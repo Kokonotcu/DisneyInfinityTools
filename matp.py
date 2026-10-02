@@ -18,15 +18,22 @@ import struct, sys, os
 from pathlib import Path
 
 SHD_DIR = Path(r'D:\DI-Extract\3.0\assets\shaders\shaders')
+SHD_DIR_10 = Path(r'D:\DI-Extract\1.0\assets\shaders\shaders')
+# .shd offsets: u16 block A size, u16 block B size, u8 B texture-slot count; then slot stride.
+# 3.0 from the exe; 1.0 fitted to 350/350 single-material bundles (same layout, 0x24 earlier)
+# and its slots are a bare u32 index (3.0: u32 index + u32).
+SHD_LAYOUT = {SHD_DIR: (0x6a, 0xa2, 0xa1, 8), SHD_DIR_10: (0x46, 0x6a, 0x69, 4)}
 _shd = {}
 
 
-def shader_sizes(name):
+def shader_sizes(name, shd_dir=None):
     """-> (blockA, blockB, nTexSlots) from the .shd, which the engine maps in place."""
-    if name not in _shd:
-        b = (SHD_DIR / f'{name}.shd').read_bytes()
-        _shd[name] = (struct.unpack_from('<H', b, 0x6a)[0], struct.unpack_from('<H', b, 0xa2)[0], b[0xa1])
-    return _shd[name]
+    d = shd_dir or SHD_DIR
+    if (d, name) not in _shd:
+        b = (d / f'{name}.shd').read_bytes()
+        oa, ob, os_, _ = SHD_LAYOUT[d]
+        _shd[d, name] = (struct.unpack_from('<H', b, oa)[0], struct.unpack_from('<H', b, ob)[0], b[os_])
+    return _shd[d, name]
 
 
 def _al(x, a):
@@ -38,8 +45,31 @@ def _cstr(b, o):
     return b[o:e].decode('latin-1'), e + 1
 
 
+def material_names(data):
+    """MATP material names in ordinal order, without sizing any block -- works on 1.0 bundles too."""
+    b = bytes(data)
+    n = struct.unpack_from('<I', b, 12)[0]
+    o = 16
+    for _ in range(n):
+        if b[o:o + 4] == b'MATP':
+            nmat = struct.unpack_from('<I', b, o + 12)[0]
+            p = _al(o + 16, 4)
+            nsh = struct.unpack_from('<I', b, p)[0]; p += 4
+            for _ in range(nsh):
+                _, p = _cstr(b, p)
+            p = _al(p, 4)
+            assert struct.unpack_from('<I', b, p)[0] == nmat; p += 4
+            names = []
+            for _ in range(nmat):
+                s, p = _cstr(b, p); names.append(s)
+            return names
+        o += struct.unpack_from('<I', b, o + 8)[0]
+    return []
+
+
 class Bundle:
-    def __init__(self, data):
+    def __init__(self, data, shd_dir=None):
+        self.shd_dir = shd_dir
         b = self.raw = bytes(data)
         assert b[:4] == b'BNDL', 'not a bundle'
         self.ver, self.size, n = struct.unpack_from('<III', b, 4)
@@ -79,14 +109,15 @@ class Bundle:
         p = _al(p, 16)
         for i in range(nmat):
             sh = shaders[idx[i]]
-            a, bb, slots = shader_sizes(sh)
+            a, bb, slots = shader_sizes(sh, self.shd_dir)
             self.materials.append(dict(name=names[i], shader=sh, hash=hashes[i],
-                                       A=b[p:p + a], B=b[p + a:p + a + bb], slots=slots))
+                                       A=b[p:p + a], B=b[p + a:p + a + bb], slots=slots,
+                                       stride=SHD_LAYOUT[self.shd_dir or SHD_DIR][3]))
             p += a + bb
         self.matp_data_end, self.matp_end = p, o + csize
 
     def tex_slots(self, m):
-        return [struct.unpack_from('<I', m['B'], 8 * s)[0] for s in range(m['slots'])]
+        return [struct.unpack_from('<I', m['B'], m['stride'] * s)[0] for s in range(m['slots'])]
 
 
 def build(textures, materials):
@@ -132,7 +163,7 @@ def merge(sources):
                 h = bnd.textures[t]
                 if h not in textures:
                     textures.append(h)
-                struct.pack_into('<I', B, 8 * s, textures.index(h))
+                struct.pack_into('<I', B, m['stride'] * s, textures.index(h))
         m['B'] = bytes(B)
         mats.append(m)
     return build(textures, mats)

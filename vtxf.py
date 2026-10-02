@@ -66,18 +66,30 @@ V10 = r'D:\DI-Extract\1.0\assets\shaders\shaders\vformat.vtxf'
 V30 = r'D:\DI-Extract\3.0\assets\shaders\shaders\vformat.vtxf'
 
 
-def remap_1to3(crc):
-    """1.0 vformatCRC -> the 3.0 vformatCRC whose 'main' declaration is identical.
+_cache = {}
+
+
+def candidates_1to3(crc):
+    """1.0 vformatCRC -> every 3.0 vformatCRC whose 'main' declaration is identical.
     3.0 has no entry for a 1.0 CRC; the primitive loader (FUN_004553c0) then stores 0xbadddec1 as
     byte 0xc1 -> an empty registry slot -> the input layout is built from nothing."""
-    f1, f3 = parse(V10), parse(V30)
+    if not _cache:
+        _cache[1], _cache[3] = parse(V10), parse(V30)
+    f1, f3 = _cache[1], _cache[3]
     if crc in {name_hash(g) for g in f3}:
-        return crc
+        return [crc]
     src = [f for g, f in f1.items() if name_hash(g) == crc]
     assert src, f'{crc:08x} is in neither vformat.vtxf'
     sig = lambda f: [e[:3] for e in elements(f)]
-    hits = [name_hash(g) for g, f in f3.items() if sig(f) == sig(src[0])]
-    assert len(hits) == 1, f'{crc:08x}: {len(hits)} identical 3.0 declarations {[hex(h) for h in hits]}'
+    return [name_hash(g) for g, f in f3.items() if sig(f) == sig(src[0])]
+
+
+def remap_1to3(crc, prefer=()):
+    """Unique twin, or among several identical ones the one the materials' shaders declare."""
+    hits = candidates_1to3(crc)
+    if len(hits) > 1:
+        hits = [h for h in hits if h in prefer] or hits
+    assert len(hits) == 1, f'{crc:08x}: {len(hits)} 3.0 twins {[hex(h) for h in hits]} (no twin = needs vertex conversion)'
     return hits[0]
 
 

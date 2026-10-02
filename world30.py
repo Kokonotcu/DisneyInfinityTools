@@ -17,7 +17,7 @@ Layout produced here, per node in order:
     then the next node's region
 
   python world30.py --source <1.0 world dir> --world <install world name>
-                    [--offset 0,-20,0] [--bundle x.mtb] [--dry]
+                    [--offset 0,-20,0] [--bundle x.mtb | auto] [--dry]
 """
 import argparse, importlib, shutil, struct, subprocess, sys
 from pathlib import Path
@@ -139,6 +139,14 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i):
 def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
     src_dir = Path(source)
     stem = src_dir.name
+    vmap = {}
+    if bundle == 'auto':   # the world's own materials, by GUID, from shipped 3.0 bundles
+        import autobundle
+        data, problems, vmap = autobundle.resolve(src_dir)
+        if problems:
+            raise SystemExit('--bundle auto: %d unresolved, nothing written\n  ' % len(problems)
+                             + '\n  '.join(problems[:20]))
+        bundle = data
     s = Oct.load(src_dir / ('%s.oct' % stem))
     ref = Oct.load(REF / 'out_intro2.oct')
 
@@ -321,7 +329,7 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
     for r in s.recs:
         if r.name == 'vformatCRC':
             old = r.ints()[0] & 0xffffffff
-            new = remapped.setdefault(old, vtxf.remap_1to3(old))
+            new = remapped.setdefault(old, vmap.get(old) or vtxf.remap_1to3(old))
             r.pay = new.to_bytes(len(r.pay), 'little')
     print('  vformatCRC: ' + ', '.join('%08x -> %08x' % kv for kv in remapped.items()))
 
@@ -333,7 +341,9 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
         p = REF / ('out_intro2%s' % ext)
         if p.exists():
             shutil.copy2(p, out / ('%s%s' % (world, ext)))
-    if bundle:
+    if isinstance(bundle, bytes):
+        (out / ('%s.mtb' % world)).write_bytes(bundle)
+    elif bundle:
         shutil.copy2(bundle, out / ('%s.mtb' % world))
     off = ','.join('%g' % x for x in offset)
     r = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
