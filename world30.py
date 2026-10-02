@@ -23,6 +23,7 @@ import argparse, importlib, shutil, struct, subprocess, sys
 from pathlib import Path
 from oct import Oct
 import graph
+import vtxf
 
 REF = Path(r'D:\DI-Extract\3.0\assets\worlds\out_intro2')
 INSTALL = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition'
@@ -314,6 +315,15 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
                 continue
             if stem in v:
                 r.pay = s.add_name(v.replace(stem, world)).to_bytes(2, 'little')
+
+    # --- vertex format ids: 1.0 CRC -> declaration-identical 3.0 CRC -------
+    remapped = {}
+    for r in s.recs:
+        if r.name == 'vformatCRC':
+            old = r.ints()[0] & 0xffffffff
+            new = remapped.setdefault(old, vtxf.remap_1to3(old))
+            r.pay = new.to_bytes(len(r.pay), 'little')
+    print('  vformatCRC: ' + ', '.join('%08x -> %08x' % kv for kv in remapped.items()))
 
     if dry:
         print('(dry run)')

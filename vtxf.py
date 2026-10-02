@@ -62,7 +62,27 @@ def elements(fmt, variant='main'):
             for si, s in enumerate(fmt[variant]['streams']) for e in s]
 
 
+V10 = r'D:\DI-Extract\1.0\assets\shaders\shaders\vformat.vtxf'
+V30 = r'D:\DI-Extract\3.0\assets\shaders\shaders\vformat.vtxf'
+
+
+def remap_1to3(crc):
+    """1.0 vformatCRC -> the 3.0 vformatCRC whose 'main' declaration is identical.
+    3.0 has no entry for a 1.0 CRC; the primitive loader (FUN_004553c0) then stores 0xbadddec1 as
+    byte 0xc1 -> an empty registry slot -> the input layout is built from nothing."""
+    f1, f3 = parse(V10), parse(V30)
+    if crc in {name_hash(g) for g in f3}:
+        return crc
+    src = [f for g, f in f1.items() if name_hash(g) == crc]
+    assert src, f'{crc:08x} is in neither vformat.vtxf'
+    sig = lambda f: [e[:3] for e in elements(f)]
+    hits = [name_hash(g) for g, f in f3.items() if sig(f) == sig(src[0])]
+    assert len(hits) == 1, f'{crc:08x}: {len(hits)} identical 3.0 declarations {[hex(h) for h in hits]}'
+    return hits[0]
+
+
 if __name__ == '__main__':
+    assert remap_1to3(0xea1acc4c) == 0x63ae710f  # tested in-game 2026-10-02: renders, no CreateInputLayout throw
     assert name_hash('8bc48a5716cd76811da52f7aee4c28b2') == 0x63ae710f  # verified vs 3.0 corpus id
     fmts = parse(sys.argv[1])
     want = {int(x, 16) for x in sys.argv[2:]}
