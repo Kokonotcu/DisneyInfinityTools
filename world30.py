@@ -362,7 +362,10 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         k = kids(s, a)
         t = k['Type'].names()[0]
         if static:   # keep world links and collision bound to a geometry node, by its 1.0 path
-            keep = t in KEEP_STATIC and (t not in COLLISION_ASSOC or k['NodeName'].names()[0] in paths)
+            # Source collision is NOT kept: a CollisionInstance whose shape link is dropped becomes a
+            # physics body with a null shape (crash at 0x7bcc0c, shape->getAabb), and multi-mesh .btd
+            # files are not converted yet. Static mode uses the donor's floor collision instead.
+            keep = t in KEEP_STATIC and t not in COLLISION_ASSOC
         else:
             keep = t not in DROP_ASSOC
         if not keep:
@@ -385,7 +388,7 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     add = []
     for a in ref.find(name='Association', pool='AssociationPool'):
         k = kids(ref, a)
-        if k['Type'].names()[0] not in ADD_ASSOC:
+        if k['Type'].names()[0] not in ADD_ASSOC + (COLLISION_ASSOC if static else ()):
             continue
         ai, aj = ref.block(a)
         blk2 = _reindex(ref, s, ref.recs[ai:aj])
@@ -393,7 +396,8 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         nm = k['NodeName'].names()[0].replace('Default_Floor', names[0])
         bk['NodeName'].pay = s.add_name(nm).to_bytes(2, 'little')
         if 'SceneTreeNodeRef' in bk:
-            bk['SceneTreeNodeRef'].set_int(layout_ref)
+            floor = static and k['Type'].names()[0] == 'CollisionInstanceToSceneTreeNode'
+            bk['SceneTreeNodeRef'].set_int(nodes.index(gn[0][0]) if floor else layout_ref)
         add.append(blk2)
     _, end = s.block(pool_rec(s, 'AssociationPool'))
     s.recs[end:end] = [r for blk2 in add for r in blk2]
@@ -401,6 +405,13 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     s = _roundtrip(s)
     for i, a in enumerate(s.find(name='Association', pool='AssociationPool')):
         a.pay = s.add_name(str(i)).to_bytes(2, 'little')
+
+    if static:   # the donor's self-consistent floor: 1 TriangleList shape, 1 instance, its .btd
+        for name in ('CollisionShapePool', 'CollisionInstancePool'):
+            i, j = s.block(pool_rec(s, name))
+            a2, b2 = ref.block(pool_rec(ref, name))
+            s.recs[i:j] = _reindex(ref, s, ref.recs[a2:b2])
+        s = _roundtrip(s)
 
     # --- the 3.0-only pools -----------------------------------------------
     for name in ('LayoutPool', 'AssetPool'):
@@ -487,6 +498,11 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     elif bundle:
         shutil.copy2(bundle, out / ('%s.mtb' % world))
     off = ','.join('%g' % x for x in offset)
+    if static:
+        shutil.copy2(REF / 'out_intro2.btd', out / ('%s.btd' % world))
+        print('  btd: donor floor (static mode)')
+        print('wrote %s into %s' % (world, out))
+        return
     r = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
                         '-Command', "& '%s' -Source '%s' -Offset %s -OutPath '%s'"
                         % (Path(__file__).parent / 'btd-convert.ps1',

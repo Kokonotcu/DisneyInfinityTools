@@ -18,6 +18,10 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 | `zone-info.ps1` / `show-zone.ps1` / `add-zone.ps1` | Menu/zone registration (needs `_ShowInMenu_` + both `available*Build` flags) | used for every launch |
 | `par.py` | `pmap`: process pool over all cores (CPU-bound Python can't use threads). Used by the corpus scans and world30's vertex conversion | parallel caches byte-identical to serial; oct self-test 2 min -> 8 s, matp 3m17 -> 41 s |
 | `capped.ps1` | Runs a command and kills its whole process tree above `-MaxGB`. The `python` on PATH is a launcher stub, so the real interpreter is a child process | kills a 400 MB child under a 200 MB cap |
+| `arenapatch.py` | Exe patch: render frame arenas A/B/C 1.25 MB/3 MB/16 KB -> 5 MB/16 MB/64 KB (FUN_00aae3e0). Retail bump allocators return NULL on overflow; Metroville crashed in the draw loop. Verifies exact original bytes, backs up, `--revert` | sizes read live from dumps (`arenas.py`); no fixed block-size constant in the exe |
+| `arenas.py` | Reads the 3 render contexts' frame arenas (cur/end/base) from a minidump | |
+| `dispfind.py` | Capstone sweep of the exe for a `[reg+disp]` operand or an immediate, on all cores | found the arena config writer |
+| `btdblocks.py` / `btdscan.py` | Multi-mesh `.btd` survey: one block per TriangleList shape (SerializeIndex). The end-of-block rule is partial (24/98 1.0, 122/267 3.0) | WIP |
 | `nodedump.py` | Dumps one geometry node's records for diffing | |
 | `streamlayout.py` | Corpus check: multi-primitive nodes are stream-major | 4915/4915 shipped nodes |
 | `disx.py` | Disassembles at a runtime address from `pentane.log` (capstone + pefile) | |
