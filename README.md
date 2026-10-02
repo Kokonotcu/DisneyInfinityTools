@@ -10,7 +10,7 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 | `graph.py` | Meridian graph sizing per geometry node | `--selftest` re-derives dor_bay n=2 and lb_zonetwo n=3 exactly |
 | `split-mesh.py` | Vertex/index buffer splitting: primitive-major (multi-node) and stream-major (multi-primitive node) | `--selftest` |
 | `mtb-retex.py` | Retextures a shipped `.mtb` by swapping TEXB name hashes only. Use this instead of synthesising bundles | sumo's 3 textures rendered in-game |
-| `matp.py` | `.mtb` codec from the engine's own parser (FUN_00472590). Per-material block sizes come from the shader (`.shd` u16 @0x6a + @0xa2), and block B opens with `shd[0xa1]` texture slots (u32 TEXB index). `merge()` combines materials from shipped bundles verbatim and only rebases texture indices | `--selftest`: layout predicted for 48,057/48,057 shipped bundles; 26,416/26,416 TEXB+MATP rebuilt byte-exact |
+| `matp.py` | `.mtb` codec from the engine's own parser (FUN_00472590). Per-material block sizes come from the shader (`.shd` u16 @0x6a + @0xa2), and block B opens with `shd[0xa1]` texture slots (u32 TEXB index). `merge()` combines materials from shipped bundles verbatim and only rebases texture indices | `--selftest`: layout predicted for 48,057/48,057 shipped bundles; 26,416/26,416 TEXB+MATP rebuilt byte-exact; sumo with its 3 real merged materials renders in-game, 0 D3D throws |
 | `mtb-build.py` | `.mtb` grouped-header layout reader/builder (n<=2) | `--selftest` rebuilds stock out_intro2.mtb byte-exact |
 | `btd-convert.ps1` | 1.0 -> 3.0 collision `.btd` (needs `btd-a-const.bin`), `-Offset` must match the mesh offset | 323/330 shipped pairs rebuilt byte-exact; collision works in-game |
 | `btd-info.ps1` | `.btd` header dump | |
