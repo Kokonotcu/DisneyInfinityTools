@@ -105,7 +105,16 @@ def _substitute(donor_path, di, m10, b10):
     B = bytearray(dm['B'])
     for s in range(dm['slots']):
         struct.pack_into('<I', B, dm['stride'] * s, used[s] if s < len(used) else UNSET)
-    m = dict(dm, B=bytes(B), name=m10['name'], hash=m10['hash'])
+    # Block A = the material's parameters (first float4 = tint). Over 421 GUIDs shipped in both games
+    # with the same shader, 3.0's A is 1.0's A followed by new trailing params in 401; across a
+    # shader change the first float4 still matches in 85%. B's data after the slots (samplers)
+    # changed layout between games in every pair, so the donor's is kept.
+    a10, a = m10['A'], dm['A']
+    if dm['shader'] == m10['shader'] and len(a10) <= len(a):
+        a = a10 + a[len(a10):]
+    elif len(a10) >= 16 and len(a) >= 16:
+        a = a10[:16] + a[16:]
+    m = dict(dm, A=a, B=bytes(B), name=m10['name'], hash=m10['hash'])
     return SimpleNamespace(textures=b10.textures, materials=[m],
                            tex_slots=lambda mm: matp.Bundle.tex_slots(None, mm)), 0
 
