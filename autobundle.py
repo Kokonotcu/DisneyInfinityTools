@@ -27,6 +27,7 @@ WORLDS10 = Path(r'D:\DI-Extract\1.0\assets\worlds')
 TEX = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition\assets\textures')
 CACHE = Path(__file__).with_name('matindex.json')
 DONORS = Path(__file__).with_name('donors.json')
+TEXIDX = Path(__file__).with_name('texindex.json')
 UNSET = 0xffffffff
 
 
@@ -68,6 +69,32 @@ def donors():
     d = {s: v + [n[s]] for s, v in d.items()}
     DONORS.write_text(json.dumps(d))
     return d
+
+
+def tex_index():
+    """.tbody hash -> a file holding it, over both extracts (3.0 first; cached). Many assets keep
+    their textures in their own textures/ folder instead of the global pool."""
+    if TEXIDX.exists():
+        return json.loads(TEXIDX.read_text())
+    idx = {}
+    for root in (MAT30.parent, WORLDS10.parent):
+        for f in root.rglob('*.tbody'):
+            idx.setdefault(f.stem, str(f))
+    TEXIDX.write_text(json.dumps(idx))
+    return idx
+
+
+def _need(h, world_dir, tocopy, problems, g):
+    """Make sure texture h will be in the pool: already there, or queue a copy."""
+    if (TEX / f'{h}.tbody').exists():
+        return
+    f = world_dir / 'textures' / f'{h}.tbody'
+    if not f.exists():
+        f = Path(tex_index().get(h, ''))
+    if f.name:
+        tocopy.add(f)
+    else:
+        problems.append(f'{g}: texture {h} nowhere')
 
 
 _svf = {}
@@ -139,7 +166,7 @@ def resolve(world_dir):
             if m10['shader'] in don:
                 path, i, _ = don[m10['shader']]; tier = 'same-sh'
             else:   # most common 3.0 shader accepting a twin of every format this material is drawn with
-                need = [set(vtxf.candidates_1to3(c)) for c in drawn.get(k, ())]
+                need = [{h for h, _, _ in vtxf.targets_1to3(c)} for c in drawn.get(k, ())]
                 ok = [(n, s, p, i) for s, (p, i, n) in don.items()
                       if all(shader_vformats(s) & c for c in need) and matp.shader_sizes(s)[2] >= 1]
                 if not ok:
@@ -147,31 +174,28 @@ def resolve(world_dir):
                 _, _, path, i = max(ok); tier = 'generic'
             src = _substitute(path, i, m10, b10)
             for t in b10.tex_slots(m10):
-                if t != UNSET and not (TEX / f'{b10.textures[t].hex()}.tbody').exists():
-                    f = world_dir / 'textures' / f'{b10.textures[t].hex()}.tbody'
-                    if f.exists():
-                        tocopy.add(f)
-                    else:
-                        problems.append(f'{g}: texture {b10.textures[t].hex()} nowhere')
+                if t != UNSET:
+                    _need(b10.textures[t].hex(), world_dir, tocopy, problems, g)
         bnd, i = src
         m = bnd.materials[i]
         shaders[k] = shader_vformats(m['shader'])
         if tier == 'real':
-            missing = [bnd.textures[t].hex() for t in bnd.tex_slots(m)
-                       if t != UNSET and not (TEX / f'{bnd.textures[t].hex()}.tbody').exists()]
-            if missing:
-                problems.append(f'{g}: missing textures {missing}')
+            for t in bnd.tex_slots(m):
+                if t != UNSET:
+                    _need(bnd.textures[t].hex(), world_dir, tocopy, problems, g)
         srcs.append(src); tiers.append(tier)
+    # (material, 1.0 vformatCRC) -> (3.0 vformatCRC, dropped, padded): the best target THIS material's
+    # shader accepts -- twin first, else a conversion. Per pair, because 3.0 nodes mix vertex formats
+    # freely (2,420 shipped nodes do) and one 1.0 format is drawn by materials with different shaders.
     vmap = {}
     for crc, refs in users.items():
-        cands = vtxf.candidates_1to3(crc)
-        if not cands:
-            problems.append(f'vformat {crc:08x}: no 3.0 twin (needs vertex conversion)'); continue
-        ok = [c for c in cands if all(c in shaders.get(r, {c}) for r in refs)]
-        if not ok:
-            problems.append(f'vformat {crc:08x}: no twin {[hex(c) for c in cands]} accepted by materials {sorted(refs)}')
-        else:
-            vmap[crc] = ok[0]
+        targets = vtxf.targets_1to3(crc)
+        for r in refs:
+            ok = [t for t in targets if t[0] in shaders.get(r, {t[0]})]
+            if not ok:
+                problems.append(f'vformat {crc:08x}: no 3.0 format accepted by material {r}')
+            else:
+                vmap[r, crc] = ok[0]
     out = matp.merge(srcs) if not problems else None
     return out, problems, vmap, tiers, sorted(tocopy)
 
@@ -198,7 +222,8 @@ if __name__ == '__main__':
         survey()
     else:
         out, probs, vmap, tiers, tocopy = resolve(sys.argv[1])
-        print('  vformat', {f'{a:08x}': f'{b:08x}' for a, b in vmap.items()})
+        from collections import Counter as _C
+        print('  vformat', dict(_C(f'{c:08x}->{t[0]:08x}' + (f' drop {t[1]}' if t[1] else '') + (f' pad {t[2]}' if t[2] else '') for (r, c), t in vmap.items())))
         print('  tiers  ', dict(Counter(tiers)), ' textures to copy:', len(tocopy))
         for p in probs:
             print(' ', p)

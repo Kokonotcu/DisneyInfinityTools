@@ -79,7 +79,7 @@ def _reindex(src, dst, recs):
     return out
 
 
-def build_buffers(src_dir, stem, nodes_prims, out_v, out_i):
+def build_buffers(src_dir, stem, nodes_prims, out_v, out_i, out_i2):
     """nodes_prims = [[(Idata, Vdata) per primitive] per node] from the SOURCE.
 
     1.0 already gives each node its own vertex region and its index values are
@@ -92,17 +92,24 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i):
     from the start of the buffer. Reading from the buffer start works only when
     a single node owns the whole mesh (sumo) and silently gives every other
     node the FIRST node's vertices.
+
+    Each primitive may also be converted to another vertex format (vtxf.plan): 3.0 nodes mix formats
+    freely, each primitive carrying its own stream offsets/strides in Vdata, with Idata[2] = number
+    of node vertices before it and node-global index values (2,420 shipped mixed nodes).
+
+    nodes_prims entries: (Idata, Vdata, src vformatCRC, dst vformatCRC). A node with more than 65535
+    vertices gets 32-bit indices in IndexBuffer 2 (out_i2), as the 3 such shipped 3.0 nodes do.
     """
+    import vtxf
     vb = (src_dir / ('%s_0.vbuf' % stem)).read_bytes()
     ib = (src_dir / ('%s_0.ibuf' % stem)).read_bytes()
     idx = list(struct.unpack('<%dH' % (len(ib) // 2), ib))
 
-    new_v, new_i, out = bytearray(), bytearray(), []
+    new_v, new_i, new_i2, out = bytearray(), bytearray(), bytearray(), []
+    plans = {}
     for prims in nodes_prims:
-        S = prims[0][1][0]
-        strides = [prims[0][1][4 + i * 3] for i in range(S)]
-        orders, subs = [], []
-        for ida, vda in prims:
+        orders, subs, conv = [], [], []
+        for ida, vda, src, dst in prims:
             sub = idx[ida[1]:ida[1] + ida[3]]
             order, remap = [], {}
             for v in sub:
@@ -111,29 +118,53 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i):
                     order.append(v)
             orders.append(order)
             subs.append([remap[v] for v in sub])
-        node_off = [[0] * S for _ in prims]
-        for s in range(S):
-            for i, (order, (ida, vda)) in enumerate(zip(orders, prims)):
-                base, st = vda[3 + s * 3], vda[4 + s * 3]
-                node_off[i][s] = len(new_v)
-                for v in order:
-                    lo = base + v * st
-                    assert lo + st <= len(vb),                         'vertex %d of a block at %d runs past the vbuf' % (v, base)
-                    new_v += vb[lo:lo + st]
-        base0 = node_off[0][0]
-        blocks = []
+            if (src, dst) not in plans:
+                plans[src, dst] = vtxf.plan(src, dst)
+            ss, ds, ops, _, _ = plans[src, dst]
+            have = [vda[4 + 3 * s] for s in range(vda[0])]
+            assert have == ss, 'vformat %08x declares strides %s, primitive has %s' % (src, ss, have)
+            identical = vtxf.candidates_1to3(src) and dst in vtxf.candidates_1to3(src)
+            conv.append((ss, ds, None if identical else ops))
+        # source bytes of every vertex, per stream, converted once
+        verts = []
+        for order, (ida, vda, _, _), (ss, ds, ops) in zip(orders, prims, conv):
+            per = []
+            for v in order:
+                src_streams = []
+                for s, st in enumerate(ss):
+                    lo = vda[3 + s * 3] + v * st
+                    assert lo + st <= len(vb), 'vertex %d at %d runs past the vbuf' % (v, lo)
+                    src_streams.append(vb[lo:lo + st])
+                per.append(src_streams if ops is None else vtxf.convert_vertex(src_streams, ops, ds))
+            verts.append(per)
+        S = max(len(c[1]) for c in conv)
+        node_off = [[None] * len(c[1]) for c in conv]
+        for s in range(S):                                   # stream-major within the node
+            for i, (per, (_, ds, _)) in enumerate(zip(verts, conv)):
+                if s < len(ds):
+                    node_off[i][s] = len(new_v)
+                    for vs in per:
+                        new_v += vs[s]
+        total = sum(len(o) for o in orders)
+        wide = total > 0xffff
+        blocks, vbase = [], 0
         for i, sub in enumerate(subs):
-            vbase = (node_off[i][0] - base0) // strides[0]
-            ioff = len(new_i)
-            new_i += struct.pack('<%dH' % len(sub), *[x + vbase for x in sub])
-            vdata = [S, len(orders[i])]
-            for s in range(S):
-                vdata += [0, node_off[i][s], strides[s]]
-            blocks.append({'Vdata': vdata, 'Idata': [0, ioff, vbase, len(sub)]})
+            buf = new_i2 if wide else new_i
+            ioff = len(buf)
+            buf += struct.pack('<%d%s' % (len(sub), 'I' if wide else 'H'), *[x + vbase for x in sub])
+            ds = conv[i][1]
+            vdata = [len(ds), len(orders[i])]
+            for s in range(len(ds)):
+                vdata += [0, node_off[i][s], ds[s]]
+            blocks.append({'Vdata': vdata, 'Idata': [2 if wide else 0, ioff, vbase, len(sub)],
+                           'vformatCRC': prims[i][3]})
+            vbase += len(orders[i])
         out.append(blocks)
     Path(out_v).write_bytes(bytes(new_v))
     Path(out_i).write_bytes(bytes(new_i))
-    return out, len(new_v), len(new_i)
+    if new_i2:
+        Path(out_i2).write_bytes(bytes(new_i2))
+    return out, len(new_v), len(new_i), len(new_i2)
 
 
 def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
@@ -165,34 +196,45 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
             del s.recs[i:j]
 
     # --- buffers, before the tree is touched -----------------------------
-    vd0 = kids(s, gn[0][2][0])['Vdata'].ints()
-    strides = [vd0[4 + i * 3] for i in range(vd0[0])]
-    layouts = {tuple(kids(s, p)['Vdata'].ints()[:1] +
-                     [kids(s, p)['Vdata'].ints()[4 + i * 3]
-                      for i in range(kids(s, p)['Vdata'].ints()[0])])
-               for _, _, prims in gn for p in prims}
-    assert len(layouts) == 1, \
-        'world uses %d vertex layouts %s -- only a single layout is supported' % (
-            len(layouts), layouts)
-    nodes_prims = [[(kids(s, p)['Idata'].ints(), kids(s, p)['Vdata'].ints())
+    # each primitive's target format: the one its material accepts (autobundle), else the best
+    # 3.0 target for its 1.0 format (identical twin first)
+    def target(p):
+        k = kids(s, p)
+        src = k['vformatCRC'].ints()[0] & 0xffffffff
+        t = vmap.get((k['MaterialReference'].ints()[0], src)) or vtxf.targets_1to3(src)[0]
+        return src, t[0]
+    nodes_prims = [[(kids(s, p)['Idata'].ints(), kids(s, p)['Vdata'].ints(), *target(p))
                     for p in prims] for _, _, prims in gn]
     out = INSTALL / world
     out.mkdir(parents=True, exist_ok=True)
-    tv, ti = out / ('%s_0.vbuf' % world), out / ('%s_0.ibuf' % world)
-    blocks, nv, ni = build_buffers(src_dir, stem, nodes_prims,
-                                   tv if not dry else tv.with_suffix('.dry'),
-                                   ti if not dry else ti.with_suffix('.dry'))
+    tv, ti, ti2 = (out / ('%s_%d.%s' % (world, n, e)) for n, e in ((0, 'vbuf'), (0, 'ibuf'), (2, 'ibuf')))
+    blocks, nv, ni, ni2 = build_buffers(src_dir, stem, nodes_prims,
+                                        *(x if not dry else x.with_name(x.name + '.dry') for x in (tv, ti, ti2)))
+    conv = __import__('collections').Counter()
     for (_, _, prims), blks in zip(gn, blocks):
         for p, b in zip(prims, blks):
             k = kids(s, p)
+            old = k['vformatCRC'].ints()[0] & 0xffffffff
+            conv['%08x -> %08x' % (old, b['vformatCRC'])] += 1
             k['Idata'].set_ints(b['Idata'])
             k['Vdata'].set_ints(b['Vdata'])
-    for pool, size in (('VertexBufferPool', nv), ('IndexBufferPool', ni)):
-        for r in s.find(name='Size', pool=pool):
-            if r.ints()[0]:
-                r.set_int(size)
-                break
-    print('  buffers: %d nodes -> vbuf %d B, ibuf %d B' % (len(gn), nv, ni))
+            k['vformatCRC'].pay = b['vformatCRC'].to_bytes(len(k['vformatCRC'].pay), 'little')
+    print('  vformatCRC per primitive: %s' % dict(conv))
+    for r in s.find(name='Size', pool='VertexBufferPool'):
+        if r.ints()[0]:
+            r.set_int(nv)
+            break
+    ibs = s.find(name='IndexBuffer', pool='IndexBufferPool')
+    for n_ib, size in ((0, ni), (2, ni2)):
+        k = kids(s, ibs[n_ib])
+        assert k['Width'].ints()[0] == (2 if n_ib == 0 else 4)
+        k['Size'].set_int(size)
+        if size and 'FileName' not in k:   # IndexBuffer 2 = 32-bit, its own file (dor_tp_mc_2.ibuf)
+            fn = kids(s, ibs[0])['FileName']
+            i, j = s.block(ibs[n_ib])
+            s.recs.insert(j, type(fn)(s, fn.level, fn.type, fn.name_idx,
+                                      s.add_name('%s_2.ibuf' % stem).to_bytes(2, 'little')))
+    print('  buffers: %d nodes -> vbuf %d B, ibuf %d B, 32-bit ibuf %d B' % (len(gn), nv, ni, ni2))
 
     # --- 1.0-only records on materials -----------------------------------
     n = 0
@@ -325,15 +367,6 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
                 continue
             if stem in v:
                 r.pay = s.add_name(v.replace(stem, world)).to_bytes(2, 'little')
-
-    # --- vertex format ids: 1.0 CRC -> declaration-identical 3.0 CRC -------
-    remapped = {}
-    for r in s.recs:
-        if r.name == 'vformatCRC':
-            old = r.ints()[0] & 0xffffffff
-            new = remapped.setdefault(old, vmap.get(old) or vtxf.remap_1to3(old))
-            r.pay = new.to_bytes(len(r.pay), 'little')
-    print('  vformatCRC: ' + ', '.join('%08x -> %08x' % kv for kv in remapped.items()))
 
     if dry:
         print('(dry run)')

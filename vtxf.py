@@ -2,7 +2,7 @@
 
 python vtxf.py <vformat.vtxf> [crc_hex ...]   -> list formats, or dump the ones matching the CRCs
 """
-import re, sys
+import re, struct, sys
 
 
 def name_hash(s):
@@ -82,6 +82,99 @@ def candidates_1to3(crc):
     assert src, f'{crc:08x} is in neither vformat.vtxf'
     sig = lambda f: [e[:3] for e in elements(f)]
     return [name_hash(g) for g, f in f3.items() if sig(f) == sig(src[0])]
+
+
+SIZE = {'FLOAT32_2': 8, 'FLOAT32_3': 12, 'FLOAT32_4': 16, 'FLOAT16_2': 4, 'FLOAT16_4': 8,
+        'U8_4': 4, 'U8_4_NORMALIZED': 4, 'S16_4_NORMALIZED': 8, 'U16_2': 4}
+
+
+def fmt_of(crc, game):
+    if not _cache:
+        _cache[1], _cache[3] = parse(V10), parse(V30)
+    return next(f for g, f in _cache[game].items() if name_hash(g) == crc)
+
+
+def layout(fmt):
+    """-> ([stride per stream], {(semantic, type): (stream, offset)}, {(semantic, type): default})"""
+    strides, where, dflt = [], {}, {}
+    for si, s in enumerate(fmt['main']['streams']):
+        off = 0
+        for e in s:
+            where[e['semantic'], e['type']] = (si, off)
+            if 'default' in e:
+                dflt[e['semantic'], e['type']] = [float(x) for x in e['default']]
+            off += SIZE[e['type']]
+        strides.append(off)
+    return strides, where, dflt
+
+
+def _encode(ty, vals):
+    n = int(ty.split('_')[1])
+    vals = (list(vals) + [0.0] * n)[:n]
+    if ty.startswith('FLOAT32'):
+        return struct.pack('<%df' % n, *vals)
+    if ty.startswith('FLOAT16'):
+        return struct.pack('<%de' % n, *vals)
+    if ty == 'U8_4_NORMALIZED':
+        return bytes(max(0, min(255, round(v * 255))) for v in vals)
+    return bytes(SIZE[ty])
+
+
+def plan(src_crc, dst_crc):
+    """How to build a dst (3.0) vertex from a src (1.0) one.
+    -> (src strides, dst strides, [(dst stream, dst off, src stream | None, src off | bytes, size, conv)],
+        dropped src elements, padded dst elements)"""
+    ss, sw, _ = layout(fmt_of(src_crc, 1))
+    ds, dw, dd = layout(fmt_of(dst_crc, 3))
+    ops, padded = [], []
+    for (sem, ty), (dsi, doff) in dw.items():
+        if (sem, ty) in sw:
+            ops.append((dsi, doff, *sw[sem, ty], SIZE[ty], None))
+            continue
+        alt = next(((s2, t2) for (s2, t2) in sw if s2 == sem and t2[:5] == 'FLOAT' and
+                    t2[5:] [2:] == ty[7:] and t2 != ty), None)   # same semantic, float16 <-> float32
+        if alt:
+            ops.append((dsi, doff, *sw[alt], SIZE[ty], (alt[1], ty)))
+        else:
+            ops.append((dsi, doff, None, _encode(ty, dd.get((sem, ty), [])), SIZE[ty], None))
+            padded.append(sem)
+    used = {(o[2], o[3]) for o in ops if o[2] is not None}
+    dropped = [sem for (sem, ty), loc in sw.items() if loc not in used]
+    return ss, ds, ops, dropped, padded
+
+
+def convert_vertex(src_streams, ops, ds):
+    """src_streams: [bytes of this vertex per src stream] -> [bytes per dst stream]"""
+    out = [bytearray(n) for n in ds]
+    for dsi, doff, ssi, soff, size, conv in ops:
+        if ssi is None:
+            out[dsi][doff:doff + size] = soff
+        elif conv is None:
+            out[dsi][doff:doff + size] = src_streams[ssi][soff:soff + size]
+        else:
+            st, dt = conv
+            n = int(dt.split('_')[1])
+            vals = struct.unpack_from('<%d%s' % (n, 'f' if st.startswith('FLOAT32') else 'e'), src_streams[ssi], soff)
+            out[dsi][doff:doff + size] = _encode(dt, vals)
+    return out
+
+
+def targets_1to3(crc):
+    """3.0 formats a 1.0 format can become, best first: identical twins, then conversions ranked
+    by (no element besides colour dropped, fewest padded, fewest dropped). -> [(dst, dropped, padded)]"""
+    twins = candidates_1to3(crc)
+    out = []
+    for g in _cache[3]:
+        h = name_hash(g)
+        try:
+            _, _, ops, dropped, padded = plan(crc, h)
+        except KeyError:
+            continue
+        if 'POSITION' in padded or h in twins:
+            continue
+        lossy = [d for d in dropped if not d.startswith('COLOR')]
+        out.append(((len(lossy), len(padded), len(dropped)), h, dropped, padded))
+    return [(t, [], []) for t in twins] + [(h, d, p) for _, h, d, p in sorted(out)]
 
 
 def remap_1to3(crc, prefer=()):
