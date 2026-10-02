@@ -82,6 +82,8 @@ def _reindex(src, dst, recs):
 COLLISION_ASSOC = ('CollisionInstanceToSceneTreeNode', 'CollisionInstanceToDataNode',
                    'CollisionShapeToCollisionInstance')
 KEEP_STATIC = COLLISION_ASSOC + ('CellLink', 'VisHierarchyLink')
+TRANSFORM_FIELDS = ('NodeName', 'Uuid', 'DisplayLayer', 'Type', 'ParentNodeReferences',
+                    'LocalToParentMatrix')   # a shipped 3.0 Transform node, exactly
 IDENT = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
 
 
@@ -276,6 +278,14 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         if p:
             i, j = s.block(p)
             del s.recs[i:j]
+    if static:   # only the donor's pool set; LayoutPool/AssetPool are appended from the donor later
+        keep = {r.name for r in ref.recs if r.level == 1} - {'LayoutPool', 'AssetPool'}
+        gone = []
+        for p in [r for r in s.recs if r.level == 1 and r.name not in keep]:
+            i, j = s.block(p)
+            del s.recs[i:j]
+            gone.append(p.name)
+        print('  static: dropped 1.0-only pools %s' % gone)
 
     # --- buffers, before the tree is touched -----------------------------
     # each primitive's target format: the one its material accepts (autobundle), else the best
@@ -331,6 +341,23 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     # 3.0 keeps Camera nodes (18 across 120 worlds), so converting one in place
     # avoids renumbering every node reference in the file.
     paths = flatten_static(s, gn) if static else None   # on the untouched 1.0 tree
+    if static:   # 1.0 Light/LodGroup nodes carry fields 3.0 never ships: make them plain Transforms
+        n = 0
+        for x in s.find(name='Node', pool='SceneTreeNodePool'):
+            k = kids(s, x)
+            if k.get('Type') and k['Type'].names()[0] in ('Light', 'LodGroup'):
+                k['Type'].pay = s.add_name('Transform').to_bytes(2, 'little')
+                i, j = s.block(x)
+                s.recs[i + 1:j] = [r for r in s.recs[i + 1:j]
+                                   if r.level == x.level + 1 and r.name in TRANSFORM_FIELDS]
+                n += 1
+        print('  static: %d Light/LodGroup nodes -> Transform' % n)
+        # DisplayLayerPool is 1.0-only and dropped; 724 in_city nodes pointed at layer 0 of it.
+        # The donor (and the dropped pool's absence) means "no layer" = -1.
+        dl = [r for r in s.recs if r.name == 'DisplayLayer' and r.pool == 'SceneTreeNodePool' and r.ints()[0] != -1]
+        for r in dl:
+            r.set_int(-1)
+        print('  static: %d DisplayLayer refs -> -1' % len(dl))
     nodes = s.find(name='Node', pool='SceneTreeNodePool')
     cam = [x for x in nodes if kids(s, x).get('Type')
            and kids(s, x)['Type'].names()[0] == 'Camera']
@@ -482,6 +509,14 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
                 continue
             if stem in v:
                 r.pay = s.add_name(v.replace(stem, world)).to_bytes(2, 'little')
+
+    if static:   # nothing 3.0 has never shipped may remain (1.0 leftovers corrupted the heap)
+        import tempfile, foreign
+        tmp = Path(tempfile.mkdtemp()) / 'check.oct'
+        s.save(tmp)
+        left = foreign.foreign_in(tmp)
+        assert not left, 'static: %d record kinds 3.0 never ships remain, e.g. %s' % (len(left), left[:5])
+        print('  static: 0 record kinds foreign to 3.0')
 
     if dry:
         print('(dry run)')
