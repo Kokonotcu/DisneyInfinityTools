@@ -34,3 +34,15 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 - At runtime the registry holds 41 entries: slot 0 is empty and the rest are the 40 formats from the file.
 - The primitive loader `FUN_004553c0` stores `lookup(vformatCRC)` as a **byte**. An unknown CRC returns `0xbadddec1`, which truncates to slot `0xc1`. That slot is empty, so the per-mesh input layout (`FUN_0045c5c0` -> `FUN_0044d430` -> `ID3D11Device::CreateInputLayout`) is built from nothing.
 - 1.0's `ea1acc4c` (sumo, monolith) has a declaration identical to 3.0's `63ae710f`. 12 of the 44 1.0 formats have an exact 3.0 twin (`vtxf.py`).
+
+## Status (end of 2026-10-02)
+**Works in-game:** sumo (3 real materials) and monolith (`--bundle auto`: 3 real, 5 same-shader, 1 generic), both with geometry, collision, lighting and correct colours.
+
+**Metroville (`in_city --static`):** materials (442) and vertex formats convert, and the world gets through loading. Crashes so far, each fix moving it later:
+1. Physics body with a null shape (0x7bcc0c). Fixed: static mode uses the donor floor collision.
+2. d3d11 crash in `PSSetShaderResources` from the texture binder (FUN_0045a1c0, call at 0x45a2c4).
+3. Draw list NULL in the draw loop (0x47d330), frame arena overflow. Fixed: `arenapatch.py`.
+4. Heap block-list corruption (0x403fc0). Fixed: static mode strips every record kind 3.0 never ships (`foreign.py`), including a duplicate 1.0 LayoutPool.
+5. **Current:** back to (2). Hypothesis: a material binds a texture object with an invalid view; candidates are the 1x1 BC3 placeholders that fail CreateTexture2D (`8c699420…` in material 62). Unproven: monolith binds `af3afa92…` without crashing.
+
+**Open:** multi-block `.btd` conversion (Metroville has 724 blocks, monolith 2; `btdblocks.py` is WIP); shared vertices duplicated (52 MB vbuf); generic materials dropping vertex colour.
