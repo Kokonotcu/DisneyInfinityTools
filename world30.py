@@ -79,6 +79,72 @@ def _reindex(src, dst, recs):
     return out
 
 
+COLLISION_ASSOC = ('CollisionInstanceToSceneTreeNode', 'CollisionInstanceToDataNode',
+                   'CollisionShapeToCollisionInstance')
+KEEP_STATIC = COLLISION_ASSOC + ('CellLink', 'VisHierarchyLink')
+IDENT = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
+
+
+def _mul(a, b):
+    """Row-major 4x4, row vectors (translation at [12:15]): world = local x parent."""
+    return [sum(a[r * 4 + k] * b[k * 4 + c] for k in range(4)) for r in range(4) for c in range(4)]
+
+
+def flatten_static(s, gn):
+    """Static scenery for worlds with a real hierarchy (in_city: 945 Transforms, 131 LodGroups,
+    geometry nested under Transform/LodGroup/Geometry). Every geometry node gets its WORLD matrix,
+    so it can sit directly under Layout; geometry below any LodGroup child but the first (child 0 is
+    the most detailed, Distances [70, -1]) is made invisible; repeated geometry names get a suffix.
+    -> {1.0 path of a geometry node: its new name} for re-pointing associations."""
+    nodes = s.find(name='Node', pool='SceneTreeNodePool')
+    K = [kids(s, n) for n in nodes]
+    typ = [k['Type'].names()[0] if 'Type' in k else '' for k in K]
+    par = [k['ParentNodeReferences'].ints()[0] if 'ParentNodeReferences' in k else None for k in K]
+    loc = [k['LocalToParentMatrix'].floats() if 'LocalToParentMatrix' in k else IDENT for k in K]
+    name = [k['NodeName'].names()[0] if 'NodeName' in k else '' for k in K]
+    W = {}
+
+    def world(i):
+        if i not in W:
+            W[i] = loc[i] if par[i] is None else _mul(loc[i], world(par[i]))
+        return W[i]
+
+    def chain(i):
+        out = []
+        while i is not None:
+            out.append(i); i = par[i]
+            assert len(out) <= len(nodes), 'scene tree parent cycle through node %d' % out[0]
+        return out
+
+    lod_first = {}
+    for i, t in enumerate(typ):
+        if t == 'LodGroup':
+            ch = [c for c in range(len(nodes)) if par[c] == i]
+            lod_first[i] = ch[0] if ch else None
+    paths, seen, hidden, moved = {}, {}, 0, 0
+    for n, k, _ in gn:
+        i = nodes.index(n)
+        anc = chain(i)
+        path = '|'.join(name[a] for a in reversed(anc) if typ[a] != 'Scene')
+        if any(typ[p] == 'LodGroup' and lod_first[p] != c for c, p in zip(anc, anc[1:])):
+            k['Visible'].set_int(0); hidden += 1
+        w = world(i)
+        if w != loc[i]:
+            k['LocalToParentMatrix'].set_floats(w); moved += 1
+        nm = name[i]
+        seen[nm] = seen.get(nm, 0) + 1
+        if seen[nm] > 1:
+            nm = '%s_%d' % (nm, seen[nm])
+            k['NodeName'].pay = s.add_name(nm).to_bytes(2, 'little')
+        paths[path] = nm
+    for i, k in enumerate(K):      # the world's own 'Layout' transforms would shadow ours
+        if typ[i] != 'Geometry' and name[i] == LAYOUT:
+            k['NodeName'].pay = s.add_name('%s_src%d' % (LAYOUT, i)).to_bytes(2, 'little')
+    print('  static: %d geometry nodes given world matrices, %d lower LODs hidden, %d renamed'
+          % (moved, hidden, sum(v - 1 for v in seen.values())))
+    return paths
+
+
 def build_buffers(src_dir, stem, nodes_prims, out_v, out_i, out_i2):
     """nodes_prims = [[(Idata, Vdata) per primitive] per node] from the SOURCE.
 
@@ -100,66 +166,39 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i, out_i2):
     nodes_prims entries: (Idata, Vdata, src vformatCRC, dst vformatCRC). A node with more than 65535
     vertices gets 32-bit indices in IndexBuffer 2 (out_i2), as the 3 such shipped 3.0 nodes do.
     """
-    import vtxf
-    vb = (src_dir / ('%s_0.vbuf' % stem)).read_bytes()
-    ib = (src_dir / ('%s_0.ibuf' % stem)).read_bytes()
-    idx = list(struct.unpack('<%dH' % (len(ib) // 2), ib))
+    import os
+    if len(nodes_prims) < 64:                       # small world: no pool overhead
+        _init_worker(src_dir, stem)
+        work = map(_node_work, nodes_prims)
+        pool = None
+    else:                                           # one process per core; nodes are independent
+        from concurrent.futures import ProcessPoolExecutor
+        pool = ProcessPoolExecutor(os.cpu_count(), initializer=_init_worker, initargs=(src_dir, stem))
+        work = pool.map(_node_work, nodes_prims, chunksize=8)
 
     new_v, new_i, new_i2, out = bytearray(), bytearray(), bytearray(), []
-    plans = {}
-    for prims in nodes_prims:
-        orders, subs, conv = [], [], []
-        for ida, vda, src, dst in prims:
-            sub = idx[ida[1]:ida[1] + ida[3]]
-            order, remap = [], {}
-            for v in sub:
-                if v not in remap:
-                    remap[v] = len(order)
-                    order.append(v)
-            orders.append(order)
-            subs.append([remap[v] for v in sub])
-            if (src, dst) not in plans:
-                plans[src, dst] = vtxf.plan(src, dst)
-            ss, ds, ops, _, _ = plans[src, dst]
-            have = [vda[4 + 3 * s] for s in range(vda[0])]
-            assert have == ss, 'vformat %08x declares strides %s, primitive has %s' % (src, ss, have)
-            identical = vtxf.candidates_1to3(src) and dst in vtxf.candidates_1to3(src)
-            conv.append((ss, ds, None if identical else ops))
-        # source bytes of every vertex, per stream, converted once
-        verts = []
-        for order, (ida, vda, _, _), (ss, ds, ops) in zip(orders, prims, conv):
-            per = []
-            for v in order:
-                src_streams = []
-                for s, st in enumerate(ss):
-                    lo = vda[3 + s * 3] + v * st
-                    assert lo + st <= len(vb), 'vertex %d at %d runs past the vbuf' % (v, lo)
-                    src_streams.append(vb[lo:lo + st])
-                per.append(src_streams if ops is None else vtxf.convert_vertex(src_streams, ops, ds))
-            verts.append(per)
-        S = max(len(c[1]) for c in conv)
-        node_off = [[None] * len(c[1]) for c in conv]
-        for s in range(S):                                   # stream-major within the node
-            for i, (per, (_, ds, _)) in enumerate(zip(verts, conv)):
-                if s < len(ds):
+    for prims, (streams, strides, subs, counts) in zip(nodes_prims, work):
+        node_off = [[None] * len(st) for st in strides]
+        for s in range(max(len(st) for st in strides)):   # stream-major within the node
+            for i, st in enumerate(strides):
+                if s < len(st):
                     node_off[i][s] = len(new_v)
-                    for vs in per:
-                        new_v += vs[s]
-        total = sum(len(o) for o in orders)
-        wide = total > 0xffff
+                    new_v += streams[i][s]
+        wide = sum(counts) > 0xffff
         blocks, vbase = [], 0
         for i, sub in enumerate(subs):
             buf = new_i2 if wide else new_i
             ioff = len(buf)
             buf += struct.pack('<%d%s' % (len(sub), 'I' if wide else 'H'), *[x + vbase for x in sub])
-            ds = conv[i][1]
-            vdata = [len(ds), len(orders[i])]
-            for s in range(len(ds)):
-                vdata += [0, node_off[i][s], ds[s]]
+            vdata = [len(strides[i]), counts[i]]
+            for s in range(len(strides[i])):
+                vdata += [0, node_off[i][s], strides[i][s]]
             blocks.append({'Vdata': vdata, 'Idata': [2 if wide else 0, ioff, vbase, len(sub)],
                            'vformatCRC': prims[i][3]})
-            vbase += len(orders[i])
+            vbase += counts[i]
         out.append(blocks)
+    if pool:
+        pool.shutdown()
     Path(out_v).write_bytes(bytes(new_v))
     Path(out_i).write_bytes(bytes(new_i))
     if new_i2:
@@ -167,20 +206,63 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i, out_i2):
     return out, len(new_v), len(new_i), len(new_i2)
 
 
-def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
+_VB = _IDX = None
+_PLANS = {}
+
+
+def _init_worker(src_dir, stem):
+    global _VB, _IDX
+    _VB = (Path(src_dir) / ('%s_0.vbuf' % stem)).read_bytes()
+    _IDX = memoryview((Path(src_dir) / ('%s_0.ibuf' % stem)).read_bytes()).cast('H')
+
+
+def _node_work(prims):
+    """One node: -> ([per prim: [bytes per dst stream]], [dst strides], [local index lists], [vertex counts])"""
+    import vtxf
+    vb = _VB
+    streams, strides, subs, counts = [], [], [], []
+    for ida, vda, src, dst in prims:
+        sub = _IDX[ida[1]:ida[1] + ida[3]]
+        order, remap = [], {}
+        for v in sub:
+            if v not in remap:
+                remap[v] = len(order)
+                order.append(v)
+        if (src, dst) not in _PLANS:
+            _PLANS[src, dst] = vtxf.plan(src, dst)
+        ss, ds, ops, _, _ = _PLANS[src, dst]
+        have = [vda[4 + 3 * s] for s in range(vda[0])]
+        assert have == ss, 'vformat %08x declares strides %s, primitive has %s' % (src, ss, have)
+        identical = dst in vtxf.candidates_1to3(src)
+        per = [bytearray() for _ in ds]
+        for v in order:
+            src_streams = []
+            for s, st in enumerate(ss):
+                lo = vda[3 + s * 3] + v * st
+                assert lo + st <= len(vb), 'vertex %d at %d runs past the vbuf' % (v, lo)
+                src_streams.append(vb[lo:lo + st])
+            got = src_streams if identical else vtxf.convert_vertex(src_streams, ops, ds)
+            for s in range(len(ds)):
+                per[s] += got[s]
+        streams.append([bytes(x) for x in per]); strides.append(ds)
+        subs.append([remap[v] for v in sub]); counts.append(len(order))
+    return streams, strides, subs, counts
+
+
+def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, static=False):
     src_dir = Path(source)
     stem = src_dir.name
     vmap, tocopy = {}, []
+    s = Oct.load(src_dir / ('%s.oct' % stem))
     if bundle == 'auto':   # the world's own materials: real, same-shader or generic (autobundle.py)
         import autobundle
-        data, problems, vmap, tiers, tocopy = autobundle.resolve(src_dir)
+        data, problems, vmap, tiers, tocopy = autobundle.resolve(src_dir, s)
         if problems:
             raise SystemExit('--bundle auto: %d unresolved, nothing written\n  ' % len(problems)
                              + '\n  '.join(problems[:20]))
         print('  materials: %s, %d textures to copy into the pool'
               % (dict(__import__('collections').Counter(tiers)), len(tocopy)))
         bundle = data
-    s = Oct.load(src_dir / ('%s.oct' % stem))
     ref = Oct.load(REF / 'out_intro2.oct')
 
     gn = geo_nodes(s)
@@ -248,6 +330,7 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
     # --- scene tree: a Camera becomes the Layout transform ----------------
     # 3.0 keeps Camera nodes (18 across 120 worlds), so converting one in place
     # avoids renumbering every node reference in the file.
+    paths = flatten_static(s, gn) if static else None   # on the untouched 1.0 tree
     nodes = s.find(name='Node', pool='SceneTreeNodePool')
     cam = [x for x in nodes if kids(s, x).get('Type')
            and kids(s, x)['Type'].names()[0] == 'Camera']
@@ -258,21 +341,42 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
     layout_ref = nodes.index(cam[0])
     a, b = s.block(cam[0])
     s.recs[a:b] = blk
-    for _, k, _ in gn:
+    if static:   # the copied reference Layout keeps the reference's parent index; root it at Scene
+        scene = next(i for i, x in enumerate(nodes) if kids(s, x)['Type'].names()[0] == 'Scene')
+        kids(s, s.recs[a])['ParentNodeReferences'].set_ints([scene])
+    tmpl = next(k['ParentNodeReferences'] for _, k, _ in gn if 'ParentNodeReferences' in k)
+    for n, k, _ in gn:
+        if 'ParentNodeReferences' not in k:      # root-level in 1.0: give it a parent record
+            i, j = s.block(n)
+            at = next(x for x in range(i, j) if s.recs[x].name == 'LocalToParentMatrix')
+            s.recs.insert(at, type(tmpl)(s, tmpl.level, tmpl.type, tmpl.name_idx, tmpl.pay))
+            k['ParentNodeReferences'] = s.recs[at]
         k['ParentNodeReferences'].set_ints([layout_ref])
     names = [k['NodeName'].names()[0] for _, k, _ in gn]
     print('  scene tree: node %d Camera -> Transform %r, %d geometry nodes reparented'
           % (layout_ref, LAYOUT, len(gn)))
 
     # --- associations ------------------------------------------------------
+    dropped = __import__('collections').Counter()
     for a in reversed(s.find(name='Association', pool='AssociationPool')):
-        if kids(s, a)['Type'].names()[0] in DROP_ASSOC:
+        k = kids(s, a)
+        t = k['Type'].names()[0]
+        if static:   # keep world links and collision bound to a geometry node, by its 1.0 path
+            keep = t in KEEP_STATIC and (t not in COLLISION_ASSOC or k['NodeName'].names()[0] in paths)
+        else:
+            keep = t not in DROP_ASSOC
+        if not keep:
             i, j = s.block(a)
             del s.recs[i:j]
+            dropped[t] += 1
+    if static:
+        print('  static: dropped associations %s' % dict(dropped))
     byname = set(names)
     for a in s.find(name='Association', pool='AssociationPool'):
         k = kids(s, a)
         nm = k['NodeName'].names()[0]
+        if static and k['Type'].names()[0] in COLLISION_ASSOC:
+            nm = paths[nm]
         if nm in byname:
             new = '%s|%s' % (LAYOUT, nm)
             if k['Type'].names()[0] == 'CollisionInstanceToDataNode':
@@ -400,9 +504,11 @@ def main():
     ap.add_argument('--offset', default='0,0,0')
     ap.add_argument('--bundle', default=None)
     ap.add_argument('--dry', action='store_true')
+    ap.add_argument('--static', action='store_true',
+                    help='static scenery: flatten the hierarchy, LOD0 only, gameplay links dropped')
     a = ap.parse_args()
     convert(a.source, a.world, tuple(float(x) for x in a.offset.split(',')),
-            a.bundle, a.dry)
+            a.bundle, a.dry, a.static)
 
 
 if __name__ == '__main__':

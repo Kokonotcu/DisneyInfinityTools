@@ -50,8 +50,8 @@ def paylen(t, buf, q):
     if t in FIXED:
         return FIXED[t]
     if t in ARR:
-        pre, cw, ew = ARR[t]
-        return pre + cw + _u(buf[q + pre:], cw) * ew
+        pre, cw, ew = ARR[t]   # bounded slice: buf[q + pre:] copied the rest of the file per record
+        return pre + cw + int.from_bytes(buf[q + pre:q + pre + cw], 'little') * ew
     return -1
 
 
@@ -132,9 +132,15 @@ class Rec:
                    for v in vals) if vals else 1
         ew = max(ew, need)
         _, cw, _ = ARR[self.type]
-        if self.type in ARRAY_W.values() or self.type in (0x01A, 0x11A, 0x21A, 0x31A):
+        wide = {t + 0x40 for t in ARRAY_W.values()}
+        if self.type in ARRAY_W.values() or self.type in wide:
+            was_wide = self.type in wide          # never narrow: keeps diffs minimal
             self.type = ARRAY_W[ew]
             cw = 1
+            if was_wide or len(vals) > 0xff:      # count width steps by +0x40: u8 -> u16
+                self.type += 0x40
+                cw = 2
+        assert len(vals) < 1 << (8 * cw), '%d values do not fit a %d-byte count' % (len(vals), cw)
         self.pay = bytes(pre) + _p(len(vals), cw) + b''.join(_p(v, ew) for v in vals)
         return self
 
@@ -250,7 +256,16 @@ class Oct:
         return h[0]
 
     def idx(self, rec):
-        return self.recs.index(rec)
+        """Position of rec. Cached: list.index was O(n) per call -- 21 s of a 413k-record in_city
+        conversion. A stale entry is detected (recs[p] is not rec) and the map rebuilt once."""
+        pos = getattr(self, '_pos', None)
+        p = pos.get(id(rec)) if pos else None
+        if p is not None and p < len(self.recs) and self.recs[p] is rec:
+            return p
+        self._pos = {id(r): i for i, r in enumerate(self.recs)}
+        if id(rec) not in self._pos:
+            raise ValueError('record not in this file')
+        return self._pos[id(rec)]
 
     def block(self, rec):
         """(start, end) record indices for rec and its children."""
@@ -275,21 +290,27 @@ class Oct:
             print('  +%-7d %r' % (r.off, r))
 
 
+def _roundtrip_one(p):
+    """None if p round-trips byte-exactly, else (p, reason)."""
+    try:
+        f = Oct.load(p)
+        if f.to_bytes() != p.read_bytes():
+            return (p, 'mismatch')
+        if f.tail:
+            return (p, 'trailing bytes')
+    except Exception as e:
+        return (p, e)
+    return None
+
+
 def _selftest():
     """Round-trip every .oct we can reach; a codec that can't reproduce the
     input byte-for-byte cannot be trusted to edit one."""
     roots = [Path(r'D:\DI-Extract\3.0\assets\worlds'), Path(r'D:\DI-Extract\1.0\assets\worlds')]
     files = [p for r in roots if r.exists() for p in r.rglob('*.oct')]
     assert files, 'no .oct found to test against'
-    bad = []
-    for p in files:
-        try:
-            f = Oct.load(p)
-            if f.to_bytes() != p.read_bytes():
-                bad.append((p, 'mismatch'))
-            assert not f.tail, (p, 'trailing bytes')
-        except Exception as e:
-            bad.append((p, e))
+    from par import pmap
+    bad = [r for r in pmap(_roundtrip_one, files) if r]
     print('round-trip %d/%d exact' % (len(files) - len(bad), len(files)))
     for p, e in bad[:10]:
         print('  FAIL', p.name, e)

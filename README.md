@@ -6,7 +6,7 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 | Tool | What | Verified by |
 |---|---|---|
 | `oct.py` | `.oct` scene container read/modify/write. Writes the header `0x14` record count, which the engine allocates from | `--selftest`: byte-exact round-trip of every world `.oct` |
-| `world30.py` | Converts any 1.0 world to 3.0 (`--source --world --offset --bundle`). Remaps `vformatCRC` to its declaration-identical 3.0 twin | sumo + `adv_cbt_protectmonolithsmall` load in-game; reproduces sumo byte-for-byte |
+| `world30.py` | Converts any 1.0 world to 3.0 (`--source --world --offset --bundle x.mtb|auto [--static] [--dry]`). Converts vertex formats per primitive (`vtxf.plan`) and uses the 32-bit IndexBuffer 2 above 65535 vertices per node. `--static`: flattens the scene hierarchy to world matrices, shows LOD0 only, and drops gameplay links | sumo + `adv_cbt_protectmonolithsmall` load in-game; reproduces sumo byte-for-byte |
 | `graph.py` | Meridian graph sizing per geometry node | `--selftest` re-derives dor_bay n=2 and lb_zonetwo n=3 exactly |
 | `split-mesh.py` | Vertex/index buffer splitting: primitive-major (multi-node) and stream-major (multi-primitive node) | `--selftest` |
 | `mtb-retex.py` | Retextures a shipped `.mtb` by swapping TEXB name hashes only. Use this instead of synthesising bundles | sumo's 3 textures rendered in-game |
@@ -16,6 +16,8 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 | `btd-convert.ps1` | 1.0 -> 3.0 collision `.btd` (needs `btd-a-const.bin`), `-Offset` must match the mesh offset | 323/330 shipped pairs rebuilt byte-exact; collision works in-game |
 | `btd-info.ps1` | `.btd` header dump | |
 | `zone-info.ps1` / `show-zone.ps1` / `add-zone.ps1` | Menu/zone registration (needs `_ShowInMenu_` + both `available*Build` flags) | used for every launch |
+| `par.py` | `pmap`: process pool over all cores (CPU-bound Python can't use threads). Used by the corpus scans and world30's vertex conversion | parallel caches byte-identical to serial; oct self-test 2 min -> 8 s, matp 3m17 -> 41 s |
+| `capped.ps1` | Runs a command and kills its whole process tree above `-MaxGB`. The `python` on PATH is a launcher stub, so the real interpreter is a child process | kills a 400 MB child under a 200 MB cap |
 | `nodedump.py` | Dumps one geometry node's records for diffing | |
 | `streamlayout.py` | Corpus check: multi-primitive nodes are stream-major | 4915/4915 shipped nodes |
 | `disx.py` | Disassembles at a runtime address from `pentane.log` (capstone + pefile) | |

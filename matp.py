@@ -169,27 +169,30 @@ def merge(sources):
     return build(textures, mats)
 
 
+def _check_one(f):
+    """-> 'skip' | ('bad', detail) | ('ok', counted for rebuild?, rebuilt byte-exact?)"""
+    try:
+        bnd = Bundle(f.read_bytes())
+    except (FileNotFoundError, AssertionError):
+        return 'skip'                    # shader not in this extract / not a BNDL
+    good = (bnd.end == len(bnd.raw) and bnd.matp_data_end == bnd.matp_end and
+            all(t == 0xffffffff or t < len(bnd.textures) for m in bnd.materials for t in bnd.tex_slots(m)))
+    if not good:
+        return ('bad', (str(f), bnd.matp_data_end, bnd.matp_end, bnd.end, len(bnd.raw)))
+    two = bnd.raw[12] == 2 and bool(bnd.textures) and bool(bnd.materials)   # the shape build() writes
+    return ('ok', two, two and build(bnd.textures, bnd.materials) == bnd.raw)
+
+
 def selftest():
-    root = Path(r'D:\DI-Extract\3.0\assets')
-    ok = bad = skip = rebuilt = two = 0
-    for f in root.rglob('*.mtb'):
-        try:
-            bnd = Bundle(f.read_bytes())
-        except FileNotFoundError:
-            skip += 1; continue          # shader not in this extract
-        except AssertionError:
-            skip += 1; continue          # not a BNDL
-        good = (bnd.end == len(bnd.raw) and bnd.matp_data_end == bnd.matp_end and
-                all(t == 0xffffffff or t < len(bnd.textures) for m in bnd.materials for t in bnd.tex_slots(m)))
-        if not good:
-            bad += 1
-            if bad <= 5:
-                print('MISMATCH', f, bnd.matp_data_end, bnd.matp_end, bnd.end, len(bnd.raw))
-            continue
-        ok += 1
-        if bnd.raw[12] == 2 and bnd.textures and bnd.materials:   # the TEXB+MATP shape build() writes
-            two += 1
-            rebuilt += build(bnd.textures, bnd.materials) == bnd.raw
+    from par import pmap
+    res = pmap(_check_one, Path(r'D:\DI-Extract\3.0\assets').rglob('*.mtb'), chunksize=64)
+    skip = res.count('skip')
+    bads = [r[1] for r in res if r != 'skip' and r[0] == 'bad']
+    oks = [r for r in res if r != 'skip' and r[0] == 'ok']
+    ok, bad = len(oks), len(bads)
+    two, rebuilt = sum(r[1] for r in oks), sum(bool(r[2]) for r in oks)
+    for b in bads[:5]:
+        print('MISMATCH', *b)
     print(f'layout predicted exactly: {ok}   mismatched: {bad}   skipped: {skip}   '
           f'TEXB+MATP rebuilt byte-exact: {rebuilt}/{two}')
     assert bad == 0 and rebuilt == two

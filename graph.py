@@ -63,9 +63,12 @@ def _kids(f, rec):
 
 
 def _set_nameidx(f, rec, strings):
-    """Type 0x0A is u8 count + u16 name indices — set_ints would retype it."""
+    """Type 0x0A is u8 count + u16 name indices — set_ints would retype it. Over 255 names it is
+    0x4A, the u16-count form (out_mark_sidescroll_v002 ships 4278, tbx_vehicleland5 3046)."""
     idx = [f.add_name(s) for s in strings]
-    rec.pay = bytes([len(idx)]) + b''.join(i.to_bytes(2, 'little') for i in idx)
+    cw = 1 if len(idx) <= 0xff and rec.type == 0x0A else 2
+    rec.type = 0x0A if cw == 1 else 0x4A
+    rec.pay = len(idx).to_bytes(cw, 'little') + b''.join(i.to_bytes(2, 'little') for i in idx)
 
 
 def expand(f, names, root='Layout'):

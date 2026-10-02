@@ -36,19 +36,31 @@ def _bundles():
     return standalone + sorted(set(MAT30.parent.rglob('*.mtb')) - set(standalone))
 
 
+def _names_of(f):
+    try:
+        return f, matp.material_names(f.read_bytes())
+    except Exception:
+        return f, []
+
+
+def _shaders_of(f):
+    try:
+        return f, [m['shader'] for m in matp.Bundle(f.read_bytes()).materials]
+    except Exception:
+        return f, []
+
+
 def index():
     """GUID -> [bundle path, material ordinal] over every 3.0 bundle, standalone material bundles
     first (cached). Same GUID = the same material, so any shipped copy is copied verbatim."""
     if CACHE.exists():
         return json.loads(CACHE.read_text())
+    from par import pmap
     idx = {}
-    for f in _bundles():
-        try:
-            for i, g in enumerate(matp.material_names(f.read_bytes())):
-                if g:
-                    idx.setdefault(g, [str(f), i])
-        except Exception:
-            pass
+    for f, names in pmap(_names_of, _bundles(), chunksize=64):   # in order: standalone first
+        for i, g in enumerate(names):
+            if g:
+                idx.setdefault(g, [str(f), i])
     CACHE.write_text(json.dumps(idx))
     return idx
 
@@ -57,15 +69,12 @@ def donors():
     """3.0 shader -> [bundle path, material ordinal, number of shipped materials using it] (cached)."""
     if DONORS.exists():
         return json.loads(DONORS.read_text())
+    from par import pmap
     d, n = {}, Counter()
-    for f in _bundles():
-        try:
-            b = matp.Bundle(f.read_bytes())
-        except Exception:
-            continue
-        for i, m in enumerate(b.materials):
-            n[m['shader']] += 1
-            d.setdefault(m['shader'], [str(f), i])
+    for f, shaders in pmap(_shaders_of, _bundles(), chunksize=64):
+        for i, sh in enumerate(shaders):
+            n[sh] += 1
+            d.setdefault(sh, [str(f), i])
     d = {s: v + [n[s]] for s, v in d.items()}
     DONORS.write_text(json.dumps(d))
     return d
@@ -108,11 +117,11 @@ def shader_vformats(shader):
     return _svf[shader]
 
 
-def prim_pairs(world_dir):
+def prim_pairs(world_dir, o=None):
     """[(MaterialReference, 1.0 vformatCRC)] per primitive, in record order."""
     from oct import Oct
     stem = Path(world_dir).name
-    o = Oct.load(str(Path(world_dir) / f'{stem}.oct'))
+    o = o or Oct.load(str(Path(world_dir) / f'{stem}.oct'))
     pairs, ref = [], None
     for r in o.recs:
         if r.name == 'MaterialReference':
@@ -146,14 +155,14 @@ def _substitute(donor_path, di, m10, b10):
                            tex_slots=lambda mm: matp.Bundle.tex_slots(None, mm)), 0
 
 
-def resolve(world_dir):
+def resolve(world_dir, o=None):
     """-> (bundle bytes or None, problems, vformat map, tiers per material, .tbody files to copy)"""
     world_dir = Path(world_dir)
     stem = world_dir.name
     b10 = matp.Bundle((world_dir / f'{stem}.mtb').read_bytes(), matp.SHD_DIR_10)
     idx, don = index(), donors()
     users, drawn = {}, {}
-    for ref, crc in prim_pairs(world_dir):
+    for ref, crc in prim_pairs(world_dir, o):
         users.setdefault(crc, set()).add(ref)
         drawn.setdefault(ref, set()).add(crc)
     problems, tiers, srcs, shaders, tocopy = [], [], [], {}, set()
@@ -200,17 +209,24 @@ def resolve(world_dir):
     return out, problems, vmap, tiers, sorted(tocopy)
 
 
+def _survey_one(d):
+    try:
+        out, probs, _, tiers, _ = resolve(d)
+    except Exception as e:
+        out, probs, tiers = None, [f'error: {e}'], []
+    return d.name, out is not None and bool(tiers), tiers, probs
+
+
 def survey():
+    from par import pmap
+    index(); donors(); tex_index()          # build caches once, before the workers read them
     ok = 0; rows = []; tc = Counter(); pc = Counter()
-    for d in sorted(p for p in WORLDS10.iterdir() if (p / f'{p.name}.mtb').exists()):
-        try:
-            out, probs, _, tiers, _ = resolve(d)
-        except Exception as e:
-            out, probs, tiers = None, [f'error: {e}'], []
-        ok += out is not None and bool(tiers)
+    worlds = sorted(p for p in WORLDS10.iterdir() if (p / f'{p.name}.mtb').exists())
+    for name, good, tiers, probs in pmap(_survey_one, worlds, chunksize=2):
+        ok += good
         tc.update(tiers)
         pc.update('no twin' if 'twin' in p else 'error' if p.startswith('error') else 'other' for p in probs)
-        rows.append((d.name, Counter(tiers), probs[:1]))
+        rows.append((name, Counter(tiers), probs[:1]))
     for name, t, first in rows:
         print(f'{"OK " if not first else "-- "} {name:45} {dict(t)}  {first[0][:80] if first else ""}')
     print(f'material tiers: {dict(tc)}   problems: {dict(pc)}')

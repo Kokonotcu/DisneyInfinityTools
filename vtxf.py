@@ -88,10 +88,15 @@ SIZE = {'FLOAT32_2': 8, 'FLOAT32_3': 12, 'FLOAT32_4': 16, 'FLOAT16_2': 4, 'FLOAT
         'U8_4': 4, 'U8_4_NORMALIZED': 4, 'S16_4_NORMALIZED': 8, 'U16_2': 4}
 
 
+_by_crc = {}
+
+
 def fmt_of(crc, game):
     if not _cache:
         _cache[1], _cache[3] = parse(V10), parse(V30)
-    return next(f for g, f in _cache[game].items() if name_hash(g) == crc)
+    if game not in _by_crc:
+        _by_crc[game] = {name_hash(g): f for g, f in _cache[game].items()}
+    return _by_crc[game][crc]
 
 
 def layout(fmt):
