@@ -43,6 +43,6 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 2. d3d11 crash in `PSSetShaderResources` from the texture binder (FUN_0045a1c0, call at 0x45a2c4).
 3. Draw list NULL in the draw loop (0x47d330), frame arena overflow. Fixed: `arenapatch.py`.
 4. Heap block-list corruption (0x403fc0). Fixed: static mode strips every record kind 3.0 never ships (`foreign.py`), including a duplicate 1.0 LayoutPool.
-5. **Current:** back to (2). Hypothesis: a material binds a texture object with an invalid view; candidates are the 1x1 BC3 placeholders that fail CreateTexture2D (`8c699420…` in material 62). Unproven: monolith binds `af3afa92…` without crashing.
+5. **Current:** back to (2), the d3d11 AV in `PSSetShaderResources` called from 0x45a2c6. **Placeholder hypothesis refuted:** swapping the only two D3D11-invalid textures (1x1 DXT5 `af3afa92…`, `8c699420…`) for a valid one removed every C++ throw, but the AV stayed. **Next lead:** `ebx` at the crash is the material's texture-slot mask (0x230, 0x32c), with bits up to 9, so some material binds `t9`. Check each material's shader binding mask against its block B slot count (`shd[0xa1]`), substitute tiers first; or set an x32dbg breakpoint at runtime(0x45a2c4) for slot index >= 8 and read the material and texture pointer.
 
 **Open:** multi-block `.btd` conversion (Metroville has 724 blocks, monolith 2; `btdblocks.py` is WIP); shared vertices duplicated (52 MB vbuf); generic materials dropping vertex colour.
