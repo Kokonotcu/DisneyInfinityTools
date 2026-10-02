@@ -139,13 +139,15 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i):
 def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
     src_dir = Path(source)
     stem = src_dir.name
-    vmap = {}
-    if bundle == 'auto':   # the world's own materials, by GUID, from shipped 3.0 bundles
+    vmap, tocopy = {}, []
+    if bundle == 'auto':   # the world's own materials: real, same-shader or generic (autobundle.py)
         import autobundle
-        data, problems, vmap = autobundle.resolve(src_dir)
+        data, problems, vmap, tiers, tocopy = autobundle.resolve(src_dir)
         if problems:
             raise SystemExit('--bundle auto: %d unresolved, nothing written\n  ' % len(problems)
                              + '\n  '.join(problems[:20]))
+        print('  materials: %s, %d textures to copy into the pool'
+              % (dict(__import__('collections').Counter(tiers)), len(tocopy)))
         bundle = data
     s = Oct.load(src_dir / ('%s.oct' % stem))
     ref = Oct.load(REF / 'out_intro2.oct')
@@ -341,6 +343,8 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False):
         p = REF / ('out_intro2%s' % ext)
         if p.exists():
             shutil.copy2(p, out / ('%s%s' % (world, ext)))
+    for f in tocopy:
+        shutil.copy2(f, INSTALL.parent / 'textures' / f.name)
     if isinstance(bundle, bytes):
         (out / ('%s.mtb' % world)).write_bytes(bundle)
     elif bundle:
