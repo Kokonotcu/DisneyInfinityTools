@@ -145,6 +145,24 @@ def pack_dir(src_dir, archive_name):
     return write(members, archive_name)
 
 
+def _new_member(name, raw):
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    data = c.compress(raw) + c.flush()
+    nm, crc = name.encode('latin-1'), zlib.crc32(raw)
+    lh = struct.pack('<4s5H3I2H', b'PK\x03\x04', 20, 0, 8, 0, 0x21, crc, len(data), len(raw), len(nm), 0) + nm
+    cd = struct.pack('<4s6H3I5H2I', b'PK\x01\x02', 20, 20, 0, 8, 0, 0x21, crc, len(data), len(raw),
+                     len(nm), 0, 0, 0, 0, 0, 0)
+    return dict(name=name, lh=lh, data=data, cd=cd, cd_extra=b'')
+
+
+def add_files(archive, files):
+    """Existing members kept byte-for-byte; {member name: bytes} appended (same name = replaced)."""
+    members, eocd = read(archive)
+    members = [m for m in members if m['name'] not in files]
+    members += [_new_member(n, b) for n, b in files.items()]
+    return write(members, Path(archive).stem, eocd[20:])
+
+
 def _selftest():
     root = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition\assets\exploders')
     ok = bad = 0

@@ -49,3 +49,15 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 5. **SOLVED (2026-10-03):** foreign texture-slot encodings. `autobundle._substitute` wrote only the 4-byte index of each 8-byte block B slot, leaving the donor's second word: 118 slots `(idx, ffffffff)` and 4 `(ffffffff, 0)`, forms that occur 0 times in 25,052 shipped slots (always `(idx, 0)` or `(ffffffff, ffffffff)`). The engine then corrupts its heap (a GeometryNode's allocator record at 0x403fc0) or binds a garbage SRV (the d3d11 AV). Found by launch bisection with `variant.py --keep` down to a crashing pair (materials 198 + 217) that each load alone. Fixed in autobundle; `slotcheck.py` now flags the mixed forms. **Full Metroville loads in-game** (442 materials, 2,067 nodes; user: "it loaded and the skybox has changed as well"). The "t9 mask" and "material count" leads were wrong.
 
 **Open:** multi-block `.btd` conversion (Metroville has 724 blocks, monolith 2; `btdblocks.py` is WIP); shared vertices duplicated (52 MB vbuf); generic materials dropping vertex colour.
+
+## Status (2026-10-03, end of session)
+**Metroville runs natively with collision** (b84fbf0): `world30.py --source ...\in_city --world out_intro2 --bundle auto --offset 76,-165,-404 --static --realm rlm_moa_motunui_day`. Backup `_backup\metroville-COLLISION-WORKS-2026-10-03`.
+
+**Expendables (buildings) port, native 1.0 system, IN PROGRESS** (a7b8e9e +):
+- World: `ExpendablePool` + 549 `Expendable` links kept; each socket gets a graph entry (Translation + Orientation). 3.0 still registers both (FUN_01604820).
+- Package: 3.0 loads `assets/expendables_data/<playset>.lua`. `expendables_data.zip` is renamed `.disabled` and the 17 packages are loose; `playsetx.lua` = `expack.py` merge (plain Lua text) of 3.0 playsetx + 1.0 `terrainbuildingsexpendables`. All 198 1.0 definitions register (verified in a memory dump).
+- Control: 1.0 entries pointed at `Exploders/psx_Barrel` (+ its DnaFile) -> barrels appeared at the sockets in-game.
+- Models: 189/195 exploders converted (`expl30.py`) and packed as `assets/exploders/xx/name.zip` (`di3arc.py`, 2961/2961 shipped archives re-packed byte-exact). The engine only sees assets inside archives.
+- Real models: no building appeared and no exploder archive was requested. **Leading hypothesis:** the 1.0 `.dnax` files were loose and the dna lookup is archive-only, so spawning aborts before the model. **Fix installed, NOT yet launched:** the 3 dnax were added into `dna.zip` (`di3arc.add_files`; shipped copy in `_backup\dna.zip.shipped`).
+- Missing in the 1.0 extract: bstone01_socket01_04(_d), bstone01_socket02_04(_d), mfact05_socket05(_d). Look in the 1.0 install's archives.
+- Undo list: `_backup\expendables-test-files.txt`.
