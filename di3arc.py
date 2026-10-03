@@ -101,6 +101,32 @@ def unpack(path):
     return out
 
 
+def unpack_index(path):
+    """Members found through the leading hash index (PK\\xff\\xff, n, n x (mm3(name), offset)), as the game
+    does. Third-party tools (the Anyone Can Cook mod) rewrite the index and leave the zip central
+    directory stale, so read()/unpack() fail on their archives."""
+    raw = Path(path).read_bytes()
+    key = key_for(Path(path).stem)
+    sig, n = struct.unpack('<4sI', _x(key, raw[:8]))
+    assert sig == b'PK\xff\xff', sig
+    idx = _x(key, raw[:8 + 8 * n])[8:]
+    out = {}
+    for i in range(n):
+        h, off = struct.unpack_from('<II', idx, 8 * i)
+        lh = _x(key, raw[off:off + 30])
+        method, comp, size, nl, el = struct.unpack_from('<H8xII2H', lh, 8)
+        k = 30 + nl + el + _span('', comp)
+        head = _x(key, raw[off:off + k])
+        name = head[30:30 + nl].decode('latin-1')
+        if name.lower().endswith('.dct'):        # whole member encrypted
+            head = _x(key, raw[off:off + 30 + nl + el + comp])
+        body = head[30 + nl + el:] + raw[off + len(head):off + 30 + nl + el + comp]
+        assert mm3(name.encode('latin-1')) == h, (name, h)
+        out[name] = zlib.decompress(body, -15) if method == 8 else body
+        assert len(out[name]) == size, (name, len(out[name]), size)
+    return out
+
+
 def write(members, archive_name, eocd_tail=b'\0\0'):
     """members: [{name, lh, data, cd, cd_extra}] in file order (lh/cd fields complete except offsets)."""
     key = key_for(archive_name)
