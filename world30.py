@@ -87,6 +87,50 @@ TRANSFORM_FIELDS = ('NodeName', 'Uuid', 'DisplayLayer', 'Type', 'ParentNodeRefer
 IDENT = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
 
 
+def world_by_path(s):
+    """{scene path 'A|B|C' (Scene node excluded): world matrix} for every node, on the 1.0 tree."""
+    nodes = s.find(name='Node', pool='SceneTreeNodePool')
+    K = [kids(s, n) for n in nodes]
+    typ = [k['Type'].names()[0] if 'Type' in k else '' for k in K]
+    par = [k['ParentNodeReferences'].ints()[0] if 'ParentNodeReferences' in k else None for k in K]
+    loc = [k['LocalToParentMatrix'].floats() if 'LocalToParentMatrix' in k else IDENT for k in K]
+    name = [k['NodeName'].names()[0] if 'NodeName' in k else '' for k in K]
+    W, out = {}, {}
+
+    def world(i):
+        if i not in W:
+            W[i] = loc[i] if par[i] is None or par[i] < 0 else _mul(loc[i], world(par[i]))
+        return W[i]
+    for i in range(len(nodes)):
+        chain, j = [], i
+        while j is not None and j >= 0:
+            if typ[j] != 'Scene':
+                chain.append(name[j])
+            j = par[j]
+        out['|'.join(reversed(chain))] = world(i)
+    return out
+
+
+def mat2quat(m):
+    """Row-major 4x4 -> DataNode Orientation [x, y, z, w], rows normalised. Convention measured on
+    shipped data: 46,036 Dilation Orientations predicted from their nodes' LocalToParentMatrix."""
+    import math
+    R = [[m[r * 4 + c] / (math.sqrt(sum(m[r * 4 + k] ** 2 for k in range(3))) or 1) for c in range(3)]
+         for r in range(3)]
+    t = R[0][0] + R[1][1] + R[2][2]
+    if t > 0:
+        q = math.sqrt(t + 1) * 2
+        return [(R[2][1] - R[1][2]) / q, (R[0][2] - R[2][0]) / q, (R[1][0] - R[0][1]) / q, q / 4]
+    if R[0][0] > R[1][1] and R[0][0] > R[2][2]:
+        q = math.sqrt(1 + R[0][0] - R[1][1] - R[2][2]) * 2
+        return [q / 4, (R[0][1] + R[1][0]) / q, (R[0][2] + R[2][0]) / q, (R[2][1] - R[1][2]) / q]
+    if R[1][1] > R[2][2]:
+        q = math.sqrt(1 + R[1][1] - R[0][0] - R[2][2]) * 2
+        return [(R[0][1] + R[1][0]) / q, q / 4, (R[1][2] + R[2][1]) / q, (R[0][2] - R[2][0]) / q]
+    q = math.sqrt(1 + R[2][2] - R[0][0] - R[1][1]) * 2
+    return [(R[0][2] + R[2][0]) / q, (R[1][2] + R[2][1]) / q, q / 4, (R[1][0] - R[0][1]) / q]
+
+
 def _mul(a, b):
     """Row-major 4x4, row vectors (translation at [12:15]): world = local x parent."""
     return [sum(a[r * 4 + k] * b[k * 4 + c] for k in range(4)) for r in range(4) for c in range(4)]
@@ -251,6 +295,47 @@ def _node_work(prims):
     return streams, strides, subs, counts
 
 
+def convert_geometry(s, gn, src_dir, stem, vmap, out, name, dry=False):
+    """Vertex formats + buffers of every geometry node; writes <out>/<name>_0.vbuf/ibuf (and _2.ibuf)."""
+    # each primitive's target format: the one its material accepts (autobundle), else the best
+    # 3.0 target for its 1.0 format (identical twin first)
+    def target(p):
+        k = kids(s, p)
+        src = k['vformatCRC'].ints()[0] & 0xffffffff
+        t = vmap.get((k['MaterialReference'].ints()[0], src)) or vtxf.targets_1to3(src)[0]
+        return src, t[0]
+    nodes_prims = [[(kids(s, p)['Idata'].ints(), kids(s, p)['Vdata'].ints(), *target(p))
+                    for p in prims] for _, _, prims in gn]
+    tv, ti, ti2 = (out / ('%s_%d.%s' % (name, n, e)) for n, e in ((0, 'vbuf'), (0, 'ibuf'), (2, 'ibuf')))
+    blocks, nv, ni, ni2 = build_buffers(src_dir, stem, nodes_prims,
+                                        *(x if not dry else x.with_name(x.name + '.dry') for x in (tv, ti, ti2)))
+    conv = __import__('collections').Counter()
+    for (_, _, prims), blks in zip(gn, blocks):
+        for p, b in zip(prims, blks):
+            k = kids(s, p)
+            old = k['vformatCRC'].ints()[0] & 0xffffffff
+            conv['%08x -> %08x' % (old, b['vformatCRC'])] += 1
+            k['Idata'].set_ints(b['Idata'])
+            k['Vdata'].set_ints(b['Vdata'])
+            k['vformatCRC'].pay = b['vformatCRC'].to_bytes(len(k['vformatCRC'].pay), 'little')
+    print('  vformatCRC per primitive: %s' % dict(conv))
+    for r in s.find(name='Size', pool='VertexBufferPool'):
+        if r.ints()[0]:
+            r.set_int(nv)
+            break
+    ibs = s.find(name='IndexBuffer', pool='IndexBufferPool')
+    for n_ib, size in ((0, ni), (2, ni2)):
+        k = kids(s, ibs[n_ib])
+        assert k['Width'].ints()[0] == (2 if n_ib == 0 else 4)
+        k['Size'].set_int(size)
+        if size and 'FileName' not in k:   # IndexBuffer 2 = 32-bit, its own file (dor_tp_mc_2.ibuf)
+            fn = kids(s, ibs[0])['FileName']
+            i, j = s.block(ibs[n_ib])
+            s.recs.insert(j, type(fn)(s, fn.level, fn.type, fn.name_idx,
+                                      s.add_name('%s_2.ibuf' % stem).to_bytes(2, 'little')))
+    print('  buffers: %d nodes -> vbuf %d B, ibuf %d B, 32-bit ibuf %d B' % (len(gn), nv, ni, ni2))
+
+
 def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, static=False, realm=None):
     src_dir = Path(source)
     stem = src_dir.name
@@ -280,6 +365,7 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
             del s.recs[i:j]
     if static:   # only the donor's pool set; LayoutPool/AssetPool are appended from the donor later
         keep = {r.name for r in ref.recs if r.level == 1} - {'LayoutPool', 'AssetPool'}
+        keep.add('ExpendablePool')   # registered by the 3.0 exe (FUN_01604820), unused by shipped worlds
         gone = []
         for p in [r for r in s.recs if r.level == 1 and r.name not in keep]:
             i, j = s.block(p)
@@ -288,45 +374,10 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         print('  static: dropped 1.0-only pools %s' % gone)
 
     # --- buffers, before the tree is touched -----------------------------
-    # each primitive's target format: the one its material accepts (autobundle), else the best
-    # 3.0 target for its 1.0 format (identical twin first)
-    def target(p):
-        k = kids(s, p)
-        src = k['vformatCRC'].ints()[0] & 0xffffffff
-        t = vmap.get((k['MaterialReference'].ints()[0], src)) or vtxf.targets_1to3(src)[0]
-        return src, t[0]
-    nodes_prims = [[(kids(s, p)['Idata'].ints(), kids(s, p)['Vdata'].ints(), *target(p))
-                    for p in prims] for _, _, prims in gn]
     out = INSTALL / world
     out.mkdir(parents=True, exist_ok=True)
-    tv, ti, ti2 = (out / ('%s_%d.%s' % (world, n, e)) for n, e in ((0, 'vbuf'), (0, 'ibuf'), (2, 'ibuf')))
-    blocks, nv, ni, ni2 = build_buffers(src_dir, stem, nodes_prims,
-                                        *(x if not dry else x.with_name(x.name + '.dry') for x in (tv, ti, ti2)))
-    conv = __import__('collections').Counter()
-    for (_, _, prims), blks in zip(gn, blocks):
-        for p, b in zip(prims, blks):
-            k = kids(s, p)
-            old = k['vformatCRC'].ints()[0] & 0xffffffff
-            conv['%08x -> %08x' % (old, b['vformatCRC'])] += 1
-            k['Idata'].set_ints(b['Idata'])
-            k['Vdata'].set_ints(b['Vdata'])
-            k['vformatCRC'].pay = b['vformatCRC'].to_bytes(len(k['vformatCRC'].pay), 'little')
-    print('  vformatCRC per primitive: %s' % dict(conv))
-    for r in s.find(name='Size', pool='VertexBufferPool'):
-        if r.ints()[0]:
-            r.set_int(nv)
-            break
-    ibs = s.find(name='IndexBuffer', pool='IndexBufferPool')
-    for n_ib, size in ((0, ni), (2, ni2)):
-        k = kids(s, ibs[n_ib])
-        assert k['Width'].ints()[0] == (2 if n_ib == 0 else 4)
-        k['Size'].set_int(size)
-        if size and 'FileName' not in k:   # IndexBuffer 2 = 32-bit, its own file (dor_tp_mc_2.ibuf)
-            fn = kids(s, ibs[0])['FileName']
-            i, j = s.block(ibs[n_ib])
-            s.recs.insert(j, type(fn)(s, fn.level, fn.type, fn.name_idx,
-                                      s.add_name('%s_2.ibuf' % stem).to_bytes(2, 'little')))
-    print('  buffers: %d nodes -> vbuf %d B, ibuf %d B, 32-bit ibuf %d B' % (len(gn), nv, ni, ni2))
+    convert_geometry(s, gn, src_dir, stem, vmap, out, world, dry)
+
 
     # --- 1.0-only records on materials -----------------------------------
     n = 0
@@ -340,6 +391,7 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     # --- scene tree: a Camera becomes the Layout transform ----------------
     # 3.0 keeps Camera nodes (18 across 120 worlds), so converting one in place
     # avoids renumbering every node reference in the file.
+    wpath = world_by_path(s) if static else None        # socket transforms, before flattening
     paths = flatten_static(s, gn) if static else None   # on the untouched 1.0 tree
     if static:   # 1.0 Light/LodGroup nodes carry fields 3.0 never ships: make them plain Transforms
         n = 0
@@ -390,7 +442,8 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         t = k['Type'].names()[0]
         if static:   # world links + the 1.0 shape->instance links; the 1.0 DataNode/SceneTreeNode
             # links point into the flattened hierarchy, so each instance gets its own graph entry below
-            keep = (t in KEEP_STATIC and t not in COLLISION_ASSOC) or t == 'CollisionShapeToCollisionInstance'
+            keep = ((t in KEEP_STATIC and t not in COLLISION_ASSOC)
+                    or t in ('CollisionShapeToCollisionInstance', 'Expendable'))
         else:
             keep = t not in DROP_ASSOC
         if not keep:
@@ -399,10 +452,16 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
             dropped[t] += 1
     if static:
         print('  static: dropped associations %s' % dict(dropped))
-    byname = set(names)
+    byname, sock = set(names), []
     for a in s.find(name='Association', pool='AssociationPool'):
         k = kids(s, a)
         nm = k['NodeName'].names()[0]
+        if static and k['Type'].names()[0] == 'Expendable':
+            # Association::Expendable (0x15ff7b0) resolves NodeName + '|Transform' as a graph DataNode
+            # and places the expendable at that node's transform: one graph entry per socket
+            sock.append(wpath[nm])
+            k['NodeName'].pay = s.add_name('%s|SOCK_%d' % (LAYOUT, len(sock) - 1)).to_bytes(2, 'little')
+            continue
         if static and k['Type'].names()[0] == 'CollisionShapeToCollisionInstance':
             k['NodeName'].pay = s.add_name('%s|COL_%d' % (LAYOUT, k['CollisionInstanceRef'].ints()[0])
                                            ).to_bytes(2, 'little')
@@ -461,9 +520,10 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     s.recs[i:j] = _reindex(ref, s, ref.recs[a2:b2])
     s = _roundtrip(s)
 
-    gp = graph.expand(s, names, LAYOUT)
-    print('  graph n=%d: headers %d, datanodes %d, processors %d, variantgroups %d'
-          % (len(names), gp['VariableHeaderCount'], gp['VariableDataNodeCount'],
+    socknames = ['SOCK_%d' % i for i in range(len(sock))]
+    gp = graph.expand(s, names + socknames, LAYOUT)
+    print('  graph n=%d (+%d expendable sockets): headers %d, datanodes %d, processors %d, variantgroups %d'
+          % (len(names), len(socknames), gp['VariableHeaderCount'], gp['VariableDataNodeCount'],
              gp['ProcessorNodeCount'], gp['VariantGroupCount']))
     s = _roundtrip(s)
     ag = s.find(name='AggregateCount')
@@ -497,7 +557,8 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
                 m = r.floats()
                 m[12], m[13], m[14] = m[12] + ox, m[13] + oy, m[14] + oz
                 r.set_floats(m)
-    dn, moved = None, 0
+    pos += [[m[12] + ox, m[13] + oy, m[14] + oz] for m in sock]   # socket entries follow the nodes
+    dn, moved, orient = None, 0, []
     for r in s.recs:
         if r.pool != 'DataNodePool':
             continue
@@ -510,9 +571,17 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         elif dn is not None and r.name == 'Translation':
             if dn['type'] == 'Dilation' and dn['basis'] == 1 and moved < len(pos):
                 r.set_floats(pos[moved])
+                if moved >= len(gn2):
+                    orient.append((r, mat2quat(sock[moved - len(gn2)])))
                 moved += 1
     assert moved == len(pos), 'placed %d of %d nodes' % (moved, len(pos))
-    print('  placement: %d nodes at their own positions, offset %s' % (len(gn2), (ox, oy, oz)))
+    for r, q in reversed(orient):   # sockets carry rotation too (Translation, Orientation as shipped)
+        s.recs.insert(s.recs.index(r) + 1,
+                      type(r)(s, r.level, r.type, s.add_name('Orientation'), r.pay).set_floats(q))
+    if orient:
+        s = _roundtrip(s)
+    print('  placement: %d nodes + %d sockets at their own positions, offset %s'
+          % (len(gn2), len(sock), (ox, oy, oz)))
 
     # --- internal file names ----------------------------------------------
     for r in s.recs:
@@ -528,7 +597,10 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         import tempfile, foreign
         tmp = Path(tempfile.mkdtemp()) / 'check.oct'
         s.save(tmp)
-        left = foreign.foreign_in(tmp)
+        # ExpendablePool and Association::Expendable are registered by the 3.0 exe (FUN_01604820)
+        # even though no shipped world uses them
+        left = [k for k in foreign.foreign_in(tmp)
+                if k[0] != 'ExpendablePool' and k[1] != 'ExpendableNodeRef']
         assert not left, 'static: %d record kinds 3.0 never ships remain, e.g. %s' % (len(left), left[:5])
         print('  static: 0 record kinds foreign to 3.0')
 
