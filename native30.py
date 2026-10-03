@@ -32,12 +32,14 @@ from conv import (kids, pool_rec, geo_nodes, _roundtrip, _reindex, convert_geome
 from subnet import subnets
 
 SRC = Path(r'D:\DI-Extract\1.0\assets\worlds\in_city')
-HOLO_MER = Path(r'D:\DI-Extract\3.0\assets\worlds\holodestruction\holodestruction.mer')
+# bound start graph: the LocatorNode's string param at offset 0 IS the binding ('Layout|LOC_PLayer');
+# holodestruction's copy is unbound (empty string) and spawned the player at the origin
+START_MER = Path(r'D:\DI-Extract\3.0\assets\worlds\emp_endor_details\emp_endor_details.mer')
 INTRO = Path(r'D:\DI-Extract\3.0\assets\worlds\psx_intro')
 DROP_POOLS = ('RealmDataPool', 'RealmVolumePool', 'SurfaceTypesPool', 'CurvesPool', 'NavMeshPool',
               'MeridianLocatorPool', 'LayoutPool', 'AssetPool', 'SubNetworkPool')
 KEEP_ASSOC = ('CellLink', 'VisHierarchyLink', 'Expendable', 'CollisionShapeToCollisionInstance')
-START = 'LOC_Start'
+START = 'LOC_PLayer'   # the name emp_endor_details' graph is bound to
 ADD_ASSOC = ('CollisionAggregate', 'Transform', 'Anchor', 'PrimaryAnchor', 'PlacementNode')
 
 
@@ -103,9 +105,9 @@ def native_scene(s):
 
 
 def build_mer(out, realm):
-    """holodestruction's LocatorNode -> PlayerStartPosNode (1 link) + a RealmCache appended after them
+    """emp_endor_details' LocatorNode -> PlayerStartPosNode (1 link) + a RealmCache appended after them
     (Mer_NoConnections, so the compressed LinksBuffer stays byte-identical)."""
-    m = Oct.load(str(HOLO_MER))
+    m = Oct.load(str(START_MER))
     intro = Oct.load(str(INTRO / 'psx_intro.mer'))
     ns = next(r for r in m.recs if r.name == 'MNode')
     nk = kids(m, ns)
@@ -136,13 +138,7 @@ def build_mer(out, realm):
     nk['ParameterStrings'].pay = pack(bytes(strs))
     nk['RootNodeCount'].set_int(nk['RootNodeCount'].ints()[0] + 1)
 
-    mnodes = m.find(name='MNode')
-    loc = next(x for x in mnodes if kids(m, x)['Type'].names()[0] == 'LocatorNode')
-    lk = kids(m, loc)
-    bo = next(r for r in intro.recs if r.name == 'BoundObjectName')
-    rec = _reindex(intro, m, [bo])[0]
-    rec.pay = m.add_name('%s|%s' % (LAYOUT, START)).to_bytes(2, 'little')
-    m.recs.insert(m.recs.index(lk['Mer_ParametersOffset']), rec)
+    assert strs.startswith(('%s|%s' % (LAYOUT, START)).encode() + b'\0'), strs[:40]
 
     i, j = intro.block(inode)
     blk = _reindex(intro, m, intro.recs[i:j])
