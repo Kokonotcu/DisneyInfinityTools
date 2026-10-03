@@ -13,7 +13,7 @@ import sys, shutil
 from pathlib import Path
 from oct import Oct
 import graph, autobundle
-from conv import kids, pool_rec, geo_nodes, _reindex, _roundtrip, convert_geometry
+from conv import kids, pool_rec, geo_nodes, _reindex, _roundtrip, convert_geometry, copy_texture
 from native30 import native_scene
 
 DROP_POOLS = ('BoundingVolumePool', 'MeridianLocatorPool', 'NavMeshPool', 'SceneNodeRefsPool', 'SurfaceTypesPool')
@@ -94,7 +94,7 @@ def convert(src_dir, out_root=GAME / 'exploders'):
     s.save(out / ('%s.oct' % stem.lower()))
     (out / ('%s.mtb' % stem.lower())).write_bytes(data)
     for f in tocopy:
-        shutil.copy2(f, GAME / 'textures' / f.name)
+        copy_texture(f, GAME / 'textures' / f.name)
     return out, dict(__import__('collections').Counter(tiers)), len(tocopy)
 
 

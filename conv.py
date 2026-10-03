@@ -15,6 +15,18 @@ INSTALL = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Editi
 
 LAYOUT = 'Layout'
 
+
+def copy_texture(src, dst):
+    """Copy a 1.0 .tbody into the pool. D3D11 rejects block-compressed textures below 4x4
+    (CreateTexture2D E_INVALIDARG, the only 2 throws in Metroville); a 1x1/2x2 single-mip DXT file
+    already holds one whole 4x4 block, so only the header size changes."""
+    d = bytearray(Path(src).read_bytes())
+    h, w = struct.unpack_from('<II', d, 12)
+    if d[:4] == b'DDS ' and d[84:87] == b'DXT' and (w < 4 or h < 4) and struct.unpack_from('<I', d, 28)[0] <= 1:
+        struct.pack_into('<II', d, 12, max(h, 4), max(w, 4))
+    Path(dst).write_bytes(bytes(d))
+
+
 def kids(f, rec):
     i, j = f.block(rec)
     return {r.name: r for r in f.recs[i + 1:j]}
