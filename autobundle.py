@@ -29,6 +29,11 @@ CACHE = Path(__file__).with_name('matindex.json')
 DONORS = Path(__file__).with_name('donors.json')
 TEXIDX = Path(__file__).with_name('texindex.json')
 UNSET = 0xffffffff
+# generic tier: 1.0 slots to use, in 3.0 (colour, normal, ...) order, for 1.0 shaders that are not
+# colour-first. d0e71afc = blend mask, colour A, normal, colour B, normal: in order, the mask became the
+# colour (Metroville's black/white mottled walls).
+# ponytail: one hand-made entry; the NRM-first shaders (030a6710, 255f3180, 1fe46d84, 01ae42b4) need one too if seen
+GENERIC_SLOTS = {'d0e71afc8ef520e49044db932c324993': [1, 2]}
 
 
 def _bundles():
@@ -137,6 +142,8 @@ def _substitute(donor_path, di, m10, b10):
     dm = bnd.materials[di]
     used = [t for t in b10.tex_slots(m10)]
     if dm['shader'] != m10['shader']:          # generic: textures in order, unset slots dropped
+        if m10['shader'] in GENERIC_SLOTS:
+            used = [used[i] for i in GENERIC_SLOTS[m10['shader']]]
         used = [t for t in used if t != UNSET]
     B = bytearray(dm['B'])
     # whole 8-B slot as shipped: (index, 0) or (UNSET, UNSET). Writing only the index left the
