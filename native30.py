@@ -254,8 +254,13 @@ def convert(source=SRC, world='out_intro2', realm='rlm_moa_motunui_day', dry=Fal
         if k['Type'].names()[0] == 'MeridianLocator':
             ai, aj = intro.block(asc)
             b2 = _reindex(intro, s, intro.recs[ai:aj])
+            # shipped locator slots are name -> Transform (a bare Dilation), so the shipped path
+            # '...|Transform|In WorldBasis.Transform' stops there. Our generated slot has the full
+            # processor block, where that path reaches a processor-computed node nothing drives:
+            # the start node got no transform (debugger: zone + player checks pass, transform fails).
+            # Bind the Dilation directly, as Association::Expendable does for sockets.
             {r.name: r for r in b2[1:]}['NodeName'].pay = s.add_name(
-                '%s|%s|Transform|In WorldBasis.Transform' % (LAYOUT, START)).to_bytes(2, 'little')
+                '%s|%s|Transform' % (LAYOUT, START)).to_bytes(2, 'little')
             add.append(b2)
     _, end = s.block(pool_rec(s, 'AssociationPool'))
     s.recs[end:end] = [r for b2 in add for r in b2]
