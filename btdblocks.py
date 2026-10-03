@@ -1,5 +1,5 @@
 """A .btd is one collision mesh per TriangleList shape (SerializeIndex = block ordinal), packed back
-to back. Each block ends where its per-triangle u32 array ends:
+to back, each starting 16-byte aligned. Each block ends where its per-triangle u32 array ends:
     1.0: u32 @0x28 = array offset, u32 @0x2c = count        3.0: u32 @48 / u32 @52
 python btdblocks.py --selftest     predict the block count of every .btd in both games
 """
@@ -20,7 +20,7 @@ def blocks(b, game):
         if not (o < end <= len(b)):
             raise ValueError('block at %#x ends at %#x (file %#x)' % (o, end, len(b)))
         out.append((o, end))
-        o = end
+        o = (end + 15) & ~15          # blocks start 16-byte aligned (zero padding between)
     return out
 
 

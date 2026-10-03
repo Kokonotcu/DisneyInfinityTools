@@ -251,7 +251,7 @@ def _node_work(prims):
     return streams, strides, subs, counts
 
 
-def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, static=False):
+def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, static=False, realm=None):
     src_dir = Path(source)
     stem = src_dir.name
     vmap, tocopy = {}, []
@@ -388,11 +388,9 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     for a in reversed(s.find(name='Association', pool='AssociationPool')):
         k = kids(s, a)
         t = k['Type'].names()[0]
-        if static:   # keep world links and collision bound to a geometry node, by its 1.0 path
-            # Source collision is NOT kept: a CollisionInstance whose shape link is dropped becomes a
-            # physics body with a null shape (crash at 0x7bcc0c, shape->getAabb), and multi-mesh .btd
-            # files are not converted yet. Static mode uses the donor's floor collision instead.
-            keep = t in KEEP_STATIC and t not in COLLISION_ASSOC
+        if static:   # world links + the 1.0 shape->instance links; the 1.0 DataNode/SceneTreeNode
+            # links point into the flattened hierarchy, so each instance gets its own graph entry below
+            keep = (t in KEEP_STATIC and t not in COLLISION_ASSOC) or t == 'CollisionShapeToCollisionInstance'
         else:
             keep = t not in DROP_ASSOC
         if not keep:
@@ -405,19 +403,24 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     for a in s.find(name='Association', pool='AssociationPool'):
         k = kids(s, a)
         nm = k['NodeName'].names()[0]
-        if static and k['Type'].names()[0] in COLLISION_ASSOC:
-            nm = paths[nm]
+        if static and k['Type'].names()[0] == 'CollisionShapeToCollisionInstance':
+            k['NodeName'].pay = s.add_name('%s|COL_%d' % (LAYOUT, k['CollisionInstanceRef'].ints()[0])
+                                           ).to_bytes(2, 'little')
+            continue
         if nm in byname:
             new = '%s|%s' % (LAYOUT, nm)
             if k['Type'].names()[0] == 'CollisionInstanceToDataNode':
                 new += '|Transform|In WorldBasis.Transform'
             k['NodeName'].pay = s.add_name(new).to_bytes(2, 'little')
-    add = []
+    add, tmpl = [], {}
     for a in ref.find(name='Association', pool='AssociationPool'):
         k = kids(ref, a)
         if k['Type'].names()[0] not in ADD_ASSOC + (COLLISION_ASSOC if static else ()):
             continue
         ai, aj = ref.block(a)
+        if static and k['Type'].names()[0] in COLLISION_ASSOC:
+            tmpl[k['Type'].names()[0]] = (ai, aj)   # templates for the per-instance links below
+            continue
         blk2 = _reindex(ref, s, ref.recs[ai:aj])
         bk = {r.name: r for r in blk2[1:]}
         nm = k['NodeName'].names()[0].replace('Default_Floor', names[0])
@@ -426,6 +429,18 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
             floor = static and k['Type'].names()[0] == 'CollisionInstanceToSceneTreeNode'
             bk['SceneTreeNodeRef'].set_int(nodes.index(gn[0][0]) if floor else layout_ref)
         add.append(blk2)
+    if static:   # mirror the WORKING monolith build: every instance gets a DataNode link whose name
+        # resolves to nothing (monolith's 'COL5'), and no per-instance CollisionAggregate. The body is
+        # placed by the instance Transform (in-game: +10 on it lifted monolith's floor by 10). Per-instance
+        # aggregates bound to graph entries left Metroville's collision misplaced in 3 builds.
+        n_inst = sum(1 for r in s.recs if r.name == 'Instance' and r.pool == 'CollisionInstancePool')
+        for i in range(n_inst):
+            ai, aj = tmpl['CollisionInstanceToDataNode']
+            blk2 = _reindex(ref, s, ref.recs[ai:aj])
+            bk = {r.name: r for r in blk2[1:]}
+            bk['NodeName'].pay = s.add_name('COL_%d' % i).to_bytes(2, 'little')
+            bk['CollisionInstanceRef'].set_int(i)
+            add.append(blk2)
     _, end = s.block(pool_rec(s, 'AssociationPool'))
     s.recs[end:end] = [r for blk2 in add for r in blk2]
 
@@ -433,12 +448,6 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     for i, a in enumerate(s.find(name='Association', pool='AssociationPool')):
         a.pay = s.add_name(str(i)).to_bytes(2, 'little')
 
-    if static:   # the donor's self-consistent floor: 1 TriangleList shape, 1 instance, its .btd
-        for name in ('CollisionShapePool', 'CollisionInstancePool'):
-            i, j = s.block(pool_rec(s, name))
-            a2, b2 = ref.block(pool_rec(ref, name))
-            s.recs[i:j] = _reindex(ref, s, ref.recs[a2:b2])
-        s = _roundtrip(s)
 
     # --- the 3.0-only pools -----------------------------------------------
     for name in ('LayoutPool', 'AssetPool'):
@@ -458,7 +467,7 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
              gp['ProcessorNodeCount'], gp['VariantGroupCount']))
     s = _roundtrip(s)
     ag = s.find(name='AggregateCount')
-    if ag:
+    if ag:   # shipped: = collision aggregates; the working monolith build has geometry count (15) here
         ag[0].set_int(len(names))
 
     # --- placement: each node keeps its OWN position ----------------------
@@ -482,6 +491,12 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
                 b = k[nm].floats()
                 k[nm].set_floats([b[0] + ox, b[1] + oy, b[2] + oz])
         pos.append(p3)
+    if static:   # instances carry 1.0 world transforms, which place the bodies: add the same offset
+        for r in s.recs:
+            if r.name == 'Transform' and r.pool == 'CollisionInstancePool':
+                m = r.floats()
+                m[12], m[13], m[14] = m[12] + ox, m[13] + oy, m[14] + oz
+                r.set_floats(m)
     dn, moved = None, 0
     for r in s.recs:
         if r.pool != 'DataNodePool':
@@ -496,9 +511,8 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
             if dn['type'] == 'Dilation' and dn['basis'] == 1 and moved < len(pos):
                 r.set_floats(pos[moved])
                 moved += 1
-    assert moved == len(gn2), 'placed %d of %d nodes' % (moved, len(gn2))
-    print('  placement: %d nodes at their own positions, offset %s'
-          % (moved, (ox, oy, oz)))
+    assert moved == len(pos), 'placed %d of %d nodes' % (moved, len(pos))
+    print('  placement: %d nodes at their own positions, offset %s' % (len(gn2), (ox, oy, oz)))
 
     # --- internal file names ----------------------------------------------
     for r in s.recs:
@@ -526,6 +540,14 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
         p = REF / ('out_intro2%s' % ext)
         if p.exists():
             shutil.copy2(p, out / ('%s%s' % (world, ext)))
+    if realm:   # the .mer's RealmLoader names the lighting realm (donor: RLM_OUT_HQSky, heavy bloom)
+        assert (INSTALL.parent / 'realms' / ('%s.zip' % realm.lower())).exists(), 'no realm %s' % realm
+        mer = Oct.load(out / ('%s.mer' % world))
+        ps = [r for r in mer.recs if r.name == 'ParameterStrings']
+        assert len(ps) == 1, 'expected one RealmLoader string in the .mer'
+        ps[0].pay = bytes([len(realm) + 1]) + realm.encode() + b'\0'
+        mer.save(out / ('%s.mer' % world))
+        print('  realm: %s' % realm)
     for f in tocopy:
         shutil.copy2(f, INSTALL.parent / 'textures' / f.name)
     if isinstance(bundle, bytes):
@@ -533,9 +555,12 @@ def convert(source, world, offset=(0.0, 0.0, 0.0), bundle=None, dry=False, stati
     elif bundle:
         shutil.copy2(bundle, out / ('%s.mtb' % world))
     off = ','.join('%g' % x for x in offset)
-    if static:
-        shutil.copy2(REF / 'out_intro2.btd', out / ('%s.btd' % world))
-        print('  btd: donor floor (static mode)')
+    if static:   # every block; vertices are local to their instances, so no offset here
+        import btdconv
+        data = btdconv.convert_file((src_dir / ('%s.btd' % stem)).read_bytes())
+        (out / ('%s.btd' % world)).write_bytes(data)
+        (out / ('%s.btm' % world)).write_bytes(btdconv.btm(data))   # block table; a copied one lists 1
+        print('  btd: %d blocks converted (btdconv), .btm block table written' % len(btdconv.blocks(data, 3)))
         print('wrote %s into %s' % (world, out))
         return
     r = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
@@ -557,9 +582,10 @@ def main():
     ap.add_argument('--dry', action='store_true')
     ap.add_argument('--static', action='store_true',
                     help='static scenery: flatten the hierarchy, LOD0 only, gameplay links dropped')
+    ap.add_argument('--realm', help='lighting realm in assets/realms, e.g. rlm_moa_motunui_day')
     a = ap.parse_args()
     convert(a.source, a.world, tuple(float(x) for x in a.offset.split(',')),
-            a.bundle, a.dry, a.static)
+            a.bundle, a.dry, a.static, a.realm)
 
 
 if __name__ == '__main__':
