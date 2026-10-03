@@ -13,7 +13,9 @@ import sys, shutil
 from pathlib import Path
 from oct import Oct
 import graph, autobundle
-from world30 import kids, pool_rec, geo_nodes, _reindex, _roundtrip, convert_geometry, DROP_POOLS
+from conv import kids, pool_rec, geo_nodes, _reindex, _roundtrip, convert_geometry
+
+DROP_POOLS = ('BoundingVolumePool', 'MeridianLocatorPool', 'NavMeshPool', 'SceneNodeRefsPool', 'SurfaceTypesPool')
 
 SRC_ROOT = Path(r'D:\DI-Extract\1.0\assets\exploders')
 TEMPLATE = Path(r'D:\DI-Extract\3.0\assets\exploders\ps\psx_barrel\psx_barrel.oct')
