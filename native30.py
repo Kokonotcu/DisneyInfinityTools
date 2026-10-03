@@ -278,7 +278,15 @@ def convert(source=SRC, world='out_intro2', realm='rlm_moa_motunui_day', dry=Fal
     s = _roundtrip(s)
     ag = s.find(name='AggregateCount')
     ag[0].set_int(len(slots))
-    pos = [m[12:15] for m in sock] + [start]
+    # SPAWN: in this zone the player spawns at the world ORIGIN whatever the start graph says (debugger:
+    # no start node is ever constructed, even with the unmodified shipped emp_endor_details graph). So the
+    # world is translated to put IN_City_StartPoint 1 below the origin -- applied ONLY to world-space
+    # fields (field audit): root scene nodes (children inherit), BoundingOBBCenter, CellToWorldMatrix,
+    # collision instance Transforms, graph slots. Local fields (BoundingSphereCenter, child matrices,
+    # vertices, .btd) are untouched -- moving the sphere centres and missing the cells is what hid the
+    # buildings in the static build.
+    off = [-start[0], -start[1] - 1.0, -start[2]]
+    pos = [[m[12] + off[0], m[13] + off[1], m[14] + off[2]] for m in sock] + [[a + b for a, b in zip(start, off)]]
     rot = [mat2quat(m) for m in sock] + [None]
     dn, moved, orient = None, 0, []
     for r in s.recs:
@@ -299,8 +307,30 @@ def convert(source=SRC, world='out_intro2', realm='rlm_moa_motunui_day', dry=Fal
     for r, q in reversed(orient):
         s.recs.insert(s.recs.index(r) + 1, type(r)(s, r.level, r.type, s.add_name('Orientation'), r.pay).set_floats(q))
     s = _roundtrip(s)
-    print('  graph: %d sockets + start, headers %d, datanodes %d (native positions)'
+    print('  graph: %d sockets + start, headers %d, datanodes %d'
           % (len(sock), gp['VariableHeaderCount'], gp['VariableDataNodeCount']))
+    moved = Counter()
+    nodes = s.find(name='Node', pool='SceneTreeNodePool')
+    scene_i = next(i for i, x in enumerate(nodes) if kids(s, x)['Type'].names()[0] == 'Scene')
+    for i, x in enumerate(nodes):
+        k = kids(s, x)
+        t = k['Type'].names()[0]
+        if t == 'Scene' or k.get('NodeName') and k['NodeName'].names()[0] == LAYOUT:
+            continue
+        if 'BoundingOBBCenter' in k:
+            b = k['BoundingOBBCenter'].floats()
+            k['BoundingOBBCenter'].set_floats([b[0] + off[0], b[1] + off[1], b[2] + off[2]]); moved['OBB'] += 1
+        par = k['ParentNodeReferences'].ints()[0] if 'ParentNodeReferences' in k else None
+        if (par is None or par == scene_i) and 'LocalToParentMatrix' in k:
+            m = k['LocalToParentMatrix'].floats()
+            m[12], m[13], m[14] = m[12] + off[0], m[13] + off[1], m[14] + off[2]
+            k['LocalToParentMatrix'].set_floats(m); moved['root nodes'] += 1
+    for r in s.recs:
+        if (r.name == 'CellToWorldMatrix' and r.pool == 'CellPool') or (r.name == 'Transform' and r.pool == 'CollisionInstancePool'):
+            m = r.floats()
+            m[12], m[13], m[14] = m[12] + off[0], m[13] + off[1], m[14] + off[2]
+            r.set_floats(m); moved[r.pool] += 1
+    print('  offset %s (start -> origin): %s' % ([round(v, 2) for v in off], dict(moved)))
 
     for r in s.recs:            # internal file names follow the install name
         if r.type in (0x05, 0x0B):
