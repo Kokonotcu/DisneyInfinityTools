@@ -36,7 +36,7 @@ SRC = Path(r'D:\DI-Extract\1.0\assets\worlds\in_city')
 # holodestruction's copy is unbound (empty string) and spawned the player at the origin
 START_MER = Path(r'D:\DI-Extract\3.0\assets\worlds\emp_endor_details\emp_endor_details.mer')
 INTRO = Path(r'D:\DI-Extract\3.0\assets\worlds\psx_intro')
-DROP_POOLS = ('RealmDataPool', 'RealmVolumePool', 'SurfaceTypesPool', 'CurvesPool', 'NavMeshPool',
+DROP_POOLS = ('RealmDataPool', 'RealmVolumePool', 'SurfaceTypesPool', 'CurvesPool', 'NavMeshPool', 'BoundingVolumePool',
               'MeridianLocatorPool', 'LayoutPool', 'AssetPool', 'SubNetworkPool')
 KEEP_ASSOC = ('CellLink', 'VisHierarchyLink', 'Expendable', 'CollisionShapeToCollisionInstance')
 START = 'LOC_PLayer'   # the name emp_endor_details' graph is bound to
