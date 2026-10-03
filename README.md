@@ -62,3 +62,6 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 - (earlier) Real models: no building appeared and no exploder archive was requested. **Hypothesis then:** the 1.0 `.dnax` files were loose and the dna lookup is archive-only, so spawning aborts before the model. **Fix installed, NOT yet launched:** the 3 dnax were added into `dna.zip` (`di3arc.add_files`; shipped copy in `_backup\dna.zip.shipped`).
 - Missing in the 1.0 extract: bstone01_socket01_04(_d), bstone01_socket02_04(_d), mfact05_socket05(_d). Look in the 1.0 install's archives.
 - Undo list: `_backup\expendables-test-files.txt`.
+
+## Status (2026-10-03, end of day) -- native Metroville
+`native30.py` (replaces the deleted world30; shared code in `conv.py`) builds in_city natively: hierarchy, cells, bounds kept; only world-space fields offset so the city's densest block sits at the spawn origin; pools written in shipped order (graph before associations -- this is what made the 549 building sockets spawn). In-game: full city, ground-floor expendables, spawn on a street. Open: VFX render solid magenta / over-bloomed in this world only; a cluster of odd meshes (black overhead structure, rubble wall) at the spawn; some walls show a mottled mask texture; no ledges/interaction (gameplay data = plan B: convert Metroville's own graph + .mer).
