@@ -138,7 +138,7 @@ def build_mer(out, realm, zone="OUT_Intro2"):
     print('  .mer: %s, start bound to %s, realm %s' % (types, bound[0], realm))
 
 
-def convert(source=SRC, world='out_intro2', realm='rlm_in_day', translate=False, dry=False):
+def convert(source=SRC, world='out_intro2', realm='rlm_in_day', translate=False, dry=False, fade_scale=4.0):
     src_dir = Path(source); stem = src_dir.name
     s = Oct.load(src_dir / ('%s.oct' % stem))
     ref = Oct.load(REF / 'out_intro2.oct')
@@ -168,6 +168,11 @@ def convert(source=SRC, world='out_intro2', realm='rlm_in_day', translate=False,
         i, j = s.block(mt)
         s.recs[i + 1:j] = [r for r in s.recs[i + 1:j] if r.name != 'RenderCaps']
     native_scene(s)
+    # 1.0 fades many props out at 10-50 m (user: "a lot of LODing"); fade_scale is the knob
+    fades = [r for r in s.recs if r.name in ('DistanceAlphaFadeStart', 'DistanceAlphaFadeEnd')]
+    for r in fades:
+        r.set_floats(r.value() * fade_scale)
+    print('  %d fade distances x%g' % (len(fades), fade_scale))
 
     # the Camera node becomes the graph root 'Layout' (in place: no node renumbering), parented to Scene
     nodes = s.find(name='Node', pool='SceneTreeNodePool')
@@ -389,5 +394,6 @@ if __name__ == '__main__':
     ap.add_argument('--realm', default='rlm_in_day', help="Metroville's own 1.0 realm, ported by realm30.py")
     ap.add_argument('--translate', action='store_true', help='move the start to the origin (old workaround)')
     ap.add_argument('--dry', action='store_true')
+    ap.add_argument('--fade-scale', type=float, default=4.0, help='multiplies every 1.0 DistanceAlphaFade distance')
     a = ap.parse_args()
-    convert(a.source, a.world, a.realm, a.translate, a.dry)
+    convert(a.source, a.world, a.realm, a.translate, a.dry, a.fade_scale)

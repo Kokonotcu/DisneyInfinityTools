@@ -34,6 +34,9 @@ UNSET = 0xffffffff
 # colour (Metroville's black/white mottled walls).
 # ponytail: one hand-made entry; the NRM-first shaders (030a6710, 255f3180, 1fe46d84, 01ae42b4) need one too if seen
 GENERIC_SLOTS = {'d0e71afc8ef520e49044db932c324993': [1, 2]}
+# GUIDs that ship in 3.0 but only on a shader that draws nothing in our worlds, so are substituted instead.
+# i_buildingrooftop's 3.0 copy is on debris shader a3399c16 (groundpounddebris2): Metroville roofs invisible.
+NOT_REAL = {'66780fdf-5a90-4c77-9d67-0f326bc80cdc'}
 
 
 def _bundles():
@@ -178,7 +181,7 @@ def resolve(world_dir, o=None):
     problems, tiers, srcs, shaders, tocopy = [], [], [], {}, set()
     for k, m10 in enumerate(b10.materials):
         g = m10['name']
-        if g in idx:
+        if g in idx and g not in NOT_REAL:
             path, i = idx[g]
             bnd = matp.Bundle(Path(path).read_bytes()); src = (bnd, i); tier = 'real'
         else:
