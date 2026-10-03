@@ -104,13 +104,21 @@ def native_scene(s):
           % (dict(conv), hidden))
 
 
-def build_mer(out, realm):
+def build_mer(out, realm, zone="OUT_Intro2"):
     """emp_endor_details' LocatorNode -> PlayerStartPosNode (1 link) + a RealmCache appended after them
     (Mer_NoConnections, so the compressed LinksBuffer stays byte-identical)."""
     m = Oct.load(str(START_MER))
     intro = Oct.load(str(INTRO / 'psx_intro.mer'))
     ns = next(r for r in m.recs if r.name == 'MNode')
     nk = kids(m, ns)
+    # start points register per ZONE under the graph namespace: every shipped graph names it after its
+    # zone (PSX_Intro, KRT_ALDN_SpdWay...). With emp_endor_details' name left in, the lookup for our zone
+    # failed and the player spawned at the origin, 155 below Metroville.
+    for f, v in (('Name', zone), ('GraphFileName', zone), ('UserNamespace', zone.lower())):
+        nk[f].pay = m.add_name(v).to_bytes(2, 'little')
+    for r in m.recs:                      # the link pool repeats the namespace header
+        if r.pool == 'MeridianLinkPool' and r.name in ('Name', 'GraphFileName', 'UserNamespace'):
+            r.pay = m.add_name(zone if r.name != 'UserNamespace' else zone.lower()).to_bytes(2, 'little')
 
     def blob(r):
         b = r.value()
