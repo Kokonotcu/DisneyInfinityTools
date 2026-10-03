@@ -173,7 +173,10 @@ def convert(source=SRC, world='out_intro2', realm='rlm_moa_motunui_day', dry=Fal
     assert not problems, problems[:5]
     print('%s: materials %s' % (stem, dict(Counter(tiers))))
     gn = geo_nodes(s)
-    start = graph_locator(s, 'IN_City_StartPoint')
+    # IN_City_StartPoint (graph_locator) is outside the playable city (user: "weird place"). Spawn in the
+    # densest 60 m block of building sockets, at its centre, where a downward ray through the geometry
+    # first hits street level (open sky, not a roof): native (-87.85, 155.35, 619.19).
+    start = [-87.85, 155.35, 619.19]
     wpath = world_by_path(s)
     print('  start (native): %s' % [round(v, 2) for v in start])
 
