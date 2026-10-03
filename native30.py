@@ -60,7 +60,9 @@ def graph_locator(s, name):
         elif pool in pools and r.level >= 5 and cur is not None:
             cur[r.name] = r.value()
     dns, convs = pools['DataNodePool'], pools['BasisConversionPool']
-    h = next(i for i, x in enumerate(hi) if hs[x] == name)
+    # header NUMBERS are 1-based (HeaderLayout pairs and DataNode.Header); HeaderStringIndices is 0-based.
+    # Reading them 0-based picked a newspaper stand's Dilation instead of the start point.
+    h = next(i for i, x in enumerate(hi) if hs[x] == name) + 1
     d = next(d for c in ch[h] for d in dns if d['Header'] == c and d.get('Type') == ['Dilation'])
     pos = list(d.get('Translation') or [0, 0, 0])
     b = d.get('BasisRef', 0)
