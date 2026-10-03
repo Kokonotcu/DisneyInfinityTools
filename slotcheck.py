@@ -7,7 +7,7 @@ The binder reads blockB[i*8] (a texture pointer after load) for i < PS count; an
 TEXB or a PS count above the slot count both hand D3D11 a garbage SRV.
 usage: slotcheck.py <bundle.mtb>      (no args: corpus check of every 3.0 .shd)
 """
-import sys
+import sys, struct
 from pathlib import Path
 from matp import Bundle, SHD_DIR
 
@@ -39,6 +39,10 @@ for i, m in enumerate(b.materials):
     if any(cnt > nslots for _, cnt in st): probs.append(f'stage count > slots {st}')
     oob = [x for x in idx if x != 0xffffffff and x >= ntex]
     if oob: probs.append(f'TEXB index out of range {oob}')
+    # shipped slots are always (idx, 0) or (ffffffff, ffffffff); mixed forms crashed Metroville
+    mixed = [s for s in range(m['slots']) if m['stride'] == 8 and
+             (idx[s] == 0xffffffff) != (struct.unpack_from('<I', m['B'], 8 * s + 4)[0] == 0xffffffff)]
+    if mixed: probs.append(f'foreign slot encoding in slots {mixed}')
     ps_end = st[0][0] + st[0][1]
     if probs or ps_end > 8:
         bad += bool(probs)

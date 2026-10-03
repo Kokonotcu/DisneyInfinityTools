@@ -22,6 +22,9 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 | `arenas.py` | Reads the 3 render contexts' frame arenas (cur/end/base) from a minidump | |
 | `dispfind.py` | Capstone sweep of the exe for a `[reg+disp]` operand or an immediate, on all cores | found the arena config writer |
 | `btdblocks.py` / `btdscan.py` | Multi-mesh `.btd` survey: one block per TriangleList shape (SerializeIndex). The end-of-block rule is partial (24/98 1.0, 122/267 3.0) | WIP |
+| `slotcheck.py` | Per-material texture-binder check: PS slot range vs block B, TEXB index range, and slot encoding (`(idx,0)` / `(ffffffff,ffffffff)` only) | flags the 122 bad Metroville materials; 0 after the autobundle fix; 0/836 shaders read past block B |
+| `ranges.py` | Every `.oct` field and per-file record count vs the largest any shipped 3.0 world uses (cache `shippedranges.json`) | run on Metroville |
+| `variant.py` | One-variable variants of the INSTALLED world for launch bisection: `--keep 178-188,199-220` materials, `--visible a:b`, `--rendercaps`, `--refmax`, `--dedupe`, `--padtex`, `--restore`. Always starts from `_backupariant-base.*` | `--keep 178-220` reproduces `--materials 43 --skip 178` byte-exact |
 | `nodedump.py` | Dumps one geometry node's records for diffing | |
 | `streamlayout.py` | Corpus check: multi-primitive nodes are stream-major | 4915/4915 shipped nodes |
 | `disx.py` | Disassembles at a runtime address from `pentane.log` (capstone + pefile) | |
@@ -35,7 +38,7 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 - The primitive loader `FUN_004553c0` stores `lookup(vformatCRC)` as a **byte**. An unknown CRC returns `0xbadddec1`, which truncates to slot `0xc1`. That slot is empty, so the per-mesh input layout (`FUN_0045c5c0` -> `FUN_0044d430` -> `ID3D11Device::CreateInputLayout`) is built from nothing.
 - 1.0's `ea1acc4c` (sumo, monolith) has a declaration identical to 3.0's `63ae710f`. 12 of the 44 1.0 formats have an exact 3.0 twin (`vtxf.py`).
 
-## Status (end of 2026-10-02)
+## Status (2026-10-03)
 **Works in-game:** sumo (3 real materials) and monolith (`--bundle auto`: 3 real, 5 same-shader, 1 generic), both with geometry, collision, lighting and correct colours.
 
 **Metroville (`in_city --static`):** materials (442) and vertex formats convert, and the world gets through loading. Crashes so far, each fix moving it later:
@@ -43,6 +46,6 @@ Format notes: https://claude.ai/artifact/FNnTo1rpHJ7UAWH7UoCooP
 2. d3d11 crash in `PSSetShaderResources` from the texture binder (FUN_0045a1c0, call at 0x45a2c4).
 3. Draw list NULL in the draw loop (0x47d330), frame arena overflow. Fixed: `arenapatch.py`.
 4. Heap block-list corruption (0x403fc0). Fixed: static mode strips every record kind 3.0 never ships (`foreign.py`), including a duplicate 1.0 LayoutPool.
-5. **Current:** back to (2), the d3d11 AV in `PSSetShaderResources` called from 0x45a2c6. **Placeholder hypothesis refuted:** swapping the only two D3D11-invalid textures (1x1 DXT5 `af3afa92…`, `8c699420…`) for a valid one removed every C++ throw, but the AV stayed. **Next lead:** `ebx` at the crash is the material's texture-slot mask (0x230, 0x32c), with bits up to 9, so some material binds `t9`. Check each material's shader binding mask against its block B slot count (`shd[0xa1]`), substitute tiers first; or set an x32dbg breakpoint at runtime(0x45a2c4) for slot index >= 8 and read the material and texture pointer.
+5. **SOLVED (2026-10-03):** foreign texture-slot encodings. `autobundle._substitute` wrote only the 4-byte index of each 8-byte block B slot, leaving the donor's second word: 118 slots `(idx, ffffffff)` and 4 `(ffffffff, 0)`, forms that occur 0 times in 25,052 shipped slots (always `(idx, 0)` or `(ffffffff, ffffffff)`). The engine then corrupts its heap (a GeometryNode's allocator record at 0x403fc0) or binds a garbage SRV (the d3d11 AV). Found by launch bisection with `variant.py --keep` down to a crashing pair (materials 198 + 217) that each load alone. Fixed in autobundle; `slotcheck.py` now flags the mixed forms. **Full Metroville loads in-game** (442 materials, 2,067 nodes; user: "it loaded and the skybox has changed as well"). The "t9 mask" and "material count" leads were wrong.
 
 **Open:** multi-block `.btd` conversion (Metroville has 724 blocks, monolith 2; `btdblocks.py` is WIP); shared vertices duplicated (52 MB vbuf); generic materials dropping vertex colour.

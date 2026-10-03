@@ -139,8 +139,11 @@ def _substitute(donor_path, di, m10, b10):
     if dm['shader'] != m10['shader']:          # generic: textures in order, unset slots dropped
         used = [t for t in used if t != UNSET]
     B = bytearray(dm['B'])
+    # whole 8-B slot as shipped: (index, 0) or (UNSET, UNSET). Writing only the index left the
+    # donor's second word: (i, ffffffff) / (ffffffff, 0) never ship and crashed Metroville.
     for s in range(dm['slots']):
-        struct.pack_into('<I', B, dm['stride'] * s, used[s] if s < len(used) else UNSET)
+        t = used[s] if s < len(used) else UNSET
+        struct.pack_into('<II', B, dm['stride'] * s, t, UNSET if t == UNSET else 0)
     # Block A = the material's parameters (first float4 = tint). Over 421 GUIDs shipped in both games
     # with the same shader, 3.0's A is 1.0's A followed by new trailing params in 401; across a
     # shader change the first float4 still matches in 85%. B's data after the slots (samplers)
