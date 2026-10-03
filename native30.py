@@ -344,6 +344,24 @@ def convert(source=SRC, world='out_intro2', realm='rlm_moa_motunui_day', dry=Fal
             if stem in v:
                 r.pay = s.add_name(v.replace(stem, world)).to_bytes(2, 'little')
 
+    # pools in the order every shipped world uses: the graph (SubNetworkPool), locators, layout and assets
+    # BEFORE AssociationPool. Appended after it, the graph-bound links (expendable sockets, the start
+    # locator) were resolved before the graph existed: 2 exploder archives opened instead of 85.
+    order = ['NavMeshPool', 'BoundingVolumePool', 'ExternalFilePool', 'SurfaceTypesPool', 'CurvesPool',
+             'SubNetworkPool', 'CollisionShapePool', 'CollisionInstancePool', 'SoundSourcePool', 'LightRigPool',
+             'ShadowCasterPool', 'DisplayLayerPool', 'CellPool', 'CellAssignmentPool', 'MaterialBundlePool',
+             'MaterialPool', 'VertexBufferPool', 'IndexBufferPool', 'SceneTreeNodePool', 'SceneNodeRefsPool',
+             'MeridianLocatorPool', 'ExpendablePool', 'LayoutPool', 'AssetPool', 'AssociationPool',
+             'ExporterDate', 'ExporterTime']
+    tops = [i for i, r in enumerate(s.recs) if r.level == 1]
+    head = s.recs[:tops[0]]
+    blocks = [s.recs[a:b] for a, b in zip(tops, tops[1:] + [len(s.recs)])]
+    assert all(b[0].name in order for b in blocks), [b[0].name for b in blocks if b[0].name not in order]
+    blocks.sort(key=lambda b: order.index(b[0].name))
+    s.recs = head + [r for b in blocks for r in b]
+    s = _roundtrip(s)
+    print('  pool order: %s' % [r.name for r in s.recs if r.level == 1])
+
     import tempfile, foreign
     tmp = Path(tempfile.mkdtemp()) / 'check.oct'
     s.save(tmp)
