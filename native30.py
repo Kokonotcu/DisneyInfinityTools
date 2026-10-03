@@ -20,7 +20,7 @@ Only what 3.0 cannot read changes (measured against the shipped 3.0 corpus, fore
   spawn               .mer = holodestruction's LocatorNode->PlayerStartPosNode (bound to Layout|LOC_Start
                       at the world's own IN_City_StartPoint) + a connection-free RealmCache for lighting
 
-python native30.py [--source <1.0 world dir>] [--world out_intro2] [--translate] [--dry]
+python native30.py [--source <1.0 world dir>] [--world out_intro2] [--realm rlm_in_day] [--translate] [--dry]
 """
 import argparse, shutil, struct, sys
 from collections import Counter
@@ -110,24 +110,35 @@ def native_scene(s):
           % (dict(conv), hidden))
 
 
-def build_mer(out, zone="OUT_Intro2"):
-    """emp_0_spaceempty's start chain verbatim; only the namespace is renamed to the zone."""
+def build_mer(out, realm, zone="OUT_Intro2"):
+    """emp_0_spaceempty's start chain verbatim; the namespace is renamed to the zone and its RealmCache
+    points at our realm (appended to ParameterStrings, so no other string offset moves)."""
     m = Oct.load(str(START_MER))
     # start points register per ZONE under the graph namespace: every shipped graph names it after its
     # zone (PSX_Intro, KRT_ALDN_SpdWay...).
     for r in m.recs:                      # node pool header + the link pool's copy of it
         if r.pool in ('MeridianNodePool', 'MeridianLinkPool') and r.name in ('Name', 'GraphFileName', 'UserNamespace'):
             r.pay = m.add_name(zone if r.name != 'UserNamespace' else zone.lower()).to_bytes(2, 'little')
+    nk = kids(m, m.find(name='MNode')[0])
+    blob = lambda b: b[1:] if b[0] + 1 == len(b) else b[2:]
+    pack = lambda d: bytes([len(d)]) + d if len(d) <= 255 else struct.pack('<H', len(d)) + d
+    vals, strs = bytearray(blob(nk['ParameterValues'].value())), bytearray(blob(nk['ParameterStrings'].value()))
+    rc = next(x for x in m.find(name='MNode') if kids(m, x)['Type'].names()[0] == 'RealmCache')
+    off = kids(m, rc)['Mer_ParametersOffset'].ints()[0]
+    assert strs[struct.unpack_from('<I', vals, off)[0]:].startswith(b'RLM_EMP_Space\0')   # its realm string slot
+    struct.pack_into('<I', vals, off, len(strs))
+    strs += realm.encode() + b'\0'
+    nk['ParameterValues'].pay, nk['ParameterStrings'].pay = pack(bytes(vals)), pack(bytes(strs))
     m.save(out)
     chk = Oct.load(str(out))
     types = [r.names()[0] for r in chk.recs if r.pool == 'MeridianNodePool' and r.name == 'Type' and r.level == 3]
     assert {'TardisManifestAdv', 'PlayerStartPosNode', 'LocatorNode'} <= set(types), types
     bound = [r.names()[0] for r in chk.recs if r.name == 'BoundObjectName']
     assert bound == ['%s|%s' % (LAYOUT, START)], bound
-    print('  .mer: %s, start bound to %s' % (types, bound[0]))
+    print('  .mer: %s, start bound to %s, realm %s' % (types, bound[0], realm))
 
 
-def convert(source=SRC, world='out_intro2', translate=False, dry=False):
+def convert(source=SRC, world='out_intro2', realm='rlm_in_day', translate=False, dry=False):
     src_dir = Path(source); stem = src_dir.name
     s = Oct.load(src_dir / ('%s.oct' % stem))
     ref = Oct.load(REF / 'out_intro2.oct')
@@ -359,7 +370,7 @@ def convert(source=SRC, world='out_intro2', translate=False, dry=False):
     s.save(out / ('%s.oct' % world))
     for ext in ('.mtc', '.ap'):
         shutil.copy2(REF / ('out_intro2%s' % ext), out / ('%s%s' % (world, ext)))
-    build_mer(out / ('%s.mer' % world))
+    build_mer(out / ('%s.mer' % world), realm)
     (out / ('%s.mtb' % world)).write_bytes(data)
     for f in tocopy:
         copy_texture(f, INSTALL.parent / 'textures' / f.name)
@@ -375,7 +386,8 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--source', default=str(SRC))
     ap.add_argument('--world', default='out_intro2')
+    ap.add_argument('--realm', default='rlm_in_day', help="Metroville's own 1.0 realm, ported by realm30.py")
     ap.add_argument('--translate', action='store_true', help='move the start to the origin (old workaround)')
     ap.add_argument('--dry', action='store_true')
     a = ap.parse_args()
-    convert(a.source, a.world, a.translate, a.dry)
+    convert(a.source, a.world, a.realm, a.translate, a.dry)
