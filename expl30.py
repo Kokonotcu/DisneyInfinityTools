@@ -14,6 +14,7 @@ from pathlib import Path
 from oct import Oct
 import graph, autobundle
 from conv import kids, pool_rec, geo_nodes, _reindex, _roundtrip, convert_geometry
+from native30 import native_scene
 
 DROP_POOLS = ('BoundingVolumePool', 'MeridianLocatorPool', 'NavMeshPool', 'SceneNodeRefsPool', 'SurfaceTypesPool')
 
@@ -28,6 +29,7 @@ def convert(src_dir, out_root=GAME / 'exploders'):
     s, ref = Oct.load(src_dir / ('%s.oct' % stem)), Oct.load(TEMPLATE)
     data, problems, vmap, tiers, tocopy = autobundle.resolve(src_dir, s)
     assert not problems, '%s: %d materials unresolved: %s' % (stem, len(problems), problems[:3])
+    native_scene(s)   # 1.0 Light nodes (bb05_socket04's point lights) broke every VFX in-game
     gn = geo_nodes(s)
     for name in DROP_POOLS:
         p = pool_rec(s, name)
