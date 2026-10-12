@@ -37,7 +37,6 @@ def to64(b):
         out.extend(b[p:p + n]); p += n
 
     def function():
-        nonlocal p
         string(); i32(); i32()
         for _ in range(4):
             byte()
@@ -82,12 +81,16 @@ def run_package(path):
 
 
 if __name__ == '__main__':
-    import sys, glob
-    ok = 0
-    for f in glob.glob(r'D:\DI-Extract\3.0\assets\expendables_data\expendables_data\*.lua'):
-        b = open(f, 'rb').read()
-        ok += to64(b) is not None
-    print('re-encoded', ok, 'packages')
-    pkg = run_package(sys.argv[1]) if len(sys.argv) > 1 else None
-    if pkg:
-        print({k: type(v).__name__ for k, v in pkg.items()})
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='Re-encode 32-bit big-endian Lua 5.1 chunks for 64-bit Lua')
+    ap.add_argument('package', nargs='?', help='run one package and print its ExpendablesPackage keys')
+    ap.add_argument('--selftest', action='store_true', help="re-encode every 3.0 expendables package")
+    paths.add_args(ap, 'ext30')
+    a = paths.use(ap.parse_args())
+    if a.selftest:
+        files = sorted(paths.ext30('expendables_data', 'expendables_data').glob('*.lua'))
+        ok = sum(to64(f.read_bytes()) is not None for f in files)
+        print('re-encoded %d of %d packages' % (ok, len(files)))
+        assert files and ok == len(files)
+    if a.package:
+        print({k: type(v).__name__ for k, v in run_package(a.package).items()})

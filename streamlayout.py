@@ -1,18 +1,21 @@
 """On a multi-primitive node, is the vbuf stream-major or primitive-major?
 
-split-mesh.py lays out each primitive's streams contiguously, then the next
-primitive -- primitive-major. That is what shipped multi-NODE worlds do, which
-is what it was written against. psx_l3_planet_main's 3-primitive node instead
-puts ALL of stream 0 for every primitive first, then all of stream 1.
+Multi-NODE worlds lay out each node's streams contiguously, then the next node -- primitive-major
+across nodes. psx_l3_planet_main's 3-primitive node instead puts ALL of stream 0 for every primitive
+first, then all of stream 1; conv.build_buffers writes that (stream-major within a node).
 
 Test: for every multi-primitive node, do the stream regions stay disjoint --
 max(end of stream s) <= min(start of stream s+1) across the node's primitives?
+python streamlayout.py [--ext30 DIR]
 """
-import collections
-from pathlib import Path
+import argparse, collections
 from oct import Oct
+import paths
 
-W30 = Path(r'D:\DI-Extract\3.0\assets\worlds')
+ap = argparse.ArgumentParser(description='Stream layout of multi-primitive nodes over the 3.0 worlds')
+paths.add_args(ap, 'ext30')
+paths.use(ap.parse_args())
+W30 = paths.ext30('worlds')
 res = collections.Counter()
 bad = []
 
@@ -68,3 +71,4 @@ if bad:
     print('\nneither, samples:')
     for b in bad:
         print('  ', b[0], b[1])
+assert res and not (res['neither'] or res['primitive-major (own streams adjacent)']), 'not every node is stream-major'

@@ -1,0 +1,7 @@
+{
+  "name": "DI3Tools",
+  "version": "0.1.0",
+  "minLoaderVersion": "1.0.0",
+  "description": "Test bench for Disney Infinity 1.0 worlds ported into 3.0: player position, zone record dump, forced travel, sky swap, DNA spawn.",
+  "entry": "main.lua"
+}

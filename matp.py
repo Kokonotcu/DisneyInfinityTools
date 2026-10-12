@@ -9,31 +9,34 @@ MATP  u32 ver(2)  u32 chunkSize u32 nMat                          FUN_00472590
       align4 u32 hash[nMat]                                        (FUN_00468500 material lookup)
       align16 per material: block A (shd u16 @0x6a bytes) + block B (shd u16 @0xa2 bytes)
       block B starts with shd[0xa1] resource slots of 8 B: u32 TEXB index (0xffffffff = unset), u32
-All alignment is file-relative (the bundle loads at a 16-aligned address).
+All alignment is file-relative (the bundle loads at a 16-aligned address). PC bundles only: PS4 TEXB
+entries are 16 B (ps4mtbfix.py).
 
-python matp.py <file.mtb>        dump
-python matp.py --selftest        predict every shipped 3.0 bundle's layout from its shaders
+python matp.py <file.mtb> [--ver 1]       dump (a 1.0 bundle sizes its blocks from 1.0 shaders)
+python matp.py --selftest [--ext30 DIR]   predict every shipped 3.0 bundle's layout from its shaders
 """
-import struct, sys, os
-from pathlib import Path
+import struct
 
-SHD_DIR = Path(r'D:\DI-Extract\3.0\assets\shaders\shaders')
-SHD_DIR_10 = Path(r'D:\DI-Extract\1.0\assets\shaders\shaders')
 # .shd offsets: u16 block A size, u16 block B size, u8 B texture-slot count; then slot stride.
 # 3.0 from the exe; 1.0 fitted to 350/350 single-material bundles (same layout, 0x24 earlier)
 # and its slots are a bare u32 index (3.0: u32 index + u32).
-SHD_LAYOUT = {SHD_DIR: (0x6a, 0xa2, 0xa1, 8), SHD_DIR_10: (0x46, 0x6a, 0x69, 4)}
+SHD_LAYOUT = {3: (0x6a, 0xa2, 0xa1, 8), 1: (0x46, 0x6a, 0x69, 4)}
 _shd = {}
 
 
-def shader_sizes(name, shd_dir=None):
+def shd_dir(game=3):
+    """The shaders folder of the 1.0 or 3.0 extract."""
+    import paths
+    return (paths.ext30 if game == 3 else paths.ext10)('shaders', 'shaders')
+
+
+def shader_sizes(name, game=3):
     """-> (blockA, blockB, nTexSlots) from the .shd, which the engine maps in place."""
-    d = shd_dir or SHD_DIR
-    if (d, name) not in _shd:
-        b = (d / f'{name}.shd').read_bytes()
-        oa, ob, os_, _ = SHD_LAYOUT[d]
-        _shd[d, name] = (struct.unpack_from('<H', b, oa)[0], struct.unpack_from('<H', b, ob)[0], b[os_])
-    return _shd[d, name]
+    if (game, name) not in _shd:
+        b = (shd_dir(game) / f'{name}.shd').read_bytes()
+        oa, ob, os_, _ = SHD_LAYOUT[game]
+        _shd[game, name] = (struct.unpack_from('<H', b, oa)[0], struct.unpack_from('<H', b, ob)[0], b[os_])
+    return _shd[game, name]
 
 
 def _al(x, a):
@@ -68,8 +71,8 @@ def material_names(data):
 
 
 class Bundle:
-    def __init__(self, data, shd_dir=None):
-        self.shd_dir = shd_dir
+    def __init__(self, data, game=3):
+        self.game = game
         b = self.raw = bytes(data)
         assert b[:4] == b'BNDL', 'not a bundle'
         self.ver, self.size, n = struct.unpack_from('<III', b, 4)
@@ -109,10 +112,10 @@ class Bundle:
         p = _al(p, 16)
         for i in range(nmat):
             sh = shaders[idx[i]]
-            a, bb, slots = shader_sizes(sh, self.shd_dir)
+            a, bb, slots = shader_sizes(sh, self.game)
             self.materials.append(dict(name=names[i], shader=sh, hash=hashes[i],
                                        A=b[p:p + a], B=b[p + a:p + a + bb], slots=slots,
-                                       stride=SHD_LAYOUT[self.shd_dir or SHD_DIR][3]))
+                                       stride=SHD_LAYOUT[self.game][3]))
             p += a + bb
         self.matp_data_end, self.matp_end = p, o + csize
 
@@ -184,8 +187,9 @@ def _check_one(f):
 
 
 def selftest():
+    import paths
     from par import pmap
-    res = pmap(_check_one, Path(r'D:\DI-Extract\3.0\assets').rglob('*.mtb'), chunksize=64)
+    res = pmap(_check_one, paths.ext30().rglob('*.mtb'), chunksize=64)
     skip = res.count('skip')
     bads = [r[1] for r in res if r != 'skip' and r[0] == 'bad']
     oks = [r for r in res if r != 'skip' and r[0] == 'ok']
@@ -199,10 +203,19 @@ def selftest():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--selftest']:
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='.mtb material bundle codec')
+    ap.add_argument('file', nargs='?')
+    ap.add_argument('--ver', type=int, choices=(1, 3), default=3, help='game whose shaders size the blocks')
+    ap.add_argument('--selftest', action='store_true')
+    paths.add_args(ap, 'ext30', 'ext10')
+    a = paths.use(ap.parse_args())
+    if a.selftest:
         selftest()
+    elif not a.file:
+        ap.print_help()
     else:
-        bnd = Bundle(open(sys.argv[1], 'rb').read())
+        bnd = Bundle(open(a.file, 'rb').read(), a.ver)
         print(f'{len(bnd.textures)} textures, {len(bnd.materials)} materials')
         for i, t in enumerate(bnd.textures):
             print(f'  tex {i}: {t.hex()}')

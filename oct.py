@@ -1,7 +1,6 @@
-"""Octane scene container (.oct/.mer/.bent/.banm/.bct) — read, edit, write.
+"""Octane tuple files (.oct/.mer/.merdebug/.bent/.banm/.bct) -- read, edit, write.
 
-Port of oct.ps1's walker plus the write side it never had. Records keep their
-payload as raw bytes, so save() is byte-exact unless something is edited.
+Records keep their payload as raw bytes, so save() is byte-exact unless something is edited.
 
   from oct import Oct
   f = Oct.load(path)
@@ -9,50 +8,80 @@ payload as raw bytes, so save() is byte-exact unless something is edited.
   f.find1(name='NumPrimitives').set_int(2)
   f.save(out)
 
-10-bit type field: type = flag & 0x3ff, level = flag >> 10.
+Header (0x3c B): magic 0x45017629, 1.1f, 0, name table size, record data size, record count (0x14: the
+engine allocates from it), zeros. Record: u16 flag (type = flag & 0x3ff, level = flag >> 10), u16 name index,
+payload. The type is a bit field -- every type in 5,079 shipped 3.0 tuple files (3,905 .oct, 584 .mer,
+584 .merdebug, 6 .bent) decodes by it, which no type table did (.mer files carry 0x17 and 0x27):
+  bits 0-1  shape   1 node, 2 list (count + elements), 3 scalar (a blob is a scalar with a count)
+  bit  2    keyed   payload starts with a u16 name (0x05 keyed node, 0x0F key+name, 0x1F key+int8 --
+                    shipped as _DebugOnly_ParamValue = <param name>, 0 / 255)
+  bits 3-5  kind    1 name (u16 index), 2 float32, 3 int, 4 byte (blob)
+  bits 6-7  count   width - 1 of the element count (u8 / u16 / u24)
+  bits 8-9  int     width - 1 of each int (1..4 bytes)
+Ints are SIGNED: the only shipped values with the top bit set are LinkedNodeRefs/Nodes = -1 (0xff, 0xffff),
+and the exporter picks the narrowest signed width (set_int/set_ints do the same, never narrowing).
+
+python oct.py <file> [name=X pool=Y level=N]   dump records
+python oct.py --selftest [--ext30 DIR] [--ext10 DIR]   round-trip every tuple file of both extracts
 """
-import struct, sys
+import struct
 from pathlib import Path
 
 MAGIC = 0x45017629
 HDR = 0x3c
+EXTS = ('.oct', '.mer', '.merdebug', '.bent', '.banm', '.bct')
+NODE, LIST, SCALAR = 1, 2, 3
+NAME, FLOAT, INT, BYTE = 1, 2, 3, 4
+_EL = {NAME: 2, FLOAT: 4, BYTE: 1}
+_spec = {}
 
-# type -> fixed payload length
-FIXED = {0x01: 0, 0x05: 2, 0x0B: 2, 0x0F: 4, 0x13: 4, 0x1B: 1, 0x1F: 3,
-         0x11B: 2, 0x21B: 3, 0x31B: 4}
-# type -> (bytes before the count, count width, element width)
-ARR = {0x0A: (0, 1, 2), 0x12: (0, 1, 4), 0x1A: (0, 1, 1), 0x23: (0, 1, 1),
-       0x11A: (0, 1, 2), 0x21A: (0, 1, 3), 0x31A: (0, 1, 4),
-       0x4A: (0, 2, 2), 0x52: (0, 2, 4), 0x5A: (0, 2, 1), 0x15A: (0, 2, 2),
-       0x25A: (0, 2, 3), 0x35A: (0, 2, 4), 0x63: (0, 2, 1), 0xA3: (0, 3, 1),
-       0x16: (2, 1, 4), 0x56: (2, 2, 4),
-       # count width steps by +0x40: u8 -> u16 -> 3-byte. Published for
-       # 0x23/0x63/0xA3; 0x92 is the same step off 0x12/0x52 and is what
-       # aladdin_ribbon_whitebox_2_4_2.oct stalls on.
-       0x92: (0, 3, 4)}
-FLOAT_T = {0x12, 0x52, 0x16, 0x56, 0x13}
-NAME_T = {0x05, 0x0B, 0x0A, 0x4A, 0x0F, 0x1F}
-# scalar/array type per integer width, for widening on write
-SCALAR_W = {1: 0x1B, 2: 0x11B, 3: 0x21B, 4: 0x31B}
-ARRAY_W = {1: 0x01A, 2: 0x11A, 3: 0x21A, 4: 0x31A}
+
+def spec(t):
+    """type -> (shape, keyed, kind, count width, element width), or None if the bits do not form a type."""
+    if t not in _spec:
+        shape, keyed, kind, cw, iw = t & 3, (t >> 2) & 1, (t >> 3) & 7, ((t >> 6) & 3) + 1, ((t >> 8) & 3) + 1
+        ok = (shape == NODE and kind == 0 and cw == iw == 1 or
+              shape in (LIST, SCALAR) and kind in (NAME, FLOAT, INT, BYTE) and (kind == INT or iw == 1) and
+              (shape == LIST or kind == BYTE or cw == 1))
+        _spec[t] = (shape, keyed, kind, cw if shape == LIST or kind == BYTE else 0,
+                    iw if kind == INT else _EL.get(kind, 0)) if ok else None
+    return _spec[t]
+
+
+def paylen(t, buf, q):
+    """Payload length of a record whose payload starts at buf[q]. -1 = not a type."""
+    s = spec(t)
+    if s is None:
+        return -1
+    shape, keyed, kind, cw, ew = s
+    pre = 2 * keyed
+    if shape == NODE:
+        return pre
+    if not cw:
+        return pre + ew
+    return pre + cw + int.from_bytes(buf[q + pre:q + pre + cw], 'little') * ew
 
 
 def _u(b, w):
     return int.from_bytes(b[:w], 'little')
 
 
-def _p(v, w):
-    return int(v).to_bytes(w, 'little', signed=(v < 0))
+def _width(vals):
+    """Narrowest signed width holding every value."""
+    w = 1
+    for v in vals:
+        while not -(1 << (8 * w - 1)) <= v < 1 << (8 * w - 1):
+            w += 1
+    assert w <= 4, 'value does not fit 32 bits'
+    return w
 
 
-def paylen(t, buf, q):
-    """Payload length of a record whose payload starts at buf[q]. -1 = unknown."""
-    if t in FIXED:
-        return FIXED[t]
-    if t in ARR:
-        pre, cw, ew = ARR[t]   # bounded slice: buf[q + pre:] copied the rest of the file per record
-        return pre + cw + int.from_bytes(buf[q + pre:q + pre + cw], 'little') * ew
-    return -1
+def children(recs, deep=True):
+    """{name: record} below recs[0], where recs is a record and its subtree (Oct.block, clone_block, a template
+    block copied from another file). deep: every level, a later (deeper) record of the same name winning;
+    otherwise direct children only."""
+    lvl = recs[0].level
+    return {r.name: r for r in recs[1:] if deep or r.level == lvl + 1}
 
 
 class Rec:
@@ -67,91 +96,106 @@ class Rec:
     def name(self):
         return self.f.name(self.name_idx)
 
-    def _split(self):
-        """(prefix bytes, count, element width) for array types."""
-        pre, cw, ew = ARR[self.type]
-        return self.pay[:pre], _u(self.pay[pre:], cw), ew
+    @property
+    def key(self):
+        """The u16 name a keyed record starts with, else None."""
+        return self.f.name(_u(self.pay, 2)) if spec(self.type)[1] else None
+
+    def _items(self):
+        """(element width, [element bytes]) of the value part (key and count stripped)."""
+        shape, keyed, kind, cw, ew = spec(self.type)
+        p = 2 * keyed
+        n = _u(self.pay[p:], cw) if cw else (0 if shape == NODE else 1)
+        p += cw
+        return ew, [self.pay[p + i * ew:p + (i + 1) * ew] for i in range(n)]
 
     def ints(self):
-        """Payload as a list of ints — works for both scalar and array types."""
-        if self.type in FIXED:
-            return [int.from_bytes(self.pay, 'little', signed=(self.type == 0x1B))]
-        pre, n, ew = self._split()
-        base = len(pre) + ARR[self.type][1]
-        signed = self.type == 0x01A
-        return [int.from_bytes(self.pay[base + i * ew: base + (i + 1) * ew], 'little', signed=signed)
-                for i in range(n)]
+        """Value as ints: signed for int kinds, name indices / bytes unsigned. Floats are refused."""
+        kind = spec(self.type)[2]
+        assert kind != FLOAT, 'float record %s' % self.name
+        return [int.from_bytes(e, 'little', signed=(kind == INT)) for e in self._items()[1]]
 
     def floats(self):
-        if self.type == 0x13:
-            return [struct.unpack('<f', self.pay)[0]]
-        pre, n, ew = self._split()
-        base = len(pre) + ARR[self.type][1]
-        return list(struct.unpack_from('<%df' % n, self.pay, base))
+        assert spec(self.type)[2] == FLOAT, 'not a float record: %s 0x%x' % (self.name, self.type)
+        return [struct.unpack('<f', e)[0] for e in self._items()[1]]
 
     def names(self):
-        if self.type in (0x05, 0x0B):
-            return [self.f.name(_u(self.pay, 2))]
-        if self.type == 0x0F:
-            return [self.f.name(_u(self.pay, 2)), self.f.name(_u(self.pay[2:], 2))]
-        if self.type == 0x1F:
-            return [self.f.name(_u(self.pay, 2)), self.f.name(self.pay[2:3], )]
-        pre, n, ew = self._split()
-        base = len(pre) + ARR[self.type][1]
-        return [self.f.name(_u(self.pay[base + i * 2:], 2)) for i in range(n)]
+        """Key (if keyed) followed by the name values (if a name kind)."""
+        shape, keyed, kind, _, _ = spec(self.type)
+        out = [self.key] if keyed else []
+        return out + ([self.f.name(_u(e, 2)) for e in self._items()[1]] if kind == NAME else [])
 
     def value(self):
-        t = self.type
-        if t == 0x01:
-            return None
-        if t in NAME_T:
-            return self.names()
-        if t in FLOAT_T:
-            v = self.floats()
-            return v[0] if t == 0x13 else v
-        if t in FIXED:
-            return self.ints()[0]
-        if t in (0x63, 0x23, 0x5A, 0xA3):
-            return self.pay  # opaque blob
-        return self.ints()
+        """None (node), a scalar, a list; [key, ...] for keyed records; raw payload for unkeyed blobs."""
+        shape, keyed, kind, cw, ew = spec(self.type)
+        if kind == NAME or shape == NODE:
+            return self.names() or None
+        if kind == BYTE:
+            return [self.key, b''.join(self._items()[1])] if keyed else self.pay
+        v = self.floats() if kind == FLOAT else self.ints()
+        if shape == SCALAR:
+            v = v[0]
+        return ([self.key] + (v if isinstance(v, list) else [v])) if keyed else v
 
     # --- edits -------------------------------------------------------------
-    def set_int(self, v):
-        """Scalar write; widens the type if the value no longer fits."""
-        assert self.type in FIXED and self.type != 0x13, self.type
-        w = 1 if -128 <= v <= 127 else 2 if -32768 <= v <= 32767 else 3 if v < 1 << 23 else 4
-        w = max(w, len(self.pay))          # never narrow: keeps diffs minimal
-        self.type = SCALAR_W[w]
-        self.pay = _p(v, w)
+    def _rebuild(self, kind, elems, ew, cw):
+        shape, keyed = self.type & 3, (self.type >> 2) & 1
+        cw = cw if shape == LIST else 1
+        iw = ew if kind == INT else 1
+        self.type = shape | keyed << 2 | kind << 3 | (cw - 1) << 6 | (iw - 1) << 8
+        self.pay = bytes(self.pay[:2 * keyed]) + (len(elems).to_bytes(cw, 'little') if shape == LIST else b'') + \
+            b''.join(elems)
+        assert spec(self.type), self.type
         return self
+
+    def _count_width(self, n):
+        cw = max(spec(self.type)[3], 1)
+        while n >= 1 << (8 * cw):
+            cw += 1
+        assert cw <= 3, '%d elements do not fit a 3-byte count' % n
+        return cw
+
+    def set_int(self, v):
+        """Scalar int write; widens the type if the value no longer fits (never narrows)."""
+        shape, _, kind, _, ew = spec(self.type)
+        assert shape == SCALAR and kind == INT, 'not an int scalar: %s 0x%x' % (self.name, self.type)
+        if v >= 1 << 31:                   # unsigned 32-bit (CRCs): same bytes
+            v -= 1 << 32
+        w = max(_width([v]), ew)
+        return self._rebuild(INT, [v.to_bytes(w, 'little', signed=True)], w, 1)
 
     def set_ints(self, vals):
-        """Array write, keeping the element width unless a value outgrows it."""
-        pre, _, ew = self._split()
-        need = max((1 if -128 <= v <= 127 else 2 if v < 1 << 15 else 3 if v < 1 << 23 else 4)
-                   for v in vals) if vals else 1
-        ew = max(ew, need)
-        _, cw, _ = ARR[self.type]
-        wide = {t + 0x40 for t in ARRAY_W.values()}
-        if self.type in ARRAY_W.values() or self.type in wide:
-            was_wide = self.type in wide          # never narrow: keeps diffs minimal
-            self.type = ARRAY_W[ew]
-            cw = 1
-            if was_wide or len(vals) > 0xff:      # count width steps by +0x40: u8 -> u16
-                self.type += 0x40
-                cw = 2
-        assert len(vals) < 1 << (8 * cw), '%d values do not fit a %d-byte count' % (len(vals), cw)
-        self.pay = bytes(pre) + _p(len(vals), cw) + b''.join(_p(v, ew) for v in vals)
-        return self
+        """Int list write, keeping the element and count widths unless the values outgrow them."""
+        shape, _, kind, _, ew = spec(self.type)
+        assert shape == LIST and kind == INT, 'not an int list: %s 0x%x' % (self.name, self.type)
+        w = max(_width(vals), ew)
+        return self._rebuild(INT, [v.to_bytes(w, 'little', signed=True) for v in vals], w, self._count_width(len(vals)))
 
     def set_floats(self, vals):
-        if self.type == 0x13:
-            self.pay = struct.pack('<f', vals[0] if isinstance(vals, (list, tuple)) else vals)
+        shape, _, kind, _, _ = spec(self.type)
+        assert kind == FLOAT, 'not a float record: %s 0x%x' % (self.name, self.type)
+        vals = list(vals) if isinstance(vals, (list, tuple)) else [vals]
+        assert shape == LIST or len(vals) == 1
+        return self._rebuild(FLOAT, [struct.pack('<f', v) for v in vals], 4, self._count_width(len(vals)))
+
+    def set_names(self, strings):
+        """Name value(s) write (adds the strings to the file's name table); a keyed node or a keyed scalar
+        takes one string: its key."""
+        shape, keyed, kind, _, _ = spec(self.type)
+        idx = [self.f.add_name(s).to_bytes(2, 'little') for s in strings]
+        if kind != NAME:
+            assert keyed and len(idx) == 1, 'no name in %s 0x%x' % (self.name, self.type)
+            self.pay = idx[0] + bytes(self.pay[2:])
             return self
-        pre, _, _ = self._split()
-        _, cw, _ = ARR[self.type]
-        self.pay = bytes(pre) + _p(len(vals), cw) + struct.pack('<%df' % len(vals), *vals)
-        return self
+        if keyed and shape == SCALAR:                 # 0x0F: key, name
+            assert len(idx) == 2
+            self.pay = idx[0] + idx[1]
+            return self
+        assert shape == LIST or len(idx) == 1
+        return self._rebuild(NAME, idx, 2, self._count_width(len(idx)))
+
+    def set_name(self, s):
+        return self.set_names([s])
 
     def raw(self):
         return struct.pack('<HH', (self.level << 10) | self.type, self.name_idx) + bytes(self.pay)
@@ -169,24 +213,32 @@ class Oct:
         self.path = None
         self.names = []
         self.recs = []
+        self.hdr = struct.pack('<IfI', MAGIC, 1.1, 0) + bytes(HDR - 12)
         self.f14 = 0
         self.tail = b''      # bytes after the last parsed record (should be empty)
 
     # --- io ----------------------------------------------------------------
     @classmethod
     def load(cls, path):
+        return cls.parse(Path(path).read_bytes(), path)
+
+    def reparse(self):
+        """A fresh parse of this file's current bytes: inserted records get their pool tags."""
+        return Oct.parse(self.to_bytes(), self.path)
+
+    @classmethod
+    def parse(cls, b, path=None):
         f = cls()
-        f.path = Path(path)
-        b = f.path.read_bytes()
+        f.path = Path(path) if path else None
         if len(b) < HDR or _u(b, 4) != MAGIC:
             raise ValueError('%s: bad magic' % path)
+        f.hdr = b[:HDR]
         nb, db, f.f14 = struct.unpack_from('<III', b, 12)
         ds = HDR + nb
         de = ds + db
         if de > len(b):
             raise ValueError('%s: size invariant broken' % path)
-        f.names = b[HDR:ds].split(b'\0')[:-1]
-        f.names = [n.decode('latin-1') for n in f.names]
+        f.names = [n.decode('latin-1') for n in b[HDR:ds].split(b'\0')[:-1]]
 
         stack = [None] * 64
         p = ds
@@ -223,7 +275,7 @@ class Oct:
     def to_bytes(self):
         nt = b''.join(n.encode('latin-1') + b'\0' for n in self.names)
         data = b''.join(r.raw() for r in self.recs) + self.tail
-        h = bytearray(HDR)
+        h = bytearray(self.hdr)
         # 0x14 is the RECORD COUNT, and the engine ALLOCATES FROM IT. It matches
         # the walked count in 43,346 of 43,356 shipped files (the other 10 are
         # 0 -- an unwritten field, preserved here). Carrying the source file's
@@ -234,7 +286,7 @@ class Oct:
         # that only removed records over-allocated and appeared to work, which
         # is why 1 and 2 primitives loaded and 3 never did.
         count = 0 if self.f14 == 0 else len(self.recs)
-        struct.pack_into('<IIIIII', h, 0, MAGIC, 0x3F8CCCCD, 0, len(nt), len(data), count)
+        struct.pack_into('<III', h, 12, len(nt), len(data), count)
         return bytes(h) + nt + data
 
     def save(self, path):
@@ -275,6 +327,11 @@ class Oct:
             j += 1
         return i, j
 
+    def kids(self, rec, deep=True):
+        """{name: record} below rec (children(); deep=False: direct children only)."""
+        i, j = self.block(rec)
+        return children(self.recs[i:j], deep)
+
     def clone_block(self, rec):
         """Deep copy of rec's subtree as a fresh list of records."""
         i, j = self.block(rec)
@@ -290,40 +347,73 @@ class Oct:
             print('  +%-7d %r' % (r.off, r))
 
 
+def is_tuple_file(p):
+    """True if p starts with the tuple magic (.mer/.merdebug/.ap/.mtc also exist in other formats)."""
+    with open(p, 'rb') as fh:
+        return _u(fh.read(4), 4) == MAGIC
+
+
 def _roundtrip_one(p):
-    """None if p round-trips byte-exactly, else (p, reason)."""
+    """None if p round-trips byte-exactly (or is not a tuple file), else (p, reason)."""
     try:
+        if not is_tuple_file(p):
+            return None
         f = Oct.load(p)
         if f.to_bytes() != p.read_bytes():
             return (p, 'mismatch')
         if f.tail:
             return (p, 'trailing bytes')
+        for r in f.recs:                    # every record decodes, and a rewrite of its value is a no-op
+            r.value()
+            shape, keyed, kind, _, _ = spec(r.type)
+            before = (r.type, bytes(r.pay))
+            if kind == INT:
+                r.set_int(r.ints()[0]) if shape == SCALAR else r.set_ints(r.ints())
+            elif kind == FLOAT:
+                r.set_floats(r.floats())
+            if (r.type, bytes(r.pay)) != before:
+                return (p, 'rewrite of %s 0x%x changed it' % (r.name, before[0]))
     except Exception as e:
         return (p, e)
     return None
 
 
 def _selftest():
-    """Round-trip every .oct we can reach; a codec that can't reproduce the
-    input byte-for-byte cannot be trusted to edit one."""
-    roots = [Path(r'D:\DI-Extract\3.0\assets\worlds'), Path(r'D:\DI-Extract\1.0\assets\worlds')]
-    files = [p for r in roots if r.exists() for p in r.rglob('*.oct')]
-    assert files, 'no .oct found to test against'
+    """Round-trip every tuple file we can reach; a codec that can't reproduce the input byte-for-byte
+    cannot be trusted to edit one."""
+    import paths
     from par import pmap
-    bad = [r for r in pmap(_roundtrip_one, files) if r]
-    print('round-trip %d/%d exact' % (len(files) - len(bad), len(files)))
+    roots = []
+    for r in ('ext30', 'ext10'):
+        p, _ = paths.where(r)
+        if p:
+            roots.append(getattr(paths, r)())
+    assert roots, 'no extract to test against: ' + paths.HINT['ext30']
+    files = [p for root in roots for p in root.rglob('*') if p.suffix in EXTS and is_tuple_file(p)]
+    bad = [r for r in pmap(_roundtrip_one, files, chunksize=32) if r]
+    print('round-trip %d/%d exact (%s)' % (len(files) - len(bad), len(files), ', '.join(map(str, roots))))
     for p, e in bad[:10]:
-        print('  FAIL', p.name, e)
+        print('  FAIL', p, e)
     assert not bad, '%d files failed' % len(bad)
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--selftest':
+    import argparse, paths
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    ap.add_argument('file', nargs='?')
+    ap.add_argument('filters', nargs='*', help='name=X pool=Y level=N type=0x1b')
+    ap.add_argument('--selftest', action='store_true')
+    paths.add_args(ap, 'ext30', 'ext10')
+    a = paths.use(ap.parse_args())
+    if a.selftest:
         _selftest()
-    elif len(sys.argv) > 1:
-        f = Oct.load(sys.argv[1])
+    elif a.file:
+        f = Oct.load(a.file)
         print('== %s  names=%d  records=%d' % (f.path.name, len(f.names), len(f.recs)))
-        kw = dict(a.split('=', 1) for a in sys.argv[2:])
+        kw = dict(x.split('=', 1) for x in a.filters)
+        for k in ('level', 'type'):
+            if k in kw:
+                kw[k] = int(kw[k], 0)
         f.dump(**kw)
     else:
-        print(__doc__)
+        ap.print_help()

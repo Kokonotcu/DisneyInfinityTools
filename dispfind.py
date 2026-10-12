@@ -1,11 +1,7 @@
 """Find every instruction in DisneyInfinity3.exe whose memory operand uses a given displacement
 (e.g. a struct field offset). Linear sweep of .text with capstone, split across cores.
-python dispfind.py 0x2534 [0x2530 ...]     python dispfind.py imm:0x300000"""
-import sys
+python dispfind.py 0x2534 [0x2530 ...]     python dispfind.py imm:0x300000     [--exe PATH | --game DIR]"""
 from par import pmap
-
-EXE = r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition\DisneyInfinity3.exe'
-WANT = set()
 
 
 def _chunk(args):
@@ -24,10 +20,14 @@ def _chunk(args):
 
 
 if __name__ == '__main__':
-    import pefile
-    # 0x2534 = a [reg + disp] operand; imm:0x300000 = an immediate operand
-    want = [x if x.startswith('imm:') else int(x, 16) for x in sys.argv[1:]]
-    pe = pefile.PE(EXE, fast_load=True)
+    import argparse, pefile, paths
+    ap = argparse.ArgumentParser(description='Find instructions using a displacement or an immediate')
+    ap.add_argument('want', nargs='+', help='0x2534 = a [reg + disp] operand; imm:0x300000 = an immediate operand')
+    ap.add_argument('--exe', help='default: <game>/DisneyInfinity3.exe')
+    paths.add_args(ap, 'game')
+    a = paths.use(ap.parse_args())
+    want = [x if x.startswith('imm:') else int(x, 16) for x in a.want]
+    pe = pefile.PE(a.exe or str(paths.game('DisneyInfinity3.exe')), fast_load=True)
     text = next(s for s in pe.sections if s.Name.rstrip(b'\0') == b'.text')
     data = text.get_data()
     base = pe.OPTIONAL_HEADER.ImageBase + text.VirtualAddress

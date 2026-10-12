@@ -3,22 +3,19 @@
   python variant.py --rendercaps          Primitive RenderCaps 1.0 0x1000|low -> 3.0 0x200|low
   python variant.py --materials 178       keep the first N materials (.oct + .mtb), refs >= N -> ref % N
   python variant.py --restore             put the pre-variant .oct/.mtb back
-Always starts from the backup, so variants never stack."""
+The world is <game>/assets/worlds/<--world> (default out_intro2), or --world-dir. The first run copies its
+.oct/.mtb to --backup-dir (default: a '<world>.variant-base' folder beside it); every variant starts from
+that copy, so variants never stack."""
 import argparse, shutil
 from pathlib import Path
 from oct import Oct
-
-OCT = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition\assets\worlds\out_intro2\out_intro2.oct')
-BAK = Path(r'D:\DI-Extract\_backup\variant-base.oct')
-MTB, MBAK = OCT.with_suffix('.mtb'), BAK.with_suffix('.mtb')
+import paths
 
 
-def kids(o, rec):
-    i, j = o.block(rec)
-    return {r.name: r for r in o.recs[i + 1:j] if r.level == rec.level + 1}
-
-
-ap = argparse.ArgumentParser()
+ap = argparse.ArgumentParser(description='One-variable variants of the installed world, for launch bisection')
+ap.add_argument('--world', default='out_intro2', help='installed world folder name')
+ap.add_argument('--world-dir', help='the world folder itself (instead of <game>/assets/worlds/<world>)')
+ap.add_argument('--backup-dir', help="where the pre-variant copy lives (default: '<world dir>.variant-base')")
 ap.add_argument('--visible')
 ap.add_argument('--rendercaps', action='store_true')
 ap.add_argument('--materials', type=int)
@@ -28,7 +25,13 @@ ap.add_argument('--dedupe', action='store_true')
 ap.add_argument('--refmax', type=int)
 ap.add_argument('--padtex', action='store_true', help='with --materials: keep every texture in TEXB')
 ap.add_argument('--restore', action='store_true')
-a = ap.parse_args()
+paths.add_args(ap, 'game')
+a = paths.use(ap.parse_args())
+wdir = Path(a.world_dir) if a.world_dir else paths.game('assets', 'worlds', a.world)
+bdir = Path(a.backup_dir) if a.backup_dir else wdir.with_name(wdir.name + '.variant-base')
+bdir.mkdir(parents=True, exist_ok=True)
+OCT, BAK = wdir / (wdir.name + '.oct'), bdir / (wdir.name + '.oct')
+MTB, MBAK = OCT.with_suffix('.mtb'), BAK.with_suffix('.mtb')
 
 if not BAK.exists():
     shutil.copy2(OCT, BAK)
@@ -44,12 +47,12 @@ o = Oct.load(str(BAK))
 if a.visible:
     lo, hi = map(int, a.visible.split(':'))
     geo = [n for n in o.find(name='Node', pool='SceneTreeNodePool')
-           if 'Type' in kids(o, n) and kids(o, n)['Type'].names()[0] == 'Geometry']
+           if 'Type' in o.kids(n, deep=False) and o.kids(n, deep=False)['Type'].names()[0] == 'Geometry']
     hid = 0
     for i, n in enumerate(geo):
-        if not lo <= i < hi and kids(o, n)['Visible'].ints()[0]:
-            kids(o, n)['Visible'].set_int(0); hid += 1
-    shown = sum(kids(o, n)['Visible'].ints()[0] != 0 for n in geo)
+        if not lo <= i < hi and o.kids(n, deep=False)['Visible'].ints()[0]:
+            o.kids(n, deep=False)['Visible'].set_int(0); hid += 1
+    shown = sum(o.kids(n, deep=False)['Visible'].ints()[0] != 0 for n in geo)
     print('%d geometry nodes, hid %d more, %d visible' % (len(geo), hid, shown))
 if a.rendercaps:
     rc = [r for r in o.find(name='RenderCaps', pool='SceneTreeNodePool') if r.value() & ~0x3f]

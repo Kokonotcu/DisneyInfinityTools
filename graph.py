@@ -14,12 +14,12 @@ The shape is fully determined by three shipped files that agree exactly
   procnodes 2 per node, VariantGroup 1 per node
   layout    (header, childCount) pairs; Layout's child count is n + 2
 
-run  python graph.py --selftest   to re-derive out_intro2 and dor_bay from the
-rule and assert every count, HeaderStringIndices and HeaderLayout matches.
+run  python graph.py --selftest [--ext30 DIR]   to re-derive out_intro2, dor_bay and lb_zonetwo
+from the rule and assert every count, HeaderStringIndices and HeaderLayout matches.
+python graph.py [n]   print the derived numbers for n nodes
 """
-import struct, sys
-from pathlib import Path
-from oct import Oct, Rec
+import struct
+from oct import Oct, Rec, children
 
 FIXED = ['Layout', 'Visibility', 'Transform', 'In WorldBasis.Transform',
          'In WorldBasis', 'Convert To WorldBasis', 'ConvertDilationToTransform']
@@ -57,20 +57,6 @@ def plan(n, names, root='Layout'):
     }
 
 
-def _kids(f, rec):
-    i, j = f.block(rec)
-    return {r.name: r for r in f.recs[i + 1:j]}
-
-
-def _set_nameidx(f, rec, strings):
-    """Type 0x0A is u8 count + u16 name indices — set_ints would retype it. Over 255 names it is
-    0x4A, the u16-count form (out_mark_sidescroll_v002 ships 4278, tbx_vehicleland5 3046)."""
-    idx = [f.add_name(s) for s in strings]
-    cw = 1 if len(idx) <= 0xff and rec.type == 0x0A else 2
-    rec.type = 0x0A if cw == 1 else 0x4A
-    rec.pay = len(idx).to_bytes(cw, 'little') + b''.join(i.to_bytes(2, 'little') for i in idx)
-
-
 def expand(f, names, root='Layout'):
     """Resize f's SubNetwork graph to len(names) geometry nodes."""
     n = len(names)
@@ -84,7 +70,8 @@ def expand(f, names, root='Layout'):
     for s in p['headers']:
         if s not in uniq:
             uniq.append(s)
-    _set_nameidx(f, f.find1(name='HeaderStrings'), uniq)
+    # 0x0A (u8 count) widens to 0x4A over 255 names (out_mark_sidescroll_v002 ships 4278)
+    f.find1(name='HeaderStrings').set_names(uniq)
     f.find1(name='HeaderStringIndices').set_ints([uniq.index(s) for s in p['headers']])
     f.find1(name='HeaderLayout').set_ints(p['HeaderLayout'])
 
@@ -104,15 +91,15 @@ def expand(f, names, root='Layout'):
     for i in range(n):
         for t, proto in enumerate(triple):
             blk = [Rec(f, r.level, r.type, r.name_idx, bytes(r.pay)) for r in proto]
-            blk[0].pay = f.add_name(str(2 + 3 * i + t)).to_bytes(2, 'little')
-            _kids_of(f, blk)['Header'].set_int(p['datanode_headers'][2 + 3 * i + t])
+            blk[0].set_name(str(2 + 3 * i + t))
+            children(blk)['Header'].set_int(p['datanode_headers'][2 + 3 * i + t])
             # The per-node Dilation carries its position. out_intro2's single
             # node sits at the origin so its exporter omitted the whole block;
             # cloning that left a null where the engine dereferences one, which
             # is the eax = 0 fault. lb_zonetwo gives every node's Dilation a
             # Data{Translation}. Placement is baked into the vertices here, so
             # the value is zero -- it is the record's presence that matters.
-            if t == 0 and 'Data' not in _kids_of(f, blk):
+            if t == 0 and 'Data' not in children(blk):
                 lv = blk[0].level
                 blk.append(Rec(f, lv + 1, 0x001, f.add_name('Data'), b''))
                 blk.append(Rec(f, lv + 2, 0x012, f.add_name('Translation'),
@@ -127,8 +114,8 @@ def expand(f, names, root='Layout'):
     for i, (h0, r0, h1, r1) in enumerate(p['proc']):
         for t, (hh, rr) in enumerate(((h0, r0), (h1, r1))):
             blk = [Rec(f, r.level, r.type, r.name_idx, bytes(r.pay)) for r in protos[t]]
-            blk[0].pay = f.add_name(str(2 * i + t)).to_bytes(2, 'little')
-            k = _kids_of(f, blk)
+            blk[0].set_name(str(2 * i + t))
+            k = children(blk)
             k['Header'].set_int(hh)
             k['DataNodeRefs'].set_ints(rr)
             out += blk
@@ -145,10 +132,6 @@ def expand(f, names, root='Layout'):
     return p
 
 
-def _kids_of(f, blk):
-    return {r.name: r for r in blk[1:]}
-
-
 def _splice_pool(f, pool_name, new_recs):
     pool = f.find1(name=pool_name)
     i, j = f.block(pool)
@@ -156,8 +139,9 @@ def _splice_pool(f, pool_name, new_recs):
 
 
 def _selftest():
-    """Re-derive two shipped files from the rule; any drift fails here."""
-    W = Path(r'D:\DI-Extract\3.0\assets\worlds')
+    """Re-derive three shipped files from the rule; any drift fails here."""
+    import paths
+    W = paths.ext30('worlds')
     # header 1 is the parent transform's own name, not the literal "Layout"
     cases = [('out_intro2', ['Default_Floor'], 'Layout'),
              ('dor_bay', ['COL_TerrainBackground', 'COL_TerrainBorder'], 'Layout'),
@@ -186,20 +170,26 @@ def _selftest():
         for i, (h0, r0, h1, r1) in enumerate(p['proc']):
             pn = f.find(name='ProcessorNode')
             for t, (hh, rr) in enumerate(((h0, r0), (h1, r1))):
-                k = _kids_of(f, f.recs[slice(*f.block(pn[2 * i + t]))])
+                k = f.kids(pn[2 * i + t])
                 assert k['Header'].ints()[0] == hh and k['DataNodeRefs'].ints() == rr, \
                     '%s proc %d: derived (%d,%s), file (%s,%s)' % (
                         name, 2 * i + t, hh, rr, k['Header'].ints()[0], k['DataNodeRefs'].ints())
         vg = [r.ints() for r in f.find(name='VariantGroup')]
         assert vg == p['variant'], '%s variant: derived %s, file %s' % (name, p['variant'], vg)
         print('%-12s n=%d  reproduced exactly' % (name, len(nodes)))
-    print('rule reproduces both shipped graphs')
+    print('rule reproduces every shipped graph tested')
 
 
 if __name__ == '__main__':
-    if '--selftest' in sys.argv:
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='Meridian graph sizing per geometry node')
+    ap.add_argument('n', nargs='?', type=int, default=3)
+    ap.add_argument('--selftest', action='store_true')
+    paths.add_args(ap, 'ext30')
+    a = paths.use(ap.parse_args())
+    if a.selftest:
         _selftest()
     else:
-        n = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+        n = a.n
         for k, v in plan(n, ['node%d' % i for i in range(n)]).items():
             print('%-24s %s' % (k, v))

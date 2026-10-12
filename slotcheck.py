@@ -5,29 +5,39 @@ The draw loop passes shader+0xa0 as the binder's descriptor, so:
   desc[0x2c] = shd[0xcc]  PS stage: low nibble = first t-register, high nibble = slot count read
 The binder reads blockB[i*8] (a texture pointer after load) for i < PS count; an index past
 TEXB or a PS count above the slot count both hand D3D11 a garbage SRV.
-usage: slotcheck.py <bundle.mtb>      (no args: corpus check of every 3.0 .shd)
+The resolver (Shader_ParseBindings, 0x45D5C0, called from the .mtb parser) treats a slot as unset only when
+w0 & w1 == 0xffffffff; otherwise it reads table[w0] and bumps that pointer's refcount -- so (ffffffff, 0)
+reads table[-1] (garbage pointer + refcount write: the Metroville heap corruption), while (idx, ffffffff)
+resolves normally. Shipped slots are only (idx, 0) or (ffffffff, ffffffff); anything else is flagged.
+usage: slotcheck.py <bundle.mtb> [--ext30 DIR]     (no bundle: corpus check of every 3.0 .shd)
 """
-import sys, struct
+import argparse, sys, struct
 from pathlib import Path
-from matp import Bundle, SHD_DIR
+from matp import Bundle, shd_dir
+from shdfmt import slot_roles
+import paths
 
 
 def stages(sh):
-    d = (SHD_DIR / f'{sh}.shd').read_bytes()
+    d = (shd_dir() / f'{sh}.shd').read_bytes()
     return d[0xa1], [(x & 0xf, x >> 4) for x in d[0xcc:0xd1]]
 
 
-if len(sys.argv) < 2:
+ap = argparse.ArgumentParser(description='Per-material texture binder check')
+ap.add_argument('bundle', nargs='?')
+paths.add_args(ap, 'ext30')
+a = paths.use(ap.parse_args())
+if not a.bundle:
     bad = 0; n = 0
-    for f in SHD_DIR.glob('*.shd'):
+    for f in shd_dir().glob('*.shd'):
         nslots, st = stages(f.stem); n += 1
         if any(cnt > nslots for _, cnt in st):
             bad += 1
             if bad <= 10: print(f.stem, nslots, st)
     print(f'{bad}/{n} shaders have a stage count above their slot count')
-    sys.exit()
+    sys.exit(1 if bad or not n else 0)
 
-b = Bundle(Path(sys.argv[1]).read_bytes())
+b = Bundle(Path(a.bundle).read_bytes())
 ntex = len(b.textures)
 print(f'{len(b.materials)} materials, {ntex} textures')
 bad = 0
@@ -46,5 +56,7 @@ for i, m in enumerate(b.materials):
     ps_end = st[0][0] + st[0][1]
     if probs or ps_end > 8:
         bad += bool(probs)
-        print(i, m['name'], m['shader'][:8], 'PS t%d..t%d' % (st[0][0], ps_end - 1), idx, '; '.join(probs))
+        print(i, m['name'], m['shader'][:8], 'PS t%d..t%d' % (st[0][0], ps_end - 1),
+              ['%s=%s' % (r, 'unset' if x == 0xffffffff else x) for r, x in zip(slot_roles(m['shader']), idx)],
+              '; '.join(probs))
 print(f'{bad} materials with problems')

@@ -1,21 +1,35 @@
-"""1.0 -> 3.0 collision .btd, every block (port of btd-convert.ps1, which handles one block).
+"""1.0 -> 3.0 collision .btd, every block.
 A .btd is one block per TriangleList shape, packed back to back, each 16-byte aligned (btdblocks.py).
 
-python btdconv.py <1.0 .btd> <out .btd> [x,y,z]      convert, vertices + AABB shifted by the offset
-python btdconv.py --selftest                         rebuild shipped 3.0 files from their 1.0 twins
+Block layout produced, matching stock 3.0 (323 of 330 shipped single-block pairs rebuilt byte-exact):
+  +0  u64 vertexOffset  +8 u64 indexOffset  +16 u32 vertexCount  +20 u32 triangleCount
+  +24 section A offset, length  +32 section B offset, length  +40 end of index array  +44 1
+  +48 per-triangle array offset, +52 count   +56 0c 00 06 00 02 00 00 00 (all 6,866 shipped blocks)
+  section A (the tree; +80 holds the AABB min/max = the root bounds, 1.0 margin) is carried from 1.0,
+      only its descriptor changes:  A[0..63] carried, A[64..183] the 120-byte constant btd-a-const.bin
+      (identical in all 322 pairs), A[184..199] = 1.0 A[64..79] (tag 0x114, node count, flags),
+      A[200..203] = 1.0 A[180..183], A[204..] = 1.0 A[188..] (the tree body, unchanged)
+  section B: 4 x triangles + 72 in 3.0 (+ 56 in 1.0): its four leading pointer fields widen u32 -> u64,
+      so 32 zero bytes, then 1.0 B from +16, size field (+16) = 72
+  then vertices f32x3, indices u16 x3, an 8-byte gap (0, ffffffff), a per-triangle u32 array of zeros
+1.0 header: +0 A offset, +4 A length, +8 B offset, +12 B length, +16 vertexOffset, +20 vertexCount,
+  +24 indexOffset, +28 triangleCount. The tree cannot be synthesised (it depends on how the geometry
+  is distributed; a donor's 480-triangle tree in front of 7,056 triangles gave no collision at all).
+
+python btdconv.py <1.0 .btd> <out .btd> [--offset x,y,z]   convert (+ <out>.btm), vertices + AABB shifted
+python btdconv.py --selftest [--ext10 DIR --ext30 DIR]       rebuild shipped 3.0 files from their 1.0 twins
 """
-import struct, sys
+import struct
 from pathlib import Path
 from btdblocks import blocks
 
-HERE = Path(__file__).parent
-A_CONST = (HERE / 'btd-a-const.bin').read_bytes()
-DONOR_HDR = (Path(r'D:\DI-Extract\3.0\assets\worlds\out_intro2\out_intro2.btd')).read_bytes()[:64]
+A_CONST = (Path(__file__).parent / 'btd-a-const.bin').read_bytes()
+HDR_TAIL = bytes.fromhex('0c00060002000000')     # block header +56..63
 assert len(A_CONST) == 120
 
 
-def convert(src, offset=(0.0, 0.0, 0.0), shell=DONOR_HDR):
-    """One 1.0 block -> one 3.0 block (layout notes in btd-convert.ps1)."""
+def convert(src, offset=(0.0, 0.0, 0.0)):
+    """One 1.0 block -> one 3.0 block."""
     aoff, alen, boff, blen, voff, vcnt, ioff, tcnt = struct.unpack_from('<8I', src, 0)
     assert voff + vcnt * 12 == ioff, 'vertex array does not close'
     assert aoff + alen == boff and boff + blen == voff, 'sections do not close'
@@ -23,7 +37,7 @@ def convert(src, offset=(0.0, 0.0, 0.0), shell=DONOR_HDR):
     A = 64; B = A + a_new; V = B + b_new; I = V + vcnt * 12
     IE = (I + tcnt * 6 + 3) & ~3; P = IE + 8   # index end rounded up to 4, then an 8-byte gap
     out = bytearray(P + tcnt * 4)
-    out[:64] = shell
+    out[56:64] = HDR_TAIL
     out[A:A + 64] = src[aoff:aoff + 64]
     out[A + 64:A + 184] = A_CONST
     out[A + 184:A + 200] = src[aoff + 64:aoff + 80]
@@ -62,7 +76,8 @@ def btm(btd3):
 
 def _pair(three):
     """Any .btd shipped at the same relative path in both games."""
-    one = Path(r'D:\DI-Extract\1.0') / three.relative_to(r'D:\DI-Extract\3.0')
+    import paths
+    one = paths.ext10(three.relative_to(paths.ext30()))
     if not one.exists():
         return None
     a, b = one.read_bytes(), three.read_bytes()
@@ -89,18 +104,28 @@ def _pair(three):
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--selftest']:
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='1.0 -> 3.0 collision .btd')
+    ap.add_argument('src', nargs='?')
+    ap.add_argument('out', nargs='?')
+    ap.add_argument('--offset', default='0,0,0', help='x,y,z added to vertices and bounds')
+    ap.add_argument('--selftest', action='store_true')
+    paths.add_args(ap, 'ext30', 'ext10')
+    a = paths.use(ap.parse_args())
+    if a.selftest:
         from par import pmap
         from collections import Counter
-        res = [r for r in pmap(_pair, sorted(Path(r'D:\DI-Extract\3.0').rglob('*.btd')), chunksize=8) if r]
+        res = [r for r in pmap(_pair, sorted(paths.ext30().rglob('*.btd')), chunksize=8) if r]
         c = Counter((r[1] > 1, r[2] == 'exact') for r in res)
         print('single-block pairs: %d exact of %d' % (c[(False, True)], c[(False, True)] + c[(False, False)]))
         print('multi-block pairs:  %d exact of %d' % (c[(True, True)], c[(True, True)] + c[(True, False)]))
         for r in [r for r in res if r[2] != 'exact'][:12]:
             print('  ', r)
+    elif a.src and a.out:
+        off = tuple(map(float, a.offset.split(',')))
+        data = convert_file(Path(a.src).read_bytes(), off)
+        Path(a.out).write_bytes(data)
+        Path(a.out).with_suffix('.btm').write_bytes(btm(data))
+        print('%s -> %s (+ .btm): %d blocks, %d B, offset %s' % (a.src, a.out, len(blocks(data, 3)), len(data), off))
     else:
-        off = tuple(map(float, sys.argv[3].split(','))) if len(sys.argv) > 3 else (0.0, 0.0, 0.0)
-        data = convert_file(Path(sys.argv[1]).read_bytes(), off)
-        Path(sys.argv[2]).write_bytes(data)
-        print('%s -> %s: %d blocks, %d B, offset %s' % (sys.argv[1], sys.argv[2],
-              len(blocks(data, 3)), len(data), off))
+        ap.print_help()

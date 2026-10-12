@@ -7,51 +7,42 @@ links named 'Anchor|<node>'. Measured against shipped 3.0 psx_barrel, the differ
   DataNode link 'Anchor|X' -> 'Anchor|X|Transform|In WorldBasis.Transform' (aggregate uses the same)
   graph sized for the node under root 'Anchor'; vertex formats + materials as for worlds (world30).
 
-python expl30.py <1.0 exploder dir> [...]     |  --package <1.0 package.lua>  converts every Model it uses
+python expl30.py <1.0 exploder dir> [...] [--assets DIR]
+python expl30.py --package <1.0 package.lua> [--assets DIR]   converts every Model the package uses (from --ext10)
 """
-import sys, shutil
+import argparse
 from pathlib import Path
-from oct import Oct
-import graph, autobundle
-from conv import kids, pool_rec, geo_nodes, _reindex, _roundtrip, convert_geometry, copy_texture
+from oct import Oct, children
+from collections import Counter
+import graph, paths
+from conv import pool_rec, geo_nodes, _reindex, _roundtrip, prepare, foreign_pools, rename_files, copy_textures
 from native30 import native_scene
 
-DROP_POOLS = ('BoundingVolumePool', 'MeridianLocatorPool', 'NavMeshPool', 'SceneNodeRefsPool', 'SurfaceTypesPool')
+# besides the pools 3.0 never ships (conv.foreign_pools: SurfaceTypes...): gameplay and set-piece pools an exploder
+# does not carry in 3.0 (psx_barrel)
+DROP_POOLS = ('BoundingVolumePool', 'MeridianLocatorPool', 'NavMeshPool', 'SceneNodeRefsPool')
+TEMPLATE = ('exploders', 'ps', 'psx_barrel', 'psx_barrel.oct')     # in the 3.0 extract
 
-SRC_ROOT = Path(r'D:\DI-Extract\1.0\assets\exploders')
-TEMPLATE = Path(r'D:\DI-Extract\3.0\assets\exploders\ps\psx_barrel\psx_barrel.oct')
-GAME = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition\assets')
 
-
-def convert(src_dir, out_root=GAME / 'exploders'):
+def convert(src_dir, assets=None):
+    """-> loose 3.0 exploder folder <assets>/exploders/<xx>/<name>/ (default: the game's assets)."""
     src_dir = Path(src_dir)
+    assets = Path(assets) if assets else paths.game('assets')
     stem = src_dir.name
-    s, ref = Oct.load(src_dir / ('%s.oct' % stem)), Oct.load(TEMPLATE)
-    data, problems, vmap, tiers, tocopy = autobundle.resolve(src_dir, s)
-    assert not problems, '%s: %d materials unresolved: %s' % (stem, len(problems), problems[:3])
+    s, ref = Oct.load(src_dir / ('%s.oct' % stem)), Oct.load(paths.ext30(*TEMPLATE))
+    out = assets / 'exploders' / stem[:2].lower() / stem.lower()
+    data, tiers, tocopy, gn = prepare(s, src_dir, out, stem.lower(), foreign_pools(s) + list(DROP_POOLS))
     native_scene(s)   # 1.0 Light nodes (bb05_socket04's point lights) broke every VFX in-game
-    gn = geo_nodes(s)
-    for name in DROP_POOLS:
-        p = pool_rec(s, name)
-        if p:
-            i, j = s.block(p)
-            del s.recs[i:j]
-    out = out_root / stem[:2].lower() / stem.lower()
-    out.mkdir(parents=True, exist_ok=True)
-    convert_geometry(s, gn, src_dir, stem, vmap, out, stem.lower())
-    for m in s.find(name='Material', pool='MaterialPool'):          # 1.0-only field
-        i, j = s.block(m)
-        s.recs[i + 1:j] = [r for r in s.recs[i + 1:j] if r.name != 'RenderCaps']
 
     # associations: drop PrimaryAsset; DataNode links get the 3.0 path; one CollisionAggregate each
     tmpl = None
     for a in ref.find(name='Association', pool='AssociationPool'):
-        if kids(ref, a)['Type'].names()[0] == 'CollisionAggregate':
+        if ref.kids(a)['Type'].names()[0] == 'CollisionAggregate':
             tmpl = ref.block(a)
     nodes = s.find(name='Node', pool='SceneTreeNodePool')
     add = []
     for a in reversed(s.find(name='Association', pool='AssociationPool')):
-        k = kids(s, a)
+        k = s.kids(a)
         t = k['Type'].names()[0]
         if t == 'PrimaryAsset':
             i, j = s.block(a)
@@ -60,10 +51,10 @@ def convert(src_dir, out_root=GAME / 'exploders'):
             path = k['NodeName'].names()[0]
             if not path.endswith('|Transform|In WorldBasis.Transform'):
                 path += '|Transform|In WorldBasis.Transform'
-                k['NodeName'].pay = s.add_name(path).to_bytes(2, 'little')
+                k['NodeName'].set_name(path)
             blk = _reindex(ref, s, ref.recs[tmpl[0]:tmpl[1]])
-            bk = {r.name: r for r in blk[1:]}
-            bk['NodeName'].pay = s.add_name(path).to_bytes(2, 'little')
+            bk = children(blk)
+            bk['NodeName'].set_name(path)
             bk['CollisionInstanceRef'].set_int(k['CollisionInstanceRef'].ints()[0])
             bk['SceneTreeNodeRef'].set_int(nodes.index(gn[0][0]))
             add.append(blk)
@@ -83,19 +74,11 @@ def convert(src_dir, out_root=GAME / 'exploders'):
     ag = s.find(name='AggregateCount')
     if ag:
         ag[0].set_int(sum(1 for r in s.recs if r.name == 'Instance' and r.pool == 'CollisionInstancePool'))
-    for r in s.recs:   # internal file names follow the lower-case install name
-        if r.type in (0x05, 0x0B):
-            try:
-                v = s.name(int.from_bytes(r.pay[:2], 'little'))
-            except Exception:
-                continue
-            if stem in v and v != stem.lower():
-                r.pay = s.add_name(v.replace(stem, stem.lower())).to_bytes(2, 'little')
+    rename_files(s, stem, stem.lower())   # internal file names follow the lower-case install name
     s.save(out / ('%s.oct' % stem.lower()))
     (out / ('%s.mtb' % stem.lower())).write_bytes(data)
-    for f in tocopy:
-        copy_texture(f, GAME / 'textures' / f.name)
-    return out, dict(__import__('collections').Counter(tiers)), len(tocopy)
+    copy_textures(tocopy, assets / 'textures')
+    return out, dict(Counter(tiers)), len(tocopy)
 
 
 def models_of(package):
@@ -106,13 +89,19 @@ def models_of(package):
 
 
 if __name__ == '__main__':
-    args = sys.argv[1:]
-    dirs = ([SRC_ROOT / m[:2] / m for m in models_of(args[1])] if args[:1] == ['--package']
-            else [Path(a) for a in args])
+    ap = argparse.ArgumentParser(description='Convert 1.0 exploders to 3.0')
+    ap.add_argument('dirs', nargs='*', help='1.0 exploder folders')
+    ap.add_argument('--package', help='1.0 expendables package (.lua): convert every Model it uses')
+    ap.add_argument('--assets', help="write into this assets folder (default: the game's; a mod folder works)")
+    paths.add_args(ap)
+    a = paths.use(ap.parse_args())
+    dirs = [Path(d) for d in a.dirs]
+    if a.package:
+        dirs += [paths.ext10('exploders', m[:2], m) for m in models_of(a.package)]
     bad = []
     for d in dirs:
         try:
-            out, tiers, ntex = convert(d)
+            out, tiers, ntex = convert(d, a.assets)
             print('%-40s -> %s  materials %s, %d textures' % (d.name, out, tiers, ntex))
         except Exception as e:
             bad.append((d.name, str(e)[:120]))

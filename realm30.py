@@ -11,18 +11,17 @@ Rules measured on rlm_intro_day, which ships in both games (--selftest reproduce
   SurfaceTypesPool, PrimaryAsset dropped; AssetPool 'Root' added; geometry/materials as for worlds
   The realm's 1.0-only textures go into the zip's textures/ folder, as rlm_moa_motunui_day ships them.
 
-python realm30.py rlm_in_day [...]      convert + install
-python realm30.py --selftest            rlm_intro_day 1.0 -> compare with the shipped 3.0 records
+python realm30.py rlm_in_day [...] [--assets DIR]   convert + install as <assets>/realms/<name>.zip
+python realm30.py --selftest                        rlm_intro_day 1.0 -> compare with the shipped 3.0 records
+(sources come from --ext10 <ext>/assets/realms, the template from --ext30; --assets defaults to the game's)
 """
-import sys, hashlib, tempfile, struct
+import argparse, hashlib, tempfile
 from pathlib import Path
-from oct import Oct
-import autobundle, di3arc
-from conv import kids, pool_rec, geo_nodes, _reindex, _roundtrip, convert_geometry, copy_texture
+from oct import Oct, children
+import di3arc, paths
+from conv import pool_rec, _reindex, _roundtrip, prepare, foreign_pools, check_foreign, copy_textures
 
-SRC_ROOT = Path(r'D:\DI-Extract\1.0\assets\realms')
-TEMPLATE = Path(r'D:\DI-Extract\3.0\assets\realms\rlm_intro_day\rlm_intro_day.oct')
-GAME = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition\assets')
+TEMPLATE = ('realms', 'rlm_intro_day', 'rlm_intro_day.oct')    # in the 3.0 extract
 REALMDATA_FIELDS = ('Name', 'AmbientRigRef', 'SunRigRef', 'SceneSettingsRef', 'SettingsName', 'ZoneName',
                     'RigBlendType', 'SettingsNonDefault', 'SunNoDirection', 'SunNoColor', 'StartWeight',
                     'FollowsCamera', 'ParallaxFactor', 'GlobalOverride')
@@ -31,10 +30,6 @@ LIGHT_TYPE = {'Directional': 6, 'Ambient': 7}
 
 def _uuid(seed):
     return bytes([16]) + hashlib.md5(seed.encode()).digest()
-
-
-def _set_name(f, rec, v):
-    rec.pay = f.add_name(v).to_bytes(2, 'little')
 
 
 def _take(blk, src):
@@ -47,35 +42,25 @@ def convert(src_dir, out_dir):
     """-> (out_dir with the loose 3.0 realm files, textures to put in its textures/ folder)"""
     src_dir, out_dir = Path(src_dir), Path(out_dir)
     stem = src_dir.name
-    s, t = Oct.load(src_dir / f'{stem}.oct'), Oct.load(TEMPLATE)
-    data, problems, vmap, tiers, tocopy = autobundle.resolve(src_dir, s)
-    assert not problems, problems[:3]
-    gn = geo_nodes(s)
-    for name in ('SurfaceTypesPool',):
-        p = pool_rec(s, name)
-        if p:
-            i, j = s.block(p); del s.recs[i:j]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    convert_geometry(s, gn, src_dir, stem, vmap, out_dir, stem)
-    for m in s.find(name='Material', pool='MaterialPool'):          # 1.0-only field
-        i, j = s.block(m)
-        s.recs[i + 1:j] = [r for r in s.recs[i + 1:j] if r.name != 'RenderCaps']
+    s, t = Oct.load(src_dir / f'{stem}.oct'), Oct.load(paths.ext30(*TEMPLATE))
+    # 1.0-only pools (SurfaceTypes...) go; RealmDataPool becomes the RealmData node below
+    data, _, tocopy, _ = prepare(s, src_dir, out_dir, stem, foreign_pools(s, keep=('RealmDataPool',)))
 
     tnodes = t.find(name='Node', pool='SceneTreeNodePool')
-    tlight = {kids(t, n)['LightType'].value(): n for n in tnodes
-              if kids(t, n)['Type'].names()[0] == 'Light'}
+    tlight = {t.kids(n)['LightType'].value(): n for n in tnodes
+              if t.kids(n)['Type'].names()[0] == 'Light'}
     # lights: rebuilt from a shipped 3.0 light of the same kind
     for n in reversed(s.find(name='Node', pool='SceneTreeNodePool')):
-        k = kids(s, n)
+        k = s.kids(n)
         if k['Type'].names()[0] != 'Light':
             continue
         lt = LIGHT_TYPE[k['LightType'].names()[0]]
         a, b = t.block(tlight[lt])
         blk = _reindex(t, s, t.recs[a:b])
-        bk = {r.name: r for r in blk[1:]}
+        bk = children(blk)
         for f in ('NodeName', 'Uuid', 'DisplayLayer', 'ExclusionType', 'ParentNodeReferences', 'LocalToParentMatrix'):
             _take(blk, k[f])
-        bk = {r.name: r for r in blk[1:]}
+        bk = children(blk)
         col, inten = k['LightColor'].floats(), k['LightIntensity'].value()
         bk['LightData'].set_floats(col + [inten] + [0.0] * (len(bk['LightData'].floats()) - 4))
         bk['FeatureCaps'].set_int(0)
@@ -87,12 +72,12 @@ def convert(src_dir, out_dir):
     rd = {r.name: r for r in s.recs if r.pool == 'RealmDataPool' and r.level == 3}
     a, b = t.block(tnodes[1])
     blk = _reindex(t, s, t.recs[a:b])
-    bk = {r.name: r for r in blk[1:]}
+    bk = children(blk)
     for f in REALMDATA_FIELDS:
         _take(blk, rd[f])
-    bk = {r.name: r for r in blk[1:]}
+    bk = children(blk)
     bk['SunLightRef'].set_int(rd['SunLightRef'].ints()[0] + 1)
-    _set_name(s, bk['NodeName'], rd['Name'].names()[0].upper())
+    bk['NodeName'].set_name(rd['Name'].names()[0].upper())
     bk['Uuid'].pay = _uuid(stem + '/RealmData')
     i, j = s.block(pool_rec(s, 'RealmDataPool'))
     del s.recs[i:j]
@@ -111,49 +96,45 @@ def convert(src_dir, out_dir):
     # rigs gain a Uuid after LightRefs
     tu = next(r for r in t.recs if r.pool == 'LightRigPool' and r.name == 'Uuid')
     for rig in s.find(name='LightRig', pool='LightRigPool'):
-        k = kids(s, rig)
+        k = s.kids(rig)
         u = _reindex(t, s, [tu])[0]
         u.pay = _uuid(stem + '/' + k['RigName'].names()[0] + rig.names()[0])
-        s.recs.insert(s.recs.index(k['LightRefs']) + 1, u)
+        s.recs.insert(s.idx(k['LightRefs']) + 1, u)
 
     # PrimaryAsset -> AssetPool (before AssociationPool, as shipped)
     for asc in reversed(s.find(name='Association', pool='AssociationPool')):
-        if kids(s, asc)['Type'].names()[0] == 'PrimaryAsset':
+        if s.kids(asc)['Type'].names()[0] == 'PrimaryAsset':
             i, j = s.block(asc); del s.recs[i:j]
     a, b = t.block(pool_rec(t, 'AssetPool'))
     i, _ = s.block(pool_rec(s, 'AssociationPool'))
     s.recs[i:i] = _reindex(t, s, t.recs[a:b])
     s = _roundtrip(s)                    # inserted records get their pool tags here
     for i, n in enumerate(s.find(name='Node', pool='SceneTreeNodePool')):
-        _set_name(s, n, str(i))
+        n.set_name(str(i))
     s = _roundtrip(s)
 
-    import foreign
-    tmp = Path(tempfile.mkdtemp()) / 'check.oct'
-    s.save(tmp)
-    left = foreign.foreign_in(tmp)
-    assert not left, '%d record kinds 3.0 never ships remain, e.g. %s' % (len(left), list(left)[:8])
+    check_foreign(s)
     s.save(out_dir / f'{stem}.oct')
     (out_dir / f'{stem}.mtb').write_bytes(data)
     (out_dir / f'{stem}.ap').write_bytes(b'')
     return out_dir, sorted(tocopy)
 
 
-def install(stem):
-    out, tocopy = convert(SRC_ROOT / stem, Path(tempfile.mkdtemp()) / stem)
+def install(stem, assets=None):
+    out, tocopy = convert(paths.ext10('realms', stem), Path(tempfile.mkdtemp()) / stem)
     tex = out / 'textures'
     tex.mkdir(exist_ok=True)
-    for f in tocopy:
-        copy_texture(f, tex / f.name)
-    zp = GAME / 'realms' / f'{stem}.zip'
-    zp.write_bytes(di3arc.pack_dir(out, stem))
+    copy_textures(tocopy, tex)
+    zp = Path(assets or paths.game('assets')) / 'realms' / f'{stem}.zip'
+    zp.parent.mkdir(parents=True, exist_ok=True)
+    zp.write_bytes(di3arc.pack_dir(out, di3arc.key_for(f'realms/{stem}.zip')))
     m = di3arc.unpack(zp)
     print('%s -> %s: %s' % (stem, zp, {k: len(v) for k, v in m.items()}))
 
 
 def _selftest():
-    out, _ = convert(SRC_ROOT / 'rlm_intro_day', Path(tempfile.mkdtemp()) / 'rlm_intro_day')
-    mine, ship = Oct.load(out / 'rlm_intro_day.oct'), Oct.load(TEMPLATE)
+    out, _ = convert(paths.ext10('realms', 'rlm_intro_day'), Path(tempfile.mkdtemp()) / 'rlm_intro_day')
+    mine, ship = Oct.load(out / 'rlm_intro_day.oct'), Oct.load(paths.ext30(*TEMPLATE))
     skip = {'Uuid', 'MaterialName', 'MaterialReference', 'vformatCRC', 'RenderCaps', 'Idata', 'Vdata',
             'ExporterDate', 'ExporterTime', 'NodeName'}
     def val(v):   # 3.0 re-exported some matrices: float noise ~1e-5
@@ -174,8 +155,13 @@ def _selftest():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--selftest']:
+    ap = argparse.ArgumentParser(description='Convert 1.0 realms to 3.0 realm archives')
+    ap.add_argument('realms', nargs='*', help='1.0 realm names, e.g. rlm_in_day')
+    ap.add_argument('--assets', help="install into this assets folder (default: the game's; a mod folder works)")
+    ap.add_argument('--selftest', action='store_true')
+    paths.add_args(ap)
+    a = paths.use(ap.parse_args())
+    if a.selftest:
         _selftest()
-    else:
-        for stem in sys.argv[1:]:
-            install(stem)
+    for stem in a.realms:
+        install(stem, a.assets)

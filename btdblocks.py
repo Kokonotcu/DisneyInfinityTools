@@ -1,10 +1,9 @@
 """A .btd is one collision mesh per TriangleList shape (SerializeIndex = block ordinal), packed back
 to back, each starting 16-byte aligned. Each block ends where its per-triangle u32 array ends:
     1.0: u32 @0x28 = array offset, u32 @0x2c = count        3.0: u32 @48 / u32 @52
-python btdblocks.py --selftest     predict the block count of every .btd in both games
+python btdblocks.py --selftest [--ext10 DIR] [--ext30 DIR]   predict the block count of every .btd in both games
 """
-import struct, sys
-from pathlib import Path
+import struct
 from par import pmap
 
 ARR = {1: (0x28, 0x2c), 3: (48, 52)}
@@ -42,12 +41,17 @@ def _check(args):
 
 
 if __name__ == '__main__':
-    jobs = [(d, g) for g, root in ((1, r'D:\DI-Extract\1.0\assets\worlds'), (3, r'D:\DI-Extract\3.0\assets\worlds'))
-            for d in sorted(Path(root).iterdir())]
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='Multi-block .btd survey')
+    ap.add_argument('--selftest', action='store_true', required=True)
+    paths.add_args(ap, 'ext30', 'ext10')
+    paths.use(ap.parse_args())
+    roots = [(g, getattr(paths, r)('worlds')) for g, r in ((1, 'ext10'), (3, 'ext30')) if paths.where(r)[0]]
+    jobs = [(d, g) for g, root in roots for d in sorted(root.iterdir())]
     res = [r for r in pmap(_check, jobs, chunksize=8) if r]
     ok = [r for r in res if r[2] == r[3]]
     bad = [r for r in res if r[2] != r[3]]
-    for g in (1, 3):
+    for g, _ in roots:
         print(f'{g}.0: block count == TriangleList shapes in {sum(r[1] == g for r in ok)} of {sum(r[1] == g for r in res)} worlds')
     for r in bad[:10]:
         print('  MISMATCH', r)

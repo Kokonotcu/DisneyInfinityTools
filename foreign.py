@@ -1,18 +1,14 @@
 """Records in an .oct that never occur in shipped 3.0 content -- the cheapest complete check for
 1.0 leftovers. Key = (pool, record name, parent record name, level, type).
-python foreign.py <built .oct>"""
-import sys
-from collections import Counter
+python foreign.py <built .oct> [--ext30 DIR]"""
 from pathlib import Path
 from oct import Oct
 from par import pmap
+import paths
 
-
-def keys(path):
-    try:
-        o = Oct.load(str(path))
-    except Exception:
-        return set()
+def keys(o):
+    """Key set of an Oct (or a path to one). Raises if it does not parse: a broken file is not 'clean'."""
+    o = o if isinstance(o, Oct) else Oct.load(str(o))
     out, parent = set(), {}
     for r in o.recs:
         parent[r.level] = r.name
@@ -23,33 +19,46 @@ def keys(path):
     return out
 
 
-CACHE = Path(__file__).with_name('shippedkeys.json')
+def _shipped_one(p):
+    try:
+        return keys(p)
+    except Exception:
+        return None
 
 
 def shipped_keys():
     """Every (pool, name, parent, level, type) over the shipped 3.0 worlds (cached)."""
-    import json
-    if CACHE.exists():
-        return {tuple(k) for k in json.loads(CACHE.read_text())}
-    shipped = set()
-    for ks in pmap(keys, sorted(Path(r'D:\DI-Extract\3.0\assets\worlds').glob('*/*.oct')), chunksize=8):
-        shipped |= ks
-    CACHE.write_text(json.dumps(sorted(shipped)))
-    return shipped
+    def build():
+        shipped, bad = set(), 0
+        for ks in pmap(_shipped_one, sorted(paths.ext30('worlds').glob('*/*.oct')), chunksize=8):
+            if ks is None:
+                bad += 1
+            else:
+                shipped |= ks
+        assert shipped, 'no shipped world parsed under ' + str(paths.ext30('worlds'))
+        if bad:
+            print('foreign: %d shipped worlds did not parse and are not in the reference set' % bad)
+        return sorted(shipped)
+    return {tuple(k) for k in paths.cached('shippedkeys.json', build, 2)}
 
 
-def foreign_in(path):
+def foreign_in(o):
+    """Keys of o (an Oct or a path) that no shipped 3.0 world has."""
     shipped = shipped_keys()
-    return sorted(k for k in keys(Path(path)) if k not in shipped)
+    return sorted(k for k in keys(o) if k not in shipped)
 
 
 if __name__ == '__main__':
+    import argparse
+    ap = argparse.ArgumentParser(description='Record kinds in an .oct that 3.0 never ships')
+    ap.add_argument('oct')
+    paths.add_args(ap, 'ext30')
+    a = paths.use(ap.parse_args())
     shipped = shipped_keys()
-    files = list(Path(r'D:\DI-Extract\3.0\assets\worlds').glob('*/*.oct'))
-    mine = keys(Path(sys.argv[1]))
+    mine = keys(Path(a.oct))
     foreign = sorted(k for k in mine if k not in shipped)
     # loosen: same (pool, name, parent, level) with another type is a type mismatch, not a new field
     loose = {k[:4] for k in shipped}
-    print(f'{len(files)} shipped worlds; {len(mine)} distinct keys in ours; {len(foreign)} not in 3.0')
+    print(f'{len(mine)} distinct keys in ours; {len(foreign)} not in 3.0')
     for k in foreign:
         print('  %s %-30s %-28s L%d type %#x' % (('TYPE ONLY' if k[:4] in loose else 'NEW      '), k[0] + '.' + k[1], 'under ' + k[2], k[3], k[4]))

@@ -4,11 +4,9 @@
 ConstantLayoutCount). This module measures candidate content statistics on every shipped 3.0
 SubNetwork so each count can be stated as a rule and checked as a prediction over the corpus.
 
-python subnet.py --fit      print, per count field, how often each candidate statistic matches
+python subnet.py --fit [--ext30 DIR]   print, per count field, how often each candidate statistic matches
 """
-import sys
-from collections import Counter, defaultdict
-from pathlib import Path
+from collections import Counter
 from oct import Oct
 
 COUNTS = ('ConstantHeaderCount', 'VariableHeaderCount', 'ConstantDataNodeCount', 'VariableDataNodeCount',
@@ -77,8 +75,9 @@ def _one(p):
 
 
 def fit():
+    import paths
     from par import pmap
-    ps = sorted(Path(r'D:\DI-Extract\3.0\assets\worlds').glob('*/*.oct'))
+    ps = sorted(paths.ext30('worlds').glob('*/*.oct'))
     rows = [r for rs in pmap(_one, ps, chunksize=8) for r in rs]
     print('shipped SubNetworks', len(rows))
     for c in COUNTS:
@@ -98,5 +97,9 @@ def fit():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--fit']:
-        fit()
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='3.0 SubNetwork count fields vs content statistics')
+    ap.add_argument('--fit', action='store_true', required=True)
+    paths.add_args(ap, 'ext30')
+    paths.use(ap.parse_args())
+    fit()

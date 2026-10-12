@@ -1,17 +1,16 @@
-"""Proven 1.0 -> 3.0 conversion primitives (extracted from the retired world30.py).
+"""Proven 1.0 -> 3.0 conversion primitives (extracted from the retired world30.py; used by native30, realm30
+and expl30).
 
+Pipeline every converter shares: prepare() (materials, dropped pools, geometry, RenderCaps), then the tool's own
+record surgery, then rename_files() / check_foreign() / copy_textures().
 Geometry: per-node vertex regions, stream-major primitives, global indices + relative base vertex,
 Idata byte offsets, vertex-format conversion (vtxf), RenderCaps 1.0 -> 3.0.
-Records: kids/pool_rec/geo_nodes, cross-file copy (_reindex) and pool re-tagging (_roundtrip).
+Records: pool_rec/geo_nodes, cross-file copy (_reindex), pool re-tagging (_roundtrip), the shipped pool order.
 """
 import struct
+from collections import Counter
 from pathlib import Path
-from oct import Oct
-import vtxf
-
-REF = Path(r'D:\DI-Extract\3.0\assets\worlds\out_intro2')
-INSTALL = Path(r'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition'
-               r'\assets\worlds')
+import paths, vtxf
 
 LAYOUT = 'Layout'
 
@@ -24,12 +23,8 @@ def copy_texture(src, dst):
     h, w = struct.unpack_from('<II', d, 12)
     if d[:4] == b'DDS ' and d[84:87] == b'DXT' and (w < 4 or h < 4) and struct.unpack_from('<I', d, 28)[0] <= 1:
         struct.pack_into('<II', d, 12, max(h, 4), max(w, 4))
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
     Path(dst).write_bytes(bytes(d))
-
-
-def kids(f, rec):
-    i, j = f.block(rec)
-    return {r.name: r for r in f.recs[i + 1:j]}
 
 
 def pool_rec(f, name):
@@ -41,7 +36,7 @@ def geo_nodes(f):
     """[(nodeRecord, kids, [primitiveRecords])] in scene tree order."""
     out = []
     for n in f.find(name='Node', pool='SceneTreeNodePool'):
-        k = kids(f, n)
+        k = f.kids(n)
         if not (k.get('Type') and k['Type'].names()[0] == 'Geometry'):
             continue
         i, j = f.block(n)
@@ -51,12 +46,7 @@ def geo_nodes(f):
 
 
 def _roundtrip(f):
-    import tempfile, os
-    p = Path(tempfile.mkdtemp()) / 'rt.oct'
-    f.save(p)
-    g = Oct.load(p)
-    os.remove(p)
-    return g
+    return f.reparse()
 
 
 def _reindex(src, dst, recs):
@@ -64,8 +54,7 @@ def _reindex(src, dst, recs):
     for r in recs:
         c = type(r)(dst, r.level, r.type, dst.add_name(src.name(r.name_idx)), r.pay)
         if r.type in (0x05, 0x0B):
-            c.pay = dst.add_name(src.name(int.from_bytes(r.pay[:2], 'little'))
-                                 ).to_bytes(2, 'little')
+            c.set_name(src.name(int.from_bytes(r.pay[:2], 'little')))
         out.append(c)
     return out
 
@@ -75,27 +64,38 @@ TRANSFORM_FIELDS = ('NodeName', 'Uuid', 'DisplayLayer', 'Type', 'ParentNodeRefer
 IDENT = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
 
 
-def world_by_path(s):
-    """{scene path 'A|B|C' (Scene node excluded): world matrix} for every node, on the 1.0 tree."""
-    nodes = s.find(name='Node', pool='SceneTreeNodePool')
-    K = [kids(s, n) for n in nodes]
-    typ = [k['Type'].names()[0] if 'Type' in k else '' for k in K]
-    par = [k['ParentNodeReferences'].ints()[0] if 'ParentNodeReferences' in k else None for k in K]
-    loc = [k['LocalToParentMatrix'].floats() if 'LocalToParentMatrix' in k else IDENT for k in K]
-    name = [k['NodeName'].names()[0] if 'NodeName' in k else '' for k in K]
-    W, out = {}, {}
+def _tree(s):
+    """Per scene node, in SceneTreeNodePool order: (type, parent index or None, local matrix, name)."""
+    K = [s.kids(n) for n in s.find(name='Node', pool='SceneTreeNodePool')]
+    return ([k['Type'].names()[0] if 'Type' in k else '' for k in K],
+            [k['ParentNodeReferences'].ints()[0] if 'ParentNodeReferences' in k else None for k in K],
+            [k['LocalToParentMatrix'].floats() if 'LocalToParentMatrix' in k else IDENT for k in K],
+            [k['NodeName'].names()[0] if 'NodeName' in k else '' for k in K])
+
+
+def world_matrices(s):
+    """World matrix of every scene node, in SceneTreeNodePool order."""
+    typ, par, loc, _ = _tree(s)
+    W = {}
 
     def world(i):
         if i not in W:
             W[i] = loc[i] if par[i] is None or par[i] < 0 else _mul(loc[i], world(par[i]))
         return W[i]
-    for i in range(len(nodes)):
+    return [world(i) for i in range(len(typ))]
+
+
+def world_by_path(s):
+    """{scene path 'A|B|C' (Scene node excluded): world matrix} for every node, on the 1.0 tree."""
+    typ, par, _, name = _tree(s)
+    out = {}
+    for i, w in enumerate(world_matrices(s)):
         chain, j = [], i
         while j is not None and j >= 0:
             if typ[j] != 'Scene':
                 chain.append(name[j])
             j = par[j]
-        out['|'.join(reversed(chain))] = world(i)
+        out['|'.join(reversed(chain))] = w
     return out
 
 
@@ -144,6 +144,7 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i, out_i2):
 
     nodes_prims entries: (Idata, Vdata, src vformatCRC, dst vformatCRC). A node with more than 65535
     vertices gets 32-bit indices in IndexBuffer 2 (out_i2), as the 3 such shipped 3.0 nodes do.
+    out_* = None: build and measure only (dry run).
     """
     import os
     if len(nodes_prims) < 64:                       # small world: no pool overhead
@@ -178,10 +179,11 @@ def build_buffers(src_dir, stem, nodes_prims, out_v, out_i, out_i2):
         out.append(blocks)
     if pool:
         pool.shutdown()
-    Path(out_v).write_bytes(bytes(new_v))
-    Path(out_i).write_bytes(bytes(new_i))
-    if new_i2:
-        Path(out_i2).write_bytes(bytes(new_i2))
+    if out_v:
+        Path(out_v).write_bytes(bytes(new_v))
+        Path(out_i).write_bytes(bytes(new_i))
+        if new_i2:
+            Path(out_i2).write_bytes(bytes(new_i2))
     return out, len(new_v), len(new_i), len(new_i2)
 
 
@@ -197,7 +199,6 @@ def _init_worker(src_dir, stem):
 
 def _node_work(prims):
     """One node: -> ([per prim: [bytes per dst stream]], [dst strides], [local index lists], [vertex counts])"""
-    import vtxf
     vb = _VB
     streams, strides, subs, counts = [], [], [], []
     for ida, vda, src, dst in prims:
@@ -244,24 +245,28 @@ def convert_geometry(s, gn, src_dir, stem, vmap, out, name, dry=False):
     # each primitive's target format: the one its material accepts (autobundle), else the best
     # 3.0 target for its 1.0 format (identical twin first)
     def target(p):
-        k = kids(s, p)
+        k = s.kids(p)
         src = k['vformatCRC'].ints()[0] & 0xffffffff
         t = vmap.get((k['MaterialReference'].ints()[0], src)) or vtxf.targets_1to3(src)[0]
         return src, t[0]
-    nodes_prims = [[(kids(s, p)['Idata'].ints(), kids(s, p)['Vdata'].ints(), *target(p))
+    nodes_prims = [[(s.kids(p)['Idata'].ints(), s.kids(p)['Vdata'].ints(), *target(p))
                     for p in prims] for _, _, prims in gn]
-    tv, ti, ti2 = (out / ('%s_%d.%s' % (name, n, e)) for n, e in ((0, 'vbuf'), (0, 'ibuf'), (2, 'ibuf')))
-    blocks, nv, ni, ni2 = build_buffers(src_dir, stem, nodes_prims,
-                                        *(x if not dry else x.with_name(x.name + '.dry') for x in (tv, ti, ti2)))
-    conv = __import__('collections').Counter()
+    # 1.0 index values are read as u16, relative to the primitive's own Vdata; Idata[0] (index buffer) and
+    # Idata[2] (base vertex) are not used. Say so if a source sets them.
+    odd = Counter((i[0], i[2]) for ps in nodes_prims for i, *_ in ps if i[0] or i[2])
+    if odd:
+        print('  NOTE: %d primitives set Idata[0]/Idata[2] (ignored): %s' % (sum(odd.values()), dict(odd.most_common(4))))
+    tv, ti, ti2 = (Path(out) / ('%s_%d.%s' % (name, n, e)) for n, e in ((0, 'vbuf'), (0, 'ibuf'), (2, 'ibuf')))
+    blocks, nv, ni, ni2 = build_buffers(src_dir, stem, nodes_prims, *((None,) * 3 if dry else (tv, ti, ti2)))
+    conv = Counter()
     for (_, _, prims), blks in zip(gn, blocks):
         for p, b in zip(prims, blks):
-            k = kids(s, p)
+            k = s.kids(p)
             old = k['vformatCRC'].ints()[0] & 0xffffffff
             conv['%08x -> %08x' % (old, b['vformatCRC'])] += 1
             k['Idata'].set_ints(b['Idata'])
             k['Vdata'].set_ints(b['Vdata'])
-            k['vformatCRC'].pay = b['vformatCRC'].to_bytes(len(k['vformatCRC'].pay), 'little')
+            k['vformatCRC'].set_int(b['vformatCRC'])
             if 'RenderCaps' in k:
                 k['RenderCaps'].set_int(rendercaps30(k['RenderCaps'].ints()[0]))
     print('  vformatCRC per primitive: %s' % dict(conv))
@@ -271,14 +276,121 @@ def convert_geometry(s, gn, src_dir, stem, vmap, out, name, dry=False):
             break
     ibs = s.find(name='IndexBuffer', pool='IndexBufferPool')
     for n_ib, size in ((0, ni), (2, ni2)):
-        k = kids(s, ibs[n_ib])
+        k = s.kids(ibs[n_ib])
         assert k['Width'].ints()[0] == (2 if n_ib == 0 else 4)
         k['Size'].set_int(size)
         if size and 'FileName' not in k:   # IndexBuffer 2 = 32-bit, its own file (dor_tp_mc_2.ibuf)
-            fn = kids(s, ibs[0])['FileName']
+            fn = s.kids(ibs[0])['FileName']
             i, j = s.block(ibs[n_ib])
-            s.recs.insert(j, type(fn)(s, fn.level, fn.type, fn.name_idx,
-                                      s.add_name('%s_2.ibuf' % stem).to_bytes(2, 'little')))
+            s.recs.insert(j, type(fn)(s, fn.level, fn.type, fn.name_idx, bytes(fn.pay)).set_name('%s_2.ibuf' % name))
     print('  buffers: %d nodes -> vbuf %d B, ibuf %d B, 32-bit ibuf %d B' % (len(gn), nv, ni, ni2))
 
 
+# --- the pipeline every converter shares ---------------------------------------------------------------
+
+def prepare(s, src_dir, out, name, drop=(), dry=False):
+    """The steps native30, realm30 and expl30 share, in this order: materials resolved (autobundle, on the untouched
+    source), the pools in drop removed, geometry + vertex formats written as <out>/<name>_0.vbuf/ibuf (nothing
+    written when dry), the 1.0-only Material RenderCaps removed.
+    -> (bundle bytes, material tiers, .tbody files to copy, geometry nodes)"""
+    import autobundle
+    src_dir = Path(src_dir)
+    data, problems, vmap, tiers, tocopy = autobundle.resolve(src_dir, s)
+    assert not problems, '%s: %d materials unresolved: %s' % (src_dir.name, len(problems), problems[:3])
+    print('%s: materials %s' % (src_dir.name, dict(Counter(tiers))))
+    gn = geo_nodes(s)
+    gone = []
+    for name_ in drop:
+        p = pool_rec(s, name_)
+        if p:
+            i, j = s.block(p); del s.recs[i:j]; gone.append(name_)
+    if gone:
+        print('  dropped pools %s' % gone)
+    if not dry:
+        Path(out).mkdir(parents=True, exist_ok=True)
+    convert_geometry(s, gn, src_dir, src_dir.name, vmap, out, name, dry)
+    for mt in s.find(name='Material', pool='MaterialPool'):
+        i, j = s.block(mt)
+        s.recs[i + 1:j] = [r for r in s.recs[i + 1:j] if r.name != 'RenderCaps']
+    return data, tiers, tocopy, gn
+
+
+def rename_files(s, old, new):
+    """Name records naming the source's files (old_0.vbuf, ...) follow the install name."""
+    if old == new:
+        return
+    for r in s.recs:
+        if r.type in (0x05, 0x0B):
+            v = s.name(int.from_bytes(r.pay[:2], 'little'))
+            if old in v:
+                r.set_name(v.replace(old, new))
+
+
+def check_foreign(s, allow=()):
+    """Assert no record kind 3.0 never ships is left (foreign.py); allow = pools or record names kept on purpose."""
+    import foreign
+    left = [k for k in foreign.foreign_in(s) if k[0] not in allow and k[1] not in allow]
+    assert not left, '%d record kinds 3.0 never ships remain, e.g. %s' % (len(left), left[:8])
+    print('  0 record kinds foreign to 3.0' + (' (kept: %s)' % ', '.join(allow) if allow else ''))
+
+
+def copy_textures(files, folder):
+    for f in files:
+        copy_texture(f, Path(folder) / f.name)
+
+
+def _tops(p):
+    from oct import Oct
+    try:
+        return [r.name for r in Oct.load(p).recs if r.level == 1]
+    except Exception:
+        return None
+
+
+def shipped_pools():
+    """Top-level pools of every shipped 3.0 .oct (worlds, realms, exploders, ...) in the one order they all agree
+    on: 0 conflicting pairs over 3,905 files. Topological over every file's sequence; pools no file holds
+    together tie by their mean relative position. Cached."""
+    def build():
+        from par import pmap
+        seqs = [q for q in pmap(_tops, sorted(paths.ext30().rglob('*.oct')), chunksize=32) if q]
+        after, pos = {}, {}
+        for q in seqs:
+            for i, a in enumerate(q):
+                after.setdefault(a, set()).update(q[i + 1:])
+                pos.setdefault(a, []).append(i / len(q))
+        clash = [(a, b) for a in after for b in after[a] if a in after.get(b, ())]
+        assert not clash, 'shipped worlds disagree on pool order: %s' % clash[:4]
+        indeg = Counter(b for a in after for b in after[a])
+        key = lambda n: (sum(pos[n]) / len(pos[n]), n)
+        ready, order = sorted((n for n in after if not indeg[n]), key=key), []
+        while ready:
+            n = ready.pop(0)
+            order.append(n)
+            for b in after[n]:
+                indeg[b] -= 1
+                if not indeg[b]:
+                    ready.append(b)
+            ready.sort(key=key)
+        return order
+    return paths.cached('shippedpools.json', build, 2)
+
+
+def foreign_pools(s, keep=()):
+    """Top-level pools of s that no shipped 3.0 .oct has (1.0's Realm*/SurfaceTypes...), except keep."""
+    shipped = set(shipped_pools())
+    return [r.name for r in s.recs if r.level == 1 and r.name not in shipped and r.name not in keep]
+
+
+def sort_pools(s, extra=None):
+    """Top-level blocks into the shipped order; extra = {pool 3.0 never ships: the pool it goes right before}."""
+    order = list(shipped_pools())
+    for p, before in (extra or {}).items():
+        order.insert(order.index(before), p)
+    tops = [i for i, r in enumerate(s.recs) if r.level == 1]
+    head = s.recs[:tops[0]]
+    blocks = [s.recs[a:b] for a, b in zip(tops, tops[1:] + [len(s.recs)])]
+    assert all(b[0].name in order for b in blocks), [b[0].name for b in blocks if b[0].name not in order]
+    blocks.sort(key=lambda b: order.index(b[0].name))
+    s.recs = head + [r for b in blocks for r in b]
+    return _roundtrip(s)

@@ -1,13 +1,11 @@
 """Print one geometry node's record block, for field-by-field diffing.
 
-  python nodedump.py <world> [nodeIndex]     3.0 extract
-  python nodedump.py --file <path> [i]
+  python nodedump.py <world | path to .oct> [nodeIndex] [--ext30 DIR]   (a bare world name is looked up in the 3.0 extract)
 """
-import sys
+import argparse
 from pathlib import Path
 from oct import Oct
-
-W30 = Path(r'D:\DI-Extract\3.0\assets\worlds')
+import paths
 
 
 def nodes(f):
@@ -29,11 +27,13 @@ def nodes(f):
     return out
 
 
-a = sys.argv[1:]
-if a[0] == '--file':
-    p = Path(a[1]); want = int(a[2]) if len(a) > 2 else None
-else:
-    p = W30 / a[0] / (a[0] + '.oct'); want = int(a[1]) if len(a) > 1 else None
+ap = argparse.ArgumentParser(description="Print one geometry node's record block")
+ap.add_argument('world', help='3.0 world name, or a path to any .oct')
+ap.add_argument('node', nargs='?', type=int)
+paths.add_args(ap, 'ext30')
+a = paths.use(ap.parse_args())
+p = Path(a.world) if a.world.lower().endswith('.oct') else paths.ext30('worlds', a.world, a.world + '.oct')
+want = a.node
 
 f = Oct.load(p)
 ns = nodes(f)
