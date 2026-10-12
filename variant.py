@@ -1,6 +1,6 @@
 """One-variable variants of the INSTALLED world .oct, for bisecting a crash by launches.
   python variant.py --visible 0:1000      hide every geometry node outside [a:b) (by node order)
-  python variant.py --rendercaps          Primitive RenderCaps 1.0 0x1000|low -> 3.0 0x200|low
+  python variant.py --rendercaps          Primitive RenderCaps still in 1.0 form -> conv.rendercaps30
   python variant.py --materials 178       keep the first N materials (.oct + .mtb), refs >= N -> ref % N
   python variant.py --restore             put the pre-variant .oct/.mtb back
 The world is <game>/assets/worlds/<--world> (default out_intro2), or --world-dir. The first run copies its
@@ -55,10 +55,11 @@ if a.visible:
     shown = sum(o.kids(n, deep=False)['Visible'].ints()[0] != 0 for n in geo)
     print('%d geometry nodes, hid %d more, %d visible' % (len(geo), hid, shown))
 if a.rendercaps:
-    rc = [r for r in o.find(name='RenderCaps', pool='SceneTreeNodePool') if r.value() & ~0x3f]
+    from conv import rendercaps30       # the converters' rule: 0x1000 -> 0x200, 0x2000 -> 0x400, 0 -> 0x200
+    rc = [r for r in o.find(name='RenderCaps', pool='SceneTreeNodePool') if r.value() == 0 or r.value() & 0x3000]
     for r in rc:
-        r.set_int(0x200 | (r.value() & 0x3f))
-    print('RenderCaps -> 0x200|low on %d primitives' % len(rc))
+        r.set_int(rendercaps30(r.value()))
+    print('RenderCaps 1.0 -> 3.0 on %d primitives' % len(rc))
 if a.materials and not a.keep:
     a.keep = '%d-%d' % (a.skip, a.skip + a.materials - 1)
 if a.keep:

@@ -6,8 +6,9 @@ Element types (3.0 uses all nine): FLOAT32_2/3/4, FLOAT16_2/4, U8_4_NORMALIZED, 
 U8_4, U16_2 (integers: BLENDINDICES, packed texcoords). A 3.0 element is filled from the 1.0 element with
 the same semantic (COLOR0, TEXCOORD1, ...): copied when the type matches, converted between any two real
 types (normalized <-> float, float16 <-> float32, 3 <-> 4 components) or between integer types; components
-the source lacks come from the 3.0 element's declared default (else 0). Only a semantic the source does not
-have at all is padded.
+the source lacks come from the 3.0 element's declared default, else as shipped data has them: w = +1 for the
+*_signed tangents (+-1 in 477,578 of 477,578 sampled vertices, +1 in 94.4%), else 0 (NORMAL w: 0 in 491,568 of
+491,568). Only a semantic the source does not have at all is padded.
 
 python vtxf.py <vformat.vtxf> [crc_hex ...]   list formats, or dump the ones matching the CRCs
 python vtxf.py --selftest [--ext30 DIR] [--ext10 DIR]   hash vs every shipped vformatCRC, conversions, twins
@@ -143,6 +144,8 @@ def layout(fmt):
             where[e['semantic'], e['type']] = (si, off)
             if 'default' in e:
                 dflt[e['semantic'], e['type']] = [float(x) for x in e['default']]
+            elif e['name'].endswith('_signed'):     # tangent + handedness: w is +1 or -1 in every shipped vertex
+                dflt[e['semantic'], e['type']] = [0.0, 0.0, 0.0, 1.0]     # (+1 in 94.4%, 0 never); NORMAL w is 0
             off += SIZE[e['type']]
         strides.append(off)
     return strides, where, dflt

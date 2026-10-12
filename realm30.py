@@ -19,7 +19,8 @@ import argparse, hashlib, tempfile
 from pathlib import Path
 from oct import Oct, children
 import di3arc, paths
-from conv import pool_rec, _reindex, _roundtrip, prepare, foreign_pools, check_foreign, copy_textures
+from conv import (pool_rec, _reindex, _roundtrip, prepare, foreign_pools, check_foreign, copy_textures, sort_pools,
+                  sort_associations)
 
 TEMPLATE = ('realms', 'rlm_intro_day', 'rlm_intro_day.oct')    # in the 3.0 extract
 REALMDATA_FIELDS = ('Name', 'AmbientRigRef', 'SunRigRef', 'SceneSettingsRef', 'SettingsName', 'ZoneName',
@@ -113,7 +114,8 @@ def convert(src_dir, out_dir):
         n.set_name(str(i))
     s = _roundtrip(s)
 
-    check_foreign(s)
+    s = sort_associations(sort_pools(s))      # the shipped pool and association orders
+    check_foreign(s, 'realms')
     s.save(out_dir / f'{stem}.oct')
     (out_dir / f'{stem}.mtb').write_bytes(data)
     (out_dir / f'{stem}.ap').write_bytes(b'')

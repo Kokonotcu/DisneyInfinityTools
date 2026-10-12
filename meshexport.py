@@ -8,8 +8,13 @@ Buffers are resolved the way the records describe them, for both games:
 Positions (POSITION), UVs (TEXCOORD0, v flipped) and normals (NORMAL) decode through vtxf; nodes are placed by
 their LocalToParentMatrix chain. One OBJ object per geometry node, one usemtl per primitive (material name).
 The game is told by the vertex formats: every vformatCRC a 3.0 format -> 3.0 rules (converted worlds too).
+--textures: an .mtl beside the OBJ, each material's colour (diffuse0) and normal (normalMap0) texture -- slots by
+their role (shdfmt.slot_roles) in 3.0, the first texture in 1.0 -- as PNG in <out>_textures/. A .tbody (a DDS) is
+looked up in the world's textures/ folder, the install's loose assets/textures/, the 3.0 extract's pool, then
+straight inside the install's textures/<first byte>.zip.
 
-python meshexport.py <world dir | .oct> <out.obj> [--all] [--node NAME ...]   (--all: LOD-hidden nodes too)
+python meshexport.py <world dir | .oct> <out.obj> [--all] [--node NAME ...] [--textures]
+                     (--all: LOD-hidden nodes too)
 python meshexport.py --check [--ext30 DIR]   every primitive of every shipped 3.0 tuple file stays inside its
                                              buffers under the 3.0 rule
 """
@@ -61,6 +66,83 @@ class Buffers:
         return [(self.raw(self.vb[vdata[2 + 3 * i]][1]), vdata[3 + 3 * i], vdata[4 + 3 * i]) for i in range(vdata[0])]
 
 
+class Textures:
+    """Colour / normal texture of each material of a world's bundle, written as PNG for the .mtl."""
+    UNSET = 0xffffffff
+
+    def __init__(self, oct_path, game, folder):
+        import matp
+        self.game, self.world, self.folder = game, Path(oct_path).parent, Path(folder)
+        mtb = Path(oct_path).with_suffix('.mtb')
+        self.bnd = matp.Bundle(mtb.read_bytes(), game) if mtb.exists() else None
+        self._zips, self._png, self.missing = {}, {}, Counter()
+
+    def maps(self, ref):
+        """{'map_Kd': .tbody hash, 'map_Bump': hash} of material ref (only the ones it has)."""
+        if not self.bnd or not 0 <= ref < len(self.bnd.materials):
+            return {}
+        m = self.bnd.materials[ref]
+        idx = self.bnd.tex_slots(m)
+        roles = [None] * len(idx)
+        if self.game == 3 and paths.where('ext30')[0]:
+            import shdfmt
+            roles = shdfmt.slot_roles(m['shader'])
+        out = {}
+        for key, want in (('map_Kd', 'diffuse0'), ('map_Bump', 'normalMap0')):
+            i = next((i for i, r in enumerate(roles) if r == want and idx[i] != self.UNSET), None)
+            if i is None and key == 'map_Kd':          # no roles (1.0, no 3.0 extract): the first texture
+                i = next((i for i, (r, t) in enumerate(zip(roles, idx))
+                          if t != self.UNSET and (r is None or 'diffuse' in r)), None)
+            if i is not None:
+                out[key] = self.bnd.textures[idx[i]].hex()
+        return out
+
+    def _tbody(self, h):
+        name = '%s.tbody' % h
+        for f in [self.world / 'textures' / name] + \
+                 ([paths.game('assets', 'textures', name)] if paths.where('game')[0] else []) + \
+                 ([paths.ext30('textures', h[:2], 'textures', name)] if paths.where('ext30')[0] else []):
+            if f.exists():
+                return f.read_bytes()
+        if paths.where('game')[0]:
+            z = paths.game('assets', 'textures', h[:2] + '.zip')
+            if z.exists() and z not in self._zips:
+                import di3arc
+                self._zips[z] = di3arc.unpack_index(z)
+            return self._zips.get(z, {}).get('textures/' + name)
+        return None
+
+    def png(self, h):
+        """Relative path of h's PNG (written on first use), or None if it cannot be found / decoded."""
+        if h not in self._png:
+            self._png[h] = None
+            raw = self._tbody(h)
+            if raw is None:
+                self.missing['not found'] += 1
+            else:
+                import io
+                from PIL import Image
+                try:
+                    self.folder.mkdir(parents=True, exist_ok=True)
+                    Image.open(io.BytesIO(raw)).save(self.folder / ('%s.png' % h))
+                    self._png[h] = '%s/%s.png' % (self.folder.name, h)
+                except Exception as e:
+                    self.missing['undecodable (%s)' % type(e).__name__] += 1
+        return self._png[h]
+
+    def mtl(self, used):
+        """.mtl text for {material name: MaterialReference}."""
+        out = []
+        for name, ref in used.items():
+            out += ['newmtl %s' % name, 'Kd 1 1 1']
+            for key, h in self.maps(ref).items():
+                p = self.png(h)
+                if p:
+                    out.append('%s %s' % (key, p))
+            out.append('')
+        return '\n'.join(out)
+
+
 def _elem(fmt, sem):
     """(stream, offset, type) of the first element whose semantic starts with sem."""
     _, where, _ = vtxf.layout(fmt)
@@ -70,7 +152,7 @@ def _elem(fmt, sem):
     return None
 
 
-def export(oct_path, out_path, all_nodes=False, only=()):
+def export(oct_path, out_path, all_nodes=False, only=(), textures=False):
     oct_path = Path(oct_path)
     if oct_path.is_dir():
         oct_path = oct_path / (oct_path.name + '.oct')
@@ -80,8 +162,11 @@ def export(oct_path, out_path, all_nodes=False, only=()):
     W = world_matrices(s)
     nodes = s.find(name='Node', pool='SceneTreeNodePool')
     pos_of = {id(n): i for i, n in enumerate(nodes)}
-    out, nv, nt, nvt, nvn, skipped = [], 0, 0, 0, 0, Counter()
+    out, nv, nt, nvt, nvn, skipped, used = [], 0, 0, 0, 0, Counter(), {}
     out.append('# %s (%d.0 rules) -> meshexport.py' % (oct_path.name, game))
+    out_path = Path(out_path)
+    if textures:
+        out.append('mtllib %s' % out_path.with_suffix('.mtl').name)
     for n, k, prims in geo_nodes(s):
         name = k['NodeName'].names()[0] if 'NodeName' in k else 'node%d' % pos_of[id(n)]
         if only and name not in only:
@@ -119,8 +204,10 @@ def export(oct_path, out_path, all_nodes=False, only=()):
                     w = [a * m[0] + b * m[4] + c * m[8], a * m[1] + b * m[5] + c * m[9], a * m[2] + b * m[6] + c * m[10]]
                     l = math.sqrt(sum(q * q for q in w)) or 1.0
                     out.append('vn %.4f %.4f %.4f' % tuple(q / l for q in w))
-            if 'MaterialName' in pk:
-                out.append('usemtl %s' % pk['MaterialName'].names()[0])
+            ref = pk['MaterialReference'].ints()[0] if 'MaterialReference' in pk else -1
+            mname = pk['MaterialName'].names()[0] if 'MaterialName' in pk else 'material%d' % ref
+            used.setdefault(mname, ref)
+            out.append('usemtl %s' % mname)
             for i in range(0, len(idx) - 2, 3):
                 f = [nv + idx[i + j] + 1 for j in range(3)]
                 ft = [nvt + idx[i + j] + 1 for j in range(3)] if el['TEXCOORD'] else None
@@ -128,9 +215,14 @@ def export(oct_path, out_path, all_nodes=False, only=()):
                 out.append('f ' + ' '.join('%d/%s/%s' % (f[j], ft[j] if ft else '', fn[j] if fn else '') for j in range(3)))
             nv += nverts; nvt += nverts if el['TEXCOORD'] else 0; nvn += nverts if el['NORMAL'] else 0
             nt += len(idx) // 3
-    Path(out_path).write_text('\n'.join(out) + '\n')
+    out_path.write_text('\n'.join(out) + '\n')
     print('%s -> %s: %d vertices, %d triangles%s' % (oct_path.name, out_path, nv, nt,
                                                     ', skipped %s' % dict(skipped) if skipped else ''))
+    if textures:
+        tx = Textures(oct_path, game, out_path.with_name(out_path.stem + '_textures'))
+        out_path.with_suffix('.mtl').write_text(tx.mtl(used))
+        print('  %d materials, %d textures written%s' % (len(used), sum(1 for v in tx._png.values() if v),
+                                                       ', missing %s' % dict(tx.missing) if tx.missing else ''))
 
 
 def _check_one(p):
@@ -166,8 +258,9 @@ if __name__ == '__main__':
     ap.add_argument('out', nargs='?', help='.obj to write')
     ap.add_argument('--all', action='store_true', help='include nodes hidden by LOD (Visible = 0)')
     ap.add_argument('--node', nargs='*', default=[], help='only these node names')
+    ap.add_argument('--textures', action='store_true', help='write an .mtl and PNG textures beside the OBJ')
     ap.add_argument('--check', action='store_true')
-    paths.add_args(ap, 'ext30', 'ext10')
+    paths.add_args(ap)
     a = paths.use(ap.parse_args())
     if a.check:
         from par import pmap
@@ -178,6 +271,6 @@ if __name__ == '__main__':
             print('  ', b)
         assert prims and not bad
     elif a.src and a.out:
-        export(a.src, a.out, a.all, set(a.node))
+        export(a.src, a.out, a.all, set(a.node), a.textures)
     else:
         ap.print_help()

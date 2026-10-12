@@ -7,17 +7,19 @@ Block layout produced, matching stock 3.0 (323 of 330 shipped single-block pairs
   +48 per-triangle array offset, +52 count   +56 0c 00 06 00 02 00 00 00 (all 6,866 shipped blocks)
   section A (the tree; +80 holds the AABB min/max = the root bounds, 1.0 margin) is carried from 1.0,
       only its descriptor changes:  A[0..63] carried, A[64..183] the 120-byte constant btd-a-const.bin
-      (identical in all 322 pairs), A[184..199] = 1.0 A[64..79] (tag 0x114, node count, flags),
+      (identical in all 322 pairs it was derived from), A[184..199] = 1.0 A[64..79] (tag 0x114, node count, flags),
       A[200..203] = 1.0 A[180..183], A[204..] = 1.0 A[188..] (the tree body, unchanged)
   section B: 4 x triangles + 72 in 3.0 (+ 56 in 1.0): its four leading pointer fields widen u32 -> u64,
       so 32 zero bytes, then 1.0 B from +16, size field (+16) = 72
-  then vertices f32x3, indices u16 x3, an 8-byte gap (0, ffffffff), a per-triangle u32 array of zeros
+  then vertices f32x3, indices u16 x3, an 8-byte gap (written 0, ffffffff; shipped files hold exporter junk
+  in the first word in 37%), a per-triangle u32 array of zeros
 1.0 header: +0 A offset, +4 A length, +8 B offset, +12 B length, +16 vertexOffset, +20 vertexCount,
   +24 indexOffset, +28 triangleCount. The tree cannot be synthesised (it depends on how the geometry
   is distributed; a donor's 480-triangle tree in front of 7,056 triangles gave no collision at all).
 
 python btdconv.py <1.0 .btd> <out .btd> [--offset x,y,z]   convert (+ <out>.btm), vertices + AABB shifted
-python btdconv.py --selftest [--ext10 DIR --ext30 DIR]       rebuild shipped 3.0 files from their 1.0 twins
+python btdconv.py --selftest [--ext30 DIR] [--ext10 DIR]     .btm rule (317/317 shipped rebuilt); with 1.0: rebuild
+                                                             shipped 3.0 .btd from their 1.0 twins
 """
 import struct
 from pathlib import Path
@@ -96,7 +98,7 @@ def _pair(three):
             g2[ie - 2:ie + 4] = b2[ie - 2:ie + 4] = b'\0' * 6
         if g2 == b2:
             return (d.name, nb, 'exact')
-    # shell bytes 56..63 come from the donor; compare the rest block by block
+    # compare block by block (header bytes 56..63 are HDR_TAIL)
     if len(got) == len(b):
         diff = [i for i in range(len(b)) if got[i] != b[i]]
         return (d.name, nb, 'same size, %d bytes differ, first %#x' % (len(diff), diff[0]))
@@ -115,10 +117,18 @@ if __name__ == '__main__':
     if a.selftest:
         from par import pmap
         from collections import Counter
-        res = [r for r in pmap(_pair, sorted(paths.ext30().rglob('*.btd')), chunksize=8) if r]
+        btds = sorted(paths.ext30().rglob('*.btd'))
+        pairs = [(b, b.with_suffix('.btm')) for b in btds if b.with_suffix('.btm').exists()]
+        same = sum(btm(b.read_bytes()) == m.read_bytes() for b, m in pairs)
+        print('btm(): %d of %d shipped .btm rebuilt byte-exact from their .btd' % (same, len(pairs)))
+        assert pairs and same == len(pairs)
+        res = [r for r in pmap(_pair, btds, chunksize=8) if r] if paths.where('ext10')[0] else []
+        if not res:
+            print('(no 1.0 extract: 1.0 -> 3.0 pairs not checked)')
         c = Counter((r[1] > 1, r[2] == 'exact') for r in res)
-        print('single-block pairs: %d exact of %d' % (c[(False, True)], c[(False, True)] + c[(False, False)]))
-        print('multi-block pairs:  %d exact of %d' % (c[(True, True)], c[(True, True)] + c[(True, False)]))
+        if res:
+            print('single-block pairs: %d exact of %d' % (c[(False, True)], c[(False, True)] + c[(False, False)]))
+            print('multi-block pairs:  %d exact of %d' % (c[(True, True)], c[(True, True)] + c[(True, False)]))
         for r in [r for r in res if r[2] != 'exact'][:12]:
             print('  ', r)
     elif a.src and a.out:

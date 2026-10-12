@@ -1,6 +1,5 @@
 """Survey: which worlds carry several TriangleList collision meshes (SerializeIndex), and how big
-their .btd is. python btdscan.py <worlds dir>"""
-import sys
+their .btd is. python btdscan.py [worlds dir]   (default: the 3.0 extract's worlds; --ext30 DIR)"""
 from pathlib import Path
 from oct import Oct
 from par import pmap
@@ -19,7 +18,13 @@ def scan(d):
 
 
 if __name__ == '__main__':
-    res = sorted((r for r in pmap(scan, sorted(Path(sys.argv[1]).iterdir()), chunksize=8) if r), reverse=True)
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='Worlds with several TriangleList collision meshes')
+    ap.add_argument('worlds', nargs='?', help='a worlds folder (default: the 3.0 extract\'s)')
+    paths.add_args(ap, 'ext30')
+    a = paths.use(ap.parse_args())
+    root = Path(a.worlds) if a.worlds else paths.ext30('worlds')
+    res = sorted((r for r in pmap(scan, sorted(root.iterdir()), chunksize=8) if r), reverse=True)
     print(len(res), 'worlds with TriangleList shapes; (count, max SerializeIndex, world, btd bytes):')
     for r in res[:8]:
         print('  ', r)

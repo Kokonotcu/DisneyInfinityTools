@@ -5,7 +5,7 @@ links named 'Anchor|<node>'. Measured against shipped 3.0 psx_barrel, the differ
   1.0 SurfaceTypesPool, PrimaryAsset link          -> dropped
   3.0 AssetPool, CollisionAggregate per instance   -> from the 3.0 template
   DataNode link 'Anchor|X' -> 'Anchor|X|Transform|In WorldBasis.Transform' (aggregate uses the same)
-  graph sized for the node under root 'Anchor'; vertex formats + materials as for worlds (world30).
+  graph sized for the node under root 'Anchor'; vertex formats + materials as for worlds (conv.prepare).
 
 python expl30.py <1.0 exploder dir> [...] [--assets DIR]
 python expl30.py --package <1.0 package.lua> [--assets DIR]   converts every Model the package uses (from --ext10)
@@ -15,7 +15,8 @@ from pathlib import Path
 from oct import Oct, children
 from collections import Counter
 import graph, paths
-from conv import pool_rec, geo_nodes, _reindex, _roundtrip, prepare, foreign_pools, rename_files, copy_textures
+from conv import (pool_rec, geo_nodes, _reindex, _roundtrip, prepare, foreign_pools, rename_files, copy_textures,
+                  sort_pools, sort_associations, check_foreign)
 from native30 import native_scene
 
 # besides the pools 3.0 never ships (conv.foreign_pools: SurfaceTypes...): gameplay and set-piece pools an exploder
@@ -75,6 +76,8 @@ def convert(src_dir, assets=None):
     if ag:
         ag[0].set_int(sum(1 for r in s.recs if r.name == 'Instance' and r.pool == 'CollisionInstancePool'))
     rename_files(s, stem, stem.lower())   # internal file names follow the lower-case install name
+    s = sort_associations(sort_pools(s))  # the shipped pool and association orders (AssetPool before AssociationPool)
+    check_foreign(s, 'exploders')
     s.save(out / ('%s.oct' % stem.lower()))
     (out / ('%s.mtb' % stem.lower())).write_bytes(data)
     copy_textures(tocopy, assets / 'textures')

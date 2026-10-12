@@ -10,7 +10,6 @@ definitions registered), so this writes the merged table as a plain Lua literal 
 
 python expack.py <out.lua> <base package> <extra package> [...]
 """
-import sys
 from pathlib import Path
 from luabc import run_package
 
@@ -50,6 +49,12 @@ def merged(pkgs):
 
 
 if __name__ == '__main__':
-    pkgs = [run_package(p) for p in sys.argv[2:]]
-    Path(sys.argv[1]).write_text(merged(pkgs), encoding='ascii')
-    print('wrote %s: %d expendables, %d groups' % (sys.argv[1], len(pkgs[0]['Expendables']), len(pkgs[0]['Groups'])))
+    import argparse
+    ap = argparse.ArgumentParser(description='Merge expendable packages into one plain-Lua 3.0 package')
+    ap.add_argument('out', help='.lua to write')
+    ap.add_argument('base', help='package whose entries come first (the 3.0 playset package)')
+    ap.add_argument('extra', nargs='+', help='packages appended to it (1.0 packages get pop-in defaults)')
+    a = ap.parse_args()
+    pkgs = [run_package(p) for p in [a.base] + a.extra]
+    Path(a.out).write_text(merged(pkgs), encoding='ascii')
+    print('wrote %s: %d expendables, %d groups' % (a.out, len(pkgs[0]['Expendables']), len(pkgs[0]['Groups'])))

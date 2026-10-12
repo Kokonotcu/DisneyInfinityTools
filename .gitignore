@@ -3,6 +3,7 @@ __pycache__/
 matindex.json
 donors.json
 texindex.json
-shippedkeys.json
+shippedkeys*.json
 shippedpools.json
 filledroles.json
+shippedassociations.json

@@ -20,6 +20,7 @@ python graph.py [n]   print the derived numbers for n nodes
 """
 import struct
 from oct import Oct, Rec, children
+import paths
 
 FIXED = ['Layout', 'Visibility', 'Transform', 'In WorldBasis.Transform',
          'In WorldBasis', 'Convert To WorldBasis', 'ConvertDilationToTransform']
@@ -27,8 +28,15 @@ BLOCK = ['Transform', 'In WorldBasis.Transform', 'In WorldBasis',
          'Convert To WorldBasis', 'ConvertDilationToTransform']
 
 
-def plan(n, names, root='Layout'):
-    """Every derived number for an n-geometry-node graph."""
+SHARED_EXTRA = {'Dilation': 0, 'Transform': 32}   # bytes a shared DataNode adds to VariableAccumulatedSize[1]
+
+
+def plan(n, names, root='Layout', shared=('Visibility', 'Dilation')):
+    """Every derived number for an n-geometry-node graph. shared: the types of the 2 shared DataNodes -- a Transform
+    where shipped graphs usually have a Dilation adds 32 bytes to both accumulated sizes (3 of 1,367 shipped graphs
+    of this shape; the rule reproduces all 1,367)."""
+    assert shared[0] == 'Visibility' and shared[1] in SHARED_EXTRA, 'shared DataNodes %s: size not measured' % (shared,)
+    x = SHARED_EXTRA[shared[1]]
     assert len(names) == n
     b = lambda i: 4 + n + 5 * i          # 1-based header of node i's block
     hdr = [root, 'Visibility', 'Transform'] + list(names)
@@ -52,15 +60,15 @@ def plan(n, names, root='Layout'):
         'proc': [(b(i) + 4, [4 + 3 * i, 3 + 3 * i],
                   b(i) + 3, [2 + 3 * i, 1, 4 + 3 * i]) for i in range(n)],
         'variant': [[4 + 3 * i, 3 + 3 * i] for i in range(n)],
-        'acc32': {'1': [4, 36 + 148 * n, 2 + 5 * n], '4': [4, 12 * n, 2 * n]},
-        'acc64': {'1': [8, 40 + 168 * n, 2 + 5 * n], '4': [8, 24 * n, 2 * n]},
+        'acc32': {'1': [4, 36 + x + 148 * n, 2 + 5 * n], '4': [4, 12 * n, 2 * n]},
+        'acc64': {'1': [8, 40 + x + 168 * n, 2 + 5 * n], '4': [8, 24 * n, 2 * n]},
     }
 
 
 def expand(f, names, root='Layout'):
     """Resize f's SubNetwork graph to len(names) geometry nodes."""
     n = len(names)
-    p = plan(n, names, root)
+    p = plan(n, names, root, tuple(f.kids(d)['Type'].names()[0] for d in f.find(name='DataNode')[:2]))
 
     for k in ('VariableHeaderCount', 'VariableDataNodeCount', 'ProcessorNodeCount',
               'VariantGroupCount', 'VariantMemberCount'):
@@ -138,9 +146,43 @@ def _splice_pool(f, pool_name, new_recs):
     f.recs[i + 1:j] = new_recs
 
 
+def _corpus_one(p):
+    """[(n, every derived number matches)] for each SubNetwork of p in the generated shape."""
+    try:
+        f = Oct.load(p)
+    except Exception:
+        return []
+    out = []
+    for sn in f.find(name='SubNetwork', pool='SubNetworkPool'):
+        i, j = f.block(sn)
+        k = {r.name: r for r in f.recs[i:j] if r.level == sn.level + 1}
+        if 'HeaderStrings' not in k or 'VariableHeaderCount' not in k:
+            continue
+        hs = k['HeaderStrings'].names()
+        heads = [hs[x] for x in k['HeaderStringIndices'].ints()]
+        if len(heads) < 9 or heads[1:3] != ['Visibility', 'Transform'] or (len(heads) - 3) % 6:
+            continue
+        n = (len(heads) - 3) // 6
+        shared = tuple(f.kids(d)['Type'].names()[0] for d in [r for r in f.recs[i:j] if r.name == 'DataNode'][:2])
+        if shared[0] != 'Visibility' or shared[1] not in SHARED_EXTRA:
+            continue
+        p_ = plan(n, heads[3:3 + n], heads[0], shared)
+        if heads != p_['headers']:
+            continue
+        ok = all(k[c].ints()[0] == p_[c] for c in ('VariableHeaderCount', 'VariableDataNodeCount', 'ProcessorNodeCount',
+                                                     'VariantGroupCount', 'VariantMemberCount') if c in k)
+        ok &= k['HeaderLayout'].ints() == p_['HeaderLayout']
+        for w in ('32', '64'):
+            r = [x for x in f.recs[i:j] if x.name == 'VariableAccumulatedSize' + w]
+            if r:
+                a, b = f.block(r[0])
+                ok &= {x.name: x.ints() for x in f.recs[a + 1:b]} == p_['acc' + w]
+        out.append((n, ok))
+    return out
+
+
 def _selftest():
-    """Re-derive three shipped files from the rule; any drift fails here."""
-    import paths
+    """Re-derive three shipped files from the rule, then every shipped SubNetwork of the generated shape."""
     W = paths.ext30('worlds')
     # header 1 is the parent transform's own name, not the literal "Layout"
     cases = [('out_intro2', ['Default_Floor'], 'Layout'),
@@ -177,11 +219,16 @@ def _selftest():
         vg = [r.ints() for r in f.find(name='VariantGroup')]
         assert vg == p['variant'], '%s variant: derived %s, file %s' % (name, p['variant'], vg)
         print('%-12s n=%d  reproduced exactly' % (name, len(nodes)))
-    print('rule reproduces every shipped graph tested')
+    from par import pmap
+    rows = [r for rs in pmap(_corpus_one, sorted(paths.ext30().rglob('*.oct')), chunksize=16) for r in rs]
+    good = sum(ok for _, ok in rows)
+    print('rule reproduces %d of %d shipped SubNetworks of the generated shape (n up to %d)'
+          % (good, len(rows), max(n for n, _ in rows)))
+    assert rows and good == len(rows)
 
 
 if __name__ == '__main__':
-    import argparse, paths
+    import argparse
     ap = argparse.ArgumentParser(description='Meridian graph sizing per geometry node')
     ap.add_argument('n', nargs='?', type=int, default=3)
     ap.add_argument('--selftest', action='store_true')

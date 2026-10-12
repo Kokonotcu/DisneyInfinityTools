@@ -18,7 +18,8 @@ python matp.py --selftest [--ext30 DIR]   predict every shipped 3.0 bundle's lay
 import struct
 
 # .shd offsets: u16 block A size, u16 block B size, u8 B texture-slot count; then slot stride.
-# 3.0 from the exe; 1.0 fitted to 350/350 single-material bundles (same layout, 0x24 earlier)
+# 3.0 from the exe; 1.0 fitted to 350/350 single-material bundles (same fields: block A size 0x24 earlier,
+# block B size and slot count 0x38 earlier)
 # and its slots are a bare u32 index (3.0: u32 index + u32).
 SHD_LAYOUT = {3: (0x6a, 0xa2, 0xa1, 8), 1: (0x46, 0x6a, 0x69, 4)}
 _shd = {}
@@ -66,6 +67,17 @@ def material_names(data):
             for _ in range(nmat):
                 s, p = _cstr(b, p); names.append(s)
             return names
+        o += struct.unpack_from('<I', b, o + 8)[0]
+    return []
+
+
+def texb(data):
+    """The TEXB texture hashes (hex) in order -- no material sized, so no shaders needed."""
+    b = bytes(data)
+    o = 16
+    for _ in range(struct.unpack_from('<I', b, 12)[0]):
+        if b[o:o + 4] == b'TEXB':
+            return [b[o + 20 + 12 * i:o + 28 + 12 * i].hex() for i in range(struct.unpack_from('<I', b, o + 12)[0])]
         o += struct.unpack_from('<I', b, o + 8)[0]
     return []
 

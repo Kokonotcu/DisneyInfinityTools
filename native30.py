@@ -11,47 +11,56 @@ Only what 3.0 cannot read changes (measured against the shipped 3.0 corpus, fore
   Light (135)         1.0 light fields -> plain Transform in place
   pools               pools 3.0 never ships dropped (measured: Realm*, SurfaceTypes; ExpendablePool kept);
                       Curves/NavMesh/BoundingVolume/MeridianLocator dropped (gameplay, needs the 1.0 graph =
-                      plan B); LayoutPool/AssetPool/SubNetworkPool from the 3.0 donor; all in shipped order
+                      plan B); LayoutPool/AssetPool/SubNetworkPool/ExternalFilePool from the 3.0 donor; all in
+                      the shipped order (conv.sort_pools)
   graph               the 1.0 graph has NO processor nodes (3,480 Dilations), 3.0 resolves positions
                       through processor chains -> a generated graph (graph.expand) carries only what must
-                      live there: the expendable sockets and the player-start locator, native positions
-  associations        CellLink/VisHierarchyLink/Expendable kept; collision as the in-game-proven static
-                      scheme (instance Transform places the body); the rest are graph bindings (plan B)
-  spawn               .mer = emp_0_spaceempty's start chain (bound to Layout|LOC_PlayerStart at --start, or a
-                      1.0 graph locator) + a connection-free RealmCache for lighting
+                      live there: the expendable sockets, one slot per collision instance, the player start
+  collision           as every shipped instance (23,509 of 23,509): CollisionInstanceToDataNode + CollisionAggregate
+                      on its slot's 'Layout|COL_i|Transform|In WorldBasis.Transform' (every part a graph header),
+                      the 1.0 CollisionShapeToCollisionInstance on 'Layout|COL_i'; no scene link (SceneTreeNodeRef
+                      -1, as 9,380 shipped instances); the slot sits at the instance's own Transform;
+                      Asset AggregateCount = instances (= CollisionAggregate links in 3,905 of 3,905 files)
+  associations        CellLink/VisHierarchyLink/Expendable kept, the rest are graph bindings (plan B); in the
+                      shipped kind order (conv.sort_associations; Expendable, never shipped, after VisHierarchyLink)
+  spawn               the .mer must be parsed: ExternalFilePool [Meridian] (every shipped world with a .mer has
+                      it, and only those: 354 [Meridian], 230 [ActorParameters, Meridian]) and AssetPool[0]; its .mtc lists exactly its node/link classes
+                      (mer.mtc, 584/584 shipped rebuilt). The start graph is holohendy's: LocatorNode ->
+                      PlayerStartPosNode, the form ground levels ship (TardisManifestAdv only starts vehicles)
+                      + a connection-free RealmCache for lighting; StartPositions keys a start by the LOADING
+                      ZONE (0x1485830), so the namespace names follow the zone / world folder as shipped
 
 python native30.py --source <1.0 world dir> --world <3.0 folder> --zone <zone record name>
                    [--start x,y,z | --start-locator NAME] [--realm rlm_in_day] [--assets DIR] [--translate] [--dry]
   Metroville as installed in-game: --source <ext10>/assets/worlds/in_city --world out_intro2 --zone OUT_Intro2
                                    --start -87.85,155.35,619.19
 """
-import argparse, shutil, struct
+import argparse, struct
 from collections import Counter
 from pathlib import Path
 from oct import Oct, children
 import graph, paths
 from conv import (pool_rec, _roundtrip, _reindex, world_by_path, mat2quat, prepare, foreign_pools, sort_pools,
-                  rename_files, check_foreign, copy_textures, TRANSFORM_FIELDS, LAYOUT)
+                  sort_associations, rename_files, check_foreign, copy_textures, TRANSFORM_FIELDS, LAYOUT)
 from subnet import subnets
 
-# Donors from the 3.0 extract. Start graph: a 3.0 level spawns the player through Catalyst -> TardisManifestAdv
-# -> PlayerStartPosNode <- LocatorNode(Layout|LOC_PlayerStart). emp_endor_details (LocatorNode ->
-# PlayerStartPosNode only, no manifest) never built a start node. emp_0_spaceempty is the smallest shipped graph
-# with the whole chain linked (10 nodes); its LinksBuffer is compressed, so it is used verbatim.
-# ponytail: its transport rule spawns the avatar in emp_xwing_ps and its realm is RLM_EMP_Space; changing
-# them needs a ParameterStrings rebuild
-DONOR = 'out_intro2'                         # Layout/AssetPool/SubNetworkPool, collision links, .mtc/.ap
-START_MER = ('emp_0_spaceempty', 'emp_0_spaceempty.mer')
-INTRO = 'psx_intro'                          # the start locator's MeridianLocatorPool + association
+# Donors from the 3.0 extract.
+DONOR = 'out_intro2'          # Layout/AssetPool/SubNetworkPool/ExternalFilePool [Meridian], collision link templates
+# Start: StartPositions::GetStartPosition (0x13a85d0) asks the PlayerStartPosNodes registered for the loading zone
+# (then AlternateStartPointZone, then any zone) and falls back to the ORIGIN. A PlayerStartPosNode takes its
+# Transform from a LocatorNode, which binds by LocatorNodeIndex into MeridianLocatorPool; the MeridianLocator
+# association must name a Transform DataNode (a Dilation resolves to null). holohendy is the smallest shipped ground
+# start with a RealmCache (5 nodes): the .mer chain, its MeridianLocatorPool and its association are taken together.
+START_DONOR = 'holohendy'
+START = 'LOC_Player'          # the slot holohendy's LocatorNode is bound to (BoundObjectName Layout|LOC_Player)
 # besides the pools 3.0 never ships (conv.foreign_pools): CurvesPool ships in 131 3.0 worlds, but 1.0's is not
 # converted; NavMesh/BoundingVolume/MeridianLocator are gameplay (plan B; the 1.0 BoundingVolume world-bounds blob
-# caused endless respawns); Layout/Asset/SubNetwork are replaced by the donor's
+# caused endless respawns); Layout/Asset/SubNetwork/ExternalFile are replaced by the donor's
 DROP_POOLS = ('CurvesPool', 'NavMeshPool', 'BoundingVolumePool', 'MeridianLocatorPool', 'LayoutPool', 'AssetPool',
-              'SubNetworkPool')
+              'SubNetworkPool', 'ExternalFilePool')
 KEEP_POOLS = {'ExpendablePool': 'LayoutPool'}    # 1.0 pool 3.0 still registers (FUN_01604820) -> placed before
 KEEP_ASSOC = ('CellLink', 'VisHierarchyLink', 'Expendable', 'CollisionShapeToCollisionInstance')
-START = 'LOC_PlayerStart'   # the name emp_0_spaceempty's LocatorNode is bound to
-ADD_ASSOC = ('CollisionAggregate', 'Transform', 'Anchor', 'PrimaryAnchor', 'PlacementNode')
+ADD_ASSOC = ('Transform', 'Anchor', 'PrimaryAnchor', 'PlacementNode')    # the donor's bindings of the Layout node
 
 
 def graph_locators(s):
@@ -123,32 +132,54 @@ def native_scene(s):
           % (dict(conv), hidden))
 
 
-def build_mer(out, realm, zone):
-    """emp_0_spaceempty's start chain verbatim; the namespace is renamed to the zone and its RealmCache
-    points at our realm (appended to ParameterStrings, so no other string offset moves)."""
-    m = Oct.load(paths.ext30('worlds', *START_MER))
-    # start points register per ZONE under the graph namespace: every shipped graph names it after its
-    # zone (PSX_Intro, KRT_ALDN_SpdWay...).
-    for r in m.recs:                      # node pool header + the link pool's copy of it
-        if r.pool in ('MeridianNodePool', 'MeridianLinkPool') and r.name in ('Name', 'GraphFileName', 'UserNamespace'):
-            r.set_name(zone if r.name != 'UserNamespace' else zone.lower())
-    nk = m.kids(m.find(name='MNode')[0])
-    blob = lambda b: b[1:] if b[0] + 1 == len(b) else b[2:]
-    pack = lambda d: bytes([len(d)]) + d if len(d) <= 255 else struct.pack('<H', len(d)) + d
-    vals, strs = bytearray(blob(nk['ParameterValues'].value())), bytearray(blob(nk['ParameterStrings'].value()))
-    rc = next(x for x in m.find(name='MNode') if m.kids(x)['Type'].names()[0] == 'RealmCache')
-    off = m.kids(rc)['Mer_ParametersOffset'].ints()[0]
-    assert strs[struct.unpack_from('<I', vals, off)[0]:].startswith(b'RLM_EMP_Space\0')   # its realm string slot
-    struct.pack_into('<I', vals, off, len(strs))
-    strs += realm.encode() + b'\0'
-    nk['ParameterValues'].pay, nk['ParameterStrings'].pay = pack(bytes(vals)), pack(bytes(strs))
-    m.save(out)
-    chk = Oct.load(str(out))
-    types = [r.names()[0] for r in chk.recs if r.pool == 'MeridianNodePool' and r.name == 'Type' and r.level == 3]
-    assert {'TardisManifestAdv', 'PlayerStartPosNode', 'LocatorNode'} <= set(types), types
-    bound = [r.names()[0] for r in chk.recs if r.name == 'BoundObjectName']
+def _start_graph(m, realm, zone, world):
+    """START_DONOR's graph (.mer or its .merdebug twin) for our world: the namespace named as shipped (Name and
+    GraphFileName the zone, as 164 of 207 zoned graphs; UserNamespace the world folder, as 189 of 207) and the
+    RealmCache's Name parameter pointed at our realm (appended to ParameterStrings: no other offset moves)."""
+    import mer
+    for pool, rec in (('MeridianNodePool', 'MNode'), ('MeridianLinkPool', 'MLink')):
+        for x in m.find(name=rec, pool=pool):
+            k = m.kids(x, deep=False)
+            if k['Type'].names()[0] == 'NameSpaceBegin':
+                for f in ('Name', 'GraphFileName'):
+                    if f in k:
+                        k[f].set_name(zone)
+                if 'UserNamespace' in k:
+                    k['UserNamespace'].set_name(world.lower())
+    nodes = m.find(name='MNode', pool='MeridianNodePool')
+    bk = m.kids(next(x for x in nodes if m.kids(x)['Type'].names()[0] == 'NameSpaceBegin'), deep=False)
+    vals, strs = bytearray(mer.blob(bk['ParameterValues'])), bytearray(mer.blob(bk['ParameterStrings']))
+    rk = m.kids(next(x for x in nodes if m.kids(x)['Type'].names()[0] == 'RealmCache'), deep=False)
+    desc = mer.blob(rk['Mer_ParameterDescription'])
+    ents = [struct.unpack_from('<BIi', desc, 4 + 9 * i) for i in range(struct.unpack_from('<I', desc)[0])]
+    slot = rk['Mer_ParametersOffset'].ints()[0] + next(o for t, hh, o in ents if t == 3 and hh == mer.h('Name'))
+    struct.pack_into('<I', vals, slot, len(strs))
+    strs += realm.encode('latin-1') + b'\0'
+    bk['ParameterValues'].set_bytes(vals)
+    bk['ParameterStrings'].set_bytes(strs)
+    for r in m.recs:                    # .merdebug: the debug copy of that parameter
+        if r.name == '_DebugOnly_ParamValue' and r.pool == 'MeridianNodePool' and r.key == 'Name' and \
+                r.value()[1:] and isinstance(r.value()[1], str) and r.value()[1].upper().startswith('RLM_'):
+            r.set_names(['Name', realm])
+    return m.reparse()
+
+
+def build_mer(out, realm, zone, world):
+    """The start graph as <world>.mer + .merdebug + .mtc (its type manifest), checked by reloading it."""
+    import mer
+    src = paths.ext30('worlds', START_DONOR, START_DONOR)
+    m = _start_graph(Oct.load(str(src) + '.mer'), realm, zone, world)
+    m.save(out.with_suffix('.mer'))
+    _start_graph(Oct.load(str(src) + '.merdebug'), realm, zone, world).save(out.with_suffix('.merdebug'))
+    out.with_suffix('.mtc').write_bytes(mer.mtc(m))
+    g = mer.load(out.with_suffix('.mer'))
+    types = [n['type'] for n in g['nodes']]
+    assert {'LocatorNode', 'PlayerStartPosNode', 'RealmCache'} <= set(types), types
+    rc = next(n for n in g['nodes'] if n['type'] == 'RealmCache')
+    assert any(p['name'] == 'Name' and p['value'] == realm for p in rc['params']), rc['params']
+    bound = [r.names()[0] for r in m.recs if r.name == 'BoundObjectName']
     assert bound == ['%s|%s' % (LAYOUT, START)], bound
-    print('  .mer: %s, start bound to %s, realm %s, zone %s' % (types, bound[0], realm, zone))
+    print('  .mer/.merdebug/.mtc: %s, start bound to %s, realm %s, zone %s' % (types, bound[0], realm, zone))
 
 
 def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=None, translate=False, dry=False,
@@ -158,7 +189,7 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
     ref_dir = paths.ext30('worlds', donor)
     s = Oct.load(src_dir / ('%s.oct' % stem))
     ref = Oct.load(ref_dir / ('%s.oct' % donor))
-    intro = Oct.load(paths.ext30('worlds', INTRO, '%s.oct' % INTRO))
+    intro = Oct.load(paths.ext30('worlds', START_DONOR, '%s.oct' % START_DONOR))
     # Metroville: IN_City_StartPoint is outside the playable city (user: "weird place"); its in-game start is
     # given with --start instead: the centre of the densest 60 m block of building sockets, where a downward ray
     # through the geometry first hits street level (open sky, not a roof): native (-87.85, 155.35, 619.19).
@@ -209,14 +240,14 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
         if t == 'Expendable':      # resolves NodeName + '|Transform' as a graph DataNode (FUN_01604820)
             sock.append(wpath[k['NodeName'].names()[0]])
             k['NodeName'].set_name('%s|SOCK_%d' % (LAYOUT, len(sock) - 1))
-        elif t == 'CollisionShapeToCollisionInstance':
+        elif t == 'CollisionShapeToCollisionInstance':      # on the instance's slot, as shipped ('Layout|<slot>')
             k['NodeName'].set_name('%s|COL_%d' % (LAYOUT, k['CollisionInstanceRef'].ints()[0]))
     add, tmpl = [], {}
     for asc in ref.find(name='Association', pool='AssociationPool'):
         k = ref.kids(asc)
         t = k['Type'].names()[0]
         ai, aj = ref.block(asc)
-        if t == 'CollisionInstanceToDataNode':
+        if t in ('CollisionInstanceToDataNode', 'CollisionAggregate'):
             tmpl[t] = (ai, aj)
         if t not in ADD_ASSOC:
             continue
@@ -224,48 +255,47 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
         bk = children(b2)
         if 'SceneTreeNodeRef' in bk:
             bk['SceneTreeNodeRef'].set_int(layout_ref)
-        if t == 'CollisionAggregate':
-            bk['NodeName'].set_name('COL_0')
-            bk['SceneTreeNodeRef'].set_int(-1)
         add.append(b2)
-    n_inst = sum(1 for r in s.recs if r.name == 'Instance' and r.pool == 'CollisionInstancePool')
-    for i in range(n_inst):   # static scheme, proven in-game: the instance Transform places the body
-        ai, aj = tmpl['CollisionInstanceToDataNode']
-        b2 = _reindex(ref, s, ref.recs[ai:aj])
-        bk = children(b2)
-        bk['NodeName'].set_name('COL_%d' % i)
-        bk['CollisionInstanceRef'].set_int(i)
-        add.append(b2)
+    cols = [s.kids(r)['Transform'].floats() for r in s.find(name='Instance', pool='CollisionInstancePool')]
+    for i in range(len(cols)):          # per instance, as every shipped one: data-node link + aggregate on its slot
+        for t in ('CollisionInstanceToDataNode', 'CollisionAggregate'):
+            b2 = _reindex(ref, s, ref.recs[slice(*tmpl[t])])
+            bk = children(b2)
+            bk['NodeName'].set_name('%s|COL_%d|Transform|In WorldBasis.Transform' % (LAYOUT, i))
+            bk['CollisionInstanceRef'].set_int(i)
+            if 'SceneTreeNodeRef' in bk:
+                bk['SceneTreeNodeRef'].set_int(-1)     # no scene link (as 9,380 of 23,509 shipped instances)
+            add.append(b2)
     for asc in intro.find(name='Association', pool='AssociationPool'):   # the start locator
         k = intro.kids(asc)
         if k['Type'].names()[0] == 'MeridianLocator':
             ai, aj = intro.block(asc)
             b2 = _reindex(intro, s, intro.recs[ai:aj])
-            # the shipped path (emp_0_spaceempty): '...|Transform|In WorldBasis.Transform', the Transform the
-            # slot's processors output. Bound to the slot Dilation instead, the locator got the wrong node
-            # type (debugger: zone + player checks pass, transform fails); bound here, the output stayed at
-            # its identity default (origin). So the outputs are also pre-filled with the start (below).
+            # '...|Transform|In WorldBasis.Transform', the Transform the slot's processors output, as 34,456
+            # shipped MeridianLocator bindings (0 bind a Dilation: 0x6b6830 requires a Transform DataNode and
+            # resolves a Dilation to null -- the "transform fails" the debugger showed). The outputs are also
+            # pre-filled with the start (below), like the 125 shipped worlds whose Transform holds the position.
             children(b2)['NodeName'].set_name('%s|%s|Transform|In WorldBasis.Transform' % (LAYOUT, START))
             add.append(b2)
     _, end = s.block(pool_rec(s, 'AssociationPool'))
     s.recs[end:end] = [r for b2 in add for r in b2]
-    s = _roundtrip(s)
-    for i, asc in enumerate(s.find(name='Association', pool='AssociationPool')):
-        asc.set_name(str(i))
+    s = sort_associations(s.reparse(), {'Expendable': 'VisHierarchyLink'})
 
-    # 3.0 pools: LayoutPool/AssetPool/SubNetworkPool from the donor, the locator pool from psx_intro
-    for src, name in ((ref, 'LayoutPool'), (ref, 'AssetPool'), (ref, 'SubNetworkPool'), (intro, 'MeridianLocatorPool')):
+    # 3.0 pools: Layout/Asset/SubNetwork/ExternalFile from the donor, the locator pool from the start donor
+    for src, name in ((ref, 'LayoutPool'), (ref, 'AssetPool'), (ref, 'SubNetworkPool'), (ref, 'ExternalFilePool'),
+                      (intro, 'MeridianLocatorPool')):
         i, j = src.block(pool_rec(src, name))
         s.recs.extend(_reindex(src, s, src.recs[i:j]))
     s = _roundtrip(s)
-    slots = ['SOCK_%d' % i for i in range(len(sock))] + [START]
+    assert [r.names()[0] for r in s.find(name='Type', pool='ExternalFilePool')] == ['Meridian']
+    slots = ['SOCK_%d' % i for i in range(len(sock))] + ['COL_%d' % i for i in range(len(cols))] + [START]
     gp = graph.expand(s, slots, LAYOUT)
     s = _roundtrip(s)
-    ag = s.find(name='AggregateCount')
-    ag[0].set_int(len(slots))
-    # SPAWN: in this zone the player spawns at the world ORIGIN whatever the start graph says (debugger:
-    # no start node is ever constructed, even with the unmodified shipped emp_endor_details graph). So the
-    # world is translated to put the start 1 below the origin -- applied ONLY to world-space
+    s.find1(name='AggregateCount', pool='AssetPool').set_int(len(cols))   # = CollisionAggregate links
+    # SPAWN: earlier builds spawned at the world ORIGIN (debugger: no start node is ever constructed, even with
+    # the unmodified shipped emp_endor_details graph): they had no ExternalFilePool [Meridian] entry, without which
+    # the .mer is never parsed (0x77ca30), and a donor .mtc declaring other node classes; both are now written as
+    # shipped. --translate is the old workaround: the world translated to put the start 1 below the origin -- applied ONLY to world-space
     # fields (field audit): root scene nodes (children inherit), BoundingOBBCenter, CellToWorldMatrix,
     # collision instance Transforms, graph slots. Local fields (BoundingSphereCenter, child matrices,
     # vertices, .btd) are untouched -- moving the sphere centres and missing the cells is what hid the
@@ -274,8 +304,8 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
     # coordinates -- the graph-driven SceneNodeRefs set pieces -- stays consistent) and the start graph
     # moves the player instead.
     off = [-start[0], -start[1] - 1.0, -start[2]] if translate else [0.0, 0.0, 0.0]
-    pos = [[m[12] + off[0], m[13] + off[1], m[14] + off[2]] for m in sock] + [[a + b for a, b in zip(start, off)]]
-    rot = [mat2quat(m) for m in sock] + [None]
+    pos = [[m[12] + off[0], m[13] + off[1], m[14] + off[2]] for m in sock + cols] + [[a + b for a, b in zip(start, off)]]
+    rot = [mat2quat(m) for m in sock + cols] + [None]
     dn, moved, orient = None, 0, []
     for r in s.recs:
         if r.pool != 'DataNodePool':
@@ -316,8 +346,8 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
     for r, q in reversed(orient):     # inserting after r leaves every earlier position (and s.idx's map) valid
         s.recs.insert(s.idx(r) + 1, type(r)(s, r.level, r.type, s.add_name('Orientation'), r.pay).set_floats(q))
     s = _roundtrip(s)
-    print('  graph: %d sockets + start, headers %d, datanodes %d'
-          % (len(sock), gp['VariableHeaderCount'], gp['VariableDataNodeCount']))
+    print('  graph: %d sockets + %d collision slots + start, headers %d, datanodes %d'
+          % (len(sock), len(cols), gp['VariableHeaderCount'], gp['VariableDataNodeCount']))
     moved = Counter()
     nodes = s.find(name='Node', pool='SceneTreeNodePool')
     scene_i = next(i for i, x in enumerate(nodes) if s.kids(x)['Type'].names()[0] == 'Scene')
@@ -347,16 +377,15 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
     # locator) were resolved before the graph existed: 2 exploder archives opened instead of 85.
     s = sort_pools(s, KEEP_POOLS)
     print('  pool order: %s' % [r.name for r in s.recs if r.level == 1])
-    check_foreign(s, allow=('ExpendablePool', 'ExpendableNodeRef'))
+    check_foreign(s, 'worlds', allow=('ExpendablePool', 'ExpendableNodeRef'))
     import btdconv
     bd = btdconv.convert_file((src_dir / ('%s.btd' % stem)).read_bytes())
     print('  btd: %d blocks, native coordinates' % len(btdconv.blocks(bd, 3)))
     if dry:
         print('(dry run: nothing written)'); return
     s.save(out / ('%s.oct' % world))
-    for ext in ('.mtc', '.ap'):
-        shutil.copy2(ref_dir / ('%s%s' % (donor, ext)), out / ('%s%s' % (world, ext)))
-    build_mer(out / ('%s.mer' % world), realm, zone)
+    (out / ('%s.ap' % world)).write_bytes(b'')    # no ActorParameters entry -> empty, as 346 of 346 such worlds
+    build_mer(out / ('%s.oct' % world), realm, zone, world)
     (out / ('%s.mtb' % world)).write_bytes(data)
     copy_textures(tocopy, assets / 'textures')
     (out / ('%s.btd' % world)).write_bytes(bd)

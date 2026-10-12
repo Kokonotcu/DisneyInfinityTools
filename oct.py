@@ -178,6 +178,16 @@ class Rec:
         assert shape == LIST or len(vals) == 1
         return self._rebuild(FLOAT, [struct.pack('<f', v) for v in vals], 4, self._count_width(len(vals)))
 
+    def set_bytes(self, data):
+        """Blob write (a key, if any, kept); the count widens with the data: 0x23 -> 0x63 -> 0xA3, never narrows."""
+        shape, keyed, kind, cw, _ = spec(self.type)
+        assert kind == BYTE, 'not a blob: %s 0x%x' % (self.name, self.type)
+        cw = self._count_width(len(data))
+        self.type = (self.type & ~0xc0) | (cw - 1) << 6
+        self.pay = bytes(self.pay[:2 * keyed]) + len(data).to_bytes(cw, 'little') + bytes(data)
+        assert spec(self.type), self.type
+        return self
+
     def set_names(self, strings):
         """Name value(s) write (adds the strings to the file's name table); a keyed node or a keyed scalar
         takes one string: its key."""

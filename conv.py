@@ -326,10 +326,11 @@ def rename_files(s, old, new):
                 r.set_name(v.replace(old, new))
 
 
-def check_foreign(s, allow=()):
-    """Assert no record kind 3.0 never ships is left (foreign.py); allow = pools or record names kept on purpose."""
+def check_foreign(s, kind='worlds', allow=()):
+    """Assert no record kind 3.0 never ships in that asset kind is left (foreign.py); allow = pools or record names
+    kept on purpose."""
     import foreign
-    left = [k for k in foreign.foreign_in(s) if k[0] not in allow and k[1] not in allow]
+    left = [k for k in foreign.foreign_in(s, kind) if k[0] not in allow and k[1] not in allow]
     assert not left, '%d record kinds 3.0 never ships remain, e.g. %s' % (len(left), left[:8])
     print('  0 record kinds foreign to 3.0' + (' (kept: %s)' % ', '.join(allow) if allow else ''))
 
@@ -347,33 +348,107 @@ def _tops(p):
         return None
 
 
+def _agreed_order(seqs, what):
+    """The one order every sequence agrees on (asserted: no two sequences order a pair both ways), topological;
+    items no sequence holds together tie by their mean relative position."""
+    after, pos = {}, {}
+    for q in seqs:
+        for i, a in enumerate(q):
+            after.setdefault(a, set()).update(q[i + 1:])
+            pos.setdefault(a, []).append(i / len(q))
+    clash = [(a, b) for a in after for b in after[a] if a in after.get(b, ())]
+    assert not clash, 'shipped files disagree on %s order: %s' % (what, clash[:4])
+    indeg = Counter(b for a in after for b in after[a])
+    key = lambda n: (sum(pos[n]) / len(pos[n]), n)
+    ready, order = sorted((n for n in after if not indeg[n]), key=key), []
+    while ready:
+        n = ready.pop(0)
+        order.append(n)
+        for b in after[n]:
+            indeg[b] -= 1
+            if not indeg[b]:
+                ready.append(b)
+        ready.sort(key=key)
+    return order
+
+
 def shipped_pools():
     """Top-level pools of every shipped 3.0 .oct (worlds, realms, exploders, ...) in the one order they all agree
-    on: 0 conflicting pairs over 3,905 files. Topological over every file's sequence; pools no file holds
-    together tie by their mean relative position. Cached."""
+    on: 0 conflicting pairs over 3,905 files. Cached."""
     def build():
         from par import pmap
-        seqs = [q for q in pmap(_tops, sorted(paths.ext30().rglob('*.oct')), chunksize=32) if q]
-        after, pos = {}, {}
-        for q in seqs:
-            for i, a in enumerate(q):
-                after.setdefault(a, set()).update(q[i + 1:])
-                pos.setdefault(a, []).append(i / len(q))
-        clash = [(a, b) for a in after for b in after[a] if a in after.get(b, ())]
-        assert not clash, 'shipped worlds disagree on pool order: %s' % clash[:4]
-        indeg = Counter(b for a in after for b in after[a])
-        key = lambda n: (sum(pos[n]) / len(pos[n]), n)
-        ready, order = sorted((n for n in after if not indeg[n]), key=key), []
-        while ready:
-            n = ready.pop(0)
-            order.append(n)
-            for b in after[n]:
-                indeg[b] -= 1
-                if not indeg[b]:
-                    ready.append(b)
-            ready.sort(key=key)
-        return order
+        return _agreed_order([q for q in pmap(_tops, sorted(paths.ext30().rglob('*.oct')), chunksize=32) if q], 'pool')
     return paths.cached('shippedpools.json', build, 2)
+
+
+# Association kinds. A collision instance's links are one group, always in this order (scene link optional:
+# 14,129 SDAH + 9,380 DAH groups over 23,509 shipped instances); a scene node's bindings are one group.
+COLLISION = ('CollisionInstanceToSceneTreeNode', 'CollisionInstanceToDataNode', 'CollisionAggregate',
+             'CollisionShapeToCollisionInstance')
+PHYSICS = ('PhysicsBodyToSceneTreeNode', 'PhysicsBodyToDataNode', 'PhysicsBodyAggregate', 'CollisionShapeToPhysicsBody',
+           'PhysicsConstraintToPhysicsBody')
+NODE_BINDINGS = ('Transform', 'Anchor', 'PrimaryAnchor', 'PlacementNode', 'Geometry', 'Material', 'RealmData')
+
+
+def association_kind(t):
+    return 'Collision' if t in COLLISION else 'Physics' if t in PHYSICS else 'NodeBindings' if t in NODE_BINDINGS else t
+
+
+def _assoc_kinds(p):
+    from oct import Oct
+    try:
+        s = Oct.load(p)
+    except Exception:
+        return None
+    q = []
+    for a in s.find(name='Association', pool='AssociationPool'):
+        k = association_kind(s.kids(a)['Type'].names()[0])
+        if not q or q[-1] != k:
+            q.append(k)
+    return q
+
+
+def shipped_associations():
+    """Association kinds in the one order every shipped 3.0 .oct agrees on -- each kind is one contiguous run in
+    3,886 of 3,886 files, and no two files order a pair both ways (MeridianLocator, Collision, CellLink,
+    VisHierarchyLink, NodeBindings, Curve ...). Cached."""
+    def build():
+        from par import pmap
+        seqs = [q for q in pmap(_assoc_kinds, sorted(paths.ext30().rglob('*.oct')), chunksize=32) if q]
+        assert all(len(q) == len(set(q)) for q in seqs), 'an association kind is split in a shipped file'
+        return _agreed_order(seqs, 'association')
+    return paths.cached('shippedassociations.json', build)
+
+
+def sort_associations(s, extra=None):
+    """AssociationPool into the shipped order: kinds by shipped_associations(), collision links grouped per instance
+    (ascending, in COLLISION order), everything else in its current relative order; the entries renumbered.
+    extra = {kind 3.0 never ships: the kind it goes right after}."""
+    order = list(shipped_associations())
+    for k, after in (extra or {}).items():
+        order.insert(order.index(after) + 1, k)
+    pool = pool_rec(s, 'AssociationPool')
+    if pool is None:
+        return s
+    i, j = s.block(pool)
+    blocks, q = [], i + 1
+    while q < j:
+        a, b = s.block(s.recs[q])
+        blocks.append(s.recs[a:b])
+        q = b
+    kinds = [association_kind(s.kids(b[0])['Type'].names()[0]) for b in blocks]
+    assert all(k in order for k in kinds), sorted({k for k in kinds if k not in order})
+
+    def key(n):
+        k = s.kids(blocks[n][0])
+        t = k['Type'].names()[0]
+        within = (k['CollisionInstanceRef'].ints()[0], COLLISION.index(t)) if t in COLLISION else (0, 0)
+        return order.index(kinds[n]), within, n
+    s.recs[i + 1:j] = [r for n in sorted(range(len(blocks)), key=key) for r in blocks[n]]
+    s = _roundtrip(s)
+    for n, a in enumerate(s.find(name='Association', pool='AssociationPool')):
+        a.set_name(str(n))
+    return s
 
 
 def foreign_pools(s, keep=()):

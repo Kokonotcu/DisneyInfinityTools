@@ -8,6 +8,12 @@ Not a plain zip. Layout, all decoded from shipped files:
   central directory (zip PK0102 records) + end record (22 B): one keystream, END RECORD FIRST
       (positions 0..21), then the directory (22..). Each directory record carries a 23-byte extra:
       'KF' 0x13 'MD5' + MD5 of the uncompressed member (1,789 of 1,789 checked)
+  members (as shipped): deflate level 9, memLevel 9 (reproduces every member of every exploder, world and realm
+      archive: 19,142 of 19,142; 98.9% of a sample of all archives), DOS
+      time/date 0xA1C3/0x742F on every deflated member (stored .anno: 0/0xA021); in a single-asset archive ordered
+      by kind -- oct, bent, mtb, textures/*.tbody (in the bundle's TEXB order), _N.vbuf, _N.ibuf, btd, btm, mer,
+      merdebug, mtc, ap -- pack_dir rebuilds 2,961/2,961 exploder, 365/365 realm and 576/579 world archives
+      byte-exact from their files
   key: the PSX key when 'psx' appears anywhere in the archive's path under assets/ (1,047 of 1,047
       shipped PSX-key archives, and no other -- choreographies/psx/.../temp_set.zip included); else the
       default key. 789 archives (sound/dialog) are not encrypted at all. Readers detect the key from
@@ -26,6 +32,13 @@ from Crypto.Cipher import AES
 KEY_DEFAULT = bytes.fromhex('681BBEEA63160188F9B7945104A51499')
 KEY_PSX = bytes.fromhex('7DDD6D92F3A46ABAF061EBC3C01D7D88')
 KEYS = {'default': KEY_DEFAULT, 'psx': KEY_PSX, 'none': None}
+DOS_TIME, DOS_DATE = 0xA1C3, 0x742F          # on every shipped deflated member
+KIND_ORDER = ('oct', 'bent', 'mtb', 'tbody', 'vbuf', 'ibuf', 'btd', 'btm', 'mer', 'merdebug', 'mtc', 'ap')
+
+
+def _kind_rank(name):
+    ext = name.rsplit('.', 1)[-1].lower()
+    return KIND_ORDER.index(ext) if ext in KIND_ORDER else len(KIND_ORDER)
 
 
 def key_for(path):
@@ -164,22 +177,26 @@ def write(members, key, eocd_tail=b'\0\0'):
 
 
 def member(name, raw):
-    """A new member with the field values shipped archives use (deflate 9, MD5 extra)."""
-    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    """A new member with the field values shipped archives use (deflate 9 / memLevel 9, DOS time, MD5 extra)."""
+    c = zlib.compressobj(9, zlib.DEFLATED, -15, 9)
     data = c.compress(raw) + c.flush()
     nm, crc = name.encode('latin-1'), zlib.crc32(raw)
     extra = b'KF\x13\x00MD5' + hashlib.md5(raw).digest()
-    lh = struct.pack('<4s5H3I2H', b'PK\x03\x04', 20, 0, 8, 0, 0x21, crc, len(data), len(raw), len(nm), 0) + nm
-    cd = struct.pack('<4s6H3I5H2I', b'PK\x01\x02', 20, 20, 0, 8, 0, 0x21, crc, len(data), len(raw),
+    lh = struct.pack('<4s5H3I2H', b'PK\x03\x04', 20, 0, 8, DOS_TIME, DOS_DATE, crc, len(data), len(raw), len(nm), 0) + nm
+    cd = struct.pack('<4s6H3I5H2I', b'PK\x01\x02', 20, 20, 0, 8, DOS_TIME, DOS_DATE, crc, len(data), len(raw),
                      len(nm), len(extra), 0, 0, 0, 0, 0)
     return dict(name=name, lh=lh, data=data, cd=cd, cd_extra=extra)
 
 
 def pack_dir(src_dir, key):
-    """New archive from loose files (members may sit in folders: textures/x.tbody)."""
+    """New single-asset archive from loose files (members may sit in folders: textures/x.tbody), in the shipped
+    kind order, then by name."""
     members = [member(f.relative_to(src_dir).as_posix(), f.read_bytes())
                for f in sorted(p for p in Path(src_dir).rglob('*') if p.is_file())]
-    members.sort(key=lambda m: (not m['name'].endswith('.oct'), m['name']))
+    import matp                          # textures follow the bundle's TEXB order (21 of 21 shipped exploders whose
+    tex = [h for f in Path(src_dir).glob('*.mtb') for h in matp.texb(f.read_bytes())]   # names are not sorted)
+    rank = lambda n: tex.index(n[-22:-6]) if n.endswith('.tbody') and n[-22:-6] in tex else len(tex)
+    members.sort(key=lambda m: (_kind_rank(m['name']), rank(m['name']), m['name']))
     return write(members, key)
 
 
@@ -222,6 +239,17 @@ def _selftest():
     ship = {m['name']: m['cd_extra'] for m in read(one)[0]}
     assert {m['name']: m['cd_extra'] for m in read(p2)[0]} == ship, 'new members lack the shipped MD5 extra'
     print('pack_dir round trip OK on', one.name, '(MD5 extras identical to shipped)')
+    # a shipped archive rebuilt from nothing but its files: member order, headers, compression, extras, index
+    same = n = 0
+    for z in sorted(root.rglob('*.zip')):
+        files = unpack(z)
+        d = Path(tempfile.mkdtemp())
+        for k, v in files.items():
+            (d / k).parent.mkdir(parents=True, exist_ok=True)
+            (d / k).write_bytes(v)
+        same += pack_dir(d, key_for(z.relative_to(root.parent))) == z.read_bytes()
+        n += 1
+    print('pack_dir from the unpacked files == the shipped archive: %d of %d exploders' % (same, n))
     assert not bad
 
 

@@ -2,7 +2,7 @@
 ring (ctx[0] -> next). Each arena is {cur, end, base, ...}: FUN_0045ace0 resets cur = base per frame,
 FUN_0047e0e0 / FUN_0047e030 bump-allocate from cur and return NULL when cur passes end.
 python arenas.py <dump.dmp> ..."""
-import struct, sys
+import struct
 from pathlib import Path
 from mdmp import Dump
 
@@ -27,5 +27,8 @@ def show(path):
 
 
 if __name__ == '__main__':
-    for p in sys.argv[1:]:
+    import argparse
+    ap = argparse.ArgumentParser(description="Render contexts' frame arenas from minidumps")
+    ap.add_argument('dumps', nargs='+', help='.dmp files (full memory)')
+    for p in ap.parse_args().dumps:
         show(p)

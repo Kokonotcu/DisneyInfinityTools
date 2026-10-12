@@ -1,0 +1,33 @@
+# Code checks that need no game data (game files cannot be in CI): lint, every module imports with no roots
+# set, every tool answers --help. The data self-tests run locally: python selftest.py --ext30 ... --ext10 ...
+# Read by Gitea / Forgejo Actions (they fall back to .github/workflows) and GitHub; needs Actions enabled on the
+# repository and a runner registered on the server.
+name: check
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: dependencies
+        run: pip install pyflakes pycryptodome capstone pefile pillow
+      - name: lint
+        run: python -m pyflakes *.py
+      - name: imports
+        run: |
+          python - <<'EOF'
+          import importlib, pathlib
+          scripts = {'nodedump', 'slotcheck', 'streamlayout', 'disx', 'variant', 'selftest'}   # run on import
+          mods = [p.stem for p in sorted(pathlib.Path('.').glob('*.py')) if p.stem not in scripts]
+          for m in mods:
+              importlib.import_module(m)
+          print('imported', len(mods), 'modules with no roots set')
+          EOF
+      - name: every tool answers --help
+        run: |
+          for f in *.py; do python "$f" --help > /dev/null || { echo "--help failed: $f"; exit 1; }; done
+          test ! -e -- --help

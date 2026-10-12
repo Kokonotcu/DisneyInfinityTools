@@ -45,7 +45,7 @@ def _steam_libraries():
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Valve\Steam') as k:
             roots.append(Path(winreg.QueryValueEx(k, 'SteamPath')[0]))
-    except OSError:
+    except (ImportError, OSError):          # not Windows (Proton, CI), or no Steam key
         pass
     roots += [Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Steam',
               Path.home() / '.steam' / 'steam', Path.home() / '.local' / 'share' / 'Steam']
