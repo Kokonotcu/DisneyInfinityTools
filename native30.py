@@ -322,9 +322,12 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
                 orient.append((r, rot[moved]))
             moved += 1
     assert moved == len(pos), 'placed %d of %d graph slots' % (moved, len(pos))
-    # the start slot's processor outputs ('In WorldBasis.Transform', 'In WorldBasis') hold the world
-    # position too: the Layout basis is identity, so it equals the slot's own Translation
-    dn, outs, seen, nslot = None, [], False, 0
+    # every slot's processor outputs ('In WorldBasis.Transform', 'In WorldBasis') hold its world transform too:
+    # the Layout basis is identity, so they equal the slot's own. The engine reads them as stored: collision binds
+    # the Transform output, and with the template's origin there only the 64 world-space instances (identity
+    # Transform) collided in-game (2026-10-12); the start needed the same. Shipped: 3,385 collision instances'
+    # positions sit in a Transform output.
+    dn, outs = None, []
     for r in s.recs:
         if r.pool != 'DataNodePool':
             continue
@@ -334,15 +337,20 @@ def convert(source, world, zone, realm='rlm_in_day', start=None, start_locator=N
             dn['t'] = r.names()[0]
         elif dn is not None and r.name == 'BasisRef':
             dn['b'] = r.ints()[0]
-        elif r.name == 'Translation' and dn is not None:
-            if seen and len(outs) < 2:
-                outs.append((dn.get('t'), r))
-            if dn.get('t') == 'Dilation' and dn.get('b') == 1 and nslot < len(pos):
-                nslot += 1
-                seen = nslot == len(pos)          # the start is the last slot
-    assert [t for t, _ in outs] == ['Transform', 'Dilation'], outs
-    for _, r in outs:
-        r.set_floats(list(pos[-1]))
+        elif dn is not None and r.name in ('Translation', 'Orientation'):
+            if r.name == 'Translation' and dn.get('t') == 'Dilation' and dn.get('b') == 1 and len(outs) < len(pos):
+                outs.append([])                   # slot input (placed above); its 2 outputs follow
+            elif outs and len(outs[-1]) < 4:
+                outs[-1].append((dn.get('t'), r))
+    assert len(outs) == len(pos) and all([(t, r.name) for t, r in o] == [
+        ('Transform', 'Translation'), ('Transform', 'Orientation'), ('Dilation', 'Translation'),
+        ('Dilation', 'Orientation')] for o in outs), 'slot outputs not in the template shape'
+    for o, p, q in zip(outs, pos, rot):
+        for _, r in o:
+            if r.name == 'Translation':
+                r.set_floats(list(p))
+            elif q:
+                r.set_floats(q)
     for r, q in reversed(orient):     # inserting after r leaves every earlier position (and s.idx's map) valid
         s.recs.insert(s.idx(r) + 1, type(r)(s, r.level, r.type, s.add_name('Orientation'), r.pay).set_floats(q))
     s = _roundtrip(s)

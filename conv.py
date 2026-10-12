@@ -372,13 +372,19 @@ def _agreed_order(seqs, what):
     return order
 
 
+def _shipped_octs():
+    """The .oct kinds the converters write. A full extract also holds characters, choreographies ... (319,544
+    files), whose AssociationPools interleave kinds (NodeBindings, LightPoint, NodeBindings)."""
+    return sorted(p for k in ('worlds', 'realms', 'exploders') for p in paths.ext30(k).rglob('*.oct'))
+
+
 def shipped_pools():
-    """Top-level pools of every shipped 3.0 .oct (worlds, realms, exploders, ...) in the one order they all agree
-    on: 0 conflicting pairs over 3,905 files. Cached."""
+    """Top-level pools of every shipped 3.0 world, realm and exploder .oct in the one order they all agree on:
+    0 conflicting pairs over 3,905 files. Cached."""
     def build():
         from par import pmap
-        return _agreed_order([q for q in pmap(_tops, sorted(paths.ext30().rglob('*.oct')), chunksize=32) if q], 'pool')
-    return paths.cached('shippedpools.json', build, 2)
+        return _agreed_order([q for q in pmap(_tops, _shipped_octs(), chunksize=32) if q], 'pool')
+    return paths.cached('shippedpools.json', build, 3)
 
 
 # Association kinds. A collision instance's links are one group, always in this order (scene link optional:
@@ -414,7 +420,7 @@ def shipped_associations():
     VisHierarchyLink, NodeBindings, Curve ...). Cached."""
     def build():
         from par import pmap
-        seqs = [q for q in pmap(_assoc_kinds, sorted(paths.ext30().rglob('*.oct')), chunksize=32) if q]
+        seqs = [q for q in pmap(_assoc_kinds, _shipped_octs(), chunksize=32) if q]
         assert all(len(q) == len(set(q)) for q in seqs), 'an association kind is split in a shipped file'
         return _agreed_order(seqs, 'association')
     return paths.cached('shippedassociations.json', build)
