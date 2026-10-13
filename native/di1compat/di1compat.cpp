@@ -483,9 +483,9 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         const char* codec = nullptr;
         if (types && t[0] != 0x1b) { k = gameplay::challengeTypes30(t); codec = "challengetypes"; }
         else if (mlua && t[0] != 0x1b) { k = gameplay::activityTasks30(t); codec = "activitytasks"; }
-        else if (ap) {   // givers of the missions activityTasks30 converts (the missiongraph beside the .ap names them)
-            std::string graph, dir = np.substr(0, np.rfind('/') + 1);
-            std::set<std::string> ok;
+        else if (ap && t.find("\nActivityIcon=") != std::string::npos) {   // givers of the missions activityTasks30
+            std::string graph, dir = np.substr(0, np.rfind('/') + 1);                // converts (the missiongraph beside
+            std::set<std::string> ok;                                                 // the .ap names them)
             if (read10s(np.substr(0, np.size() - 3) + ".lua", graph))
                 ok = gameplay::activityGivers(graph, [&](const std::string& name, std::string& o) {
                     std::string m = dir + name + ".lua";
