@@ -134,6 +134,8 @@ static struct {
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
+    bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
+    bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -162,6 +164,8 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "vfx10")) g_cfg.vfx10 = atoi(val) != 0;
+        else if (!strcmp(key, "vfx_universal10")) g_cfg.vfxUniversal10 = atoi(val) != 0;
+        else if (!strcmp(key, "vfx_trace")) g_cfg.vfxTrace = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1709,6 +1713,8 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
     return t30.substr(0, end30) + add + t30.substr(end30);
 }
 
+#include "vfxrt.hpp"
+
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
 {
@@ -1819,6 +1825,16 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
+    if (g_cfg.vfx10 && g_cfg.vfxUniversal10) {
+        for (const char* e : {".particledata", ".mtb"})   // the alias vfxrt::hkPkg loads -> 1.0 particles/universal.zip
+            g_over10.emplace(std::string("particles/universal10") + e, std::string("particles/universal/universal") + e);
+        hook("particle package load (vfx)", 0x00672620, "6AFF68????????64A100000000", (void*)&vfxrt::hkPkg, (void**)&vfxrt::g_pkg);
+    }
+    if (g_cfg.vfxTrace) {
+        hook("effect create (vfx trace)", 0x0065E3A0, "8B54240C8B4A18", (void*)&vfxrt::hkEffect, (void**)&vfxrt::g_effect);
+        hook("emitter create (vfx trace)", 0x0066A1C0, "6AFF68????????64A100000000", (void*)&vfxrt::hkEmitter, (void**)&vfxrt::g_emitter);
+        hook("slaved emitter create (vfx trace)", 0x0066E7F0, "6AFF68????????64A100000000", (void*)&vfxrt::hkAttached, (void**)&vfxrt::g_attached);
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
