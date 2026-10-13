@@ -1033,7 +1033,9 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
 }
 
 struct Vo {
-    std::string dir10;                                  // <1.0 install>\assets\sound\dialog
+    std::string root10;                                 // <1.0 install>\assets\sound\dialog
+    std::string dir10;                                  // its language folder in use (ENU until the first bank)
+    const char*(__cdecl* lang)() = nullptr;             // 3.0 FUN_00680c00: the 'LangHogFile' setting
     std::recursive_mutex mx;
     std::map<std::string, std::unique_ptr<DlgBank>> banks;   // lower-case file name; kept (posts hold their pointer)
     struct Speaker {
@@ -1049,11 +1051,23 @@ struct Vo {
     void(__fastcall* mapAdd)(void* map, void* edx, uint32_t key, const uint32_t* rec) = nullptr;   // FUN_018308e0
     uint8_t* mgr = nullptr;                             // the sound manager (0x0228D668)
 
+    // the language folder: 1.0 FUN_01137bb0 builds sound/dialog/<lang>/ from its 'LangHogFile' setting
+    // (FUN_007185d0); 3.0 keeps the setting and the folder names (DED enu ESL FRF; 1.0 adds PTB, 3.0 NLN PL)
+    void pickLanguage()
+    {
+        const char* l = lang ? lang() : nullptr;
+        DWORD a = l && *l ? GetFileAttributesA((root10 + "\\" + l).c_str()) : INVALID_FILE_ATTRIBUTES;
+        std::string want = root10 + "\\" + (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) ? l : "ENU");
+        if (want != dir10) AUDLOG("vo10: 1.0 dialog language folder %s", want.c_str());
+        dir10 = want;
+    }
+
     // the bank's '<file>' and its '.name' from the 1.0 language folder; 1.0 FUN_01137bb0: '_str' streams (mode
     // 0x20002c1), else 0x2000241; the FSB must hold as many subsounds as the '.name' lists
     DlgBank* open(const std::string& file)
     {
         std::lock_guard<std::recursive_mutex> l(mx);
+        if (dir10.empty()) pickLanguage();
         auto& slot = banks[lower(file)];
         if (!slot) { slot.reset(new DlgBank); slot->file = file; }
         DlgBank* b = slot.get();
@@ -1215,7 +1229,7 @@ inline bool annoSource(const char* path, std::string& zipRel, std::string& membe
     std::string c = it->second.banks.front()->file;
     c = c.substr(0, c.rfind('.'));
     if (c.size() > 4 && (!_stricmp(c.c_str() + c.size() - 4, "_str") || !_stricmp(c.c_str() + c.size() - 4, "_ram"))) c.resize(c.size() - 4);
-    zipRel = "sound/dialog/ENU/" + c + ".zip";
+    zipRel = "sound/dialog/" + vo.dir10.substr(vo.dir10.rfind('\\') + 1) + "/" + c + ".zip";
     member = p.substr(b + 1);
     return true;
 }
@@ -1523,7 +1537,7 @@ inline void* __cdecl hkLoadFile(const char* path, uint32_t* size)
     size_t n = path ? strlen(path) : 0;
     std::vector<uint8_t> in;
     if (n <= 11 || _strnicmp(path, "dialog/", 7) || _stricmp(path + n - 4, ".dlg") ||
-        !slurp(vo.dir10.substr(0, vo.dir10.rfind('\\')) + "\\" + (path + 7), in) || in.size() < 4 || *(uint32_t*)in.data() != 11)
+        !slurp(vo.root10 + "\\" + (path + 7), in) || in.size() < 4 || *(uint32_t*)in.data() != 11)
         return oLoadFile(path, size);
     uint32_t n30 = 0;
     uint8_t* d30 = (uint8_t*)oLoadFile(path, &n30);   // 3.0's own script of that name, if any (its entries are kept)
@@ -1637,7 +1651,8 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
         hook("MusicStack tick (music10)", 0x0073EDE0, "A1????????DB05????????81EC04010000", (void*)&hkStackTick, (void**)&oStackTick);
     }
     if (cfg.vo) {
-        vo.dir10 = install10 + "\\assets\\sound\\dialog\\ENU";   // ponytail: 1.0's English folder; map 3.0's language if needed
+        vo.root10 = install10 + "\\assets\\sound\\dialog";
+        *(void**)&vo.lang = (void*)rt(0x00680C00);
         vo.mgr = (uint8_t*)rt(0x0228D668);
         *(void**)&vo.mapFind = (void*)rt(0x013CC1F0);
         *(void**)&vo.mapAdd = (void*)rt(0x018308E0);

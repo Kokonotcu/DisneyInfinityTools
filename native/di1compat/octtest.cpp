@@ -264,7 +264,8 @@ static int voTest(char** argv)
     audio::logfn = stdoutLog;
     std::string inst = argv[2], outDir = argv[3];
     if (!audio::g.init(inst, true)) return 1;
-    audio::vo.dir10 = inst + "\\assets\\sound\\dialog\\ENU";
+    audio::vo.root10 = inst + "\\assets\\sound\\dialog";
+    audio::vo.pickLanguage();   // no engine: ENU
     audio::vo.buildEvNames(audio::g.sound10);
     int bad = 0;
     for (auto& e : fs::directory_iterator(inst + "\\assets\\sound\\dialog")) {
