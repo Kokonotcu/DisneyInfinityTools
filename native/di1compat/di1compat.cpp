@@ -7,6 +7,7 @@
 //         memtest = <path substring>[,...]  (serve those 3.0 files from a memory copy: proves the MemFile path)
 #include <windows.h>
 #include <tlhelp32.h>
+#include <intrin.h>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -351,6 +352,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     bool changed = transcodeAssetRender(path, f, note);
     if (f.dropPool("NavMeshPool")) { note += "-NavMeshPool "; changed = true; }
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
+    if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }
@@ -552,6 +554,17 @@ static bool afterCall(uintptr_t ret)
     if (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) return true;   // call reg / [reg]
     return false;
 }
+// Appends the exe return addresses found on a stack (static VAs, call-site validated) to line.
+static void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max = 24)
+{
+    for (int i = 0, found = 0; i < 2048 && found < max; ++i) {
+        uint32_t v;
+        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        bool ok = false;
+        __try { ok = afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+        if (ok) { len += sprintf_s(line + len, cap - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
+    }
+}
 static LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
 {
     if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || InterlockedExchange(&g_avLogged, 1)) return EXCEPTION_CONTINUE_SEARCH;
@@ -559,14 +572,7 @@ static LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
     char line[900];
     int len = sprintf_s(line, "ACCESS VIOLATION at %08X (%s %08X), stack:", (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip),
                         e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (unsigned)e->ExceptionRecord->ExceptionInformation[1]);
-    const uint32_t* sp = (const uint32_t*)e->ContextRecord->Esp;
-    for (int i = 0, found = 0; i < 2048 && found < 24; ++i) {
-        uint32_t v;
-        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
-        bool ok = false;
-        __try { ok = afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-        if (ok) { len += sprintf_s(line + len, sizeof(line) - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
-    }
+    stackOf((const uint32_t*)e->ContextRecord->Esp, line, sizeof(line), len);
     logf("%s", line);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -684,6 +690,7 @@ static void* __fastcall hkAssetInst(void* self, void*, void* out, const char** n
 // 2026-10-12, instancing a 1.0 prop's 'Anchor'); log it and return 0 (FUN_007734f0 handles a failed instance).
 typedef int(__fastcall* InstFn)(void* self, void* edx, uint32_t p1, uint32_t root, int no);
 static InstFn g_inst;
+static uint32_t g_instHeaders;   // header count of the template being instanced (trace)
 static int __fastcall hkInst(void* self, void*, uint32_t p1, uint32_t root, int no)
 {
     typedef void*(__fastcall * ResolveFn)(void* handleField, void* edx);
@@ -694,30 +701,62 @@ static int __fastcall hkInst(void* self, void*, uint32_t p1, uint32_t root, int 
              self, t[3], t[0x4c / 4], t[0x5c / 4], t[100 / 4], t[0x60 / 4]);
         return 0;
     }
+    g_instHeaders = ((uint32_t*)self)[0x5c / 4];
     return g_inst(self, nullptr, p1, root, no);
 }
 
+// Trace: header creation FUN_004fae90(out, name, parent, a4, a5) (thiscall on the allocator, ret 0x14). Logs the
+// adapter headers ('As...') made at runtime, with the creator's stack.
+typedef void*(__fastcall* HdrMakeFn)(void* self, void* edx, void* out, uint32_t name, uint32_t parent, uint32_t a4, uint32_t a5);
+static HdrMakeFn g_hdrMake;
+static volatile LONG g_hdrMakeLogged;
+static void* __fastcall hkHdrMake(void* self, void*, void* out, uint32_t name, uint32_t parent, uint32_t a4, uint32_t a5)
+{
+    char n[80] = "";
+    __try { if (name) safeCopy(n, sizeof(n), (const char*)(name + 0xc)); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (n[0] == 'A' && n[1] == 's' && n[2] >= 'A' && n[2] <= 'Z' && InterlockedIncrement(&g_hdrMakeLogged) <= 6) {
+        char line[700];
+        int len = sprintf_s(line, "make header '%s' (allocator %p, parent %08X, %u %u), stack:", n, self, parent, a4, a5);
+        stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 20);
+        logf("%s", line);
+    }
+    return g_hdrMake(self, nullptr, out, name, parent, a4, a5);
+}
+
 // Trace: instance header clone FUN_004f5900(index, a2, delta, instRoot) (thiscall on the instance header, ret 0x10).
-// When the copy's parent handle (+4) does not resolve but the template's does, log both headers and the name.
+// Header = [name, parent|rc, sibling|flags, child-or-self|slot, ...]. FUN_004b4470 gave every header of the cloned array
+// a temp slot (DAT_021af260); 0x4f5a25 maps the +0xc target through it without a check, so a +0xc that leads outside
+// the array reads slot 0 (NULL) and faults at 0x4cdabe. Log such headers with their target.
 typedef void(__fastcall* HdrCloneFn)(void* self, void* edx, uint32_t index, uint32_t a2, int delta, uint32_t instRoot);
 static HdrCloneFn g_hdrClone;
 static volatile LONG g_hdrLogged;
+static void hdrName(const uint32_t* h, char* out, size_t cap)
+{
+    __try { if (h && h[0]) safeCopy(out, cap, (const char*)(h[0] + 0xc)); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 static void __fastcall hkHdrClone(void* self, void*, uint32_t index, uint32_t a2, int delta, uint32_t instRoot)
 {
     typedef void*(__fastcall * ResolveFn)(void* handleField, void* edx);
     ResolveFn res = (ResolveFn)rt(0x004B46D0);
     uint32_t* inst = (uint32_t*)self;
     uint32_t* tmpl = (uint32_t*)((char*)self - delta);
-    void* pi = res(inst + 3, nullptr);   // +0xc: resolved without a NULL check at 0x4f5a13
-    if (!pi && InterlockedIncrement(&g_hdrLogged) <= 4) {
-        void* pt = nullptr;
-        char name[80] = "?";
-        __try {
-            pt = res(tmpl + 3, nullptr);
-            if (tmpl[0]) safeCopy(name, sizeof(name), (const char*)(tmpl[0] + 0xc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        logf("header clone %u '%s' (instRoot %08X): instance %p [%08X %08X %08X %08X %08X], template %p [%08X %08X %08X %08X %08X] +0xc -> %p, delta %d",
-             index, name, instRoot, self, inst[0], inst[1], inst[2], inst[3], inst[4], tmpl, tmpl[0], tmpl[1], tmpl[2], tmpl[3], tmpl[4], pt, delta);
+    uint32_t* t = (uint32_t*)res(inst + 3, nullptr);
+    uint32_t slots = *(uint32_t*)rt(0x021B725C), e = 1, slot = 0;
+    if (t) {
+        slot = ((t[2] & 0xe001ffff) | (t[3] >> 3)) >> 17;
+        e = slot < slots ? ((uint32_t*)rt(0x021AF260))[slot] : 1;
+    }
+    if ((!t || !e) && InterlockedIncrement(&g_hdrLogged) <= 6) {
+        char name[80] = "?", tname[80] = "?", pname[80] = "?";
+        hdrName(tmpl, name, sizeof(name));
+        hdrName(t, tname, sizeof(tname));
+        uint32_t* tp = t ? (uint32_t*)res(t + 1, nullptr) : nullptr;
+        hdrName(tp, pname, sizeof(pname));
+        const uint32_t* base = (const uint32_t*)((char*)tmpl - index * 0x14);
+        logf("header clone %u/%u '%s' (instRoot %08X, %u slots): template %p [%08X %08X %08X %08X %08X] +0xc -> %p '%s' (array index %d, slot %u) [%08X %08X %08X %08X %08X] parent %p '%s'",
+             index, g_instHeaders, name, instRoot, slots, tmpl, tmpl[0], tmpl[1], tmpl[2], tmpl[3], tmpl[4], t, tname,
+             t ? (int)(((const char*)t - (const char*)base) / 0x14) : -1, slot,
+             t ? t[0] : 0, t ? t[1] : 0, t ? t[2] : 0, t ? t[3] : 0, t ? t[4] : 0, tp, pname);
     }
     g_hdrClone(self, nullptr, index, a2, delta, instRoot);
 }
@@ -933,6 +972,7 @@ extern "C" void __stdcall Pentane_Main()
         hook("asset instance (trace)", 0x007734F0, "6AFF68????????64A100000000", (void*)&hkAssetInst, (void**)&g_assetInst);
         hook("SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst, (void**)&g_inst);
         hook("header clone (trace)", 0x004F5900, "5153555657", (void*)&hkHdrClone, (void**)&g_hdrClone);
+        hook("header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake);
     }
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);

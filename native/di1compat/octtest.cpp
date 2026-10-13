@@ -174,6 +174,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--oct") {   // --oct <1.0 .oct> <out>: the SubNetwork transforms only
         std::string b = slurp(argv[2]);
         oct::File f = oct::File::parse(b.data(), b.size());
+        printf("skin influences redirected: %d\n", octx::skin30(f));
         printf("subnetworks with counts added: %d\n", octx::addAllCounts(f));
         std::string o = f.write();
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());

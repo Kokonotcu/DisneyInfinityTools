@@ -309,6 +309,183 @@ inline bool addAssetPool(oct::File& f)
     return true;
 }
 
+// A name list record's values replaced (keeps its key).
+inline void setNames(oct::File& f, oct::Rec& r, const std::vector<std::string>& v)
+{
+    oct::Spec s = oct::spec(r.type);
+    int cw = s.cw < 1 ? 1 : s.cw;
+    while (v.size() >= ((size_t)1 << (8 * cw))) ++cw;
+    r.type = (uint16_t)(oct::LIST | (s.keyed << 2) | oct::NAME << 3 | (cw - 1) << 6);
+    std::string pay = r.pay.substr(0, 2 * s.keyed);
+    oct::File::put(pay, (uint32_t)v.size(), cw);
+    for (auto& x : v) oct::File::put(pay, f.addName(x), 2);
+    r.pay = pay;
+}
+inline oct::Rec nameList(oct::File& f, uint16_t level, const std::string& n, const std::vector<std::string>& v)
+{
+    oct::Rec r{level, (uint16_t)(oct::LIST | oct::NAME << 3), f.addName(n), {}};
+    setNames(f, r, v);
+    return r;
+}
+inline oct::Rec floatList(oct::File& f, uint16_t level, const std::string& n, const std::vector<float>& v)
+{
+    oct::Rec r{level, (uint16_t)(oct::LIST | oct::FLOAT << 3), f.addName(n), {}};
+    oct::File::put(r.pay, (uint32_t)v.size(), 1);
+    r.pay.append((const char*)v.data(), v.size() * 4);
+    return r;
+}
+inline oct::Rec keyedNode(oct::File& f, uint16_t level, const std::string& n, int key)
+{
+    oct::Rec r{level, (uint16_t)(oct::NODE | 4), f.addName(n), {}};
+    oct::File::put(r.pay, f.addName(std::to_string(key)), 2);
+    return r;
+}
+
+// SkinInfluence in 3.0 form. A 1.0 SkinInfluence association names a Transform/Dilation DataNode
+// ('Anchor|Center|Transform|Center to WorldBasis'); the 3.0 exporter adds beside it a Matrix4x4 DataNode
+// '<leaf>.Matrix4x4' (External, same basis, identity data) fed by a ConvertTransformToMatrix4x4 /
+// ConvertDilationToMatrix4x4 processor (TransformToMatrix4x4VariantProcessor / DilationToMatrix4x4VariantProcessor,
+// Input/Output, its header under the new node's) and names that node (tb_tron_disc, _proxyavatar). Without it
+// 3.0 binds the influence through an 'AsXfrmTransMat' adapter header made at load outside the SubNetwork's header
+// arena (FUN_004a5ee0 -> FUN_005077e0 -> FUN_0056afc0 'As%s'), which instancing cannot map: the clone reads an empty
+// temp slot at 0x4cdabe (in-game 2026-10-13, 1.0 inc_delivery_box). New headers go at the end of the layout, the
+// node and processor at the end of their pools, so no existing index moves. Returns the influences redirected.
+inline int skin30(oct::File& f)
+{
+    long ap = f.pool("AssociationPool"), sp = f.pool("SubNetworkPool");
+    if (ap < 0 || sp < 0) return 0;
+    std::vector<size_t> sns;
+    for (size_t i = sp + 1; i < f.blockEnd(sp); i = f.blockEnd(i))
+        if (f.recs[i].level == 2) sns.push_back(i);
+    // requested paths per SubNetwork
+    std::map<int, std::vector<std::string>> want;
+    auto each = [&](auto fn) {   // fn(NodeName record, SubNetworkRef) for every SkinInfluence
+        long a = f.pool("AssociationPool");
+        for (size_t i = a + 1; i < f.blockEnd(a); i = f.blockEnd(i)) {
+            std::string type;
+            long nn = -1;
+            int sn = -1;
+            for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
+                const std::string& n = f.name(f.recs[j]);
+                if (n == "Type") type = f.nameValues(f.recs[j])[0];
+                else if (n == "NodeName") nn = (long)j;
+                else if (n == "SubNetworkRef") sn = f.ints(f.recs[j])[0];
+            }
+            if (type == "SkinInfluence" && nn >= 0 && sn >= 0 && sn < (int)sns.size()) fn(f.recs[nn], sn);
+        }
+    };
+    each([&](oct::Rec& r, int sn) { want[sn].push_back(f.nameValues(r)[0]); });
+    if (want.empty()) return 0;
+    std::map<std::pair<int, std::string>, std::string> renamed;
+    for (auto it = want.rbegin(); it != want.rend(); ++it) {   // later SubNetworks first: inserts keep earlier indices
+        size_t sn = sns[it->first], end = f.blockEnd(sn);
+        long hsAt = -1, hsiAt = -1, hlAt = -1, dnPool = -1, pnPool = -1;
+        struct DN { int header, basis; std::string type; };
+        std::vector<DN> dns;
+        int npn = 0;
+        std::string pool;
+        for (size_t i = sn + 1; i < end; ++i) {
+            const oct::Rec& r = f.recs[i];
+            const std::string& n = f.name(r);
+            if (r.level == 3) {
+                pool = n;
+                if (n == "HeaderStrings") hsAt = (long)i;
+                else if (n == "HeaderStringIndices") hsiAt = (long)i;
+                else if (n == "HeaderLayout") hlAt = (long)i;
+                else if (n == "DataNodePool") dnPool = (long)i;
+                else if (n == "ProcessorNodePool") pnPool = (long)i;
+            } else if (r.level == 4 && pool == "DataNodePool" && n == "DataNode") dns.push_back({-1, 0, ""});
+            else if (r.level == 4 && pool == "ProcessorNodePool" && n == "ProcessorNode") ++npn;
+            else if (r.level == 5 && pool == "DataNodePool" && !dns.empty()) {
+                if (n == "Header") dns.back().header = f.ints(r)[0];
+                else if (n == "BasisRef") dns.back().basis = f.ints(r)[0];
+                else if (n == "Type") dns.back().type = f.nameValues(r)[0];
+            }
+        }
+        if (hsAt < 0 || hsiAt < 0 || hlAt < 0 || dnPool < 0) continue;
+        std::vector<std::string> hs = f.nameValues(f.recs[hsAt]);
+        std::vector<int32_t> hsi = f.ints(f.recs[hsiAt]), hl = f.ints(f.recs[hlAt]);
+        std::vector<int32_t> parent(1, -1);   // header k (1-based; 0 = the SubNetwork root) -> parent
+        for (size_t i = 0; i + 1 < hl.size(); i += 2)
+            for (int c = 0; c < hl[i + 1]; ++c) parent.push_back(hl[i]);
+        auto hname = [&](int h) -> std::string { return h >= 1 && h <= (int)hsi.size() && hsi[h - 1] < (int)hs.size() ? hs[hsi[h - 1]] : ""; };
+        auto strIdx = [&](const std::string& s) {
+            for (size_t i = 0; i < hs.size(); ++i) if (hs[i] == s) return (int32_t)i;
+            hs.push_back(s);
+            return (int32_t)(hs.size() - 1);
+        };
+        std::vector<oct::Rec> addDn, addPn;
+        std::map<int, std::string> done;   // source header -> new leaf name
+        for (const std::string& path : it->second) {
+            int h = 0;
+            size_t p = 0;
+            while (h >= 0 && p <= path.size()) {   // walk the path's components down the header tree
+                size_t q = path.find('|', p);
+                std::string comp = path.substr(p, q == std::string::npos ? std::string::npos : q - p);
+                int found = -1;
+                for (int k = 1; k < (int)parent.size() && found < 0; ++k)
+                    if (parent[k] == h && hname(k) == comp) found = k;
+                h = found;
+                if (q == std::string::npos) break;
+                p = q + 1;
+            }
+            if (h <= 0) continue;
+            int src = -1;
+            for (size_t d = 0; d < dns.size(); ++d) if (dns[d].header == h) src = (int)d;
+            if (src < 0) continue;
+            const std::string& t = dns[src].type;
+            if (t != "Transform" && t != "Dilation") continue;   // Matrix4x4 already, or a type 3.0 never converts
+            std::string leaf = hname(h) + ".Matrix4x4";
+            if (!done.count(h)) {
+                int h1 = (int)parent.size(), h2 = h1 + 1;
+                parent.push_back(parent[h]);
+                parent.push_back(h1);
+                hsi.push_back(strIdx(leaf));
+                hsi.push_back(strIdx("Convert" + t + "ToMatrix4x4"));
+                hl.insert(hl.end(), {parent[h], 1, h1, 1});
+                int nd = (int)dns.size();
+                dns.push_back({h1, dns[src].basis, "Matrix4x4"});
+                addDn.push_back(keyedNode(f, 4, "DataNode", nd));
+                addDn.push_back(f.intScalar(5, "Header", h1));
+                addDn.push_back(f.nameScalar(5, f.addName("Type"), "Matrix4x4"));
+                addDn.push_back(f.intScalar(5, "External", 1));
+                addDn.push_back(f.intScalar(5, "BasisRef", dns[src].basis));
+                addDn.push_back(f.node(5, "Data"));
+                addDn.push_back(floatList(f, 6, "Matrix", {1, 0, 0, 0, 1, 0, 0, 0, 1}));
+                addDn.push_back(floatList(f, 6, "Translation", {0, 0, 0}));
+                addPn.push_back(keyedNode(f, 4, "ProcessorNode", npn++));
+                addPn.push_back(f.intScalar(5, "Header", h2));
+                addPn.push_back(f.nameScalar(5, f.addName("Type"), t + "ToMatrix4x4VariantProcessor"));
+                addPn.push_back(f.intList(5, "DataNodeRefs", {src, nd}));
+                addPn.push_back(nameList(f, 5, "DataNodeAttributes", {"Input", "Output"}));
+                done[h] = leaf;
+            }
+            size_t cut = path.rfind('|');
+            renamed[{it->first, path}] = (cut == std::string::npos ? std::string() : path.substr(0, cut + 1)) + done[h];
+        }
+        if (addDn.empty()) continue;
+        f.setInts(f.recs[hlAt], hl);   // in place, before the inserts move anything
+        f.setInts(f.recs[hsiAt], hsi);
+        setNames(f, f.recs[hsAt], hs);
+        // later records first
+        if (pnPool > dnPool) f.recs.insert(f.recs.begin() + f.blockEnd(pnPool), addPn.begin(), addPn.end());
+        size_t dnEnd = f.blockEnd(dnPool);
+        if (pnPool < 0) addPn.insert(addPn.begin(), f.node(3, "ProcessorNodePool"));
+        if (pnPool < 0) f.recs.insert(f.recs.begin() + dnEnd, addPn.begin(), addPn.end());
+        f.recs.insert(f.recs.begin() + dnEnd, addDn.begin(), addDn.end());
+        if (pnPool >= 0 && pnPool < dnPool) f.recs.insert(f.recs.begin() + f.blockEnd(pnPool), addPn.begin(), addPn.end());
+    }
+    int n = 0;
+    each([&](oct::Rec& r, int sn) {
+        auto k = renamed.find({sn, f.nameValues(r)[0]});
+        if (k == renamed.end()) return;
+        r.pay.clear();
+        oct::File::put(r.pay, f.addName(k->second), 2);
+        ++n;
+    });
+    return n;
+}
+
 // Every SubNetwork of the SubNetworkPool; returns how many got counts.
 inline int addAllCounts(oct::File& f)
 {
