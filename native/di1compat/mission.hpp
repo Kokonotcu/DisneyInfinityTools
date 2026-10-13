@@ -12,9 +12,22 @@
 // 646 'Event' keys sits in Mission.Presentations[].Data, one per 'Event = N,' line. Read raw, 3.0 took them as
 // Intro/Generic/Interact: a mission's Activate list (DockFire's spawns, triggers, set-piece caches) never fired.
 #pragma once
+#include <cstdint>
 #include <string>
 
 namespace mission {
+
+// Meridian classes 1.0 graphs use that 3.0 no longer registers, but whose 1.0 registration template 3.0 still has
+// under another name: registered again with that 3.0 template after the class registry is built (FUN_0178e330),
+// and transcoded with the 3.0 twin's pin/parameter table. 1.0 FUN_01098250 registers
+// MissionFocusPoint_Rule_ProximityCheck_ActorToLocator and MissionTask_ProximityCheck_ActorToLocator with the same
+// template FUN_0108ce60; 3.0 FUN_0178e330 has the MissionTask one (template FUN_0177a8b0, cdecl(name)) and not the
+// rule. Pins match by name (1.0 ObjectActorList..ObjectUndelivered = the 3.0 twin's). 6 nodes / 3 missions
+// (hotdogsforall, gpmayordelivery2, activity deliverblockheadcarbside01).
+struct Alias { const char* name; uint32_t templateVa; const char* twin; };
+static const Alias kAliases[] = {
+    {"MissionFocusPoint_Rule_ProximityCheck_ActorToLocator", 0x0177A8B0, "MissionTask_ProximityCheck_ActorToLocator"},
+};
 
 inline int presentEvent30(int e10)
 {

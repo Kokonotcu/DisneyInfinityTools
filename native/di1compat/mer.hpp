@@ -75,6 +75,17 @@ struct Table {
     }
 };
 
+// mission.hpp kAliases as registered classes, each with its 3.0 twin's pins and parameter types added
+inline void addAliases(Table& T)
+{
+    for (auto& a : mission::kAliases) {
+        T.registered.insert(a.name);
+        Class &c = T.classes[a.name], &t = T.classes[a.twin];
+        c.pins.insert(t.pins.begin(), t.pins.end());
+        c.params.insert(t.params.begin(), t.params.end());
+    }
+}
+
 inline bool isGeneric(const std::string& n)
 {
     static const std::set<std::string> g = {"Type", "Uuid", "IsProxy", "MerSpawnGroup", "NumInLinks", "NumOutLinks", "IsRootObject",
@@ -174,14 +185,23 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         return -1;
     };
     auto isInt = [&](const oct::Rec& r) { oct::Spec sp = oct::spec(r.type); return sp.shape == oct::SCALAR && sp.kind == oct::INT && !sp.keyed; };
-    // the class's pin records: from its first instance listing any (1.0 writes the table once per file)
+    // the class's pin records: from its first instance listing any (1.0 writes the table once per file). Every plain
+    // int field that is not a parameter 3.0 reads counts: the table names a pin only if a 3.0 graph listed it, which
+    // misses classes no 3.0 graph uses (AbsoluteValueInt: 5 link ends) and names the table cannot hold (MissionMonitor
+    // 'Now Available': 22 link ends unbound on the instances that list no pins). Copies only add names an instance
+    // lacks, and 1.0 writes parameters on every instance, so only the pin table is ever copied.
     std::map<std::string, std::vector<oct::Rec>> pinTables;
     for (auto& n : nodes) {
+        if (pinTables.count(n.type) || n.type == "NameSpaceBegin" || n.type == "NameSpaceEnd") continue;
         auto c = T.classes.find(n.type);
-        if (c == T.classes.end() || pinTables.count(n.type)) continue;
         std::vector<oct::Rec> pins;
-        for (size_t j = n.at + 1; j < n.end; ++j)
-            if (f.recs[j].level == fl && isInt(f.recs[j]) && c->second.pins.count(f.name(f.recs[j]))) pins.push_back(f.recs[j]);
+        for (size_t j = n.at + 1; j < n.end; ++j) {
+            const std::string& nm = f.name(f.recs[j]);
+            if (f.recs[j].level != fl || !isInt(f.recs[j]) || isGeneric(nm) || nm.find("__") != std::string::npos ||
+                (nm.size() > 6 && !nm.compare(nm.size() - 6, 6, "_value")))
+                continue;
+            if (c == T.classes.end() || c->second.pins.count(nm) || !c->second.params.count(nm)) pins.push_back(f.recs[j]);
+        }
         if (!pins.empty()) pinTables[n.type] = pins;
     }
 
@@ -278,10 +298,6 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             names.insert(nm);
             if (nm.size() > 6 && !nm.compare(nm.size() - 6, 6, "_value")) valued.insert(nm.substr(0, nm.size() - 6));
         }
-        bool hasPins = false;
-        for (size_t j = n.at + 1; j < n.end; ++j)
-            if (f.recs[j].level == fl && c && c->pins.count(f.name(f.recs[j]))) hasPins = true;
-
         std::string desc, val;
         uint32_t count = 0;
         std::set<std::string> done;
@@ -328,9 +344,13 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             desc.append((const char*)&o, 4);
             ++count;
         }
-        if (!n.stub && !hasPins && c) {   // the class's pin table on this instance too
+        if (!n.stub) {   // the class's pin table on this instance too (the names it lacks)
             auto pt = pinTables.find(n.type);
-            if (pt != pinTables.end()) { outRecs.insert(outRecs.end(), pt->second.begin(), pt->second.end()); ++s.pinsCopied; }
+            bool copied = false;
+            if (pt != pinTables.end())
+                for (auto& pr : pt->second)
+                    if (!names.count(f.name(pr))) { outRecs.push_back(pr); copied = true; }
+            s.pinsCopied += copied;
         }
         long leaf = field(n, "LeafName");
         if (leaf >= 0 && !names.count("LeafNameHash"))

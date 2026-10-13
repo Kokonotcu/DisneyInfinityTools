@@ -133,6 +133,7 @@ static struct {
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
+    bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -161,6 +162,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "events10")) g_cfg.events10 = atoi(val) != 0;
+        else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1140,6 +1142,22 @@ static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
     std::string& l = last[self];
     if (l != sig) { l = sig; logf("mission %.60s: %s", name, sig); }
 }
+// Meridian class registry (FUN_0178e330, run once at boot by FUN_013aaba0): the 1.0 classes of mission.hpp kAliases
+// are registered after it with their 3.0 template. The transcoder treats them as registered only once that has run,
+// so a registry built before the hook (plugin loaded late) leaves them stand-ins, never slotless (verify-meridian 6).
+typedef void(__cdecl* VoidFn)();
+static VoidFn g_merRegistry;
+static void __cdecl hkMerRegistry()
+{
+    g_merRegistry();
+    typedef void(__cdecl * RegFn)(const char* name);
+    for (auto& a : mission::kAliases) {
+        ((RegFn)rt(a.templateVa))(a.name);
+        logf("meridian: 1.0 class %s registered with the template of %s", a.name, a.twin);
+    }
+    mer::addAliases(g_mer);
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -1813,6 +1831,8 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.missionTrace)
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
+    if (g_cfg.aliases10 && g_merOk)
+        hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry, (void**)&g_merRegistry);
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
