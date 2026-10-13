@@ -136,6 +136,7 @@ static struct {
     bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
     bool sxNatives10 = true;         // sx10's imports bound to 1.0-semantics natives by a linker hook (SX-3/4)
     bool sxPorts10 = true;           // sxNatives10 with the ported natives (0: stack-balanced stubs only)
+    bool sxBeh10 = true;             // sxPorts10 + 1.0 behavior-type numbers into 1.0 scripts' SetInitialParams
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -166,6 +167,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "sx10")) g_cfg.sx10 = atoi(val) != 0;
         else if (!strcmp(key, "sxnatives10")) g_cfg.sxNatives10 = atoi(val) != 0;
         else if (!strcmp(key, "sxports10")) g_cfg.sxPorts10 = atoi(val) != 0;
+        else if (!strcmp(key, "sxbeh10")) g_cfg.sxBeh10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1824,6 +1826,9 @@ extern "C" void __stdcall Pentane_Main()
         sx::g_log = logf;
         sx::init(g_cfg.sxPorts10);
         hook("Slang linker (1.0 natives)", 0x00736DA0, "51538B5C240C568BF18BCBE8", (void*)&sx::hkLink, (void**)&sx::g_link);
+        if (g_cfg.sxPorts10 && g_cfg.sxBeh10)
+            hook("Slang call by name (1.0 behavior type)", 0x00739090, "56578B7C240C8BF18B4E04", (void*)&sx::hkCallByName,
+                 (void**)&sx::g_callByName);
     }
 }
 

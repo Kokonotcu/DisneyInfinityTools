@@ -131,62 +131,119 @@ inline bool readStr(const char* p, char* out, size_t cap)   // a string cell's t
     } __except (1) { out[0] = 0; return false; }
 }
 
-// 1.0 Hash* key name -> 3.0 key id (KEYS30); names no paired 3.0 script uses get ids above the 3.0 enum (max 719),
-// handed out once per name, so 1.0 scripts still agree among themselves.
+// 1.0 key name -> 3.0 key id. 3.0 compiles key names to the ids of one alphabetical enum (0..~722); 378 names are
+// paired (scratch\sx\keymerge.py -> keys30.tsv: twin-script alignment 1.0 `07 "Name"` vs 3.0 `03 id` (keyalign.py),
+// twin .bmx Data rows (keypair.py; 3.0 parser FUN_0152d380 reads {id, value}), hashmap.py; all in case-insensitive
+// name order). A name 3.0 does not pair gets a stable id outside the enum (keyFallback), the same one any 1.0 data
+// transcoder gets from keyId(), so 1.0 scripts and 1.0 data still meet.
 struct Key { const char* name; int id; };
-inline const Key KEYS30[] = {   // scratch\sx\hashmap.py -> hashids.tsv
-    {"Distance",128}, {"DoLand",133}, {"DoPreLaunch",136}, {"DoSmash",138}, {"Duration",143}, {"EnvInfo_GroupMask",148},
-    {"EquipNamedShield",151}, {"EventName",152}, {"EventSender",153}, {"EventType",154}, {"ExitCode",157},
-    {"ExitOnAnimTreeSync",158}, {"ExitType",159}, {"ExitUID",160}, {"ExitWhenDone",161}, {"faceBackward",164},
-    {"FaceTarget",166}, {"FaceTargetX",167}, {"FaceTargetY",168}, {"FaceTargetZ",169}, {"FlyIn",177}, {"FourCC",192},
-    {"GenericPerformFlags",194}, {"GoalPosX",198}, {"GoalPosY",199}, {"GoalPosZ",200}, {"Gravity",201},
-    {"gravityStrength",202}, {"Group",203}, {"HealthZero_Handle",210}, {"HealthZero_Owner",211},
-    {"HealthZero_Reason",212}, {"HealthZero_Shooter",213}, {"HerdOverride",215}, {"Hit",217}, {"IdleAudioEvent",221},
-    {"IdleType",223}, {"IgnoreActorCollisions",224}, {"IgnoredActor",229}, {"IgnorePerception",232},
-    {"IgnoreSignificant",233}, {"IgnoreWorldCollisions",235}, {"ImpactDirX",237}, {"ImpactDirY",238}, {"ImpactDirZ",239},
-    {"ImpactLocX",240}, {"ImpactLocY",241}, {"ImpactLocZ",242}, {"ImpactVelX",244}, {"ImpactVelY",245},
-    {"ImpactVelZ",246}, {"Index",247}, {"InitialAction",248}, {"Instant",252}, {"Interact_Action",253},
-    {"InteractionEventSender",254}, {"InteractionEventTypeIndex",256}, {"InteractionSender",257},
-    {"InteractionTarget",258}, {"InteractionType",259}, {"InteractionTypeIndex",260}, {"InteractionValid",261},
-    {"LandAction",279}, {"LandType",280}, {"LastAttack",282}, {"LateJoin",284}, {"LaunchType",285}, {"LeftOrRight",287},
-    {"LocomotionMode",289}, {"LocomotionSet",290}, {"LookDestinationX",293}, {"LookDestinationY",294},
-    {"LookDestinationZ",295}, {"MaxMoveSpeed",306}, {"MaxTurnRate",312}, {"MessageOwner",316}, {"MinMoveSpeed",320},
-    {"MinTargetThreshold",326}, {"MinTurnRate",327}, {"MoveAction",331}, {"MoveClipIgnore",335}, {"MoveEvent",337},
-    {"MovementType",340}, {"MoveSpeed",341}, {"MoveTargetLocX",344}, {"MoveTargetLocY",345}, {"MoveTargetLocZ",346},
-    {"MovingAttack",349}, {"myAIBMStringValueName",354}, {"OffsetX",384}, {"OffsetY",385}, {"OffsetZ",386},
-    {"OrientX",391}, {"OrientY",392}, {"OrientZ",393}, {"OverrideGravity",398}, {"OverrideSpeed",399}, {"PlatformId",420},
-    {"PlatformType",421}, {"PursueReason",438}, {"QuickLand",441}, {"QuickLaunch",442}, {"RadiusOffset",445},
-    {"RandomSleep",449}, {"Range",450}, {"Repeatable",454}, {"Repetitions",455}, {"ResumeOnInterrupt",459},
-    {"RideTarget",461}, {"RotateOffset",466}, {"RotateToTarget",476}, {"RotSpeed",478}, {"rowboatHandle",479},
-    {"SelectedSubrange",489}, {"Shuffle",501}, {"ShuffleSide",503}, {"SigNodeIndex",508}, {"SourcePosX",512},
-    {"SourcePosY",513}, {"SourcePosZ",514}, {"Speed",549}, {"SpeedProperty",551}, {"SplineHandle",552},
-    {"StartDelay",561}, {"StartPosX",567}, {"StartPosY",568}, {"StartPosZ",569}, {"StateBits",571}, {"StopDistance",578},
-    {"StopOnExit",584}, {"STravParm1",587}, {"STravParm2",588}, {"SucceedOnAnimTreeSync",589}, {"Success",590},
-    {"target",592}, {"TargetActor",593}, {"TargetActor1",594}, {"TargetActor2",595}, {"TargetActorNavigate",606},
-    {"targetControl",608}, {"TargetLocX",614}, {"TargetLocY",615}, {"TargetLocZ",616}, {"TargetPositionX",620},
-    {"TargetPositionY",621}, {"TargetPositionZ",622}, {"TargetPosX",623}, {"TargetPosY",624}, {"TargetPosZ",625},
-    {"TargetSplineHandle",629}, {"TargetThreshold",630}, {"TargetType",631}, {"TargetVelX",632}, {"TargetVelY",633},
-    {"TargetVelZ",634}, {"TargetVisible",635}, {"TauntType",637}, {"Teleport",638}, {"TetherDistance",640},
-    {"TetherPosX",642}, {"TetherPosY",643}, {"TetherPosZ",644}, {"Threshold",645}, {"Timeout",647},
-    {"TriggeredAction",651}, {"TriggeredTime",652}, {"TurnSpeed",655}, {"UID",660}, {"UpperType",661},
-    {"UpperTypeLeft",662}, {"UseCustomHashParams",665}, {"UseDuration",668}, {"UseFacing",669}, {"UseNavMesh",674},
-    {"UseNavMesh_SetGoalRange",677}, {"UseNavMesh_WaypointRange",678}, {"UseNodeName",681}, {"UseSTravParm1",685},
-    {"UseSTravParm2",686}, {"UseTarget",687}, {"UseWalkSpeed",689}, {"Victim",690}, {"WalkSpeed",696},
-    {"WasControllerOwner",709}, {"WeaponName",715}, {"Who",717}, {"WillFaceTarget",718}, {"Withdraw",719},
+inline const Key KEYS30[] = {
+    {"ActorOn",10}, {"ActorTargetForceRotate",11}, {"AddStat",12}, {"AdjustSpeedByAngleToTarget",13},
+    {"AgentHandle",14}, {"AimDestinationX",15}, {"AimDestinationY",16}, {"AimDestinationZ",17}, {"AirAction",18},
+    {"AnimalsMoveType",23}, {"AnimTreeEventIndex",25}, {"AnimTreeEventName",26}, {"apexHeight",27},
+    {"AppearChoAnchor",28}, {"AppearChoDelay",29}, {"AppearChoName",30}, {"ArcHeight",31}, {"AscendDist",33},
+    {"AttackDamage",36}, {"AttackDistance",37}, {"AttackGoalPosZ",41}, {"AttackType",50}, {"AutoReload",51},
+    {"BehaviorCC",54}, {"BehaviorHandlesMove",55}, {"BehaviorHandlesTurn",56}, {"blendFrames",58}, {"BreakDistance",62},
+    {"Chase",71}, {"CheckTargetSighted",75}, {"CircleStrafeTetherDistance",78}, {"ClearVelOnExit",79},
+    {"CollisionNormalY",82}, {"CollisionNormalZ",83}, {"CollisionPosX",84}, {"CollisionPosY",85}, {"CollisionPosZ",86},
+    {"ColorR",89}, {"Connect",93}, {"connectControl",94}, {"ConstrainTargetLoc",95}, {"CoverType",100},
+    {"DamageLevel",104}, {"Deceleration",108}, {"DecelerationThreshold",109}, {"DecoupleTurn",110},
+    {"DeEquipNamedShield",111}, {"Delay",117}, {"DescendDist",118}, {"Destroy",119}, {"Difficulty",121},
+    {"DisableGravity",124}, {"DisappearChoAnchor",125}, {"DisappearChoDelay",126}, {"DisappearChoName",127},
+    {"Distance",128}, {"DoHide",132}, {"DoLand",133}, {"DoLandAnim",134}, {"DoNotExit",135}, {"DoPreLaunch",136},
+    {"DoSmash",138}, {"DoSpecialLandAnim",139}, {"DriftAcceleration",140}, {"Duration",143}, {"DurationMax",144},
+    {"DurationMin",145}, {"EnableUseNavMesh",147}, {"EnvInfo_GroupMask",148}, {"EquipNamedShield",151},
+    {"EventName",152}, {"EventSender",153}, {"EventType",154}, {"ExitAtTarget",156}, {"ExitCode",157},
+    {"ExitOnAnimTreeSync",158}, {"ExitType",159}, {"ExitUID",160}, {"ExitWhenDone",161}, {"FaceAttacker",163},
+    {"faceBackward",164}, {"FaceTarget",166}, {"FaceTargetX",167}, {"FaceTargetY",168}, {"FaceTargetZ",169},
+    {"FadeInDelay",171}, {"FadeOutDelay",172}, {"fleeWhenHit",176}, {"FlyIn",177}, {"ForcePlayStop",190},
+    {"ForcePositionToTarget",191}, {"FourCC",192}, {"GenericPerformFlags",194}, {"GoalPosX",198}, {"GoalPosY",199},
+    {"GoalPosZ",200}, {"Gravity",201}, {"gravityStrength",202}, {"Group",203}, {"HangTime",204},
+    {"HangTimeGravity",205}, {"HangTimeSpeedThreshold",206}, {"HasTimeLimit",208}, {"HealthZero_Handle",210},
+    {"HealthZero_Owner",211}, {"HealthZero_Reason",212}, {"HealthZero_Shooter",213}, {"HeightOfFan",214},
+    {"HerdOverride",215}, {"HideDelay",216}, {"Hit",217}, {"IdleAction",220}, {"IdleAudioEvent",221}, {"IdleType",223},
+    {"IgnoreActorCollisions",224}, {"IgnoreAttackerCollision",225}, {"IgnoreAttackerCollisionFrameCount",226},
+    {"IgnoreCollisionsWithActor",228}, {"IgnoredActor",229}, {"IgnorePerception",232}, {"IgnoreSignificant",233},
+    {"IgnoreWorldCollisions",235}, {"ImpactBlocked",236}, {"ImpactDirX",237}, {"ImpactDirY",238}, {"ImpactDirZ",239},
+    {"ImpactLocX",240}, {"ImpactLocY",241}, {"ImpactLocZ",242}, {"ImpactPassThru",243}, {"ImpactVelX",244},
+    {"ImpactVelY",245}, {"ImpactVelZ",246}, {"Index",247}, {"InitialAction",248}, {"InitialWanderAngle",249},
+    {"Instant",252}, {"Interact_Action",253}, {"InteractionEventSender",254}, {"InteractionEventTypeIndex",256},
+    {"InteractionSender",257}, {"InteractionTarget",258}, {"InteractionType",259}, {"InteractionTypeIndex",260},
+    {"InteractionValid",261}, {"KnockBackDirection",275}, {"KnockBackOthers",276}, {"KnockBackOthersMinSpeed",277},
+    {"KnockBackSpeed",278}, {"LandAction",279}, {"LandType",280}, {"LastAgentHandle",281}, {"LastAttack",282},
+    {"LateJoin",284}, {"LaunchType",285}, {"LeftOrRight",287}, {"LocomotionMode",289}, {"LocomotionSet",290},
+    {"LookDestinationX",293}, {"LookDestinationY",294}, {"LookDestinationZ",295}, {"MaxDriftSpeedRatio",304},
+    {"MaxMoveSpeed",306}, {"MaxTargetDist",309}, {"MaxTargetRot",310}, {"MaxTurnRate",312}, {"MaxTurnSpeed",313},
+    {"MaxWallBounces",314}, {"MessageOwner",316}, {"MinDuration",318}, {"MinMoveSpeed",320}, {"MinTargetDist",323},
+    {"MinTargetRot",324}, {"MinTargetThreshold",326}, {"MinTurnRate",327}, {"MinTurnSpeed",328}, {"Mission",329},
+    {"MoveAction",331}, {"MoveAnimName",332}, {"MoveClipIgnore",335}, {"MoveEvent",337}, {"MovementType",340},
+    {"MoveSpeed",341}, {"MoveSpeedMax",342}, {"MoveSpeedMin",343}, {"MoveTargetLocX",344}, {"MoveTargetLocY",345},
+    {"MoveTargetLocZ",346}, {"MovingAttack",349}, {"MovingTarget",350}, {"myAIBMStringValueName",354},
+    {"myAIBMValueName",355}, {"NavmeshFailedGotoAnyway",359}, {"NavmeshResetAllVars",361}, {"NavmeshTimeout",362},
+    {"NavMeshWaitAction",363}, {"NonProgressTimeout",371}, {"NotifyAttacker",373}, {"NowLarge",374}, {"NowSmall",375},
+    {"OffNavMeshAppearCho",377}, {"OffNavMeshAppearChoAnchor",378}, {"OffNavMeshDisppearCho",380},
+    {"OffNavMeshDisppearChoAnchor",381}, {"OffNavMeshRecoveryType",382}, {"OffsetX",384}, {"OffsetY",385},
+    {"OffsetZ",386}, {"operation",388}, {"OrientX",391}, {"OrientY",392}, {"OrientZ",393}, {"OverrideGravity",398},
+    {"OverrideSpeed",399}, {"PassedToPartner",401}, {"PathGoAcceleration",403}, {"PathName",404},
+    {"PathTetherDistance",405}, {"PauseAfterAnim",411}, {"PlatformId",420}, {"PlatformType",421}, {"PlayerId",423},
+    {"PlayStop",424}, {"PopUpSpeed",429}, {"ProtectAfterBlock",437}, {"PursueReason",438}, {"QuickLand",441},
+    {"QuickLaunch",442}, {"RadiusOffset",445}, {"RandomChance",447}, {"RandomDist",448}, {"RandomSleep",449},
+    {"Range",450}, {"RangeVariance",453}, {"Repeatable",454}, {"Repetitions",455}, {"RespondToActorCollisions",458},
+    {"ResumeOnInterrupt",459}, {"RideTarget",461}, {"RotateOffset",466}, {"RotateToTarget",476}, {"RotSpeed",478},
+    {"rowboatHandle",479}, {"RunMaxTurnSpeed",480}, {"RunStartTurnSpeed",481}, {"RunTurnAcc",483},
+    {"RunWaitToTurn",484}, {"RunWaitToTurnAgain",485}, {"SelectedSubrange",489}, {"SetRandomScale",494},
+    {"ShowDelay",500}, {"Shuffle",501}, {"ShuffleSide",503}, {"SigNodeIndex",508}, {"SnapToGround",510},
+    {"SourcePosX",512}, {"SourcePosY",513}, {"SourcePosZ",514}, {"SpawnLoc0X",518}, {"SpawnLoc0Y",524},
+    {"SpawnLoc0Z",530}, {"Speed",549}, {"SpeedProperty",551}, {"SplineHandle",552}, {"StartAnimtreeEvents",559},
+    {"StartAnimtreeEventsHash",560}, {"StartDelay",561}, {"StartEventHash",563}, {"StartMoveAction",564},
+    {"StartMoveEventHash",566}, {"StartPosX",567}, {"StartPosY",568}, {"StartPosZ",569}, {"StateBits",571},
+    {"StopAfterStopAction",575}, {"StopAnimName",577}, {"StopDistance",578}, {"StopEventHash",580},
+    {"StopMoveAction",581}, {"StopMoveEventHash",583}, {"StopOnExit",584}, {"STravParm1",587}, {"STravParm2",588},
+    {"SucceedOnAnimTreeSync",589}, {"Success",590}, {"target",592}, {"TargetActor",593}, {"TargetActor1",594},
+    {"TargetActor2",595}, {"TargetActorNavigate",606}, {"targetControl",608}, {"targetDistanceAlongPath",609},
+    {"TargetLocX",614}, {"TargetLocY",615}, {"TargetLocZ",616}, {"TargetObject",617}, {"TargetOnGround",618},
+    {"TargetPlayerByDefault",619}, {"TargetPositionX",620}, {"TargetPositionY",621}, {"TargetPositionZ",622},
+    {"TargetPosX",623}, {"TargetPosY",624}, {"TargetPosZ",625}, {"TargetProperty",626}, {"TargetSplineHandle",629},
+    {"TargetThreshold",630}, {"TargetType",631}, {"TargetVelX",632}, {"TargetVelY",633}, {"TargetVelZ",634},
+    {"TargetVisible",635}, {"TauntType",637}, {"Teleport",638}, {"TerrainCollisionResponse",639},
+    {"TetherDistance",640}, {"TetherExceededReturn",641}, {"TetherPosX",642}, {"TetherPosY",643}, {"TetherPosZ",644},
+    {"Threshold",645}, {"TimeAfterImpact",646}, {"Timeout",647}, {"TriggeredAction",651}, {"TriggeredTime",652},
+    {"TurnOffCollision",653}, {"TurnOffGravity",654}, {"TurnSpeed",655}, {"UID",660}, {"UpperType",661},
+    {"UpperTypeLeft",662}, {"UseAcceleration",663}, {"UseCustomHashParams",665}, {"UseDest",667}, {"UseDuration",668},
+    {"UseFacing",669}, {"UseHipsForPosition",672}, {"UseLookDestination",673}, {"UseNavMesh",674},
+    {"UseNavMesh_ConstrainTargetToNavMesh",675}, {"UseNavMesh_SafeDistOnMesh",678}, {"UseNavMesh_SetGoalRange",679},
+    {"UseNavMesh_WaypointRange",680}, {"UseNodeName",681}, {"UseRigidBodyFuncs",683}, {"UseSendPoints",684},
+    {"UseSTravParm1",685}, {"UseSTravParm2",686}, {"UseTarget",687}, {"UseWalkSpeed",689}, {"Victim",690},
+    {"WaitForGround",691}, {"WaitMoveAction",692}, {"WaitMoveEventHash",693}, {"WalkAction",694},
+    {"WalkMaxTurnSpeed",695}, {"WalkSpeed",696}, {"WalkStartAction",697}, {"WalkStartTurnSpeed",698},
+    {"WalkStopAction",699}, {"WalkTurnAcc",700}, {"WalkWaitToTurn",701}, {"WalkWaitToTurnAgain",702},
+    {"WallBounceMaxSpeed",703}, {"WallBounceMinSpeed",704}, {"WallBouncePopUpSpeed",705},
+    {"WallBounceRestitutionCoef",706}, {"WanderChangeDirectionDistance",707}, {"WanderChoiceArc",708},
+    {"WasControllerOwner",709}, {"WasLarge",710}, {"WasSmall",711}, {"WeaponName",715}, {"WhichAnim",716}, {"Who",717},
+    {"WillFaceTarget",718}, {"Withdraw",719}, {"YAimOffset",722},
 };
+// FNV-1a of the exact name (1.0 interns key strings byte-exact, 0x416dc0) in [0x40000000, 0x7fffffff]: far above the
+// enum, no collision among the 570 key literals of the 1.0 scripts + the 1.0 .bmx Data names (keycheck.py).
+inline int keyFallback(const char* s)
+{
+    uint32_t h = 2166136261u;
+    for (; *s; ++s) h = (h ^ (uint8_t)*s) * 16777619u;
+    return (int)(0x40000000u | (h & 0x3fffffffu));
+}
 inline int keyId(const char* name)
 {
-    static std::mutex mx;
-    static std::unordered_map<std::string, int> ids;
-    std::lock_guard<std::mutex> lock(mx);
-    if (ids.empty())
-        for (const Key& k : KEYS30) ids.emplace(k.name, k.id);
+    static const std::unordered_map<std::string, int> ids = [] {
+        std::unordered_map<std::string, int> m;
+        for (const Key& k : KEYS30) m.emplace(k.name, k.id);
+        return m;
+    }();
     auto it = ids.find(name);
     if (it != ids.end()) return it->second;
-    static int next = 0x100000;
-    int id = next++;
-    ids.emplace(name, id);
-    if (g_log) g_log("sx hash key '%s': no 3.0 id paired, private id %#x", name, id);
+    int id = keyFallback(name);
+    static std::mutex mx;
+    static std::set<int> told;
+    std::lock_guard<std::mutex> lock(mx);
+    if (told.insert(id).second && g_log) g_log("sx key '%s': not in the 3.0 enum, id %#x", name, id);
     return id;
 }
 // A 1.0 key cell (string literal) as the 3.0 id cell; other cells (1.0 int keys) pass unchanged.
@@ -240,6 +297,86 @@ inline void __cdecl matrix3x3BuildFromVector(uint8_t* ctx)
 inline void __cdecl reactionInfoGetReactionScript(uint8_t* ctx) { Vm{ctx}.top() -= 1; call30(0x0137C4A0, ctx); }
 // Combat_AttackStart: 1.0 0xae20e0 (actor, attack) -> nothing; 3.0 0xeb2020 does the same and pushes the result.
 inline void __cdecl combatAttackStart(uint8_t* ctx) { call30(0x00EB2020, ctx); Vm{ctx}.top() -= 1; }
+// GetSliderFloat: 1.0 0xa00420 and 3.0 _GetSliderFloat 0xa77540 pop (f, f, p, p, f) and push the slider's float the
+// same way (3.0 passes one more constant 0 to its slider lookup 0x1441370).
+inline void __cdecl getSliderFloat(uint8_t* ctx) { call30(0x00A77540, ctx); }
+// ReactionInfo_FlipMotionName: 1.0 0xed8270 copies the name into one static buffer (0x1757378) turning "BACK" into
+// "FRONT" and "FRONT" into "BACK" (case-sensitive, left to right), and pushes the buffer. 3.0 has no such native.
+inline void flipMotionName(const char* s, char* buf, size_t cap)
+{
+    size_t n = strlen(s), o = 0;
+    for (size_t i = 0; i <= n && o + 6 < cap;) {   // i == n copies the terminator, as 1.0's `cmp edx,ebx; jle`
+        if (i + 3 < n && !memcmp(s + i, "BACK", 4)) { memcpy(buf + o, "FRONT", 5); o += 5; i += 4; }
+        else if (i + 4 < n && !memcmp(s + i, "FRONT", 5)) { memcpy(buf + o, "BACK", 4); o += 4; i += 5; }
+        else buf[o++] = s[i++];
+    }
+    buf[cap - 1] = 0;
+}
+inline void __cdecl reactionInfoFlipMotionName(uint8_t* ctx)
+{
+    static char buf[512];
+    Vm v{ctx};
+    Cell c = v.pop();
+    char s[256];
+    if (c.type != 2 || !readStr(c.s, s, sizeof(s))) s[0] = 0;
+    flipMotionName(s, buf, sizeof(buf));
+    Cell r; r.type = 2; r.s = buf; v.push(r);
+}
+
+// AI behavior types. 1.0 numbers them by its table 0x15f5c04 (36, index 0 ACTION; bound 0x24 in 0xfd16c0/0xf2f9a0),
+// 3.0 by 0x210455c (30, index 0 ATTACK; FUN_01523c30, bound 0x1d in 0x13b7430): every index moved. Tested on the
+// scripts: the type constants of 19/19 twin scripts (behtwins.py) and the self-checks "INCORRECT Behavior ID ... not
+// AI_BEHAVIOR_X" (7/7 1.0, 8/8 3.0, behcheck.py) follow the tables. 1.0 scripts see 1.0 numbers: the engine's number
+// is translated where it enters a 1.0 script (SetInitialParams, AiBehaviorGetCurrentBehaviorType) and back where a
+// 1.0 script hands one to the engine (AiBehaviorGet{String,Float}Property). The names the other table lacks map to -1.
+inline const char* const BEH10[36] = {
+    "ACTION", "ATTACK", "BALLISTICTOPOINT", "CHARGE", "CINEMATIC", "CUSTOM", "CUSTOMIZE", "DEATH", "FOLLOWSPLINE",
+    "LOOKATTARGET", "MOVETOPOINT", "MOVETURN", "MUNITIONIMPACT", "SLEEP", "SPAWN", "SPECIALCASE", "TELEPORT", "ALERT",
+    "BLOCK", "CAPTURE", "INVESTIGATE", "NAVBEACON", "PLAYERCONTROL", "RETURNTONAVMESH", "STANDGUARD", "TAUNT",
+    "APPROACH", "CIRCLE", "FLEE", "FOLLOW", "MORALSUPPORT", "PATROL", "PROTECT", "ROAM", "SNEAK", "WANDER",
+};
+inline const char* beh30Name(int t30) { return ((const char*(__cdecl*)(unsigned))(g_exe + 0x01523C30 - 0x400000))(t30); }
+inline int behTo30(int t10)
+{
+    if (t10 < 0 || t10 >= 36) return -1;
+    for (int i = 0; i < 30; ++i)
+        if (!_stricmp(beh30Name(i), BEH10[t10])) return i;
+    return -1;
+}
+inline int behTo10(int t30)
+{
+    if (t30 < 0 || t30 >= 30) return -1;
+    const char* n = beh30Name(t30);
+    for (int i = 0; i < 36; ++i)
+        if (!_stricmp(n, BEH10[i])) return i;
+    return -1;
+}
+inline void behCell30(Cell& c) { if (c.type == 0) c.i = behTo30(c.i); }
+// AiBehaviorGet{String,Float}Property: 1.0 0xed7250/0xed72b0 and 3.0 0x1375c50/0x1375ca0 pop (type, name) -> value;
+// the name goes into the key table lookup (1.0 0xa15890 by interned string, 3.0 0x13429c0 by key id, as HashFind).
+inline void __cdecl aiBehaviorGetStringProperty(uint8_t* ctx)
+{
+    Vm v{ctx}; keyCell(v.at(0)); behCell30(v.at(1)); call30(0x01375C50, ctx);
+}
+inline void __cdecl aiBehaviorGetFloatProperty(uint8_t* ctx)
+{
+    Vm v{ctx}; keyCell(v.at(0)); behCell30(v.at(1)); call30(0x01375CA0, ctx);
+}
+// AiBehaviorGetBehaviorStringFromType: 1.0 0xed7310 = name from the 1.0 table, "UNDEFINED" past it (0xfd16c0).
+inline void __cdecl aiBehaviorGetBehaviorStringFromType(uint8_t* ctx)
+{
+    Vm v{ctx};
+    Cell c = v.pop();
+    int t = c.type == 1 ? (int)c.f : c.i;
+    Cell r; r.type = 2; r.s = (unsigned)t < 36 ? BEH10[t] : "UNDEFINED"; v.push(r);
+}
+// AiBehaviorGetCurrentBehaviorType: 1.0 0xed7330 / 3.0 0x1375d20 (actor) -> type, -1 without the component.
+inline void __cdecl aiBehaviorGetCurrentBehaviorType(uint8_t* ctx)
+{
+    call30(0x01375D20, ctx);
+    Cell& c = Vm{ctx}.at(0);
+    if (c.type == 0 && c.i >= 0) c.i = behTo10(c.i);
+}
 
 inline Native g_natives[] = {   // scratch\sx\sig.py + need.py -> gentab.py (name, args, results)
     {"ActorGetNamedLocatorPosition",2,3}, {"ActorIsExploder",1,2}, {"ActorTypeVars_GetLiveVarValue",2,1},
@@ -421,6 +558,12 @@ inline Native g_ports[] = {
     {"Matrix3x3BuildFromVector", 3, 9, &matrix3x3BuildFromVector},
     {"ReactionInfo_GetReactionScript", 3, 1, &reactionInfoGetReactionScript},
     {"Combat_AttackStart", 2, 0, &combatAttackStart},
+    {"GetSliderFloat", 5, 1, &getSliderFloat},
+    {"ReactionInfo_FlipMotionName", 1, 1, &reactionInfoFlipMotionName},
+    {"AiBehaviorGetStringProperty", 2, 1, &aiBehaviorGetStringProperty},
+    {"AiBehaviorGetFloatProperty", 2, 1, &aiBehaviorGetFloatProperty},
+    {"AiBehaviorGetBehaviorStringFromType", 1, 1, &aiBehaviorGetBehaviorStringFromType},
+    {"AiBehaviorGetCurrentBehaviorType", 1, 1, &aiBehaviorGetCurrentBehaviorType},
 };
 
 inline std::unordered_map<std::string, Native*>& table()
@@ -485,6 +628,33 @@ inline uint8_t __fastcall hkLink(void* reg, void*, uint8_t* hdr)
         try { bind(hdr); } catch (...) {}   // never unwind into engine code
     }
     return ok;
+}
+
+// ---- engine -> 1.0 script: the behavior type the AI tree passes to a behavior script's SetInitialParams
+// (FUN_013fa680 pushes the param table, then the type; the script's prologue `0a x=2 85` stores the type, pushed last,
+// in its behavior-type variable) is a 3.0 number, which a 1.0 script compares with 1.0 ones.
+// Detour of the call-by-name FUN_00739090 (thiscall: ECX = VM context, [ctx+4] = script header; name, arg; ret 8),
+// the only caller of SetInitialParams.
+inline bool isDi1(const uint8_t* hdr)
+{
+    const uint8_t* t = *(uint8_t* const*)(hdr + 0x54);
+    return *(const int*)(hdr + 0x2c) > 0 && t && rd(t + 20) == DI1;
+}
+inline void behInitParams(uint8_t* ctx, const char* name)
+{
+    __try {
+        const uint8_t* hdr = *(uint8_t**)(ctx + 4);
+        if (!name || strcmp(name, "SetInitialParams") || !hdr || !isDi1(hdr)) return;
+        Cell& c = Vm{ctx}.at(0);
+        if (c.type == 0) c.i = behTo10(c.i);
+    } __except (1) {}
+}
+typedef void(__fastcall* CallByNameFn)(uint8_t* ctx, void* edx, const char* name, int arg);
+inline CallByNameFn g_callByName;
+inline void __fastcall hkCallByName(uint8_t* ctx, void*, const char* name, int arg)
+{
+    behInitParams(ctx, name);
+    g_callByName(ctx, nullptr, name, arg);
 }
 
 }  // namespace sx

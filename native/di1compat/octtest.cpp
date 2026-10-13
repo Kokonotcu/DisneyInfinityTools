@@ -155,11 +155,20 @@ int main(int argc, char** argv)
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
-    if (argc > 3 && std::string(argv[1]) == "--sx") {   // --sx <out dir> <dir>...: SX-1 over every .sx (sxcheck.py checks
-        fs::path out = argv[2];                        // the files); <out>/natives.tsv, keys.tsv: the embedded tables
-        fs::create_directories(out);
+    if (argc > 3 && std::string(argv[1]) == "--sxkeys") {   // --sxkeys <names file> <out.tsv>: sx::keyId of every line
+        std::ifstream in(argv[2]);                          // (keycheck.py recomputes the ids independently)
+        std::ofstream o(argv[3]);
+        for (std::string s; std::getline(in, s);)
+            if (!s.empty()) o << s << '\t' << sx::keyId(s.c_str()) << '\n';
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--sx") {   // --sx <out dir> <dir>...: SX-1 over every .sx into
+        fs::path out = argv[2];                        // <out>/<input dir name>/ (sxcheck.py checks the files);
+        fs::create_directories(out);                   // <out>/natives.tsv, keys.tsv: the embedded tables
         size_t ok = 0, bad = 0, imports = 0;
-        for (int i = 3; i < argc; ++i)
+        for (int i = 3; i < argc; ++i) {
+            fs::path sub = out / fs::path(argv[i]).filename();   // characters/ and scripts/ share names (cannonball.sx)
+            fs::create_directories(sub);
             for (auto& e : fs::directory_iterator(argv[i])) {
                 if (e.path().extension() != ".sx") continue;
                 std::string b = slurp(e.path()), o, why;
@@ -167,12 +176,22 @@ int main(int argc, char** argv)
                 int k = sx::transcode(b.data(), b.size(), name, o, &why);
                 if (k < 0) { ++bad; printf("REFUSED %s: %s\n", e.path().string().c_str(), why.c_str()); continue; }
                 ++ok; imports += k;
-                std::ofstream(out / e.path().filename(), std::ios::binary).write(o.data(), o.size());
+                std::ofstream(sub / e.path().filename(), std::ios::binary).write(o.data(), o.size());
             }
+        }
         std::ofstream nt(out / "natives.tsv"), kt(out / "keys.tsv");
         for (auto& n : sx::g_natives) nt << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
         for (auto& n : sx::g_ports) nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
         for (auto& k : sx::KEYS30) kt << k.name << '\t' << k.id << '\n';
+        std::ofstream bt(out / "beh10.tsv");
+        for (auto* n : sx::BEH10) bt << n << '\n';
+        const char* flips[][2] = {{"HIT_BACK_HEAVY", "HIT_FRONT_HEAVY"}, {"FRONT", "BACK"}, {"BACK", "FRONT"},
+                                  {"FRONTBACK", "BACKFRONT"}, {"FRON", "FRON"}, {"BAC", "BAC"}, {"", ""}};
+        for (auto& f : flips) {
+            char b[64];
+            sx::flipMotionName(f[0], b, sizeof(b));
+            if (strcmp(b, f[1])) { printf("FlipMotionName(%s) = %s, want %s\n", f[0], b, f[1]); ++bad; }
+        }
         printf("sx transcoded %zu (%zu imports), refused %zu; %zu natives, %zu ports, %zu keys\n", ok, imports, bad,
                std::size(sx::g_natives), std::size(sx::g_ports), std::size(sx::KEYS30));
         return bad ? 1 : 0;
