@@ -240,6 +240,28 @@ int main(int argc, char** argv)
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
         return 0;
     }
+    if (argc > 3 && std::string(argv[1]) == "--challenge") {   // --challenge <out dir> <file>...: gameplay.hpp activity
+        // -> challenge transforms by file kind (challenge.py checks the outputs); a ChallengeData.lua needs the 1.0
+        // beacons file given before it
+        namespace fs = std::filesystem;
+        std::string beacons10;
+        for (int a = 3; a < argc; ++a) {
+            fs::path in = argv[a];
+            std::string t = slurp(in), o, name = in.filename().string(), kind;
+            for (char& c : name) c = (char)tolower((unsigned char)c);
+            int k = 0;
+            if (name == "defaultactivitybeacons.lua") { beacons10 = t; continue; }
+            if (name.rfind("activitytypedata", 0) == 0) { kind = "types"; k = gameplay::challengeTypes30(t); o = t; }
+            else if (name == "challengedata.lua") { kind = "beacons"; k = gameplay::beacons30(t, beacons10); o = t; }
+            else if (name.find("zonelist") != std::string::npos) { kind = "zonelist"; k = gameplay::zonelist30(t); o = t; }
+            else if (in.extension() == ".ap") { kind = "ap"; k = gameplay::apGivers30(t); o = t; }
+            else if (in.extension() == ".dnax") { kind = "dna"; k = gameplay::dnaGadgets30(t, o); }
+            else continue;
+            std::ofstream(fs::path(argv[2]) / in.filename(), std::ios::binary).write(o.data(), o.size());
+            printf("%-8s %-48s %d\n", kind.c_str(), in.filename().string().c_str(), k);
+        }
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--surf") {   // --surf <3.0 surfacetypes.lua> <1.0 .oct>...: OCT-5 (surf.py)
         std::string lua = slurp(argv[2]);
         std::vector<std::string> names30;   // entries '{ name = "dynamic" | "static" }' in order

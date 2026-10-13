@@ -136,6 +136,7 @@ static struct {
     bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
     bool assetBufs10 = true;         // gp: read10 finds <stem>_<n>.vbuf/.ibuf in a per-asset archive <dir>/<stem>.zip
+    bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -166,6 +167,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
         else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
         else if (!strcmp(key, "assetbufs10")) g_cfg.assetBufs10 = atoi(val) != 0;
+        else if (!strcmp(key, "challenge10")) g_cfg.challenge10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -471,6 +473,26 @@ static int missionGraph30(std::string& t)
 
 static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note)
 {
+    // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp): type data, giver sections, giver DNA
+    bool types = !gameplay::challengeTypePath(norm(path)).empty(), ap = endsWith(path, ".ap"), dna = endsWith(path, ".dnax");
+    if (g_cfg.challenge10 && n && (types || ap || dna)) {
+        std::string t((const char*)data, n);
+        int k = 0;
+        const char* codec = nullptr;
+        if (types && t[0] != 0x1b) { k = gameplay::challengeTypes30(t); codec = "challengetypes"; }
+        else if (ap) { k = gameplay::apGivers30(t); codec = "apgivers"; }
+        else if (dna && t[0] == 0x1b) {
+            std::string o;
+            try { k = gameplay::dnaGadgets30(t, o); } catch (std::exception&) { k = 0; }
+            if (k) t.swap(o);
+            codec = "dnagadgets";
+        }
+        if (k) {
+            note += std::string("+") + codec + "(" + std::to_string(k) + ") ";
+            out.swap(t);
+            return codec;
+        }
+    }
     if (endsWith(path, "__missiongraph.lua") && n && ((const char*)data)[0] != 0x1b) {
         std::string t((const char*)data, n);
         int k = missionGraph30(t);
@@ -1315,6 +1337,26 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         ((DtorFn)vt[11])(r, nullptr, 1);
         return g_open(path, flags, a3, a4, a5);
     }
+    // gp: 3.0 files the activity -> challenge redirect extends (gameplay.hpp): the zone list (ChallengeTypeDataFile
+    // beside the 1.0 ActivityTypeDataFile) and ChallengeData.lua (+ the 1.0 beacons)
+    bool zl = endsWith(p, "zonelist.lua"), cd = endsWith(p, "challengedata/challengedata.lua") || endsWith(p, "challengedata\\challengedata.lua");
+    if (r && g_cfg.challenge10 && !(flags & 1) && (zl || cd)) {
+        typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
+        typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
+        typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
+        void** vt = *(void***)r;
+        std::string t, t10;
+        t.resize(((SizeFn)vt[4])(r, nullptr));
+        uint32_t got = t.empty() ? 0 : ((ReadFn)vt[5])(r, nullptr, &t[0], (uint32_t)t.size());
+        ((DtorFn)vt[11])(r, nullptr, 1);
+        int k = 0;
+        if (got == t.size() && !t.empty() && t[0] != 0x1b) {
+            if (zl) k = gameplay::zonelist30(t);
+            else if (read10s("activitydata/defaultactivitybeacons.lua", t10)) k = gameplay::beacons30(t, t10);
+        }
+        logf("%s: %d %s", p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
+        return k ? memFile(t.data(), t.size()) : g_open(path, flags, a3, a4, a5);
+    }
     if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
         char line[600];
         int len = sprintf_s(line, "gamedb package open %s, stack:", p);
@@ -1358,7 +1400,8 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         size_t n = 0;
         std::string where;
         missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)" : " (overlay " + over + " unreadable)";
-        void* data = read10(over.empty() ? p : over.c_str(), &n, &where);
+        std::string chal = g_cfg.challenge10 ? gameplay::challengeTypePath(np) : "";   // gp: ChallengeData/<1.0 type file>
+        void* data = read10(!chal.empty() ? chal.c_str() : over.empty() ? p : over.c_str(), &n, &where);
         // 3.0 registers a language table only with its controller variant <lang>_pc_con.dct beside it, which 1.0
         // never shipped: without one the whole playset table was dropped (in-game 2026-10-13, lang\IN). The WIN32
         // table stands in (same strings).
