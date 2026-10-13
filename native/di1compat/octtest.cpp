@@ -49,6 +49,9 @@ static int renderTest(char** a)
         return ok;
     };
     io.verbose = getenv("RENDER_VERBOSE") != nullptr;
+    io.translate = getenv("RENDER_TRANSLATE") != nullptr;   // real 1.0 shaders (read10 finds shaders/shaders/<x>.shd)
+    gen30::VFormats vf10 = gen30::vformats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
+    io.skinned = [&](uint32_t vf) { auto f = vf10.find(vf); return f != vf10.end() && f->second.count("BLENDINDICES0"); };
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
     auto t0 = std::chrono::steady_clock::now();
     io.read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
@@ -288,6 +291,64 @@ int main(int argc, char** argv)
         }
         printf("%zu shaders identical to gen30.py, %zu differ (%zu programs)\n", ok, bad, progs);
         return bad ? 1 : 0;
+    }
+    if (argc > 5 && std::string(argv[1]) == "--warm") {   // --warm <render table> <1.0 extract root> <cache dir> <1.0 .mtb>...
+        // compile the translated shaders these bundles name into the plugin's cache (same compiler, same keys)
+        render::Table T;
+        if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
+        fs::path ext10 = fs::path(argv[3]) / "assets";
+        std::string cache = argv[4];
+        fs::create_directories(cache);
+        gen30::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(ext10 / p); return !o.empty(); };
+        gen30::VFormats vf = gen30::vformats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
+        typedef HRESULT(WINAPI * CompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, void**, void**);
+        HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
+        CompileFn cf = dc ? (CompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
+        if (!cf) { printf("no d3dcompiler_47\n"); return 2; }
+        auto fnv = [](const std::string& x) { uint64_t h = 1469598103934665603ull; for (unsigned char c : x) h = (h ^ c) * 1099511628211ull; return h; };
+        size_t compiled = 0, cached = 0, failed = 0;
+        auto blob = [](void* b, std::string& out) {
+            void** vt = *(void***)b;
+            out.assign((const char*)((void*(__stdcall*)(void*))vt[3])(b), ((SIZE_T(__stdcall*)(void*))vt[4])(b));
+            ((ULONG(__stdcall*)(void*))vt[2])(b);
+        };
+        gen30::Compile comp = [&](const std::string& hlsl, const char* target, std::string& code, std::string& msg) {
+            char nm[40];
+            sprintf_s(nm, "%016llx.dxbc", (unsigned long long)fnv(std::string(target) + "\n" + hlsl));
+            fs::path path = fs::path(cache) / nm;
+            code = slurp(path);
+            if (code.size() > 32) { ++cached; return true; }
+            void *c = nullptr, *e = nullptr;
+            HRESULT hr = cf(hlsl.data(), hlsl.size(), "di1compat", nullptr, nullptr, "main", target, 0, 0, &c, &e);
+            if (e) blob(e, msg);
+            if (FAILED(hr) || !c) { ++failed; return false; }
+            blob(c, code);
+            std::ofstream(path, std::ios::binary).write(code.data(), code.size());
+            ++compiled;
+            return true;
+        };
+        std::set<std::string> shaders;
+        for (int a = 5; a < argc; ++a) {
+            std::string b = slurp(argv[a]);
+            size_t o = 16, nc = b.size() >= 16 ? gen30::u32(b, 12) : 0;
+            for (size_t c = 0; c < nc && o + 16 <= b.size(); ++c) {
+                if (!b.compare(o, 4, "MATP")) {
+                    size_t p = (o + 16 + 3) & ~(size_t)3;
+                    uint32_t ns = gen30::u32(b, p);
+                    p += 4;
+                    for (uint32_t i = 0; i < ns; ++i) { size_t e = b.find('\0', p); shaders.insert(b.substr(p, e - p)); p = e + 1; }
+                }
+                o += gen30::u32(b, o + 8);
+            }
+        }
+        size_t probs = 0;
+        for (auto& sh : shaders) {
+            gen30::Generated g;
+            gen30::generate(T.shaders10, read10, vf, sh, comp, g);
+            for (auto& pr : g.problems) if (++probs <= 10) printf("  %s: %s\n", sh.c_str(), pr.c_str());
+        }
+        printf("%zu shaders: %zu programs compiled, %zu already cached, %zu failed, %zu problems\n", shaders.size(), compiled, cached, failed, probs);
+        return failed ? 1 : 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--read10") {   // --read10 <1.0 install> <engine path>: read10's candidates
         std::string p = argv[3];

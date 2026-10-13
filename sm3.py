@@ -123,6 +123,8 @@ def fmt_reg(r):
 # integers); vFace = +-1. Instructions follow their D3D9 definitions: rsq / log / pow on |x|, scalar ops read the
 # replicate component, cmp = per component src0 >= 0, nrm scales all four components, mova rounds.
 VARYINGS = ['TEXCOORD%d' % i for i in range(10)] + ['COLOR0', 'COLOR1']
+# 3.0 renders reversed-Z (its sky VSs write z = 0); 1.0's far-plane idiom z = w is 3.0's near plane (sm3.hpp REVERSED_Z)
+REVERSED_Z = '    if (vout.pos.z == vout.pos.w) vout.pos.z = 0;'
 SWZ = 'xyzw'
 
 
@@ -304,7 +306,7 @@ def to_hlsl(kind, prog, binding=None):
         out.append('struct VSIn { %s };' % ' '.join('%s4 v%d : %s;' % (B.input_type(v), k, v) for k, v in sorted(inputs.items())))
         out.append('struct VSOut { %s };' % io)
         out.append('VSOut main(VSIn vin) {')
-        out.append('    float4 ' + ', '.join('o%d = 0' % k for k in range(16)) + ';')
+        out.append('    precise float4 ' + ', '.join('o%d = 0' % k for k in range(16)) + ';')   # bit-equal positions across passes (sm3.hpp)
         out.append('    int4 a0 = 0;')
         out += ['    float4 v%d = (float4)vin.v%d;' % (k, k) for k in sorted(inputs)]
     else:
@@ -321,11 +323,12 @@ def to_hlsl(kind, prog, binding=None):
         out.append('    float4 vPos = float4(pin.pos.xy - 0.5, 0, 0); float vFace = pin.face ? 1.0 : -1.0;')
         out += ['    float4 v%d = pin.%s;' % (k, v) for k, v in sorted(inputs.items())]
     if temps:
-        out.append('    float4 ' + ', '.join('r%d = 0' % t for t in sorted(temps)) + ';')
+        out.append(('    precise float4 ' if kind == 'vs' else '    float4 ') + ', '.join('r%d = 0' % t for t in sorted(temps)) + ';')
     out += body
     if kind == 'vs':
         out.append('    VSOut vout = (VSOut)0;')
         out += ['    vout.%s = o%d;' % ('pos' if v == 'POSITION0' else v, k) for k, v in sorted(outputs.items())]
+        out.append(REVERSED_Z)
         out.append('    return vout;')
     else:
         if B.epilogue:

@@ -305,6 +305,15 @@ struct IO {
     std::function<bool(const std::string& path, std::string& out)> read10;   // a 1.0 asset by path
     std::function<void(const std::string&)> log;
     bool verbose = false;   // log every substituted material's slot assignment
+    // real 1.0 shaders (gen30.hpp): a material whose 1.0 shader read10 finds keeps it, as 'x'<shader>, with its own
+    // blocks (B re-laid for 8-byte slots) and its primitives keep their 1.0 vertex formats
+    bool translate = false;
+    // a 1.0 vertex format with bone indices: 3.0 skins on the GPU before the material shader (MemExport, six
+    // layouts; a raw 1.0 skinned layout matches none -> its job list spins on purpose, FUN_0047c300, in-game
+    // 2026-10-13), so materials drawn with one keep the converted path for now
+    std::function<bool(uint32_t vformat)> skinned;
+    // the shader translates (and is registered): only then may a material take it
+    std::function<bool(const std::string& shader)> translatable;
 };
 
 struct Result {
@@ -312,6 +321,7 @@ struct Result {
     std::vector<std::string> problems;
     std::map<std::string, int> tiers;
     std::set<std::string> textures10;   // 1.0 texture hashes (hex) the bundle uses
+    std::set<int> translated;           // materials on their real (translated) 1.0 shader
 };
 
 struct Src { Bundle b; int i; };   // one material of a source bundle (merge input)
@@ -381,6 +391,34 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
     for (size_t k = 0; k < b10.mats.size(); ++k) {
         const Material& m10 = b10.mats[k];
         Bundle* bnd = nullptr;
+        std::string raw10;
+        gen30::Shd10 s10;
+        bool skin = false;
+        if (auto dk = drawn.find((int)k); dk != drawn.end() && io.skinned)
+            for (uint32_t c : dk->second) skin |= io.skinned(c);
+        if (io.translate && !skin && io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) && gen30::parse10(raw10, s10) &&
+            (!io.translatable || io.translatable(m10.shader))) {
+            gen30::Layout L = gen30::layout(s10);
+            Material dm;
+            dm.name = m10.name;
+            dm.shader = "x" + m10.shader;
+            // MATP load (FUN_00472590) reuses any material already registered under the hash (FUN_00468500): the
+            // same 1.0 GUID converted onto a 3.0 shader in a choreography/exploder bundle loaded first replaced this
+            // one -- 3.0 shader, 1.0 block A, opacity 0 -> skipped, black (in-game 2026-10-13). Own hash space.
+            dm.hash = m10.hash ^ 0x9E3779B9u;
+            dm.stride = 8;
+            dm.slots = L.slots;
+            dm.A = m10.A;
+            dm.A.resize(L.sizeA, '\0');
+            dm.B = gen30::blockB30(m10.B, L);
+            Bundle one;
+            one.textures = b10.textures;
+            one.mats.push_back(dm);
+            srcs.push_back({one, 0});
+            r.tiers["translated"]++;
+            r.translated.insert((int)k);
+            continue;
+        }
         auto mi = T.matindex.find(m10.name);
         if (!m10.name.empty() && mi != T.matindex.end() && !T.notReal.count(m10.name)) {
             if (!bundle30(mi->second, bnd)) continue;
@@ -455,7 +493,25 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
                 memcpy(&dm.B[dm.stride * s + 4], &w2, 4);
             }
             const std::string &a10 = m10.A;
-            if (dm.shader == m10.shader && a10.size() <= dm.A.size()) dm.A = a10 + dm.A.substr(a10.size());
+            // Block A by parameter name: the 3.0 shader's own defaults, then each parameter the 1.0 material has, at
+            // 3.0's offset. Copied raw, 1.0's layout misplaced what 3.0 moved: 3.0 put g_diffuse_hdrModifier at 0x10
+            // and the opacity parameter (+0x50 word, read by FUN_0044ad80) at 0x20, which then held the donor's 0 --
+            // every such piece was "transparent": depth only, never coloured, black (in-game 2026-10-13).
+            std::string raw30, raw10a;
+            gen30::ShdA30 a30;
+            gen30::Shd10 sa10;
+            if (io.read30 && io.read30("3:shaders/shaders/" + dm.shader + ".shd", raw30) && gen30::parseA30(raw30, a30) &&
+                (int)dm.A.size() == a30.sizeA) {
+                std::string A = a30.defA;
+                if (io.read10("shaders/shaders/" + m10.shader + ".shd", raw10a) && gen30::parse10(raw10a, sa10))
+                    for (auto& p : sa10.params) {
+                        auto q = a30.off.find(p.hash);
+                        if (!p.A || q == a30.off.end()) continue;
+                        size_t n = (std::min)({(size_t)16, a10.size() - (std::min)(a10.size(), (size_t)p.offset), A.size() - (size_t)q->second});
+                        A.replace(q->second, n, a10, p.offset, n);
+                    }
+                dm.A = A;
+            } else if (dm.shader == m10.shader && a10.size() <= dm.A.size()) dm.A = a10 + dm.A.substr(a10.size());
             else if (a10.size() >= 16 && dm.A.size() >= 16) dm.A = a10.substr(0, 16) + dm.A.substr(16);
             if (io.verbose) {   // octtest --render with RENDER_VERBOSE: which 1.0 texture went to which donor slot
                 std::string l = std::string(tier) + " " + m10.name + " [" + m10.shader + " -> " + dm.shader + "]";
@@ -534,9 +590,16 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     // (material, 1.0 vformat) -> the first 3.0 target that material's shader takes
     std::map<std::pair<int, uint32_t>, uint32_t> vmap;
     for (auto& [crc, refs] : users) {
+        bool all = true;
+        for (int ref : refs) {
+            if (r.translated.count(ref)) vmap[{ref, crc}] = crc;   // its own shader takes the 1.0 format as it is
+            else all = false;
+        }
+        if (all) continue;
         auto t = T.targets.find(crc);
         if (t == T.targets.end() || t->second.empty()) { r.problems.push_back("vformat " + std::to_string(crc) + ": no 3.0 target"); continue; }
         for (int ref : refs) {
+            if (r.translated.count(ref)) continue;
             auto sv = shaderVf.find(ref);
             uint32_t pick = 0;
             bool found = false;
@@ -594,7 +657,17 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
             int ref = f.ints(f.recs[p.matref])[0];
             auto vm = vmap.find({ref, src});
             uint32_t dst = vm != vmap.end() ? vm->second : T.targets.at(src)[0];
-            const Plan& plan = T.plans.at({src, dst});
+            Plan same;                       // a translated material's primitive: every stream copied as it is
+            if (dst == src) {
+                for (int s = 0; s < vda[0]; ++s) {
+                    same.ss.push_back(vda[4 + 3 * s]);
+                    Op o{};
+                    o.dsi = s; o.doff = 0; o.size = vda[4 + 3 * s]; o.kind = 'C'; o.ssi = s; o.soff = 0;
+                    same.ops.push_back(o);
+                }
+                same.ds = same.ss;
+            }
+            const Plan& plan = dst == src ? same : T.plans.at({src, dst});
             std::vector<uint32_t> order, sub;
             std::unordered_map<uint32_t, uint32_t> remap;
             for (int32_t q = 0; q < ida[3]; ++q) {

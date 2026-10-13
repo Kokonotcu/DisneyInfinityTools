@@ -14,6 +14,7 @@
 #include <share.h>
 #include <cstring>
 #include <map>
+#include <unordered_set>
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
@@ -28,6 +29,8 @@
 #include "dct.hpp"
 #include "luachunk.hpp"
 #include "third_party/miniz/miniz.h"
+#include "renderdoc_app.h"
+#include <thread>
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -119,6 +122,13 @@ static struct {
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
     bool trace = true;               // log every open
     bool missionTrace = false;       // log IN_ mission context state changes (one cheap hook; trace's cost frames)
+    bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
+    bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
+    bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
+    bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
+    int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
+    int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
+    bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
@@ -139,6 +149,13 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "serve10")) g_cfg.serve10 = atoi(val) != 0;
         else if (!strcmp(key, "trace")) g_cfg.trace = atoi(val) != 0;
         else if (!strcmp(key, "missiontrace")) g_cfg.missionTrace = atoi(val) != 0;
+        else if (!strcmp(key, "shaders10")) g_cfg.shaders10 = atoi(val) != 0;
+        else if (!strcmp(key, "translate10")) g_cfg.translate10 = atoi(val) != 0;
+        else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
+        else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
+        else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
+        else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
+        else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
@@ -290,6 +307,8 @@ static std::map<std::string, std::string> g_served;
 static std::map<std::string, std::string> g_over10;
 static std::set<std::string> g_indexed10;
 static render::Table g_render;
+static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
+static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
 static mer::Table g_mer;
 static bool g_merOk;
@@ -340,6 +359,9 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.read30 = read30x;
     io.read10 = read10s;
     io.log = [](const std::string& s) { logf("%s", s.c_str()); };
+    io.translate = g_cfg.shaders10 && g_cfg.translate10;
+    io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
+    io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
     render::Result r;
     if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
         for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
@@ -354,8 +376,8 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
         if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
     }
     char buf[200];
-    sprintf_s(buf, "+render(real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["real"], r.tiers["same-sh"],
-              r.tiers["generic"], (unsigned)r.textures10.size());
+    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["translated"], r.tiers["real"],
+              r.tiers["same-sh"], r.tiers["generic"], (unsigned)r.textures10.size());
     note += buf;
     return true;
 }
@@ -1025,11 +1047,70 @@ static void __cdecl hkPlaceToy(void* msg) { logf("ToyCreation_PlaceToy callback 
 // Offsets from the context parser FUN_016748d0 and the update itself; +0x10 is the context's name string.
 typedef void(__fastcall* MissionTickFn)(uint8_t* self, void* edx, float dt);
 static MissionTickFn g_missionTick;
+// test (opacitylog10): FUN_0044ad80 -> bit i set = primitive i is "faded" (opacity param * object fade < 1) and the
+// opaque G-buffer list skips it (FUN_00461020); logs our skipped primitives with the values that decided it
+typedef uint32_t(__cdecl* OpacityMaskFn)(uint32_t n, float fade, uint32_t prims, uint32_t insts);
+static OpacityMaskFn g_opacityMask;
+static uint32_t __cdecl hkOpacityMask(uint32_t n, float fade, uint32_t prims, uint32_t insts)
+{
+    uint32_t r = g_opacityMask(n, fade, prims, insts);
+    static std::mutex m;
+    static std::set<std::string> seen;
+    uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1;
+    if (r && (r & all) != all) {   // one object, some primitives skipped and some kept: log all of them once
+        std::string line;
+        for (uint32_t i = 0; i < n && i < 32; ++i) {
+            uint32_t prim = *(uint32_t*)(uintptr_t)(prims + 4 * i);
+            uint8_t* shd = *(uint8_t**)(uintptr_t)(prim + 0x10);
+            uint32_t w = shd ? *(uint32_t*)(shd + 0x50) : 0;
+            float v = w ? *(float*)(uintptr_t)((w >> 16) + *(uint32_t*)(uintptr_t)(insts + 4 * i)) : 1.0f;
+            char e[96];
+            sprintf_s(e, " [%u %.8s w%08x v%.3f %s]", i, shd && *(const char**)shd ? *(const char**)shd : "?", w, v, (r >> i) & 1 ? "SKIP" : "keep");
+            line += e;
+        }
+        std::lock_guard<std::mutex> lock(m);
+        if (seen.size() < 300 && seen.insert(line).second) logf("opacity mixed: fade %.3f%s", fade, line.c_str());
+        static int dumped;
+        for (uint32_t i = 0; i < n && i < 32 && dumped < 6; ++i) {
+            if (!((r >> i) & 1)) continue;
+            uint32_t prim = *(uint32_t*)(uintptr_t)(prims + 4 * i);
+            uint8_t* shd = *(uint8_t**)(uintptr_t)(prim + 0x10);
+            float* inst = *(float**)(uintptr_t)(insts + 4 * i);
+            std::string f;
+            for (int k = 0; k < 12; ++k) { char e[16]; sprintf_s(e, " %.3f", inst[k]); f += e; }
+            std::string pr;
+            for (int k = 0; k < 12; ++k) { char e[16]; sprintf_s(e, " %08x", ((uint32_t*)(uintptr_t)prim)[k]); pr += e; }
+            logf("skipped primitive %s sizeA %u: instance floats%s | prim words%s", shd && *(const char**)shd ? *(const char**)shd : "?",
+                 shd ? *(uint16_t*)(shd + 0x6a) : 0, f.c_str(), pr.c_str());
+            ++dumped;
+        }
+    }
+    for (uint32_t i = 0; r && i < n && i < 32; ++i) {
+        uint32_t prim = *(uint32_t*)(uintptr_t)(prims + 4 * i);
+        uint8_t* shd = *(uint8_t**)(uintptr_t)(prim + 0x10);
+        const char* nm = shd ? *(const char**)shd : nullptr;
+        uint32_t w = shd ? *(uint32_t*)(shd + 0x50) : 0;
+        float v = w ? *(float*)(uintptr_t)((w >> 16) + *(uint32_t*)(uintptr_t)(insts + 4 * i)) : 1.0f;
+        char key[160];
+        sprintf_s(key, "%s %08x %.3f %.3f %u", nm ? nm : "(null)", w, v, fade, (r >> i) & 1);
+        std::lock_guard<std::mutex> lock(m);
+        if (seen.size() < 300 && seen.insert(key).second)
+            logf("opacity mask: %s (word %08x: value %.3f, object fade %.3f) skip %u", nm ? nm : "(null)", w, v, fade, (r >> i) & 1);
+    }
+    return r;
+}
+
+static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc loaded in-process, one frame captured once the world runs
 static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
 {
     g_missionTick(self, nullptr, dt);
     const char* name = *(const char**)(self + 0x10);
     if (!name || _strnicmp(name, "IN_", 3)) return;
+    static bool armed;
+    if (g_rdoc && !armed) {
+        armed = true;
+        std::thread([] { Sleep(1000 * g_cfg.renderdoc10); g_rdoc->TriggerCapture(); logf("renderdoc: capture triggered"); }).detach();
+    }
     static const uint32_t stateVa[] = {0x0228a2c0, 0x0228a2c4, 0x0228a2c8, 0x0228a2cc, 0x0228a2d0, 0x0228a2d4, 0x0228a2d8,
                                        0x0228a2dc, 0x0228a2e0, 0x0228a2e4, 0x0228a2e8, 0x0228a2ec, 0x0228a2f0, 0x0228a2f4};
     auto stateName = [](uint32_t v) {
@@ -1175,11 +1256,28 @@ static void __cdecl hkNormPath(char* dst, unsigned size, const char* src)
     g_normPath(dst, size, src);
 }
 
+static std::string mergeVtxf(const std::string& t30, const std::string& t10);
 static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
 {
     int* r = g_open(path, flags, a3, a4, a5);
     char p[300];
     safeCopy(p, sizeof(p), path);
+    if (r && g_cfg.shaders10 && !(flags & 1) && _stricmp(p, "shaders/vformat.vtxf") == 0) {   // + 1.0's formats
+        typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
+        typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
+        typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
+        void** vt = *(void***)r;
+        std::string t30, t10;
+        t30.resize(((SizeFn)vt[4])(r, nullptr));
+        uint32_t got = t30.empty() ? 0 : ((ReadFn)vt[5])(r, nullptr, &t30[0], (uint32_t)t30.size());
+        if (got == t30.size() && read10s("shaders/vformat.vtxf", t10)) {
+            std::string m = mergeVtxf(t30, t10);
+            ((DtorFn)vt[11])(r, nullptr, 1);
+            return memFile(m.data(), m.size());
+        }
+        ((DtorFn)vt[11])(r, nullptr, 1);
+        return g_open(path, flags, a3, a4, a5);
+    }
     if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
         char line[600];
         int len = sprintf_s(line, "gamedb package open %s, stack:", p);
@@ -1261,6 +1359,341 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     return r;
 }
 
+// ---- real 1.0 shaders at runtime (gen30.hpp; plan in DI3Tools/gen30.py) ----
+// The engine loads its whole shader package once, at boot (renderer init FUN_00479470: shaders.list ->
+// FUN_00476180, then the linker FUN_00472050), and 3.0's index fields cap a session at 2047 programs per stage --
+// 1.0's shaders do not all fit beside 3.0's, so each is registered when a material first names it ('x'<GUID>, the
+// name the world transcode gives it): the shader-by-name lookup FUN_0045c820 is hooked. On a miss for an 'x' name
+// the 1.0 shader is translated (programs compiled once, then from <plugin dir>\di1compat_shaders), its programs are
+// added through the engine's own registration (VS FUN_0045c230 / PS FUN_0045c350: CreateVertexShader /
+// CreatePixelShader, table append) under ids above every shipped one (the tables stay sorted), the .shd is
+// finalized by the engine's FUN_0045cf40 (EDI = shader, ECX = &cursor, as the loader calls it) and each pass gets
+// a pass-state record built as the linker builds one (records 0x38 B at 0x02173a68, count u16 at 0x02173a66).
+struct Blob : IUnknown {
+    virtual void* STDMETHODCALLTYPE GetBufferPointer() = 0;
+    virtual SIZE_T STDMETHODCALLTYPE GetBufferSize() = 0;
+};
+typedef HRESULT(WINAPI* D3DCompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, Blob**, Blob**);
+static D3DCompileFn g_d3dCompile;
+static std::string g_shaderCache;
+static std::mutex g_sh10Lock;
+static std::unordered_map<std::string, uint8_t*> g_sh10;                       // 'x'<GUID> -> finalized .shd (nullptr: failed)
+static std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> g_prog10;  // code -> engine id, table index
+
+static uint64_t fnv64(const std::string& s)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) h = (h ^ c) * 1099511628211ull;
+    return h;
+}
+
+static thread_local std::string g_compiling10;   // the shader shader10 is generating (debug views name it)
+static bool compile10(const std::string& hlsl0, const char* target, std::string& code, std::string& msg)
+{
+    std::string idcolor;
+    if (g_cfg.bufview10 == 8 && target[0] == 'p') {
+        // test: final passes skip, G-buffer albedo carries the shader's ID colour (3.0's own composite shows it)
+        uint64_t h = fnv64(g_compiling10);
+        char c[160];
+        sprintf_s(c, "o.o1 = float4(sqrt(float3(%.2f, %.2f, %.2f)), 0.2236);", (h & 3) / 3.0, (h >> 2 & 3) / 3.0, (h >> 4 & 3) / 3.0);
+        if (hlsl0.find("tLight") != std::string::npos)
+            idcolor = "float4 main(float4 p : SV_Position) : SV_Target0 { discard; return 0; }";
+        else if (size_t at = hlsl0.find("o.o1 = float4(0, 0, 0, 0);"); at != std::string::npos) {
+            idcolor = hlsl0;
+            idcolor.replace(at, strlen("o.o1 = float4(0, 0, 0, 0);"), c);
+            logf("idcolor %s = %.2f %.2f %.2f", g_compiling10.c_str(), (h & 3) / 3.0, (h >> 2 & 3) / 3.0, (h >> 4 & 3) / 3.0);
+        }
+    }
+    if (g_cfg.bufview10 >= 6 && g_cfg.bufview10 <= 7 && target[0] == 'p' && (g_cfg.bufview10 == 7 ? hlsl0.find("SV_Target1") == std::string::npos
+                                                                           : hlsl0.find("tLight") != std::string::npos)) {
+        // test: each translated final pass a solid colour of its own, logged with its shader
+        uint64_t h = fnv64(g_compiling10);
+        char c[200];
+        sprintf_s(c, "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(%.2f, %.2f, %.2f, 1); }",
+                  (h & 3) / 3.0, (h >> 2 & 3) / 3.0, (h >> 4 & 3) / 3.0);
+        idcolor = c;
+        logf("idcolor %s = %.2f %.2f %.2f", g_compiling10.c_str(), (h & 3) / 3.0, (h >> 2 & 3) / 3.0, (h >> 4 & 3) / 3.0);
+    }
+    static const std::string magenta = "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(1, 0, 1, 1); }";
+    static const std::string bufview[5] = {
+        "cbuffer perView : register(b1) { float4 CB1[18]; }; Texture2D t3 : register(t3); SamplerState s3 : register(s3);\n"
+        "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(t3.Sample(s3, p.xy * CB1[17].zw).rgb, 1); }",
+        "cbuffer perView : register(b1) { float4 CB1[18]; }; Texture2D t0 : register(t0); SamplerState s0 : register(s0);\n"
+        "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(t0.Sample(s0, p.xy * CB1[17].zw).xxx, 1); }",
+        "cbuffer perView : register(b1) { float4 CB1[18]; }; Texture2D t4 : register(t4); SamplerState s4 : register(s4);\n"
+        "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(t4.Sample(s4, p.xy * CB1[17].zw).rgb, 1); }",
+        "cbuffer perInstance : register(b4) { float4 CB4[1]; };\n"
+        "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(CB4[0].rgb * 0.5 + float3(0.5, 0, 0) * (CB4[0].a == 0), 1); }",
+        "Texture2D t5 : register(t5); SamplerState s5 : register(s5);\n"
+        "struct PSIn { float4 pos : SV_Position; float4 TEXCOORD0 : TEXCOORD0; float4 TEXCOORD1 : TEXCOORD1; float4 TEXCOORD2 : TEXCOORD2; };\n"
+        "float4 main(PSIn i) : SV_Target0 { return float4(t5.Sample(s5, i.TEXCOORD2.xy).rgb, 1); }"};
+    const std::string& hlsl = g_cfg.magenta10 && target[0] == 'p' ? magenta
+        : !idcolor.empty() ? idcolor
+        : g_cfg.bufview10 && target[0] == 'p' && hlsl0.find("tLight") != std::string::npos ? bufview[(g_cfg.bufview10 - 1) % 5] : hlsl0;
+    char name[40];
+    sprintf_s(name, "\\%016llx.dxbc", (unsigned long long)fnv64(std::string(target) + "\n" + hlsl));
+    std::string path = g_shaderCache + name;
+    FILE* f = nullptr;
+    if (!fopen_s(&f, path.c_str(), "rb") && f) {
+        char buf[65536];
+        size_t got;
+        code.clear();
+        while ((got = fread(buf, 1, sizeof(buf), f)) > 0) code.append(buf, got);
+        fclose(f);
+        if (code.size() > 32 && !code.compare(0, 4, "DXBC")) return true;
+    }
+    if (!g_d3dCompile) { msg = "no d3dcompiler_47"; return false; }
+    Blob *c = nullptr, *e = nullptr;
+    HRESULT hr = g_d3dCompile(hlsl.data(), hlsl.size(), "di1compat", nullptr, nullptr, "main", target, 0, 0, &c, &e);
+    if (e) { msg.assign((const char*)e->GetBufferPointer(), e->GetBufferSize()); e->Release(); }
+    if (FAILED(hr) || !c) { if (c) c->Release(); return false; }
+    code.assign((const char*)c->GetBufferPointer(), c->GetBufferSize());
+    c->Release();
+    if (!fopen_s(&f, path.c_str(), "wb") && f) { fwrite(code.data(), 1, code.size(), f); fclose(f); }
+    return true;
+}
+
+// A program into the engine's table for its stage -> engine id and table index (identical code shared).
+static bool registerProgram10(const gen30::Program& p, uint32_t& id, uint32_t& index)
+{
+    uint64_t key = fnv64(p.code) ^ (p.ps ? 0x9e3779b97f4a7c15ull : 0);
+    if (auto it = g_prog10.find(key); it != g_prog10.end()) { id = it->second.first; index = it->second.second; return true; }
+    const uint32_t countVa = p.ps ? 0x0216B04C : 0x0215EFC4, tableVa = p.ps ? 0x0216B050 : 0x0215EFC8;
+    uint16_t n = *(uint16_t*)rt(countVa);
+    if (n >= 2047) { logf("shaders10: %s table full (%u)", p.ps ? "PS" : "VS", n); return false; }
+    static uint32_t next[2] = {0xF0000000u, 0xF0000000u};
+    uint32_t last = n ? *(uint32_t*)rt(tableVa + 8 * (n - 1)) : 0;
+    uint32_t& nx = next[p.ps ? 1 : 0];
+    if (nx <= last) nx = last + 1;
+    id = nx++;
+    void* data = _aligned_malloc(p.code.size(), 16);   // kept: the engine reads VS bytecode again for input layouts
+    memcpy(data, p.code.data(), p.code.size());
+    typedef void(__cdecl * RegFn)(uint32_t id, const void* data, uint32_t size);
+    ((RegFn)rt(p.ps ? 0x0045C350 : 0x0045C230))(id, data, (uint32_t)p.code.size());
+    if (*(uint16_t*)rt(countVa) != n + 1 || !*(uint32_t*)rt(tableVa + 8 * n + 4)) {
+        logf("shaders10: program %08X not created", id);
+        return false;
+    }
+    index = n;
+    g_prog10[key] = {id, index};
+    return true;
+}
+
+static void finalizeShd10(uint8_t* shd)
+{
+    uint32_t cursor[2] = {(uint32_t)(uintptr_t)(shd + 0xE0), 0};
+    uint32_t* pc = cursor;
+    void* fn = (void*)rt(0x0045CF40);
+    __asm {
+        push edi
+        mov ecx, pc
+        mov edi, shd
+        call fn
+        pop edi
+    }
+}
+
+static uint32_t inputLayout10(uint32_t vfIndex, uint32_t vsIndex)
+{
+    void* fn = (void*)rt(0x0044D430);
+    uint32_t entry = (uint32_t)rt(0x02170664) + vfIndex * 0x34, r;
+    __asm {
+        push 0xff
+        push 0xff
+        push 0xff
+        mov ecx, entry
+        mov eax, vsIndex
+        call fn
+        add esp, 12
+        mov r, eax
+    }
+    return r;
+}
+
+// Pass-state records (0x38 B at 0x02173a68, u16 count at 0x02173a66): the renderer packs a record index into 12 bits
+// of its draw sort key, so 4096 is a hard ceiling -- and 3.0's boot linker FUN_00472050 spends 3802 of them on every
+// pass of all 836 3.0 shaders. So nothing links at boot (hkLinkAll keeps only the linker's shader-array sort) and a
+// shader's passes are linked on its first lookup (every shader the engine uses comes through FUN_0045c820): the
+// records go to the shaders a session uses. Fields as FUN_00472050 builds them; program indices by the engine's
+// FUN_00450970 over its sorted tables (ours too: their ids sort after every shipped one).
+// The render thread adds records too (FUN_0045c5c0 clones one per extra vertex format, mid-draw); with our linker
+// writing from loader threads the two raced for the count and the clone chains (FUN_0045c5c0 walks them in a loop):
+// the first lazy-linking run froze on the loading screen (2026-10-13). One lock for both writers.
+static CRITICAL_SECTION g_recCs;
+static std::unordered_set<uint8_t*> g_linked;
+struct RecLock { RecLock() { EnterCriticalSection(&g_recCs); } ~RecLock() { LeaveCriticalSection(&g_recCs); } };
+
+typedef uint32_t(__cdecl* CloneRecFn)(uint32_t rec, uint32_t vformat);
+static CloneRecFn g_cloneRec;
+static uint32_t __cdecl hkCloneRec(uint32_t rec, uint32_t vformat)
+{
+    RecLock lock;
+    uint32_t r = g_cloneRec(rec, vformat);
+    uint32_t* c = (uint32_t*)rt(0x02173A68) + 14 * (r & 0xffff);
+    const char* nm = c[6] ? *(const char**)(uintptr_t)c[6] : nullptr;
+    if (!c[7] && nm && nm[0] == 'x') {
+        static int told;
+        if (told++ < 40) logf("clone without input layout: %s pass %u vformat %u (record %u from %u)", nm, c[0] & 0x3f, vformat & 0xff, r & 0xffff, rec & 0xffff);
+    }
+    return r;
+}
+
+static bool linkShader(uint8_t* shd)
+{
+    RecLock lock;
+    bool seen = g_linked.count(shd) != 0;
+    int fresh = 0;
+    typedef uint32_t(__cdecl * IndexFn)(uint32_t id, uint32_t table, uint32_t count, uint32_t fallback);
+    IndexFn index = (IndexFn)rt(0x00450970);
+    auto idx = [&](uint32_t id, uint32_t tableVa, uint32_t countVa, uint32_t fallback) -> uint32_t {
+        return id ? index(id, (uint32_t)rt(tableVa), *(uint16_t*)rt(countVa), fallback) & 0xffff : 0;
+    };
+    uint32_t shaderIndex = 0x3ff;                      // the record key's shader field; ours are not in the array
+    uint32_t nsh = *(uint32_t*)rt(0x0215CFC0);
+    for (uint32_t k = 0; k < nsh; ++k)
+        if (*(uint32_t*)rt(0x0215CFC8 + 8 * k) == (uint32_t)(uintptr_t)shd) { shaderIndex = k & 0x3ff; break; }
+    uint8_t* passes = *(uint8_t**)(shd + 0x38);
+    int npass = shd[0x19];
+    for (int i = 0; i < npass; ++i) {
+        uint8_t* p = passes + 0x50 * i;
+        if (!p[0x14]) continue;                        // no stage (yet): not drawn
+        uint16_t& count = *(uint16_t*)rt(0x02173A66);
+        uint16_t had = *(uint16_t*)(p + 0x16);         // linked already: its record points back at this pass
+        uint32_t* old = (uint32_t*)rt(0x02173A68) + 14 * had;
+        if (had < count && old[6] == (uint32_t)(uintptr_t)shd && (old[0] & 0x3f) == (uint32_t)i) continue;
+        ++fresh;
+        if (count >= 4095) { logf("pass-state records full (%u)", count); return false; }
+        uint16_t n = count;
+        uint32_t* rec = (uint32_t*)rt(0x02173A68) + 14 * n;
+        memset(rec, 0, 0x38);
+        uint32_t word = *(uint32_t*)p;
+        uint32_t vsi = idx(*(uint32_t*)(p + 0x28), 0x0215EFC8, 0x0215EFC4, 0x7ff);
+        uint32_t psi = idx(*(uint32_t*)(p + 0x30), 0x0216B050, 0x0216B04C, 0x7ff);
+        uint32_t s0 = idx(*(uint32_t*)(p + 0x2c), 0x0216AFCC, 0x0216AFC8, 0xf), s1 = idx(*(uint32_t*)(p + 0x38), 0x0216F0D8, 0x0216F0D4, 0xf);
+        uint32_t s2 = idx(*(uint32_t*)(p + 0x3c), 0x0216F15C, 0x0216F158, 0xf), s3 = idx(*(uint32_t*)(p + 0x34), 0x0216F054, 0x0216F050, 0xf);
+        rec[0] = (uint32_t)(i & 0x3f) | (shaderIndex << 6) | ((word >> 25) << 16) | ((psi & 0xff) << 24);
+        rec[1] = ((psi & 0x7ff) >> 8) | ((vsi & 0x7ff) << 3) | ((uint32_t)p[0x18] << 14);
+        rec[2] = (s0 & 0xf) | (s1 & 0xf) << 4 | (s2 & 0xf) << 8 | (s3 & 0xf) << 12;
+        ((uint16_t*)rec)[6] = n;                       // +0x0c, +0x0e: itself (FUN_0045c5c0 chains other vformats)
+        ((uint16_t*)rec)[7] = n;
+        ((uint16_t*)rec)[8] = *(uint16_t*)(p + 0x18);  // +0x10
+        ((uint16_t*)rec)[9] = p[0x15];                 // +0x12: run length
+        rec[5] = *(uint32_t*)(p + 0x1c);
+        rec[6] = (uint32_t)(uintptr_t)shd;
+        rec[7] = inputLayout10(p[0x18], vsi);
+        if (shaderIndex == 0x3ff)
+            logf("ours: %s pass %d word %08x stage %u run %u b1c %02x layout %08x", *(const char**)shd, i, word, p[0x14], p[0x15],
+                 p[0x1c], rec[7]);
+        rec[8] = vsi ? *(uint32_t*)rt(0x0215EFCC + 8 * vsi) : 0;
+        rec[9] = psi ? *(uint32_t*)rt(0x0216B054 + 8 * psi) : 0;
+        rec[10] = s0 ? *(uint32_t*)rt(0x0216AFD0 + 8 * s0) : 0;
+        rec[11] = s1 ? *(uint32_t*)rt(0x0216F0DC + 8 * s1) : 0;
+        rec[12] = s2 ? *(uint32_t*)rt(0x0216F160 + 8 * s2) : 0;
+        rec[13] = s3 ? *(uint32_t*)rt(0x0216F058 + 8 * s3) : 0;
+        *(uint16_t*)(p + 0x16) = n;
+        count = n + 1;
+    }
+    if (seen && fresh) logf("late link: shader %p gained %d staged passes", shd, fresh);
+    if (seen) return true;
+    g_linked.insert(shd);
+    if (g_linked.size() % 50 == 0) logf("linked %u shaders (records %u)", (unsigned)g_linked.size(), *(uint16_t*)rt(0x02173A66));
+    return true;
+}
+
+typedef void(__cdecl* LinkAllFn)();
+static LinkAllFn g_linkAll;
+static void __cdecl hkLinkAll()
+{
+    typedef void(__cdecl * SortFn)(uint32_t arr, uint32_t n);
+    ((SortFn)rt(0x004703A0))((uint32_t)rt(0x0215CFC4), *(uint32_t*)rt(0x0215CFC0));
+    // The shaders the engine builds in code have no name (shd+0): they are used by pointer, never looked up, so
+    // they link now -- unlinked, the world drew black or white and the loading screen never closed (2026-10-13).
+    unsigned builtin = 0;
+    for (uint32_t k = 0, n = *(uint32_t*)rt(0x0215CFC0); k < n; ++k) {
+        uint8_t* s = *(uint8_t**)rt(0x0215CFC8 + 8 * k);
+        if (!*(const char**)s) { linkShader(s); ++builtin; }
+    }
+    logf("shader linking deferred to first use (%u shaders registered, %u built-in linked now: %u pass-state records)",
+         *(uint32_t*)rt(0x0215CFC0), builtin, *(uint16_t*)rt(0x02173A66));
+}
+
+// create: generate it if new (the material transcode asks first, so a 1.0 shader that does not translate keeps its
+// material on the other tiers); lookups only find ones already made, whatever the name's length
+static uint8_t* shader10(const char* name, bool create)
+{
+    std::lock_guard<std::mutex> lock(g_sh10Lock);
+    if (auto it = g_sh10.find(name); it != g_sh10.end()) return it->second;
+    if (!create) return nullptr;
+    uint8_t*& out = g_sh10[name];
+    out = nullptr;
+    gen30::Generated g;
+    g_compiling10 = name;
+    gen30::generate(g_render.shaders10, read10s, g_vf10, std::string(name + 1), compile10, g);
+    for (auto& pr : g.problems) logf("shaders10 %s: %s", name, pr.c_str());
+    if (g.shd.empty() || !g.problems.empty()) return nullptr;
+    std::map<uint32_t, uint32_t> engineId, vsIndex, psIndex;   // generator id -> engine id; engine id -> index
+    for (auto& p : g.programs) {
+        uint32_t id = 0, index = 0;
+        if (!registerProgram10(p, id, index)) return nullptr;
+        engineId[p.id] = id;
+        (p.ps ? psIndex : vsIndex)[id] = index;
+    }
+    std::string shd = g.shd;
+    for (int i = 0; i < (uint8_t)shd[0x19]; ++i)
+        for (size_t off : {(size_t)0x28, (size_t)0x30}) {
+            uint32_t& pid = *(uint32_t*)&shd[0xE0 + 0x50 * i + off];
+            if (pid) pid = engineId.at(pid);
+        }
+    uint8_t* mem = (uint8_t*)_aligned_malloc(shd.size(), 16);   // shaders live for the session, as the engine's do
+    memcpy(mem, shd.data(), shd.size());
+    char* nm = _strdup(name);
+    *(uint32_t*)mem = (uint32_t)(uintptr_t)nm;
+    *(uint32_t*)(mem + 4) = (uint32_t)shd.size();
+    finalizeShd10(mem);
+    logf("shaders10 %s: %u passes, %u programs registered (pass-state records in use: %u)", name, (unsigned)mem[0x19],
+         (unsigned)g.programs.size(), *(uint16_t*)rt(0x02173A66));
+    out = mem;
+    return out;
+}
+
+typedef uint8_t*(__cdecl* ShaderByNameFn)(const char* name);
+static ShaderByNameFn g_shaderByName;
+static uint8_t* __cdecl hkShaderByName(const char* name)
+{
+    uint8_t* s = nullptr;
+    // 'x'<1.0 shader>: hash-named ones (33 chars) are made on demand; named ones ('xfades') exist only if the
+    // transcode made them -- a name it could not translate reached the engine, whose loader task waited on it
+    // forever: the respawn after Edna's dialog never finished and control never came back (2026-10-13)
+    if (name && name[0] == 'x') s = shader10(name, strlen(name) == 33);
+    bool ours = s != nullptr;
+    if (!s) s = g_shaderByName(name);
+    if (s && (ours || g_cfg.lazyLink10)) linkShader(s);   // with the boot linker on, 3.0's are linked already
+    return s;
+}
+
+// vformat.vtxf: 3.0's formats plus every 1.0 format 3.0 lacks, so 1.0 vertex buffers draw as they are.
+static std::string mergeVtxf(const std::string& t30, const std::string& t10)
+{
+    size_t end30 = 0;
+    auto e30 = gen30::ventries(t30, &end30);
+    if (!end30) return t30;
+    std::set<std::string> have;
+    for (auto& e : e30) { std::string g = e.guid; for (char& c : g) c = (char)tolower((unsigned char)c); have.insert(g); }
+    std::string add;
+    int n = 0;
+    for (auto& e : gen30::ventries(t10)) {
+        std::string g = e.guid;
+        for (char& c : g) c = (char)tolower((unsigned char)c);
+        if (have.count(g)) continue;
+        std::string block = t10.substr(e.start, e.end - e.start);
+        if (block.back() != ',') block += ",";
+        add += "\t\t" + block + "\n";
+        ++n;
+    }
+    logf("shaders10: vformat.vtxf + %d 1.0 formats", n);
+    return t30.substr(0, end30) + add + t30.substr(end30);
+}
+
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
 {
@@ -1280,6 +1713,14 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     loadConfig(dir);
+    if (g_cfg.renderdoc10 > 0) {   // before the renderer creates its device, so RenderDoc's hooks see it
+        HMODULE rd = LoadLibraryExA("C:\\Program Files\\RenderDoc\\x86\\renderdoc.dll", nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        auto get = rd ? (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI") : nullptr;
+        if (get && get(eRENDERDOC_API_Version_1_1_2, (void**)&g_rdoc) == 1) {
+            g_rdoc->SetCaptureFilePathTemplate((g_gameDir + "\\di3cap").c_str());
+            logf("renderdoc: loaded; capture %d s after the first mission tick (missiontrace)", g_cfg.renderdoc10);
+        } else logf("renderdoc: not loaded (%lu)", GetLastError());
+    }
     _setmaxstdio(8192);   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
     auto slurpFile = [&](const char* name) {
         std::string text;
@@ -1300,6 +1741,16 @@ extern "C" void __stdcall Pentane_Main()
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
+    if (g_cfg.shaders10) {
+        HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
+        g_d3dCompile = dc ? (D3DCompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
+        g_shaderCache = std::string(dir) + "\\di1compat_shaders";
+        CreateDirectoryA(g_shaderCache.c_str(), nullptr);
+        std::string v10;
+        if (read10s("shaders/vformat.vtxf", v10)) g_vf10 = gen30::vformats(v10);
+        logf("shaders10: compiler %s, %u 1.0 vertex formats, %u 3.0 globals, cache %s", g_d3dCompile ? "ok" : "MISSING",
+             (unsigned)g_vf10.size(), (unsigned)g_render.shaders10.globals.size(), g_shaderCache.c_str());
+    }
 
     AddVectoredExceptionHandler(1, avHandler);
     if (MH_Initialize() != MH_OK) {
@@ -1339,8 +1790,17 @@ extern "C" void __stdcall Pentane_Main()
         hook("MNode SpawnExpendable (trace)", 0x017BF020, "518B442410", (void*)&hkMkSpawnExp, (void**)&g_mkSpawnExp);
         hook("header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake);
     }
+    if (g_cfg.shaders10) {
+        InitializeCriticalSection(&g_recCs);
+        hook("shader by name", 0x0045C820, "8B44240450E8????????8B0D", (void*)&hkShaderByName, (void**)&g_shaderByName);
+        if (g_cfg.lazyLink10)
+            hook("shader linker (deferred)", 0x00472050, "83EC50A1????????535657", (void*)&hkLinkAll, (void**)&g_linkAll);
+        hook("pass-state clone (locked)", 0x0045C5C0, "83EC4856578B7C2454", (void*)&hkCloneRec, (void**)&g_cloneRec);
+    }
     if (g_cfg.missionTrace)
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
+    if (g_cfg.opacityLog10)
+        hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);

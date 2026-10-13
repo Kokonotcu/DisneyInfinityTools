@@ -13,8 +13,8 @@
 
 namespace sm3 {
 
-enum Reg { TEMP = 0, INPUT = 1, CONST = 2, ADDR_TEX = 3, OUTPUT = 6, COLOROUT = 8, DEPTHOUT = 9, SAMPLER = 10,
-           CONSTBOOL = 14, LOOP = 15, MISCTYPE = 17, PREDICATE = 19 };
+enum Reg { R_TEMP = 0, R_INPUT = 1, R_CONST = 2, R_ADDR_TEX = 3, R_OUTPUT = 6, R_COLOROUT = 8, R_DEPTHOUT = 9, R_SAMPLER = 10,
+           R_CONSTBOOL = 14, R_LOOP = 15, R_MISCTYPE = 17, R_PREDICATE = 19 };
 inline const char* usage(int u)
 {
     static const char* U[] = {"POSITION", "BLENDWEIGHT", "BLENDINDICES", "NORMAL", "PSIZE", "TEXCOORD", "TANGENT", "BINORMAL",
@@ -128,11 +128,16 @@ struct Binding {
     }
     virtual std::string inputType(const std::string&) { return "float"; }
     bool gbuffer = false;
+    bool depthOnly = false;   // a depth-only pass (3.0 writes no colour there): keep the discards, drop the outputs
     std::string epilogue;
 };
 
 inline const char* VARYINGS[] = {"TEXCOORD0", "TEXCOORD1", "TEXCOORD2", "TEXCOORD3", "TEXCOORD4", "TEXCOORD5", "TEXCOORD6",
                                  "TEXCOORD7", "TEXCOORD8", "TEXCOORD9", "COLOR0", "COLOR1"};
+// 3.0 renders reversed-Z (its sky VSs write z = 0, the far plane); 1.0's far-plane idiom is z = w (a .xyww matrix row,
+// bit-equal components), which under 3.0's test is the near plane: the 1.0 sky dome covered the world (2026-10-13).
+// Geometry through the shared worldToProjected matrix is reversed already. (sm3.py REVERSED_Z)
+inline const char* REVERSED_Z = "    if (vout.pos.z == vout.pos.w) vout.pos.z = 0;";
 
 inline std::string toHlsl(const Program& P, Binding& B)
 {
@@ -148,32 +153,32 @@ inline std::string toHlsl(const Program& P, Binding& B)
         else if (o.op == 31) {
             int t = o.dst.type, n = o.dst.num;
             std::string sem = std::string(usage(o.decl & 0x1f)) + std::to_string((o.decl >> 16) & 0xf);
-            if (t == SAMPLER) samplers[n] = (o.decl >> 27) & 0xf;
-            else if (t == INPUT) inputs[n] = sem;
-            else if (t == OUTPUT) outputs[n] = sem;
+            if (t == R_SAMPLER) samplers[n] = (o.decl >> 27) & 0xf;
+            else if (t == R_INPUT) inputs[n] = sem;
+            else if (t == R_OUTPUT) outputs[n] = sem;
         }
     }
     static const char SW[] = "xyzw";
     auto reg = [&](const Operand& r) -> std::string {
         int t = r.type, n = r.num;
         switch (t) {
-        case TEMP: temps.insert(n); return "r" + std::to_string(n);
-        case INPUT: return "v" + std::to_string(n);
-        case CONST: {
+        case R_TEMP: temps.insert(n); return "r" + std::to_string(n);
+        case R_INPUT: return "v" + std::to_string(n);
+        case R_CONST: {
             std::string rel;
-            if (r.rel) rel = std::string(r.relType == ADDR_TEX ? "a" : "aL") + std::to_string(r.relNum) + "." + SW[r.relSwz & 3];
+            if (r.rel) rel = std::string(r.relType == R_ADDR_TEX ? "a" : "aL") + std::to_string(r.relNum) + "." + SW[r.relSwz & 3];
             if (rel.empty() && defs.count(n)) {
                 const float* l = defs[n];
                 return "float4(" + pyrepr(l[0]) + ", " + pyrepr(l[1]) + ", " + pyrepr(l[2]) + ", " + pyrepr(l[3]) + ")";
             }
             return B.constant(n, rel);
         }
-        case ADDR_TEX: if (vs) return "a" + std::to_string(n); break;
-        case OUTPUT: return "o" + std::to_string(n);
-        case COLOROUT: return "o.oC" + std::to_string(n);
-        case DEPTHOUT: return "o.oDepth";
-        case MISCTYPE: return n == 0 ? "vPos" : "vFace.xxxx";
-        case CONSTBOOL: return B.boolean(n);
+        case R_ADDR_TEX: if (vs) return "a" + std::to_string(n); break;
+        case R_OUTPUT: return "o" + std::to_string(n);
+        case R_COLOROUT: return "o.oC" + std::to_string(n);
+        case R_DEPTHOUT: return "o.oDepth";
+        case R_MISCTYPE: return n == 0 ? "vPos" : "vFace.xxxx";
+        case R_CONSTBOOL: return B.boolean(n);
         }
         throw std::runtime_error("register type " + std::to_string(t));
     };
@@ -186,15 +191,15 @@ inline std::string toHlsl(const Program& P, Binding& B)
     };
     auto s = [&](const Operand& r, int n = 4) -> std::string {
         std::string e = reg(r);
-        if (r.type == CONSTBOOL) return e;
-        if (r.type == ADDR_TEX) e = "((float4)" + e + ")";
+        if (r.type == R_CONSTBOOL) return e;
+        if (r.type == R_ADDR_TEX) e = "((float4)" + e + ")";
         std::string sw;
         for (int c = 0; c < n; ++c) sw.push_back(SW[(r.swz >> (2 * c)) & 3]);
         return mod((sw == "xyzw") ? e : e + "." + sw, r.mod);
     };
     auto scal = [&](const Operand& r) -> std::string {
         std::string e = reg(r);
-        if (r.type == ADDR_TEX) e = "((float4)" + e + ")";
+        if (r.type == R_ADDR_TEX) e = "((float4)" + e + ")";
         return mod(e + "." + SW[r.swz & 3], r.mod);
     };
     auto emit = [&](const std::string& l) { body.push_back(std::string(4 * depth, ' ') + l); };
@@ -205,7 +210,7 @@ inline std::string toHlsl(const Program& P, Binding& B)
         std::string mask = maskOf(d.mask);
         std::string val = scalar ? "((float4)(" + expr + "))." + mask : "(" + expr + ")." + mask;
         if (d.mod & 1) val = "saturate(" + val + ")";
-        if (d.type == ADDR_TEX && vs)
+        if (d.type == R_ADDR_TEX && vs)
             emit(reg(d) + "." + mask + " = (int" + (mask.size() == 1 ? "" : std::to_string(mask.size())) + ")round(" + val + ");");
         else
             emit(reg(d) + "." + mask + " = " + val + ";");
@@ -266,6 +271,7 @@ inline std::string toHlsl(const Program& P, Binding& B)
     }
     std::vector<std::string> out = {B.cbuffers()};
     for (auto& [num, k] : samplers) { std::string t, sm, d; B.sampler(num, k, t, sm, d); out.push_back(d); }
+    bool quiet = false;   // a depth-only PS: no outputs
     std::string io = "float4 pos : SV_Position;";
     for (const char* v : VARYINGS) io += std::string(" float4 ") + v + " : " + v + ";";
     if (vs) {
@@ -274,7 +280,10 @@ inline std::string toHlsl(const Program& P, Binding& B)
         out.push_back("struct VSIn { " + in + " };");
         out.push_back("struct VSOut { " + io + " };");
         out.push_back("VSOut main(VSIn vin) {");
-        std::string os = "    float4 ";
+        // precise: 1.0 draws a surface in passes that test depth for equality against its prepass (G-buffer, final);
+        // each pass's VS is compiled on its own, and unconstrained the compiler fuses mul+add differently per program:
+        // positions a rounding bit apart z-fought -- dotted black surfaces, flicker, worst far away (2026-10-13)
+        std::string os = "    precise float4 ";
         for (int k = 0; k < 16; ++k) os += (k ? ", o" : "o") + std::to_string(k) + " = 0";
         out.push_back(os + ";");
         out.push_back("    int4 a0 = 0;");
@@ -283,20 +292,22 @@ inline std::string toHlsl(const Program& P, Binding& B)
         std::string outs;
         for (int k = 0; k < 4; ++k) {
             bool w = false;
-            for (auto& o : P.ops) if (o.hasDst && o.dst.type == COLOROUT && o.dst.num == k) w = true;
+            for (auto& o : P.ops) if (o.hasDst && o.dst.type == R_COLOROUT && o.dst.num == k) w = true;
             if (w) outs += (outs.empty() ? "" : " ") + std::string("float4 oC") + std::to_string(k) + " : SV_Target" + std::to_string(k) + ";";
         }
-        for (auto& o : P.ops) if (o.hasDst && o.dst.type == DEPTHOUT) { outs += " float oDepth : SV_Depth;"; break; }
+        for (auto& o : P.ops) if (o.hasDst && o.dst.type == R_DEPTHOUT) { outs += " float oDepth : SV_Depth;"; break; }
         if (B.gbuffer) outs = "float4 oC0 : SV_Target0; float4 o1 : SV_Target1; float4 o2 : SV_Target2;";
+        quiet = B.depthOnly && outs.find("SV_Depth") == std::string::npos;
+        if (quiet) outs = "float4 oC0; float4 oC1; float4 oC2; float4 oC3;";   // written, never output
         out.push_back("struct PSIn { " + io + " bool face : SV_IsFrontFace; };");
         out.push_back("struct PSOut { " + outs + " };");
-        out.push_back("PSOut main(PSIn pin) {");
+        out.push_back(quiet ? "void main(PSIn pin) {" : "PSOut main(PSIn pin) {");
         out.push_back("    PSOut o = (PSOut)0;");
         out.push_back("    float4 vPos = float4(pin.pos.xy - 0.5, 0, 0); float vFace = pin.face ? 1.0 : -1.0;");
         for (auto& [k, v] : inputs) out.push_back("    float4 v" + std::to_string(k) + " = pin." + v + ";");
     }
     if (!temps.empty()) {
-        std::string t = "    float4 ";
+        std::string t = vs ? "    precise float4 " : "    float4 ";
         bool first = true;
         for (int r : temps) { t += (first ? "r" : ", r") + std::to_string(r) + " = 0"; first = false; }
         out.push_back(t + ";");
@@ -305,10 +316,11 @@ inline std::string toHlsl(const Program& P, Binding& B)
     if (vs) {
         out.push_back("    VSOut vout = (VSOut)0;");
         for (auto& [k, v] : outputs) out.push_back("    vout." + (v == "POSITION0" ? std::string("pos") : v) + " = o" + std::to_string(k) + ";");
+        out.push_back(REVERSED_Z);
         out.push_back("    return vout;");
     } else {
         if (!B.epilogue.empty()) out.push_back(B.epilogue);
-        out.push_back("    return o;");
+        if (!quiet) out.push_back("    return o;");
     }
     out.push_back("}");
     std::string all;

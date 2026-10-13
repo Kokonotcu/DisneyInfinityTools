@@ -73,6 +73,25 @@ inline bool parse10(const std::string& b, Shd10& s)
     return o <= b.size();
 }
 
+// A 3.0 .shd's block A: parameter offsets by name hash, size, and the shader's default block (shd.parse(b, '3.0'):
+// header to 0xE0, passes 0x50 each, techniques, params, slot names, then 16-aligned defaults A).
+struct ShdA30 { std::map<uint32_t, int> off; int sizeA = 0; std::string defA; };
+inline bool parseA30(const std::string& b, ShdA30& s)
+{
+    if (b.size() < 0xE0) return false;
+    int npar = (uint8_t)b[0x18], npass = (uint8_t)b[0x19], ntech = (uint8_t)b[0x1a], nA = (uint8_t)b[0x68];
+    size_t o = 0xE0 + 0x50 * (size_t)npass + 2 * (size_t)ntech;
+    o = (o + 3) & ~(size_t)3;
+    size_t names = o, words = o + 4 * ((size_t)npar + ntech);
+    o = words + 4 * (size_t)npar + 4 * ((size_t)(uint8_t)b[0x69] + (uint8_t)b[0xa1]);
+    o = (o + 15) & ~(size_t)15;
+    s.sizeA = u16(b, 0x6a);
+    if (o + s.sizeA > b.size()) return false;
+    for (int i = 0; i < npar && i < nA; ++i) s.off[u32(b, names + 4 * i)] = (int)(u32(b, words + 4 * i) >> 16);
+    s.defA = b.substr(o, s.sizeA);
+    return true;
+}
+
 // A D3D9 program's constant table: (name, set 'b'/'i'/'f'/'s', register, count).
 struct Const { std::string name; char set; int reg, count; };
 inline std::vector<Const> ctab(const std::string& b)
@@ -179,13 +198,13 @@ inline Layout layout(const Shd10& s)
     L.slots = (int)s.slotsB.size();
     int first10 = (L.slots * 5 + 15) & ~15;
     bool any = false;
-    for (auto& p : s.params) if (!p.A) { first10 = any ? std::min(first10, p.offset) : p.offset; any = true; }
+    for (auto& p : s.params) if (!p.A) { first10 = any ? (std::min)(first10, p.offset) : p.offset; any = true; }
     L.first10 = first10;
     L.first30 = (L.slots * 9 + 15) & ~15;
     for (auto& p : s.params) (p.A ? L.A : L.B)[p.hash] = p.A ? p.offset : p.offset - first10 + L.first30;
     L.firstB = L.first30 / 16;
     L.sizeA = s.sizeA;
-    L.sizeB = L.first30 + std::max(s.sizeB - first10, 0);
+    L.sizeB = L.first30 + (std::max)(s.sizeB - first10, 0);
     return L;
 }
 
@@ -209,7 +228,7 @@ static const char* GBUFFER_EPILOGUE =
     "        float2 f = (1.0 - abs(n.yx)) * (n.xy >= 0 ? 1.0 : -1.0);\n"
     "        o.oC0 = float4((n.z >= 0 ? n.xy : f) * 0.5 + 0.5, o.oC0.w, 1.0);\n"
     "        o.o1 = float4(0, 0, 0, 0);\n"
-    "        o.o2 = float4(1, 1, 1, 0.5);\n"
+    "        o.o2 = float4(1, 1, 1, 0);\n"
     "    }";
 
 struct Binding30 : sm3::Binding {
@@ -218,11 +237,16 @@ struct Binding30 : sm3::Binding {
     std::map<std::string, std::string> fmt;
     std::map<int, std::pair<std::string, int>> creg;
     std::map<int, int> used;                              // buffer register -> registers declared
+    std::map<int, std::string> sname;                     // sampler register -> 1.0 sampler name
+    bool envOff(int) { return false; }   // test 2026-10-13: dropping environment maps did not fix the black objects
     std::vector<std::string> unresolved;
     Binding30(const Tables& t, const Layout& l, const std::vector<Const>& ct, std::map<std::string, std::string> f, bool gb)
         : T(t), L(l), fmt(std::move(f))
     {
-        for (auto& c : ct) if (c.set == 'f') for (int k = 0; k < c.count; ++k) creg[c.reg + k] = {c.name, c.reg};
+        for (auto& c : ct) {
+            if (c.set == 'f') for (int k = 0; k < c.count; ++k) creg[c.reg + k] = {c.name, c.reg};
+            if (c.set == 's') sname[c.reg] = c.name;
+        }
         gbuffer = gb;
         if (gb) epilogue = GBUFFER_EPILOGUE;
     }
@@ -237,7 +261,7 @@ struct Binding30 : sm3::Binding {
             auto p = T.globals.find("g_fog_sunLight_params"), c = T.globals.find("g_fog_color");
             if (p == T.globals.end() || c == T.globals.end()) return false;
             int pr = p->second[1] / 16, cr = c->second[1] / 16;
-            used[0] = std::max({used[0], pr + 1, cr + 1});
+            used[0] = (std::max)({used[0], pr + 1, cr + 1});
             cb = -1;
             expr = "float4(CB0[" + std::to_string(pr) + "].xyz + CB0[" + std::to_string(cr) + "].xyz, CB0[" + std::to_string(pr) + "].w)";
             return true;
@@ -257,11 +281,11 @@ struct Binding30 : sm3::Binding {
         int reg0 = hit->second.second;
         if (!rel.empty()) {
             int span = 0;
-            for (auto& [r, h] : creg) if (h == hit->second) span = std::max(span, r - reg0 + 1);
-            used[cb] = std::max(used[cb], base + span);
+            for (auto& [r, h] : creg) if (h == hit->second) span = (std::max)(span, r - reg0 + 1);
+            used[cb] = (std::max)(used[cb], base + span);
             return "CB" + std::to_string(cb) + "[" + rel + " + " + std::to_string(base + num - reg0) + "]";
         }
-        used[cb] = std::max(used[cb], base + num - reg0 + 1);
+        used[cb] = (std::max)(used[cb], base + num - reg0 + 1);
         return "CB" + std::to_string(cb) + "[" + std::to_string(base + num - reg0) + "]";
     }
     std::string boolean(int) override { return "false"; }
@@ -274,11 +298,20 @@ struct Binding30 : sm3::Binding {
                         std::to_string(k) + "[" + std::to_string(n) + "]; };";
         return s;
     }
+    // 1.0's normal-gloss target (s1) holds the world normal and gloss (.w); 3.0's (t1) the octahedral normal (.xy) and,
+    // through GBUFFER_EPILOGUE, the same gloss in .z: NG10 hands a 1.0 program its own layout. One declaration for
+    // both users (the light bridge reads gloss too).
+    static constexpr const char* NG10 =
+        "#ifndef NG10\n#define NG10\nTexture2D tNG : register(t1); SamplerState sNG : register(s1);\n"
+        "float4 ng10(float4 t) { float2 e = t.xy * 2.0 - 1.0; float3 n = float3(e, 1.0 - abs(e.x) - abs(e.y));\n"
+        "    if (n.z < 0) n.xy = (1.0 - abs(n.yx)) * (n.xy >= 0 ? 1.0 : -1.0); return float4(normalize(n), t.z); }\n#endif";
     void sampler(int num, int kind, std::string& tex, std::string& smp, std::string& decl) override
     {
+        if (num == 1) { tex = "tNG"; smp = "sNG"; decl = NG10; return; }
+        if (envOff(num)) { tex = smp = decl = ""; return; }
         if (num == 2) {
             tex = "tLight"; smp = "sLight";
-            decl = "Texture2D tLight : register(t3); SamplerState sLight : register(s3); Texture2D tSpec : register(t4); SamplerState sSpec : register(s4);";
+            decl = std::string(NG10) + "\nTexture2D tLight : register(t3); SamplerState sLight : register(s3); Texture2D tSpec : register(t4); SamplerState sSpec : register(s4);";
             return;
         }
         int r = num == 0 ? 0 : num == 1 ? 1 : 5 + num - 3;
@@ -288,10 +321,16 @@ struct Binding30 : sm3::Binding {
     }
     std::string sample(int num, int kind, const std::string& method, const std::string& uv, const std::string& extra) override
     {
+        std::string x = extra.empty() ? "" : ", " + extra;
+        if (envOff(num)) return "float4(0, 0, 0, 0)";
+        if (num == 1) return "ng10(tNG." + method + "(sNG, " + uv + x + "))";
         if (num == 2) {
-            std::string x = extra.empty() ? "" : ", " + extra;
+            // 1.0's light buffer: diffuse light .rgb, raw specular luminance x6 in .a, which its final pass scales by
+            // the Blinn normalization (exp2(10 gloss + 1) + 2) / 8. 3.0's specular buffer is normalized already:
+            // divided here, so 1.0's multiply restores exactly 3.0's lighting (it multiplied it ~256x: blown out).
             return "float4(tLight." + method + "(sLight, " + uv + x + ").rgb, 6.0 * dot(tSpec." + method + "(sSpec, " + uv + x +
-                   ").rgb, float3(0.2125, 0.7154, 0.0721)))";
+                   ").rgb, float3(0.2125, 0.7154, 0.0721)) * 8.0 / (exp2(10.0 * ng10(tNG." + method + "(sNG, " + uv + x +
+                   ")).w + 1.0) + 2.0))";
         }
         return sm3::Binding::sample(num, kind, method, uv, extra);
     }
@@ -355,12 +394,12 @@ inline std::string buildShd(const Tables& T, const std::string& raw10, const Shd
     memcpy(&h[0x54], raw10.data() + 0x30, 16);
     h[0x68] = (char)nA; h[0x69] = 0;
     put16(h, 0x6a, (uint16_t)L.sizeA);
-    h[0x90] = (char)std::max(L.sizeA / 16 - 1, 0);
+    h[0x90] = (char)(std::max)(L.sizeA / 16 - 1, 0);
     memset(&h[0x94], 0x0f, 6);
     h[0xa0] = (char)nB; h[0xa1] = (char)slots;
     put16(h, 0xa2, (uint16_t)L.sizeB);
     h[0xc4] = (char)L.firstB;
-    h[0xc8] = (char)std::max(L.sizeB / 16 - L.firstB, 0);
+    h[0xc8] = (char)(std::max)(L.sizeB / 16 - L.firstB, 0);
     h[0xca] = (char)slots;
     h[0xcc] = (char)(slots ? (5 | (slots << 4)) : 0x0f);
     memset(&h[0xcd], 0x0f, 5);
@@ -388,13 +427,17 @@ inline std::string buildShd(const Tables& T, const std::string& raw10, const Shd
     }
     for (uint32_t x : s.slotsB) out.append((const char*)&x, 4);
     size_t a = (s.defaultsAt + 15) & ~(size_t)15, b = (a + s.sizeA + 15) & ~(size_t)15;
-    std::string dA = raw10.substr(std::min(a, raw10.size()), s.sizeA), dB = raw10.substr(std::min(b, raw10.size()), s.sizeB);
+    std::string dA = raw10.substr((std::min)(a, raw10.size()), s.sizeA), dB = raw10.substr((std::min)(b, raw10.size()), s.sizeB);
     dA.resize(s.sizeA, '\0');
     dB.resize(s.sizeB, '\0');
     out.resize((out.size() + 15) & ~(size_t)15, '\0');
     out += dA;
     out.resize((out.size() + 15) & ~(size_t)15, '\0');
-    out += blockB30(dB, L);
+    // the template's slots hold texture object pointers the engine fills (FUN_0045ce20 reads any non-zero one as a
+    // texture): zero in all 836 3.0 shaders. 1.0's empty 0xffffffff there crashed finalize (in-game 2026-10-13).
+    std::string b30 = blockB30(dB, L);
+    std::fill(b30.begin(), b30.begin() + (std::min)(b30.size(), (size_t)8 * L.slots), '\0');
+    out += b30;
     return out;
 }
 
@@ -430,6 +473,9 @@ inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, co
             try {
                 sm3::Program prog = sm3::parse(b);
                 Binding30 B(T, L, ctab(b), k ? std::map<std::string, std::string>() : fmt, gb && k);
+                // depth field 1 = a depth-only pass: no colour output in 1549 of 3.0's 1550. 1.0's wrote linear depth as
+                // colour; translated as is it painted near-black, dithered, over fading objects (2026-10-13)
+                B.depthOnly = k == 1 && ((w >> 3) & 7) == 1;
                 pr.hlsl = sm3::toHlsl(prog, B);
                 if (!B.unresolved.empty()) g.problems.push_back("pass " + std::to_string(i) + ": unresolved " + B.unresolved[0]);
             } catch (std::exception& e) {
@@ -448,6 +494,29 @@ inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, co
     }
     g.name = "x" + shader;
     g.shd = buildShd(T, raw10, s, L, passes);
+    // Pass bytes +0x1c/+0x1d: the texture registers the engine binds for the pass (bit n = tn); a technique's first
+    // pass carries the union over the technique. 3794 of 3.0's 3802 passes follow this exactly (shdiff.py). A mask
+    // learned per word left the 1.0 final pass without its diffuse texture: the world drew black (2026-10-13).
+    std::vector<uint32_t> mask(passes.size(), 0);
+    for (auto& pr : g.programs) {
+        int i = -1;
+        for (size_t k = 0; k < passes.size(); ++k)
+            if (std::get<3>(passes[k]) == pr.id || std::get<4>(passes[k]) == pr.id) { i = (int)k; break; }
+        for (size_t at = 0; i >= 0 && (at = pr.hlsl.find("register(t", at)) != std::string::npos;) {
+            at += 10;
+            int r = atoi(pr.hlsl.c_str() + at);
+            if (r >= 0 && r < 16) mask[i] |= 1u << r;
+        }
+    }
+    for (auto& t : s.techs) {
+        uint32_t all = 0;
+        for (int i = t.first; i < t.first + t.count && i < (int)passes.size(); ++i) all |= mask[i];
+        for (int i = t.first; i < t.first + t.count && i < (int)passes.size(); ++i) {
+            uint32_t m = i == t.first ? all : mask[i];
+            g.shd[0xE0 + 0x50 * i + 0x1c] = (char)(m & 0xff);
+            g.shd[0xE0 + 0x50 * i + 0x1d] = (char)(m >> 8);
+        }
+    }
     return true;
 }
 

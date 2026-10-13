@@ -316,7 +316,9 @@ def build_shd(raw10, s10, L, passes):
     out += struct.pack('<%dI' % slots, *s10['slotsB'])
     dA, dB = defaults10(raw10, s10)
     out += bytes(-len(out) % 16) + dA
-    out += bytes(-len(out) % 16) + block_b30(dB, L)
+    # the template's slots hold texture object pointers the engine fills (FUN_0045ce20 reads any non-zero one as a
+    # texture): zero in all 836 3.0 shaders. 1.0's empty 0xffffffff there crashed finalize (in-game 2026-10-13).
+    out += bytes(-len(out) % 16) + bytes(8 * L['slots']) + block_b30(dB, L)[8 * L['slots']:]
     return bytes(out)
 
 
