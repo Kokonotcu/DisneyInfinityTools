@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
+#include "octx.hpp"
 #include "third_party/miniz/miniz.h"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
@@ -179,6 +180,43 @@ static int* memFile(const void* data, size_t n)
     return (int*)f;
 }
 
+// ---- load-time transcodes: 1.0 bytes in, the form the 3.0 reader takes out (the 1.0 file is never rewritten) ----
+static bool endsWith(const char* s, const char* suffix)
+{
+    size_t a = strlen(s), b = strlen(suffix);
+    return a >= b && _stricmp(s + a - b, suffix) == 0;
+}
+
+// .oct (worlds, missions, exploders ...). Steps, each from the research plan (PLAN.md section 4):
+//   NavMeshPool removed: 3.0's blob parser FUN_01909fb0 trusts the layout, and the 1.0 layout differs (in-game
+//   2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it). Interim until the navmesh codec (OCT-8).
+//   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
+//   DataNodeBasisConversion in FUN_004d0160).
+static bool transcodeOct(oct::File& f, std::string& note)
+{
+    bool changed = false;
+    if (f.dropPool("NavMeshPool")) { note += "-NavMeshPool "; changed = true; }
+    if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
+    return changed;
+}
+
+// -> codec name if out holds transcoded bytes, nullptr to serve the 1.0 bytes unchanged.
+static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note)
+{
+    if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
+        try {
+            oct::File f = oct::File::parse(data, n);
+            if (!transcodeOct(f, note)) return nullptr;
+            out = f.write();
+            return "oct";
+        } catch (std::exception& e) {
+            note = std::string("oct parse failed: ") + e.what();
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
 // FUN_0041cb10: the engine's asset open (cdecl; path, flags, ...) -> stream object or NULL.
 typedef int*(__cdecl* OpenFn)(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5);
 static OpenFn g_open;
@@ -224,8 +262,11 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         size_t n = 0;
         std::string where;
         if (void* data = read10(p, &n, &where)) {
-            r = memFile(data, n);
-            logf("served %s %u B from 1.0 %s codec=raw -> %s", p, (unsigned)n, where.c_str(), r ? "ok" : "FAILED");
+            std::string out, note;
+            const char* codec = transcode(p, data, n, out, note);
+            r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
+            logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
+                 codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED");
             mz_free(data);
             return r;
         }

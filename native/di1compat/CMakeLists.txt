@@ -7,3 +7,6 @@ add_library(di1compat SHARED
     third_party/miniz/miniz.c)
 target_compile_features(di1compat PRIVATE cxx_std_17)
 set_property(TARGET di1compat PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")   # no VC runtime DLL dependency
+# octtest <root>...: byte-exact round trip of every tuple file (the C++ oct codec's acceptance check)
+add_executable(octtest octtest.cpp)
+target_compile_features(octtest PRIVATE cxx_std_17)

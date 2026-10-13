@@ -119,6 +119,24 @@ Every rule below is measured on the stock 3.0 install and now applied by the too
 - Checked, no rule to apply: expendable pop-in distances (size predicts the shipped pair in 31.6% of 453 models,
   a constant in 17.2%) -- `expack.PORT_DEFAULTS` stays explicit.
 
+## Status (2026-10-12, main machine) -- fully native track started
+Goal now (user): 1.0 Metroville running natively on 3.0 -- the 1.0 files served unaltered from the 1.0 install and
+redirected into the 3.0 systems that replaced them; new systems only where 3.0 has none (native30 = the old
+converted-copy approach). Research and roadmap: `D:\DI-Extract\_research\PLAN.md`.
+- **Harness** (`harness.ps1`, `lua.ps1`): unattended boot -> zone -> avatar -> probes -> screenshot -> quit.
+- **di1compat** (`native/di1compat`, Pentane plugin): hooks the asset open FUN_0041cb10; paths 3.0 lacks are read in
+  place from the 1.0 install's zips and returned as engine `Genie::MemFile`s, through per-format load-time
+  transcodes. `octtest.exe`: the C++ .oct codec round-trips 9,251/9,251 tuple files; OCT-1 regenerates the counts
+  of 4,299/4,299 shipped processor-free SubNetworks.
+- **IN_City registered** (`zonereg.py`): the 1.0 IN_City zone record verbatim + PlaysetProperties.Incredibles
+  (1.0 record + 3.0 keys, ID 11) + OrderedPlaysets entry in the loose zonelist (original kept as
+  `zonelist.lua.pre-incredibles`). Launching IN_City makes the engine request `worlds\in_city\*`.
+- In-game ladder so far (harness, zone IN_City):
+  1. raw in_city.oct -> AV in the NavMesh blob parser FUN_01909fb0 -> NavMeshPool removed in memory (interim)
+  2. -> NULL basis conversion in FUN_004d0160 -> SubNetwork counts (OCT-1) -> .oct accepted
+  3. -> in_city.mtb raw -> int3 in Shader_LookupCrc FUN_004509d0 (1.0 shaders unknown to 3.0) -> **next: REN-5**,
+     the material translation at load time (1.0 material onto a 3.0 shader with its own textures).
+
 ## Next (needs the game running)
 1. **Rebuild and launch Metroville** with the rules above (`native30.py ... --dry` first; `diffworld.py` against
    the build that worked). Expect the start position, collision and expendables to change. If the player still
