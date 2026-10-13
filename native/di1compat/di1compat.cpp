@@ -19,6 +19,7 @@
 #include "octx.hpp"
 #include "bent.hpp"
 #include "chd.hpp"
+#include "mer.hpp"
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
@@ -107,6 +108,8 @@ static struct {
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
     bool trace = true;               // log every open
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
+    bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
+    char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -124,6 +127,8 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "serve10")) g_cfg.serve10 = atoi(val) != 0;
         else if (!strcmp(key, "trace")) g_cfg.trace = atoi(val) != 0;
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
+        else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
+        else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -266,6 +271,8 @@ static std::map<std::string, std::string> g_over10;
 static std::set<std::string> g_indexed10;
 static render::Table g_render;
 static bool g_renderOk;
+static mer::Table g_mer;
+static bool g_merOk;
 
 static void indexZip10(const std::string& zipRel)
 {
@@ -343,6 +350,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
 {
     bool changed = transcodeAssetRender(path, f, note);
     if (f.dropPool("NavMeshPool")) { note += "-NavMeshPool "; changed = true; }
+    if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }
@@ -360,6 +368,26 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
             note = std::string("oct parse failed: ") + e.what();
             return nullptr;
         }
+    }
+    // a Meridian graph (.mer, mer.hpp, MER-2/4) and its type manifest (.mtc, rebuilt from the transcoded graph, since
+    // stand-ins change the class counts)
+    bool isMtc = endsWith(path, ".mtc");
+    if ((endsWith(path, ".mer") || isMtc) && g_merOk) {
+        std::string graph, why;
+        if (isMtc) {
+            std::string p = norm(path);
+            if (!read10s(p.substr(0, p.size() - 4) + ".mer", graph)) return nullptr;
+        } else graph.assign((const char*)data, n);
+        if (graph.size() < 4 || oct::u((const uint8_t*)graph.data(), 4) != oct::MAGIC) return nullptr;
+        oct::File f = oct::File::parse(graph.data(), graph.size());
+        mer::Stats st;
+        if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
+        char buf[200];
+        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped) ",
+                  st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped);
+        note += buf;
+        out = isMtc ? mer::mtc(f) : f.write();
+        return isMtc ? "mtc" : "mer";
     }
     // an entity description (.bent 4.1 -> 4.1f, bent.hpp, NPC-4): characters, playset avatars, choreographies
     if (endsWith(path, ".bent") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
@@ -491,6 +519,7 @@ static uint8_t __fastcall hkActorExists(void* self, void*, const char** name)
     uint8_t r = g_actorExists(self, nullptr, name);
     char n[200];
     safeCopy(n, sizeof(n), name && *name ? *name : "(null)");
+    if (g_cfg.hidePs && endsWith(n, "_PS") && !strncmp(n, "AV_", 3)) r = 0;
     logf("actor exists? %s -> %u", n, r);
     return r;
 }
@@ -509,6 +538,39 @@ static uint8_t __fastcall hkFigureOk(void* self, void*, uint32_t player, int sku
 // ... the reader item list the playset flow fills its figure slots from (FUN_00427330(out) -> count, ret 4; items
 // 0x50 B from out+4: +0 type, +4 sku) and its per-item gate FUN_00deb610(type, sku, a3, a4, a5) (ret 0x14); logged
 // on change
+// First access violation in the exe: the faulting address and a call stack (stack words that point into the exe right
+// after a call instruction: E8 rel32 whose target is plausible, or an FF /2 indirect call), static addresses. Logged
+// once, then the exception continues to the game's / CrabeLoader's handlers.
+static volatile LONG g_avLogged;
+static bool afterCall(uintptr_t ret)
+{
+    if (ret < g_base + 0x1000 + 6 || ret >= g_base + 0x2100000) return false;
+    const uint8_t* p = (const uint8_t*)ret;
+    if (p[-5] == 0xE8) { uintptr_t t = ret + *(const int32_t*)(p - 4); return t >= g_base && t < g_base + 0x2100000; }
+    if (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) return true;   // call [mem32] / [reg+disp32]
+    if (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) return true;   // call [reg+disp8]
+    if (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) return true;   // call reg / [reg]
+    return false;
+}
+static LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
+{
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || InterlockedExchange(&g_avLogged, 1)) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t eip = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
+    char line[900];
+    int len = sprintf_s(line, "ACCESS VIOLATION at %08X (%s %08X), stack:", (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip),
+                        e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (unsigned)e->ExceptionRecord->ExceptionInformation[1]);
+    const uint32_t* sp = (const uint32_t*)e->ContextRecord->Esp;
+    for (int i = 0, found = 0; i < 2048 && found < 24; ++i) {
+        uint32_t v;
+        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        bool ok = false;
+        __try { ok = afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+        if (ok) { len += sprintf_s(line + len, sizeof(line) - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
+    }
+    logf("%s", line);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 // Trace only: a hardware write watchpoint (DR0, 4 bytes) on one address in every thread; the vectored handler logs
 // the writer's EIP and the exe return addresses on its stack (first 5 hits).
 static volatile uintptr_t g_watchAddr;
@@ -517,7 +579,7 @@ static LONG CALLBACK watchHandler(EXCEPTION_POINTERS* e)
 {
     if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
     e->ContextRecord->Dr6 = 0;
-    if (InterlockedIncrement(&g_watchHits) <= 5) {
+    if (InterlockedIncrement(&g_watchHits) <= 10) {
         char line[700];
         uintptr_t eip = e->ContextRecord->Eip;
         int len = sprintf_s(line, "watch hit: value now %d, eip %08X, stack:", *(int*)g_watchAddr,
@@ -569,13 +631,20 @@ static ReaderListFn g_readerList;
 static int __fastcall hkReaderList(void* self, void*, int* out)
 {
     static std::string last;
-    int n = g_readerList(self, nullptr, out);
-    for (int i = 0; i < n && i < 12; ++i)   // reader slot = this + 0x6c + index * 0x260, its toy id at +0x168
-        if (out[2 + i * 20] > 0) watch((uintptr_t)self + 0x6c + (uint8_t)out[i * 20] * 0x260 + 0x168);
+    int n = g_readerList(self, nullptr, out);   // reader slot = this + 0x6c + index * 0x260, its toy id at +0x168
     std::string s = std::to_string(n) + ":";
     for (int i = 0; i < n && i < 12; ++i) s += " " + std::to_string(out[1 + i * 20]) + "/" + std::to_string(out[2 + i * 20]);
     if (s != last) { last = s; logf("reader list %s", s.c_str()); }
     return n;
+}
+// ... the playset flow's player figure slot (*(this + 0xc) + 0xc + player * 4, read by FUN_00df9fd0(out, player,
+// flag), thiscall ret 0xc): the watchpoint shows who fills and who clears player 0's slot
+typedef void*(__fastcall* IgpNameFn)(void* self, void* edx, void* out, uint32_t player, uint32_t flag);
+static IgpNameFn g_igpName;
+static void* __fastcall hkIgpName(void* self, void*, void* out, uint32_t player, uint32_t flag)
+{
+    if (self && *(char**)((char*)self + 0xc)) watch((uintptr_t)(*(char**)((char*)self + 0xc)) + 0xc);
+    return g_igpName(self, nullptr, out, player, flag);
 }
 typedef uint8_t(__fastcall* ReaderItemOkFn)(void* self, void* edx, uint32_t type, int sku, uint32_t a3, uint32_t a4, uint32_t a5);
 static ReaderItemOkFn g_readerItemOk;
@@ -596,6 +665,36 @@ static const char** __fastcall hkFigurePlayset(void* self, void*, const char** o
     safeCopy(s, sizeof(s), out && *out ? *out : "(null)");
     logf("Gateway[%d].playset = '%s'", sku, s);
     return r;
+}
+
+// Trace only: an entity instancing one of its assets' SubNetworks (FUN_007734f0(out, const char** subName, a3),
+// thiscall ret 0xc; an empty name = the root SubNetwork).
+typedef void*(__fastcall* AssetInstFn)(void* self, void* edx, void* out, const char** name, uint32_t a3);
+static AssetInstFn g_assetInst;
+static void* __fastcall hkAssetInst(void* self, void*, void* out, const char** name, uint32_t a3)
+{
+    char n[200];
+    safeCopy(n, sizeof(n), name && *name ? *name : "(null)");
+    logf("instance asset '%s' of entity %p", n, self);
+    return g_assetInst(self, nullptr, out, name, a3);
+}
+
+// Diagnostic guard (trace): SubNetwork instancing FUN_004ff0e0(param_1, root, instanceNo) (thiscall on the template,
+// ret 0xc). A template whose root handle (+0xc) no longer resolves faults in FUN_004f5900 (NULL+8, in-game
+// 2026-10-12, instancing a 1.0 prop's 'Anchor'); log it and return 0 (FUN_007734f0 handles a failed instance).
+typedef int(__fastcall* InstFn)(void* self, void* edx, uint32_t p1, uint32_t root, int no);
+static InstFn g_inst;
+static int __fastcall hkInst(void* self, void*, uint32_t p1, uint32_t root, int no)
+{
+    typedef void*(__fastcall * ResolveFn)(void* handleField, void* edx);
+    void* r = ((ResolveFn)rt(0x004B46D0))((char*)self + 0xc, nullptr);
+    if (!r) {
+        uint32_t* t = (uint32_t*)self;
+        logf("instancing template %p with a dead root handle %08X (block %08X, headers %u, conv %u, procs %u): skipped",
+             self, t[3], t[0x4c / 4], t[0x5c / 4], t[100 / 4], t[0x60 / 4]);
+        return 0;
+    }
+    return g_inst(self, nullptr, p1, root, no);
 }
 
 // The open half: a .lua stream (3.0's own or served from 1.0) -> CHD bytes. nullptr leaves the open as it was.
@@ -693,7 +792,17 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         logf("memtest %s %u B -> %s", p, (unsigned)n, r ? "MemFile" : "FAILED");
         return r;
     }
-    if (!r && g_cfg.serve10 && g_cfg.install10[0] && !(flags & 1)) {   // flags bit 0 = write (never served)
+    bool blocked = false;
+    if (g_cfg.block10[0]) {
+        std::string np = norm(p), list = g_cfg.block10;
+        for (size_t a = 0, b; a < list.size(); a = b + 1) {
+            b = list.find(',', a);
+            if (b == std::string::npos) b = list.size();
+            std::string pre = list.substr(a, b - a);
+            if (!pre.empty() && np.rfind(pre, 0) == 0) blocked = true;
+        }
+    }
+    if (!r && !blocked && g_cfg.serve10 && g_cfg.install10[0] && !(flags & 1)) {   // flags bit 0 = write (never served)
         std::string np = norm(p), hit, over;
         {
             std::lock_guard<std::mutex> lock(g_sessLock);
@@ -759,21 +868,27 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     loadConfig(dir);
-    {
+    auto slurpFile = [&](const char* name) {
         std::string text;
         FILE* tf = nullptr;
-        if (!fopen_s(&tf, (std::string(dir) + "\\di1compat_render.txt").c_str(), "rb") && tf) {
+        if (!fopen_s(&tf, (std::string(dir) + "\\" + name).c_str(), "rb") && tf) {
             char buf[65536];
             size_t got;
             while ((got = fread(buf, 1, sizeof(buf), tf)) > 0) text.append(buf, got);
             fclose(tf);
         }
-        g_renderOk = g_render.load(text);
-        logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
-             (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
-             (unsigned)g_render.plans.size());
-    }
+        return text;
+    };
+    g_renderOk = g_render.load(slurpFile("di1compat_render.txt"));
+    logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
+         (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
+         (unsigned)g_render.plans.size());
+    octx::g_slack = 4096;   // instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
+    g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
+    logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
+         (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
 
+    AddVectoredExceptionHandler(1, avHandler);
     if (MH_Initialize() != MH_OK) {
         logf("MinHook init failed; no hooks");
         return;
@@ -789,6 +904,9 @@ extern "C" void __stdcall Pentane_Main()
         hook("figure playset (trace)", 0x00435080, "6AFF68????????64A100000000", (void*)&hkFigurePlayset, (void**)&g_figurePlayset);
         hook("reader list (trace)", 0x00427330, "83EC08535556", (void*)&hkReaderList, (void**)&g_readerList);
         hook("reader item gate (trace)", 0x00DEB610, "538B5C2408", (void*)&hkReaderItemOk, (void**)&g_readerItemOk);
+        hook("playset figure slot (trace)", 0x00DF9FD0, "6AFF68????????64A100000000", (void*)&hkIgpName, (void**)&g_igpName);
+        hook("asset instance (trace)", 0x007734F0, "6AFF68????????64A100000000", (void*)&hkAssetInst, (void**)&g_assetInst);
+        hook("SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst, (void**)&g_inst);
     }
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);

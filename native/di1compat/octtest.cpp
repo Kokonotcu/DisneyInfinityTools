@@ -8,6 +8,7 @@
 #include "octx.hpp"
 #include "bent.hpp"
 #include "chd.hpp"
+#include "mer.hpp"
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
@@ -116,6 +117,9 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
             bool hit = bound ? ours[k] >= v : ours[k] == v;
             if (!hit && shipped["ConstantHeaderCount"] && (k == "ConstantHeaderCount" || k == "VariableHeaderCount" || k == "ConstantLayoutCount"))
                 hit = k != "VariableHeaderCount" ? ours[k] == 0 : ours[k] == v + shipped["ConstantHeaderCount"];   // all variable by design
+            if (!hit && shipped["ConstantDataNodeCount"] && (k == "ConstantDataNodeCount" || k == "VariableDataNodeCount"))
+                hit = k == "ConstantDataNodeCount" ? ours[k] == 0 : ours[k] == v + shipped["ConstantDataNodeCount"];   // static -> variable
+            if (!hit && k == "ConstantAccumulatedSize32" && !ours.count(k)) hit = true;   // no constant nodes left
             (hit ? g_fieldTally[k].first : g_fieldTally[k].second)++;
             if (!hit && g_fieldTally[k].second <= 3) printf("FIELD %s ours %ld shipped %ld  %s\n", k.c_str(), ours[k], v, path.c_str());
             all &= hit;
@@ -142,6 +146,20 @@ int main(int argc, char** argv)
             else { ++bad; printf("MISMATCH %s (%zu vs %zu B)\n", e.path().string().c_str(), got.size(), (size_t)fs::file_size(e.path())); }
         }
         printf("chd compiled exact: %zu, mismatch %zu\n", ok, bad);
+        return 0;
+    }
+    if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc]
+        mer::Table T;
+        if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
+        std::string b = slurp(argv[3]), why;
+        oct::File f = oct::File::parse(b.data(), b.size());
+        mer::Stats st;
+        if (!mer::transcode(T, f, &st, &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
+        std::string o = f.write();
+        std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
+        if (argc > 5) { std::string m = mer::mtc(f); std::ofstream(argv[5], std::ios::binary).write(m.data(), m.size()); }
+        printf("%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped; %zu B\n",
+               st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, o.size());
         return 0;
     }
     if (argc > 4 && std::string(argv[1]) == "--bent") {   // --bent <1.0 .bent> <engine path> <out>: 4.1 -> 4.1f

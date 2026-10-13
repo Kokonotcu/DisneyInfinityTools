@@ -93,13 +93,18 @@ inline int convertLink(oct::File& f, size_t link)
 // the content counts, exact on the 6,143 shipped 3.0 processor SubNetworks (countfit.py): ProcessorNodeCount =
 // #ProcessorNode, ComponentFamilyCount = #ComponentFamily, ComponentMemberCount = sum #ComponentNameIndices,
 // VariantGroupCount = #VariantGroup, VariantMemberCount = sum of their member lists, LayerBindCount = #LayerBind,
-// ConstantDataNodeCount = #Static (3.0 differs on 7 static ClothData). Headers stay all variable (ConstantHeaderCount
-// and ConstantLayoutCount 0): 3.0 puts constant headers first (FUN_004fe4d0 builds headers 1..CHC from the first
-// ConstantLayoutCount layout entries), 1.0 interleaves them, and the header tables do not depend on Static.
+// ConstantDataNodeCount = #Static only for all-static graphs (clips); elsewhere the static nodes become variable and
+// headers stay all variable (ConstantHeaderCount and ConstantLayoutCount 0): 3.0 puts constant headers first
+// (FUN_004fe4d0 builds headers 1..CHC from the first ConstantLayoutCount layout entries), 1.0 interleaves them.
 // Arena sizes are upper bounds, not fits: FUN_00500ac0 sums [align, size, count] triples per capability key
 // (FUN_004b4970: count*(align-1)+size) into the variable (+0x88) / constant (+0x84) arenas, which grow on demand
 // (FUN_00412220) and DataNodes fall back to the heap (FUN_0050a720); only basis / conversion slots trap, and those
 // counts are exact. 3.0 processor graphs need at most 64 B per node in total over all keys (vasfit.py).
+// Slack added to every arena size the rules compute (0 = the shipped-exact values octtest checks). An instanced
+// SubNetwork copies its arena block and relocates the pointers inside (FUN_004f5900, FUN_004b4470), so anything that
+// spilled past a precomputed size (heap fallback, grown chunk) becomes a wild pointer; 1.0 graphs get slack.
+inline int g_slack = 0;
+
 inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
 {
     size_t end = f.blockEnd(sn);
@@ -157,19 +162,30 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     }
     if (typeAt < 0 || layoutAt < 0) { if (why) *why = "no Type/HeaderLayout"; return false; }   // clips have no Name
     bool exact = !pn && sized;
-    if (!exact) {   // ponytail: generous bounds (128 B/node + payload), fit per-type sizes if memory ever matters
-        statics = statics < dn ? statics : dn;
-        s32 = 128 * (dn - statics + pn) + dnBytes + 4096;
-        s64 = 2 * s32;
-    } else statics = 0;   // the exact rule counts static DataNodes as variable (in_city root, tested in-game)
     // every DataNode static (clips: 2,945/2,945 shipped 3.0 ones so): all headers constant, as 3.0 writes them
     bool allStatic = !exact && !pn && dn && statics == dn;
+    // Otherwise the static DataNodes become variable ones. 3.0 keeps constant headers first and gives them the
+    // constant nodes; 1.0 interleaves them, and with all headers variable an instanced SubNetwork relocates every
+    // header's node pointer by the instance offset (FUN_004b4470), a constant (or heap) node included -> wild pointer
+    // (in-game 2026-10-12, once the 1.0 mission graphs' .mer loaded and instanced them). Static data is never written,
+    // so a per-instance copy reads the same.
+    if (!allStatic && statics) {
+        for (size_t i = sn + 1; i < f.blockEnd(sn); ++i)
+            if (f.recs[i].level == 5 && f.name(f.recs[i]) == "Static" && f.ints(f.recs[i])[0]) f.setInt(f.recs[i], 0);
+        statics = 0;
+    }
+    if (!exact) {   // ponytail: generous bounds (128 B/node + payload), fit per-type sizes if memory ever matters
+        s32 = 128 * (dn - statics + pn) + dnBytes + 4096;
+        s64 = 2 * s32;
+    }
 
     std::vector<oct::Rec> a;
     int vals[] = {allStatic ? hsi : 0, allStatic ? 0 : hsi, statics, dn - statics, pn};
     for (int k = 0; k < 5; ++k) a.push_back(f.intScalar(3, COUNTS_A[k], vals[k]));
-    if (statics) {
-        int c32 = 128 * statics + dnBytes;
+    s32 += g_slack;
+    s64 += 2 * g_slack;
+    if (statics || g_slack) {
+        int c32 = 128 * statics + (statics ? dnBytes : 0) + g_slack;
         a.push_back(f.node(3, "ConstantAccumulatedSize32"));
         a.push_back(f.intList(4, "1", {4, c32, statics}));
         a.push_back(f.node(3, "ConstantAccumulatedSize64"));
@@ -185,11 +201,11 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     int valsB[] = {bases - roots, bconv, cfam, cmem, vgroups, vmem};
     for (int k = 0; k < 6; ++k) a.push_back(f.intScalar(3, COUNTS_B[k], valsB[k]));
     if (cmudnAt >= 0) a.push_back(f.recs[cmudnAt]);                     // moved into its 3.0 place
-    if (defaultData >= 0) a.push_back(f.intScalar(3, "DefaultDataSize", (defaultData + defaultIdx) & ~3));
+    if (defaultData >= 0) a.push_back(f.intScalar(3, "DefaultDataSize", ((defaultData + defaultIdx) & ~3) + g_slack / 16));
     a.push_back(f.intScalar(3, COUNTS_B[6], lbinds));                     // LayerBindCount
     if (lbinds) a.push_back(f.intScalar(3, "LayerBindAdditionalSize", lbBytes));
     a.push_back(f.intScalar(3, COUNTS_B[7], links));                      // BaseDataNodeLinksCount
-    if (hasLinkPool) a.push_back(f.intScalar(3, "BaseDataNodeLinksAdditionalSize", linksExtra));
+    if (hasLinkPool) a.push_back(f.intScalar(3, "BaseDataNodeLinksAdditionalSize", linksExtra + g_slack / 16));
     oct::Rec cl = f.intScalar(3, "ConstantLayoutCount", allStatic ? hl : 0);
 
     // later positions first so the earlier indices stay valid
@@ -247,6 +263,50 @@ inline bool clip30(oct::File& f, size_t sn)
         if (clipData && !ext && put) { f.recs.insert(f.recs.begin() + put, f.intScalar(5, "External", 1)); changed = true; }
     }
     return changed;
+}
+
+// AssetPool (3.0 only). 3.0 loads a world's or graph's .mer only when the .oct has assets: FUN_0077cb60 builds the
+// '<name>.mer' path only if the AssetPool (FUN_0076c100) is non-empty and ExternalFilePool lists Meridian
+// (FUN_0077ca30); 1.0 files list PrimaryAsset / Asset associations instead (in-game 2026-10-12: in_city.mer and the
+// mission graphs' .mer were never requested). Asset[i] = Name ('Root' for the PrimaryAsset, else its NodeName),
+// SubNetworkRef, SceneTreeNodeRef, AggregateCount 0 (never read by 3.0); PrimaryAsset first, as 196/196 1.0
+// Incredibles .oct list it (research oct-world 2.3). Placed before AssociationPool, the shipped order.
+inline bool addAssetPool(oct::File& f)
+{
+    if (f.pool("AssetPool") >= 0) return false;
+    long ap = f.pool("AssociationPool");
+    if (ap < 0) return false;
+    struct A { std::string name; int32_t sn, stn; };
+    std::vector<A> assets;
+    for (size_t i = ap + 1; i < f.blockEnd(ap); i = f.blockEnd(i)) {
+        if (f.recs[i].level != f.recs[ap].level + 1) continue;
+        std::string type, node;
+        int32_t sn = -1, stn = -1;
+        for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
+            const std::string& n = f.name(f.recs[j]);
+            if (n == "Type") type = f.nameValues(f.recs[j])[0];
+            else if (n == "NodeName") node = f.nameValues(f.recs[j])[0];
+            else if (n == "SubNetworkRef") sn = f.ints(f.recs[j])[0];
+            else if (n == "SceneTreeNodeRef") stn = f.ints(f.recs[j])[0];
+        }
+        if (type == "PrimaryAsset") assets.insert(assets.begin(), A{"Root", sn, stn});
+        else if (type == "Asset" && sn >= 0) assets.push_back(A{node, sn, stn});   // pieces without a SubNetwork: not
+        // assets in 3.0 (the 1.0 inc_phonebooth's piece_1..7 with SubNetworkRef -1 are absent from its 3.0 twin;
+        // instancing one hit a NULL root in FUN_004f5900, in-game 2026-10-12)
+    }
+    if (assets.empty()) return false;
+    std::vector<oct::Rec> add = {f.node(1, "AssetPool")};
+    for (size_t k = 0; k < assets.size(); ++k) {
+        oct::Rec a{2, (uint16_t)(oct::NODE | 4), f.addName("Asset"), {}};   // keyed node: Asset = ['k']
+        oct::File::put(a.pay, f.addName(std::to_string(k)), 2);
+        add.push_back(a);
+        add.push_back(f.nameScalar(3, f.addName("Name"), assets[k].name));
+        add.push_back(f.intScalar(3, "SubNetworkRef", assets[k].sn));
+        add.push_back(f.intScalar(3, "SceneTreeNodeRef", assets[k].stn));
+        add.push_back(f.intScalar(3, "AggregateCount", 0));
+    }
+    f.recs.insert(f.recs.begin() + ap, add.begin(), add.end());
+    return true;
 }
 
 // Every SubNetwork of the SubNetworkPool; returns how many got counts.
