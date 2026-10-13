@@ -28,22 +28,45 @@ static std::mutex g_dbLock;
 static npc::GameDb* g_db;                                   // built for the 1.0 playset g_dbPlayset
 static std::string g_dbPlayset;
 static bool g_dbActive;                                     // between its Playset include and unload
-static std::set<std::pair<std::string, std::string>> g_dbRouted;
+static std::set<std::pair<std::string, std::string>> g_dbRouted;   // routed in this activation (repeat includes skip)
+static std::set<std::pair<std::string, std::string>> g_dbOwned;    // loaded by this hook: released at unload
 static std::string g_psPath;                                // playset30: the served Playset-record DataMap
 static const char* const KINDS[] = {"playset", "gamemode", "zone", "actor", "toy", "activity", "zonebackgroundload",
                                     "realm", "munition", "surfaceimpact", "costume", "powerdisc", "include"};
 
-static void route(const std::vector<std::pair<std::string, std::string>>& tps, const char* what)
+// Already loaded by a GameDB loader named 'type'? The router keeps no count (a second load is skipped, one unload
+// removes the file), so a table the core loaded at boot (CoreDataMap _core_ / avatarprogression) must not be
+// released here. DBFileRouter: loaders [router+8] x [router+0xc] (FUN_018da710); a loader's name is the string at +4,
+// FUN_018d9730 (thiscall path) its loaded-file id or -1 (exact compare, as the loader stored the path).
+static bool loaded(void* router, const std::string& type, const std::string& path)
 {
+    typedef int(__fastcall* FindFn)(void* self, void* edx, const char* path);
+    FindFn find = (FindFn)rt(0x018D9730);
+    void** ls = *(void***)((uint8_t*)router + 8);
+    int n = *(int*)((uint8_t*)router + 0xc);
+    for (int i = 0; ls && i < n; ++i) {
+        const char* nm = ls[i] ? ((const char**)ls[i])[1] : nullptr;
+        if (nm && type == nm && find(ls[i], nullptr, path.c_str()) >= 0) return true;
+    }
+    return false;
+}
+
+// -> the tables this call loaded (not resident before)
+static std::vector<std::pair<std::string, std::string>> route(const std::vector<std::pair<std::string, std::string>>& tps, const char* what)
+{
+    std::vector<std::pair<std::string, std::string>> mine;
     void* router = *(void**)rt(0x022A6E68);
-    if (!router || tps.empty()) return;
+    if (!router || tps.empty()) return mine;
     RouteFn fn = (RouteFn)(*(void***)router)[1];
     std::string line;
     for (auto& [t, p] : tps) {
+        bool had = loaded(router, t, p);
         uint8_t r = fn(router, nullptr, t.c_str(), p.c_str(), 0, 1);
-        line += " " + t + "=" + p + (r ? "" : "(0)");
+        line += " " + t + "=" + p + (had ? "(resident)" : r ? "" : "(0)");
+        if (!had) mine.push_back({t, p});
     }
     logf("gamedb30 %s: %u 3.0 tables:%s", what, (unsigned)tps.size(), line.c_str());
+    return mine;
 }
 
 // The 1.0 DataMap of playset 'name' with no Playset record in the engine: build its supplement (once per playset).
@@ -118,7 +141,12 @@ static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
         auto e = std::remove_if(todo.begin(), todo.end(), [](const std::pair<std::string, std::string>& tp) { return !g_dbRouted.insert(tp).second; });
         todo.erase(e, todo.end());
     }
-    route(todo, (what + KINDS[kind < 0 || kind > 12 ? 12 : kind] + " " + (name ? name : "")).c_str());   // before: the include's DNA reads them
+    // before the include: its DNA reads them
+    auto mine = route(todo, (what + KINDS[kind < 0 || kind > 12 ? 12 : kind] + " " + (name ? name : "")).c_str());
+    if (!mine.empty()) {
+        std::lock_guard<std::mutex> lock(g_dbLock);
+        g_dbOwned.insert(mine.begin(), mine.end());
+    }
     if (!todo.empty() && kind == 0) {                       // the table Game_ComputeCarryStyle interns into
         uint8_t* cs = *(uint8_t**)rt(0x022896E4);
         logf("gamedb30: CarryStyleInfo table %s", cs && *(void**)(cs + 0x58) ? "present" : "STILL MISSING");
@@ -141,15 +169,16 @@ static void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
         std::lock_guard<std::mutex> lock(g_dbLock);
         if (!name || !g_db || g_dbPlayset != npc::lower(name)) return;
         g_dbActive = false;
-        done.swap(g_dbRouted);
+        g_dbRouted.clear();
+        done.swap(g_dbOwned);
         psMap = g_psPath;
     }
     dataMapRoute(false, psMap);
     void* router = *(void**)rt(0x022A6E68);
     if (!router) return;
     UnrouteFn fn = (UnrouteFn)(*(void***)router)[2];
-    for (auto& [t, p] : done) fn(router, nullptr, t.c_str(), p.c_str());
-    logf("gamedb30 Playset %s unloaded: %u 3.0 tables released", name, (unsigned)done.size());
+    for (auto& [t, p] : done) fn(router, nullptr, t.c_str(), p.c_str());   // a table already gone is skipped (FUN_018da6c0)
+    logf("gamedb30 Playset %s unloaded: %u 3.0 tables it loaded released", name, (unsigned)done.size());
 }
 
 // ---- skin10: a 1.0 asset's InfluenceRemap palettes applied to its vertex buffer before the render transcode ----
