@@ -421,8 +421,10 @@ inline void reach(const DataMap& m, const std::pair<std::string, std::string>& k
 // - a 1.0 DataMap has no Playset group (7/7; all 9 3.0 DataMaps have one), and 3.0 includes DataMap.Playset.<playset>
 //   for every playset (FUN_0070d9b0 -> FUN_0070d730(name, 0)): the 3.0 playset tables -- CarryStyles, SizeClassifications,
 //   DecisionsInfo, DifficultyInfo, Munitions, SurfaceImpacts -- never load. Taken from ToyBox's Playset.toybox (the 3.0
-//   playset that hosts the 1.0 characters) for every GameDB type the 1.0 DataMap never names; assetDefs stays with the
-//   asset defs fallback (gamedb/incredibles/assetdefs.lua).
+//   playset that hosts the 1.0 characters) for every GameDB type the 1.0 DataMap never names, except assetDefs (served
+//   by the asset defs fallback from gamedb/incredibles/assetdefs.lua) and RumpusSpawnData (the Toy Box spawn map: 1 of
+//   the 9 3.0 Playset closures; sizeclassifications/decisionsInfo/difficultyInfo 9, carrystyles/munitions 8,
+//   surfaceImpacts 6; pstypes.py).
 // - a 1.0 Actor record carries no GameDB entries, while the 3.0 DNA served for it reads 3.0 tables: emuInfo by its
 //   Progression Hierarchy, toolset by its ToolSet (68 of 70 3.0 *_ps DNA: every Hierarchy name has its
 //   emuinfo_<name>.lua among the GameDB entries of the ToyBox record with the same DNA minus _ps; psdna.py). Per 1.0
@@ -443,7 +445,8 @@ inline GameDb gamedb30(const DataMap& m10, const DataMap& m30)
     for (auto& [k, r] : m10) for (auto& f : r.files) if (gamedbEntry(f, tp)) types10.insert(tp.first);
     if (auto pt = m30.find({"playset", "toybox"}); pt != m30.end())
         for (auto& f : pt->second.files)
-            if (gamedbEntry(f, tp) && !types10.count(tp.first) && tp.first != "assetDefs") g.playset.push_back(tp);
+            if (gamedbEntry(f, tp) && !types10.count(tp.first) && tp.first != "assetDefs" && tp.first != "RumpusSpawnData")
+                g.playset.push_back(tp);
     std::map<std::string, std::string> byDna;   // DataMap is ordered: the first record per DNA has the smallest name
     for (auto& [k, r] : m30) {
         std::string d = k.first == "actor" ? dnaOf(r) : "";
