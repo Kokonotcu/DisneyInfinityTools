@@ -69,6 +69,14 @@ static void logf(const char* fmt, ...)
 // Copies a C string the engine handed us without trusting the pointer.
 static void safeCopy(char* out, size_t cap, const char* src)
 {
+    // trace hooks pass values that may not be pointers; check first, so no first-chance AV reaches the vectored
+    // handlers (CrabeLoader writes a dump per AV even when the __try below handles it)
+    MEMORY_BASIC_INFORMATION mbi;
+    if ((uintptr_t)src < 0x10000 || !VirtualQuery(src, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mbi.Protect) {
+        if (cap) out[0] = 0;
+        return;
+    }
     __try {
         size_t i = 0;
         for (; src && i + 1 < cap && src[i]; ++i) out[i] = src[i];

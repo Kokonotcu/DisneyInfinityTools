@@ -724,8 +724,8 @@ inline int collision30(oct::File& f)
 //     the node's scale (pCube205), TypeName, OverrideType, BlendDistance, InRealmFile 0, BlendWithAvatarPos 0;
 //   Light Directional -> LightType 6, LightData [r, g, b, intensity, 0 x6]; Ambient -> 7, [r, g, b, intensity];
 //     FeatureCaps 0; the 1.0 named fields go;
-//   ponytail: Point / Spot lights become plain Transforms (no 1.0/3.0 twin to fit their LightData from; raw 1.0 point
-//     lights broke all VFX before, 2026-10-03) -- fit a rule from paired exploders if local lights matter;
+//   Light Point -> LightType 0, Spot -> 1, LightData [r, g, b, I, FalloffRadius, FalloffStrength, FalloffClamp,
+//     (Spot: ConeAngle, PenumbraAngle, Dropoff,) -1], FeatureCaps = Specular (fitted on the twin files below);
 //   LightRig gains a Uuid after LightRefs; the two 1.0 pools go.
 // Only worlds (a RealmData NodeRef that is a Transform node); realm files have their own rule (realm30.py).
 inline int realm30w(oct::File& f)
@@ -816,18 +816,57 @@ inline int realm30w(oct::File& f)
         auto lt = nodeField(n, "LightType");
         if (!lt || oct::spec(lt->type).kind != oct::NAME) continue;   // already 3.0 (int)
         std::string kind = f.nameValues(*lt)[0];
+        auto flt = [&](const char* name, float d) {   // a float scalar field of the node
+            auto r = nodeField(n, name);
+            float v = d;
+            if (r && r->pay.size() >= 4 && oct::spec(r->type).kind == oct::FLOAT) memcpy(&v, r->pay.data() + r->pay.size() - 4, 4);
+            return v;
+        };
+        auto kv = [&](const char* name, float d) {    // a StaticKeyValuePairs entry ('FalloffRadius' = '60.0')
+            for (size_t j = nodes[n] + 1, e = f.blockEnd(nodes[n]); j < e; ++j)
+                if (f.recs[j].level == 4 && f.name(f.recs[j]) == name && oct::spec(f.recs[j].type).kind == oct::NAME) {
+                    auto v = f.nameValues(f.recs[j]);
+                    if (!v.empty()) { try { return std::stof(v.back()); } catch (...) {} }
+                }
+            return d;
+        };
+        auto kvTrue = [&](const char* name) {
+            for (size_t j = nodes[n] + 1, e = f.blockEnd(nodes[n]); j < e; ++j)
+                if (f.recs[j].level == 4 && f.name(f.recs[j]) == name && oct::spec(f.recs[j].type).kind == oct::NAME) {
+                    auto v = f.nameValues(f.recs[j]);
+                    return !v.empty() && (v.back() == "True" || v.back() == "true");
+                }
+            return false;
+        };
+        std::vector<float> data;
+        int type = -1, caps = 0;
+        float col[3] = {0, 0, 0};
+        if (auto c = nodeField(n, "LightColor"); c && c->pay.size() >= 13) memcpy(col, c->pay.data() + 1, 12);
+        float inten = flt("LightIntensity", 0.f);
         if (kind == "Directional" || kind == "Ambient") {
-            std::vector<float> data(kind == "Directional" ? 10 : 4, 0.f);
-            if (auto c = nodeField(n, "LightColor"); c && c->pay.size() >= 13) memcpy(data.data(), c->pay.data() + 1, 12);
-            if (auto i = nodeField(n, "LightIntensity"); i && i->pay.size() >= 4) memcpy(&data[3], i->pay.data(), 4);
+            type = kind == "Directional" ? 6 : 7;
+            data.assign(type == 6 ? 10 : 4, 0.f);
+            memcpy(data.data(), col, 12);
+            data[3] = inten;
+        } else if (kind == "Point" || kind == "Spot") {
+            // twins in both games (31/31 static Point lights exact, choreographies differ only in animated keys;
+            // Spot from lr_generalstore): [r, g, b, I, FalloffRadius (10), FalloffStrength (9), FalloffClamp (1),
+            // Spot: ConeAngle, PenumbraAngle, Dropoff, then -1]; FeatureCaps = Specular (232 / 233)
+            type = kind == "Point" ? 0 : 1;
+            caps = kvTrue("Specular") ? 1 : 0;
+            data = {col[0], col[1], col[2], inten, kv("FalloffRadius", 10.f), kv("FalloffStrength", 9.f), kv("FalloffClamp", 1.f)};
+            if (type == 1) { data.push_back(flt("ConeAngle", 0.f)); data.push_back(flt("PenumbraAngle", 0.f)); data.push_back(flt("Dropoff", 0.f)); }
+            data.push_back(-1.f);
+        }
+        if (type >= 0) {
             auto b = head(n, "Light");
-            b.push_back(f.intScalar(3, "LightType", kind == "Directional" ? 6 : 7));
-            b.push_back(f.intScalar(3, "FeatureCaps", 0));
+            b.push_back(f.intScalar(3, "LightType", type));
+            b.push_back(f.intScalar(3, "FeatureCaps", caps));
             b.push_back(floatList(f, 3, "LightData", data));
             if (auto x = nodeField(n, "ExclusionType")) b.push_back(*x);
             tail(n, b);
             blocks[n] = b;
-        } else {
+        } else {   // a kind 3.0 has no twin rule for: a plain Transform
             auto b = head(n, "Transform");
             tail(n, b);
             blocks[n] = b;
