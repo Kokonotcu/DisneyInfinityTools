@@ -138,6 +138,7 @@ static struct {
     bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)
     bool chest10 = true;             // sys: 1.0 ChestInfo.bin through 3.0's chestInfo loader (GLB-1)
     bool bits10 = true;              // sys: the 1.0 core bitmasks after the playset's (PS-5)
+    bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -170,6 +171,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "popin10")) g_cfg.popin10 = atoi(val) != 0;
         else if (!strcmp(key, "chest10")) g_cfg.chest10 = atoi(val) != 0;
         else if (!strcmp(key, "bits10")) g_cfg.bits10 = atoi(val) != 0;
+        else if (!strcmp(key, "econ10")) g_cfg.econ10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1289,6 +1291,27 @@ static uint8_t __fastcall hkCbLoad(void* self, void*, const char* path, uint32_t
     return r;
 }
 
+// NPC-8: the .ap key SpawnEconomyOnDeath. 1.0's combat getter FUN_00aa1520 decides once per actor: default 1, then
+// the key from the actor's params (component DAT_016a6a80, +8; 271 uses in the 195 Metroville .ap files: 268 say 1,
+// 3 in in_city_story__missiongraph.ap say 0). 3.0's getter FUN_00ff69c0 (thiscall, decided-bit 0x20 of +0x90c) sets 1 unread; the 1.0
+// read goes in front of it: params component DAT_0220353c (FUN_0069ecd0, +8, as 3.0 reads ChestName in FUN_00b9ebb0),
+// has-key FUN_006f9640, bool FUN_006f9610, setter FUN_00fee6b0 (the one Combat_SetOnDeathSpawnEconomy calls).
+typedef uint32_t(__fastcall* CombatGetFn)(uint8_t* self, void* edx);
+static CombatGetFn g_econOnDeath;
+static uint32_t __fastcall hkEconOnDeath(uint8_t* self, void*)
+{
+    if (!(self[0x90c] & 0x20)) {
+        void* comp = ((void*(__cdecl*)(void*, uint32_t))rt(0x0069ECD0))(*(void**)self, *(uint16_t*)rt(0x0220353C));
+        void* params = comp ? (uint8_t*)comp + 8 : nullptr;
+        if (params && ((uint8_t(__fastcall*)(void*, void*, const char*, uint32_t))rt(0x006F9640))(params, nullptr, "SpawnEconomyOnDeath", 0)) {
+            uint8_t v = ((uint8_t(__fastcall*)(void*, void*, const char*, uint32_t, uint32_t))rt(0x006F9610))(params, nullptr, "SpawnEconomyOnDeath", 0, 0);
+            ((void(__fastcall*)(void*, void*, uint32_t))rt(0x00FEE6B0))(self, nullptr, v);
+            if (!v) logf("SpawnEconomyOnDeath = 0 read for actor %p", *(void**)self);
+        }
+    }
+    return g_econOnDeath(self, nullptr);
+}
+
 typedef void(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
 static ExpDefFn g_expDef;
 static void __fastcall hkExpDef(void* self, void*, void* entry)
@@ -1874,6 +1897,8 @@ extern "C" void __stdcall Pentane_Main()
     hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
     if (g_cfg.bits10)
         hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad, (void**)&g_cbLoad);
+    if (g_cfg.econ10)
+        hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath, (void**)&g_econOnDeath);
     if (g_cfg.popin10) {
         hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
         hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);
