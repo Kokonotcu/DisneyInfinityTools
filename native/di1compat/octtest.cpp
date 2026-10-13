@@ -16,6 +16,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "npc.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -216,6 +217,31 @@ int main(int argc, char** argv)
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         printf("wrote %zu B, %zu records\n", o.size(), f.recs.size());
         return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--nav") {   // --nav <out dir> <1.0 .oct>...: navmesh blobs -> 3.0 layout
+        // writes <out>/<stem>_<i>.bin per mesh (payload, no count) for navconv.py's byte comparison
+        int files = 0, meshes = 0, failed = 0;
+        for (int k = 3; k < argc; ++k) {
+            std::string b = slurp(argv[k]), why;
+            oct::File f = oct::File::parse(b.data(), b.size());
+            int n = npc::navmesh30(f, &why);
+            ++files;
+            if (n < 0) { ++failed; printf("FAIL %s: %s\n", argv[k], why.c_str()); continue; }
+            long p = f.pool("NavMeshPool");
+            int i = 0;
+            for (size_t j = p < 0 ? 0 : p + 1; p >= 0 && j < f.blockEnd(p); ++j)
+                if (f.name(f.recs[j]) == "Data") {
+                    oct::Spec s = oct::spec(f.recs[j].type);
+                    std::string pay = f.recs[j].pay.substr(s.cw);
+                    std::ofstream(fs::path(argv[2]) / (fs::path(argv[k]).stem().string() + "_" + std::to_string(i++) + ".bin"), std::ios::binary)
+                        .write(pay.data(), pay.size());
+                }
+            meshes += n;
+            std::string w = f.write();
+            oct::File::parse(w.data(), w.size());   // the edited file re-parses (count widths, sizes)
+        }
+        printf("nav: %d files, %d meshes converted, %d files failed\n", files, meshes, failed);
+        return failed ? 1 : 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--oct") {   // --oct <1.0 .oct> <out>: the SubNetwork transforms only
         std::string b = slurp(argv[2]);

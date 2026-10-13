@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "npc.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,7 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +161,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "navmesh10")) g_cfg.navmesh10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -383,15 +386,18 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
 }
 
 // .oct (worlds, missions, exploders ...). Steps, each from the research plan (PLAN.md section 4):
-//   NavMeshPool removed: 3.0's blob parser FUN_01909fb0 trusts the layout, and the 1.0 layout differs (in-game
-//   2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it). Interim until the navmesh codec (OCT-8).
+//   NavMeshPool blobs into the 3.0 layout (npc::navmesh30, OCT-8): 3.0's blob parser FUN_01909fb0 trusts the layout
+//   (in-game 2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it); a mesh that does not convert drops the pool.
 //   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
 //   DataNodeBasisConversion in FUN_004d0160).
 //   World render (render.hpp, REN-5 + geometry): the 1.0 .mtb named 1.0 shaders (int3 in Shader_LookupCrc).
 static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
 {
     bool changed = transcodeAssetRender(path, f, note);
-    if (f.dropPool("NavMeshPool")) { note += "-NavMeshPool "; changed = true; }
+    std::string navWhy = "navmesh10 off";
+    int navs = g_cfg.navmesh10 ? npc::navmesh30(f, &navWhy) : -1;
+    if (navs > 0) { note += "+navmesh(" + std::to_string(navs) + ") "; changed = true; }
+    else if (navs < 0 && f.dropPool("NavMeshPool")) { note += "-NavMeshPool (" + navWhy + ") "; changed = true; }
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
     if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
