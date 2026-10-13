@@ -1617,8 +1617,16 @@ inline int tickAndDeliver()
     return (int)fin.size();
 }
 
-inline DWORD WINAPI tickThread(void*)
+// The FMOD host's own thread: FMOD's init runs here, then the tick. fmodex.dll imports CoInitialize (STA) while 3.0
+// initialises COM itself (CoInitializeEx MTA at 0x0132e41b / 0x0197106a, STA at 0x0198261f / 0x004403d6), so FMOD
+// never touches the apartment of the thread that runs Pentane_Main.
+struct HostStart { std::string install10; bool ok = false; HANDLE done = nullptr; };
+inline DWORD WINAPI hostThread(void* p)
 {
+    HostStart* s = (HostStart*)p;
+    s->ok = g.init(s->install10, false);
+    SetEvent(s->done);
+    if (!s->ok) return 0;
     for (;;) {
         Sleep(16);
         tickAndDeliver();
@@ -1629,7 +1637,14 @@ typedef bool (*HookFn)(const char* name, uint32_t staticVa, const char* prologue
 
 inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& install10, const std::string& game30)
 {
-    if (!g.init(install10, false)) return false;
+    static HostStart start;
+    start.install10 = install10;
+    start.done = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    HANDLE th = start.done ? CreateThread(nullptr, 0, hostThread, &start, 0, nullptr) : nullptr;
+    DWORD w = th ? WaitForSingleObject(start.done, 20000) : WAIT_FAILED;
+    if (w != WAIT_OBJECT_0) AUDLOG("audio10: FMOD host thread %s", th ? "did not finish its init in 20 s" : "not started");
+    if (w != WAIT_OBJECT_0 || !start.ok) return false;
+    CloseHandle(th);
     sound30 = game30 + "\\assets\\sound";
     g.idCounter = (volatile LONG*)rt(0x022AFBE8);
     g.loadTree("Initialize.fev", "Permanent");   // 1.0 FUN_01138210 at audio init: 'Initialize.fev:Permanent'
@@ -1665,7 +1680,6 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
         hook("dialog request (vo10)", 0x0073BF50, "53568BF1E8????????8D4618", (void*)&hkDlgReq, (void**)&oDlgReq);
     }
     if (cfg.trace) hook("queued sound post (audiotrace10)", 0x01830270, "83EC44538B5C244C", (void*)&hkQueuedPost, (void**)&oQueuedPost);
-    CreateThread(nullptr, 0, tickThread, nullptr, 0, nullptr);
     return true;
 }
 
