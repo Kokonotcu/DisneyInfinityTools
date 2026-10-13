@@ -332,6 +332,21 @@ static int voTest(char** argv)
     printf("PLAY ED019 media %s sub %d (%s) id %u: duration cb %.0f ms (subsound %u ms), end cb %d after %lu ms\n", found ? "ours" : "NOT FOUND",
            sub, found ? b->idx().subName(sub) : "-", id, dur, ms, ends, (unsigned long)(endAt - t0));
     bad += !found || !id || ends != 1 || dur != (float)ms;
+    // the next line of the same bank while one plays (3.0 FUN_01830370 posts it before stopping the old one): the old
+    // ends once, at once; the new one keeps playing after 3.0's StopPlayingID of the old id
+    int endsBefore = ends;
+    uint32_t a = audio::g.playLine(audio::fnv1("dialog_edna"), 7, 1, (void*)cb, nullptr, b->snd, sub);
+    for (int t = 0; t < 500; t += 16) { Sleep(16); audio::tickAndDeliver(); }
+    uint32_t c = audio::g.playLine(audio::fnv1("dialog_edna"), 7, 1, (void*)cb, nullptr, b->snd, sub + 1);
+    audio::g.act(a, 0);
+    for (int t = 0; t < 500; t += 16) { Sleep(16); audio::tickAndDeliver(); }
+    bool cAlive;
+    {
+        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+        cAlive = audio::g.plays.count(c) && audio::g.plays[c].ev;
+    }
+    printf("PLAY overlap: old id %u ended %d time(s), new id %u %s\n", a, ends - endsBefore, c, cAlive ? "still playing" : "ENDED");
+    bad += ends - endsBefore != 1 || !cAlive;
     // lipsync: the path 3.0 FUN_014c5550 builds from that media name -> 1.0's Edna.zip member (vocheck.py: 19023 of
     // 19026 subsounds of the 1.0 characters with a zip have theirs)
     std::string zr, mem, ap = std::string("sound/dialog/enu/ED/") + (found ? b->idx().subName(sub) : "") + ".anno";

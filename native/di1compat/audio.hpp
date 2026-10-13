@@ -172,6 +172,7 @@ struct Play {
     bool ui;
     uint32_t born;     // tick number at start: its end is delivered one tick later at the earliest (3.0 FUN_01830270
                        // stores the playing id in the cookie record after the post returns; Wwise ends events no sooner)
+    void* fsb;         // a dialog line: the 1.0 bank whose subsound it plays
 };
 struct V3 { float v[3]; };
 
@@ -414,12 +415,24 @@ struct Host {
 
     // 1.0 FUN_01136850 (dialog line): the line's event with the bank's subsound as its programmer sound (1.0's
     // callback 0x01136440 answers SOUNDDEF_CREATE with it), 3D attributes, start. Its length goes out as AK_Duration.
+    // A bank is one FSB (one stream for '_str'): 1.0 stops the speaker's current line before it seeks the bank to the
+    // next (FUN_01135d60, then getSubSound); 3.0 FUN_01830370 posts the new line first and stops the old one after, so
+    // the old line of the same bank is retired here (ended for 3.0, its later StopPlayingID finds no event).
     uint32_t playLine(uint32_t eventId, uint32_t obj, uint32_t flags, void* cb, void* cookie, void* fsb, int sub)
     {
         std::lock_guard<std::recursive_mutex> l(mx);
         auto it = byId.find(eventId);
+        if (it == byId.end() || !fsb) return 0;
+        for (auto& pl : plays)
+            if (pl.second.fsb == fsb && pl.second.ev) {
+                f.Event_SetCallback(pl.second.ev, nullptr, nullptr);
+                f.Event_Stop(pl.second.ev, 1);
+                pl.second.ev = nullptr;
+                std::lock_guard<std::mutex> d(doneMx);
+                done.push_back(pl.first);
+            }
         void* s = nullptr;
-        if (it == byId.end() || !fsb || f.Sound_GetSubSound(fsb, sub, &s) || !s) return 0;
+        if (f.Sound_GetSubSound(fsb, sub, &s) || !s) return 0;
         void* ev = nullptr;
         if (f.EventSystem_GetEventBySystemID(es, it->second.sysId, 0, &ev) || !ev) return 0;
         uint32_t id = newId();
@@ -427,7 +440,7 @@ struct Host {
         f.Event_SetCallback(ev, &Host::onEvent, (void*)(uintptr_t)id);
         place(ev, obj);
         if (f.Event_Start(ev)) { f.Event_SetCallback(ev, nullptr, nullptr); return 0; }
-        plays[id] = Play{ev, it->second.proj, obj, eventId, flags, cb, cookie, it->second.ui, tickNo};
+        plays[id] = Play{ev, it->second.proj, obj, eventId, flags, cb, cookie, it->second.ui, tickNo, fsb};
         unsigned ms = 0;
         if (!f.Sound_GetLength(s, &ms, 1)) {   // FMOD_TIMEUNIT_MS
             std::lock_guard<std::mutex> d(doneMx);
@@ -974,8 +987,8 @@ struct Vo {
         v.erase(std::remove(v.begin(), v.end(), b), v.end());
         publish(p);
         std::lock_guard<std::recursive_mutex> gl(g.mx);
-        for (auto& pl : g.plays)   // its subsounds die with it
-            if (pl.second.ev && g.progSound[pl.first & 4095]) { g.f.Event_Stop(pl.second.ev, 1); }
+        for (auto& pl : g.plays)   // its subsounds die with it (EVENTFINISHED ends them for 3.0)
+            if (pl.second.ev && pl.second.fsb == b->snd) g.f.Event_Stop(pl.second.ev, 1);
         g.f.Sound_Release(b->snd);
         b->snd = nullptr;
         AUDLOG("vo10: unloaded %s", file.c_str());
