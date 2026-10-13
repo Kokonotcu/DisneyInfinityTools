@@ -481,9 +481,9 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         oct::File f = oct::File::parse(graph.data(), graph.size());
         mer::Stats st;
         if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
-        char buf[200];
-        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events) ",
-                  st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events);
+        char buf[240];
+        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches) ",
+                  st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches);
         note += buf;
         out = isMtc ? mer::mtc(f) : f.write();
         return isMtc ? "mtc" : "mer";

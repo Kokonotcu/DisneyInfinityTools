@@ -180,8 +180,8 @@ int main(int argc, char** argv)
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         if (argc > 5) { std::string m = mer::mtc(f); std::ofstream(argv[5], std::ios::binary).write(m.data(), m.size()); }
-        printf("%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events; %zu B\n",
-               st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, o.size());
+        printf("%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches; %zu B\n",
+               st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches, o.size());
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--mission") {   // --mission <1.0 mission .lua> <out.lua>: events -> 3.0

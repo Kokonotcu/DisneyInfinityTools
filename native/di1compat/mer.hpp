@@ -14,7 +14,8 @@
 //               instance gets the pins; a name with a '<name>_value' sibling is a data pin
 //   types       a parameter's type is the one 3.0 reads it as (the table), else the record's own
 //   second Type the parameter 'Type' (2,127 1.0 mission nodes; 3.0 data stores it so)
-//   LeafName    + LeafNameHash = lookup2(LeafName) (3.0 port sub-nodes carry the hash)
+//   LeafName    + LeafNameHash = lookup2(port name: LeafName, else the owner field naming the sub-node); a DataFetch's
+//               'Value' becomes the parameter of that port name (3.0 form)
 //   links       u32 n, u8 0, u16 3, n x (u16 code, u16 from, u16 to), from/to = node index - Begin - 1
 //   classes 3.0 does not register (DeliveryNode, Activate/SpawnDecorationSockets + 8 mission classes) would leave
 //               no node slot and shift every later index (verify-meridian claim 6: out-of-bounds link writes), so
@@ -145,7 +146,7 @@ inline int typeOf(const oct::File& f, const oct::Rec& r)
     return -1;
 }
 
-struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0; };
+struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0, fetches = 0; };
 
 // False (f unchanged) if the file is not a 1.0 graph (already has descriptions, or no node pool).
 inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::string* why = nullptr)
@@ -271,6 +272,30 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         }
     }
 
+    // port names: a sub-node's LeafName, else the owner field naming it (1.0 camera/LuaNode/EventSurge ports carry no
+    // LeafName; their owner lists '<port> = <sub-node index>' and the sub-nodes sit right before it). 3.0 needs it as
+    // LeafNameHash (FUN_006c8be0 -> node+0x18) and names a DataFetch's constant after it: over 400 3.0 graphs every
+    // owned sub-node's LeafNameHash = lookup2(owner field) (9,629/9,629) and every DataFetch parameter hash = its
+    // LeafNameHash (2,638/2,638), while 1.0 stores that constant as 'Value' (808 DataFetch nodes) -- read raw, camera
+    // priorities and transition times, AI attack counts and the like fell back to defaults.
+    static const std::set<std::string> subTypes = {"Event", "DataFetch", "DataSource", "DataListSource", "DataListFetch",
+                                                   "Handler", "EventSurge", "DataWritable", "DataWrite"};
+    std::vector<std::string> port(nodes.size());
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        long leaf = field(nodes[k], "LeafName");
+        if (leaf >= 0) port[k] = f.nameValues(f.recs[leaf])[0];
+    }
+    for (size_t k = 0; k < nodes.size(); ++k)
+        for (size_t j = nodes[k].at + 1; j < nodes[k].end; ++j) {
+            const oct::Rec& r = f.recs[j];
+            if (r.level != fl || !isInt(r) || isGeneric(f.name(r))) continue;
+            int64_t v = f.ints(r)[0];
+            if (v < 0 || (size_t)v >= k || k - (size_t)v > 64 || !port[v].empty() || nodes[v].ns != nodes[k].ns) continue;
+            bool owned = true;
+            for (size_t q = (size_t)v; q < k && owned; ++q) owned = subTypes.count(nodes[q].type) > 0;
+            if (owned) port[v] = f.name(r);
+        }
+
     // rebuild the node pool
     std::vector<oct::Rec> outRecs(f.recs.begin(), f.recs.begin() + pool + 1);
     std::vector<std::string> values(nss.size()), strs(nss.size());
@@ -323,6 +348,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             if (pin) continue;
             std::string pn = nm;
             if (pn.size() > 6 && !pn.compare(pn.size() - 6, 6, "_value")) pn = pn.substr(0, pn.size() - 6);
+            if (n.type == "DataFetch" && pn == "Value" && !port[k].empty()) { pn = port[k]; ++s.fetches; }
             if (done.count(pn)) continue;
             int type = -1;
             if (c) { auto t = c->params.find(pn); if (t != c->params.end()) type = t->second; }
@@ -352,9 +378,8 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
                     if (!names.count(f.name(pr))) { outRecs.push_back(pr); copied = true; }
             s.pinsCopied += copied;
         }
-        long leaf = field(n, "LeafName");
-        if (leaf >= 0 && !names.count("LeafNameHash"))
-            outRecs.push_back(f.intScalar(fl, "LeafNameHash", (int32_t)lookup2(f.nameValues(f.recs[leaf])[0])));
+        if (!port[k].empty() && !names.count("LeafNameHash"))
+            outRecs.push_back(f.intScalar(fl, "LeafNameHash", (int32_t)lookup2(port[k])));
         outRecs.push_back(f.intScalar(fl, "Mer_ParametersOffset", (int32_t)values[ns].size()));
         std::string d((const char*)&count, 4);
         outRecs.push_back(blob(f, fl, "Mer_ParameterDescription", d + desc));
