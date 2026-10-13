@@ -91,6 +91,10 @@ static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
         todo.erase(e, todo.end());
     }
     route(todo, (what + KINDS[kind < 0 || kind > 12 ? 12 : kind] + " " + (name ? name : "")).c_str());   // before: the include's DNA reads them
+    if (!todo.empty() && kind == 0) {                       // the table Game_ComputeCarryStyle interns into
+        uint8_t* cs = *(uint8_t**)rt(0x022896E4);
+        logf("gamedb30: CarryStyleInfo table %s", cs && *(void**)(cs + 0x58) ? "present" : "STILL MISSING");
+    }
     return g_include(self, nullptr, name, kind, flag, prog);
 }
 
