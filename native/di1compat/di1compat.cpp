@@ -136,6 +136,7 @@ static struct {
     bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
     bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
+    bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -166,6 +167,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "navmesh10")) g_cfg.navmesh10 = atoi(val) != 0;
         else if (!strcmp(key, "gamedb30")) g_cfg.gamedb30 = atoi(val) != 0;
         else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
+        else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -559,6 +561,14 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         note += buf;
         out = r.mtb;
         return "mtb";
+    }
+    // a 1.0 playset avatar DNA that 3.0 ships only as its base DNA: the base, naming the 1.0 _PS model (npc::psDna30)
+    if (g_cfg.psdna30 && endsWith(path, "_ps.dnax")) {
+        std::string p = norm(path), base, why;
+        if (!read30(p.substr(0, p.size() - 8) + ".dnax", base)) return nullptr;
+        if (!npc::psDna30(std::string((const char*)data, n), base, out, &why)) { note += "psdna30: " + why + " "; return nullptr; }
+        note += "+psdna30(3.0 base, " + why + ") ";
+        return "psdna30";
     }
     // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
     if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {

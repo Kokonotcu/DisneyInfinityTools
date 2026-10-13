@@ -10,6 +10,7 @@
 #include <vector>
 #include "oct.hpp"
 #include "gen30.hpp"
+#include "luachunk.hpp"
 
 namespace npc {
 
@@ -462,6 +463,75 @@ inline GameDb gamedb30(const DataMap& m10, const DataMap& m30)
                 if (gamedbEntry(f, tp) && !types10.count(tp.first) && got.insert(tp).second) g.actor[k.second].push_back(tp);
     }
     return g;
+}
+
+// ---- psdna30: a 1.0 playset avatar DNA (<x>_ps.dnax) that 3.0 ships only as <x>.dnax ----
+// 3.0's own convention for a playset DNA is its base DNA naming the _PS model: of the 72 3.0 *_ps.dnax with a base,
+// 63 differ from it only in EntityInstance.ModelName, 54 of them by '_PS' appended (psrule.py); inc_bob_ps vs inc_bob:
+// 1 of 635 leaves. All 33 1.0 *_ps.dnax have a 3.0 base, one (inc_bob_ps) a 3.0 _ps. The 1.0 DNA itself cannot run on
+// 3.0 (1.0 Combat schema: 237 of 511 fields absent; 1.0-only gadgets, research npcs-ai 3.2). Served: the 3.0 base with
+// its one string constant c for which c + '_ps' is a constant of the 1.0 DNA (case-insensitive) replaced by that 1.0
+// constant -- only when exactly one such constant exists and the code references it once (one leaf changes; 31 of 32
+// such 1.0 DNA, the ModelName every time; psmodel.py).
+inline bool luaStrings(const std::string& b, std::vector<std::string>& ks, std::vector<int>& refs)
+{
+    static const uint8_t HDR[12] = {0x1b, 'L', 'u', 'a', 0x51, 0, 1, 4, 4, 4, 8, 0};
+    if (b.size() < 24 || memcmp(b.data(), HDR, 12)) return false;
+    size_t at = 12;
+    auto u32 = [&](uint32_t& v) { if (at + 4 > b.size()) return false; memcpy(&v, b.data() + at, 4); at += 4; return true; };
+    uint32_t n, ncode, nk;
+    if (!u32(n) || (at += n + 12) > b.size() || !u32(ncode) || at + (size_t)ncode * 4 > b.size()) return false;
+    size_t code = at;
+    at += (size_t)ncode * 4;
+    if (!u32(nk)) return false;
+    std::vector<int> kidx;                                     // constant index -> string index, -1 if not a string
+    for (uint32_t i = 0; i < nk; ++i) {
+        if (at >= b.size()) return false;
+        uint8_t t = (uint8_t)b[at++];
+        kidx.push_back(-1);
+        if (t == 1) ++at;
+        else if (t == 3) at += 8;
+        else if (t == 4) {
+            uint32_t len;
+            if (!u32(len) || at + len > b.size()) return false;
+            kidx.back() = (int)ks.size();
+            ks.emplace_back(b, at, len ? len - 1 : 0);
+            at += len;
+        } else if (t != 0) return false;
+    }
+    refs.assign(ks.size(), 0);
+    auto ref = [&](uint32_t k) { if (k < kidx.size() && kidx[k] >= 0) ++refs[kidx[k]]; };
+    for (uint32_t pc = 0; pc < ncode; ++pc) {
+        uint32_t i;
+        memcpy(&i, b.data() + code + 4 * pc, 4);
+        uint32_t op = i & 0x3f, C = (i >> 14) & 0x1ff, B = i >> 23;
+        if (op == 1 || op == 5 || op == 7) ref(i >> 14);                     // LOADK, GETGLOBAL, SETGLOBAL: Bx
+        else if (op == 6 || op == 9 || (op >= 12 && op <= 17) || (op >= 23 && op <= 25) || op == 11) {
+            if (B & 0x100) ref(B & 0xff);                                    // RK operands
+            if (C & 0x100) ref(C & 0xff);
+        }
+    }
+    return true;
+}
+
+inline bool psDna30(const std::string& dna10, const std::string& base30, std::string& out, std::string* why = nullptr)
+{
+    auto fail = [&](const char* w) { if (why) *why = w; return false; };
+    std::vector<std::string> k10, k30;
+    std::vector<int> r10, r30;
+    if (!luaStrings(dna10, k10, r10) || !luaStrings(base30, k30, r30)) return fail("not a one-function Lua chunk");
+    std::map<std::string, std::string> ps;                      // lower(1.0 constant) -> 1.0 constant
+    for (auto& s : k10) ps.emplace(lower(s), s);
+    int hit = -1, hits = 0;
+    for (size_t i = 0; i < k30.size(); ++i)
+        if (k30[i].find('/') != std::string::npos && ps.count(lower(k30[i]) + "_ps")) { hit = (int)i; ++hits; }
+    if (hits != 1) return fail(hits ? "several model constants" : "no model constant");
+    if (r30[hit] != 1) return fail("the model constant has several uses");
+    const std::string from = k30[hit], to = ps[lower(from) + "_ps"];
+    int n = luachunk::rewrite(base30, out, [&](std::string& s) { if (s != from) return false; s = to; return true; });
+    if (n != 1) return fail("rewrite");
+    if (why) *why = from + " -> " + to;
+    return true;
 }
 
 }  // namespace npc

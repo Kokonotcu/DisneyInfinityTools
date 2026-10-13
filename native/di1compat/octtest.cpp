@@ -272,6 +272,23 @@ int main(int argc, char** argv)
         }
         return 0;
     }
+    if (argc > 4 && std::string(argv[1]) == "--psdna") {   // --psdna <1.0 characters dir> <3.0 characters dir> <out dir>
+        namespace fs = std::filesystem;
+        int ok = 0, no = 0;
+        for (auto& e : fs::directory_iterator(argv[2])) {
+            std::string n = e.path().filename().string();
+            if (n.size() < 9 || n.compare(n.size() - 8, 8, "_ps.dnax") || fs::exists(fs::path(argv[3]) / n)) continue;
+            fs::path base = fs::path(argv[3]) / (n.substr(0, n.size() - 8) + ".dnax");
+            if (!fs::exists(base)) continue;
+            std::string out, why;
+            bool r = npc::psDna30(slurp(e.path()), slurp(base), out, &why);
+            printf("%s: %s %s\n", n.c_str(), r ? "ok" : "kept 1.0", why.c_str());
+            if (r) std::ofstream(fs::path(argv[4]) / n, std::ios::binary).write(out.data(), out.size());
+            (r ? ok : no)++;
+        }
+        printf("psdna: %d served from the 3.0 base, %d kept\n", ok, no);
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--gamedb") {   // --gamedb <1.0 DataMap> <3.0 ToyBox DataMap>: npc::gamedb30
         npc::DataMap m10, m30;
         if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), m30)) { printf("DataMap eval failed\n"); return 1; }
