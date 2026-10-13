@@ -135,6 +135,7 @@ static struct {
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
     bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
+    bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 standard includes) as a DataMap
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
 } g_cfg;
@@ -167,6 +168,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "navmesh10")) g_cfg.navmesh10 = atoi(val) != 0;
         else if (!strcmp(key, "gamedb30")) g_cfg.gamedb30 = atoi(val) != 0;
         else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
+        else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
         else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
     }
     fclose(f);

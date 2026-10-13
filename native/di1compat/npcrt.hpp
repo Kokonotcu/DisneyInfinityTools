@@ -29,6 +29,7 @@ static npc::GameDb* g_db;                                   // built for the 1.0
 static std::string g_dbPlayset;
 static bool g_dbActive;                                     // between its Playset include and unload
 static std::set<std::pair<std::string, std::string>> g_dbRouted;
+static std::string g_psPath;                                // playset30: the served Playset-record DataMap
 static const char* const KINDS[] = {"playset", "gamemode", "zone", "actor", "toy", "activity", "zonebackgroundload",
                                     "realm", "munition", "surfaceimpact", "costume", "powerdisc", "include"};
 
@@ -63,17 +64,44 @@ static void prepare(void* self, const char* name)
     g_dbPlayset = n;
     logf("gamedb30 %s: 1.0 DataMap (%u records), %u Playset tables, %u actors with 3.0 tables", name, (unsigned)m10.size(),
          (unsigned)g_db->playset.size(), (unsigned)g_db->actor.size());
+    // playset30: its Playset record as one more DataMap, served from the session (hkOpen) -- the playset-standard
+    // includes not in Toy Box come from the smallest other 3.0 DataMap (identical in all 8 that define them)
+    std::string bo;
+    npc::DataMap other;
+    g_psPath.clear();
+    if (g_cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && npc::dataMap(bo, other, &why)) {
+        std::string t = npc::playsetText(n, g_db->playset, m30, other);
+        g_psPath = "GameDB/Core/" + std::string(name) + "DataMap30.lua";
+        std::lock_guard<std::mutex> l2(g_sessLock);
+        g_served[npc::lower(g_psPath)] = t;
+        logf("playset30 %s: Playset record (%u B of Lua) at %s", name, (unsigned)t.size(), g_psPath.c_str());
+    } else if (g_cfg.playset30) logf("playset30 %s: no Playset record (%s)", name, why.empty() ? "Dory DataMap unreadable" : why.c_str());
+}
+
+// the DataMap router call FUN_0143acc0 makes for a playset's DataMap (vtable[1] "DataMap", path, 0, 0; vtable[2] unloads)
+static void dataMapRoute(bool load, const std::string& path)
+{
+    void* router = *(void**)rt(0x022A6E68);
+    if (!router || path.empty()) return;
+    uint8_t r = load ? ((RouteFn)(*(void***)router)[1])(router, nullptr, "DataMap", path.c_str(), 0, 0)
+                     : ((UnrouteFn)(*(void***)router)[2])(router, nullptr, "DataMap", path.c_str());
+    logf("playset30: DataMap %s %s -> %u", path.c_str(), load ? "loaded" : "released", r);
 }
 
 static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kind, int flag, int prog)
 {
     std::vector<std::pair<std::string, std::string>> todo;
-    std::string what;
+    std::string what, psMap;
     if (name && kind >= 0 && kind <= 12) {
         std::lock_guard<std::mutex> lock(g_dbLock);
         if (kind == 0 && g_cfg.serve10) {
             prepare(self, name);
-            if (g_db && g_dbPlayset == npc::lower(name)) { g_dbActive = true; todo = g_db->playset; what = "Playset "; }
+            if (g_db && g_dbPlayset == npc::lower(name)) {
+                g_dbActive = true;
+                todo = g_db->playset;
+                what = "Playset ";
+                psMap = g_psPath;
+            }
         }
         if (g_db && g_dbActive) {                           // actors this record includes (itself, Includes)
             std::set<std::pair<std::string, std::string>> seen;
@@ -95,19 +123,28 @@ static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
         uint8_t* cs = *(uint8_t**)rt(0x022896E4);
         logf("gamedb30: CarryStyleInfo table %s", cs && *(void**)(cs + 0x58) ? "present" : "STILL MISSING");
     }
-    return g_include(self, nullptr, name, kind, flag, prog);
+    dataMapRoute(true, psMap);                              // before the include looks the Playset record up
+    uint8_t r = g_include(self, nullptr, name, kind, flag, prog);
+    if (!psMap.empty()) {
+        LookupFn lookup = (LookupFn)rt(0x00705860);
+        logf("playset30: Playset record %s %s", name, lookup(self, nullptr, name, 0) ? "found by the engine" : "NOT FOUND");
+    }
+    return r;
 }
 
 static void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
 {
     g_playsetUnload(self, nullptr, name);
     std::set<std::pair<std::string, std::string>> done;
+    std::string psMap;
     {
         std::lock_guard<std::mutex> lock(g_dbLock);
         if (!name || !g_db || g_dbPlayset != npc::lower(name)) return;
         g_dbActive = false;
         done.swap(g_dbRouted);
+        psMap = g_psPath;
     }
+    dataMapRoute(false, psMap);
     void* router = *(void**)rt(0x022A6E68);
     if (!router) return;
     UnrouteFn fn = (UnrouteFn)(*(void***)router)[2];

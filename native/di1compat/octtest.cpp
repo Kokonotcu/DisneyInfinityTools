@@ -289,6 +289,16 @@ int main(int argc, char** argv)
         printf("psdna: %d served from the 3.0 base, %d kept\n", ok, no);
         return 0;
     }
+    if (argc > 5 && std::string(argv[1]) == "--playset") {   // --playset <1.0 DM> <ToyBox DM> <other 3.0 DM> <playset>
+        npc::DataMap m10, tb, other;
+        if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), tb) || !npc::dataMap(slurp(argv[4]), other)) {
+            printf("DataMap eval failed\n");
+            return 1;
+        }
+        std::string t = npc::playsetText(argv[5], npc::gamedb30(m10, tb).playset, tb, other);
+        fwrite(t.data(), 1, t.size(), stdout);
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--gamedb") {   // --gamedb <1.0 DataMap> <3.0 ToyBox DataMap>: npc::gamedb30
         npc::DataMap m10, m30;
         if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), m30)) { printf("DataMap eval failed\n"); return 1; }

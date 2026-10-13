@@ -468,6 +468,59 @@ inline GameDb gamedb30(const DataMap& m10, const DataMap& m30)
     return g;
 }
 
+// ---- playset30: the Playset record a 1.0 DataMap lacks, as one more DataMap (Lua text) ----
+// Every 3.0 playset's Playset record includes avatar.auto and avatar.btx.auto (9 of 9 3.0 DataMaps), and outside Toy Box
+// includeforallnontoyboxplaysets (8 of 8), which includes currencycache (psreach.py): the avatar behaviour scripts and
+// combat Chos (com_blockimpact, mba_default_impact, default_punch_big ...), its AnimTreeProject / BehaviorMap, the
+// 'Common' mission glob, MissionLog screen, mission alert UI, the overhead health Cho, the spark/health currency caches.
+// avatar.btx.auto, currencycache and includeforallnontoyboxplaysets are identical in every map that defines them;
+// avatar.auto differs per playset (8 variants, autocmp.py) and comes from Toy Box, the 3.0 playset hosting the 1.0
+// characters. The record also lists the gamedb30 playset tables. 3.0 reads GameDB Lua text as well as bytecode: it
+// ships its own stats.lua, bitmasks.lua, zonelist.lua as text, and the DataMap loader is the same
+// GameDB::DBFileLoader_Callback (0008.c:28225).
+inline std::string luaQuote(const std::string& s)
+{
+    std::string o = "\"";
+    for (unsigned char c : s) {
+        if (c == '\\' || c == '"') { o += '\\'; o += (char)c; }
+        else if (c < 0x20 || c > 0x7e) { char b[8]; sprintf_s(b, "\\%03u", c); o += b; }
+        else o += (char)c;
+    }
+    return o + "\"";
+}
+
+inline std::string playsetText(const std::string& playset, const std::vector<std::pair<std::string, std::string>>& tables,
+                               const DataMap& toybox, const DataMap& other)
+{
+    static const char* const GROUPS[] = {"Playset", "GameMode", "Zone", "Actor", "Toy", "Activity", "ZoneBackgroundLoad",
+                                         "Realm", "Munition", "SurfaceImpact", "Costume", "PowerDisc", "Include"};
+    DataMap out;
+    DmRec& ps = out[{"playset", lower(playset)}];
+    for (auto& [t, p] : tables) ps.files.push_back("GameDB|" + p + "|1|" + t);
+    std::pair<const DataMap*, const char*> std30[] = {{&toybox, "avatar.auto"}, {&toybox, "avatar.btx.auto"},
+                                                       {&other, "includeforallnontoyboxplaysets"}};
+    for (auto& [m, name] : std30) {
+        std::set<std::pair<std::string, std::string>> seen;
+        reach(*m, {"include", name}, seen);
+        if (!seen.empty()) ps.includes.push_back(std::string(name) + "|Include");
+        for (auto& k : seen) out.emplace(k, m->at(k));
+    }
+    std::string t = "DataMap =\n{\n";
+    for (const char* g : GROUPS) {
+        std::string body;
+        for (auto& [k, r] : out) {
+            if (k.first != lower(g)) continue;
+            body += "\t\t[" + luaQuote(k.second) + "] =\n\t\t{\n\t\t\tFiles =\n\t\t\t{\n";
+            for (auto& f : r.files) body += "\t\t\t\t" + luaQuote(f) + ",\n";
+            body += "\t\t\t},\n\t\t\tIncludes =\n\t\t\t{\n";
+            for (auto& i : r.includes) body += "\t\t\t\t" + luaQuote(i) + ",\n";
+            body += "\t\t\t},\n\t\t},\n";
+        }
+        if (!body.empty()) t += std::string("\t") + g + " =\n\t{\n" + body + "\t},\n";
+    }
+    return t + "}\n";
+}
+
 // ---- psdna30: a 1.0 playset avatar DNA (<x>_ps.dnax) that 3.0 ships only as <x>.dnax ----
 // 3.0's own convention for a playset DNA is its base DNA naming the _PS model: of the 72 3.0 *_ps.dnax with a base,
 // 63 differ from it only in EntityInstance.ModelName, 54 of them by '_PS' appended (psrule.py); inc_bob_ps vs inc_bob:
