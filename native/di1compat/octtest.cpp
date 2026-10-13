@@ -544,6 +544,19 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-corpus") return choFileTest(argc, argv);
     if (argc > 2 && std::string(argv[1]) == "--banm") return banmTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-time10") return choTime10Test(argv);
+    if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
+        std::string in = slurp(argv[2]), out;
+        cho::Aliases al;
+        luachunk::rewrite(in, out, [&](std::string& s) { al.add(s); return datamap::normalise(s); });
+        int hit = 0;
+        for (int i = 3; i < argc; ++i) {
+            std::string r = al.resolve(argv[i]);
+            hit += !r.empty();
+            printf("%s -> %s\n", argv[i], r.empty() ? "(none)" : r.c_str());
+        }
+        printf("%zu aliases, %d of %d paths resolved\n", al.map.size(), hit, argc - 3);
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {

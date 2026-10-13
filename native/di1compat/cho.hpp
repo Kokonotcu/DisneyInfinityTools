@@ -41,8 +41,11 @@
 //   1.0's ContextNodes (1.0 FUN_0075d630: flag 1 PlacementNodeRef, 2 FilePath, 0x10 BoundingSceneNodeName) are
 //   ignored, so no 1.0 choreography actor or clip was ever instanced (in-game log 2026-10-13: _gtut_inc_ledgehang's
 //   motions/inc_bob_clip.oct never requested). Rules, on the 611 choreography twins with a LayoutPool (layout30.py):
-//   attachments 611/611, instances 609/611, placements 594/611 (the rest: 3.0 also pruned unreferenced placements,
-//   kept here so the files' PlacementNode associations keep their indices).
+//   attachments 611/611, instances 610/611, placements 594/611 (the rest: 3.0 also pruned unreferenced placements,
+//   kept here so the files' PlacementNode associations keep their indices). Corpus-wide (1.0 choreographies +
+//   exploders, 2,589 layouts) the entries hold only the fields mapped here, all name (0x0b) or int (0x1b) scalars.
+//   An empty ContextNodePool (in_city.oct, buildingrepair*) becomes an empty InstanceNodePool: the 3.0 pool
+//   resize (FUN_00786c30, like the AttachmentPool's FUN_0077e810 1.0 files already pass through) takes 0.
 //     ContextNode -> InstanceNode if it has a FilePath, or flag 8 and an Attachment uses it; others (anchors, flags
 //       4 / 5) only name placements. Fields Name, PlacementNodeRef, [BoundingSceneNodeName], FilePath (lowercase),
 //       Flags: FilePath 8 (| 0x10 if 1.0 flag 4), 1.0 0x10 -> 0x20, 1.0 8 -> 0x40.
@@ -67,6 +70,12 @@ inline uint32_t rd(const std::string& s, size_t o, int w)
     return o + w <= s.size() ? oct::u((const uint8_t*)s.data() + o, w) : 0xffffffffu;
 }
 inline void wr(std::string& s, uint32_t v, int w) { oct::File::put(s, v, w); }
+// first int of a record, def if it has none (a node or an empty list)
+inline int first(const oct::File& f, const oct::Rec& r, int def)
+{
+    auto v = f.ints(r);
+    return v.empty() ? def : v[0];
+}
 
 // ---- clips ----
 struct ClipOut { uint32_t id; std::vector<std::vector<uint16_t>> comps; };
@@ -128,6 +137,9 @@ inline bool clipBlock30(const std::string& d, std::string& out)
     uint32_t last = *starts.rbegin(), areaEnd = (uint32_t)d.size();
     for (uint32_t e : sec) if (e > last && e < areaEnd) areaEnd = e;
     if (constOff > last && constOff < areaEnd) areaEnd = constOff;
+    // an offset into the middle of the re-packed area would go stale
+    auto inside = [&](uint32_t o) { return o >= hdrEnd && o < areaEnd && !starts.count(o); };
+    if (inside(constOff) || std::any_of(sec.begin(), sec.end(), inside)) return false;
     std::string area;
     std::map<uint32_t, uint32_t> moved;
     for (auto it = starts.begin(); it != starts.end(); ++it) {
@@ -235,7 +247,7 @@ inline int time30(oct::File& f)
                 for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
                     const std::string& k = f.name(f.recs[j]);
                     if (k == "Type") ev = f.nameValues(f.recs[j]) == std::vector<std::string>{"EventList"};
-                    else if (k == "NetworkBufferOffset") off = f.ints(f.recs[j])[0];
+                    else if (k == "NetworkBufferOffset") off = first(f, f.recs[j], -1);
                 }
                 if (ev && off >= 0) evOffs.push_back((uint32_t)off);
             }
@@ -365,7 +377,7 @@ inline int layout30(oct::File& f, int* instances = nullptr)
         };
         auto ival = [&](const std::map<std::string, long>& m, const char* k, int def) {
             auto it = m.find(k);
-            return it == m.end() ? def : f.ints(f.recs[it->second])[0];
+            return it == m.end() ? def : first(f, f.recs[it->second], def);
         };
         auto ctx = entries(cp), pls = entries(pp), atts = entries(ap);
         std::set<int> used;
@@ -373,6 +385,7 @@ inline int layout30(oct::File& f, int* instances = nullptr)
         std::map<int, int> remap;
         for (size_t i = 0; i < ctx.size(); ++i) {
             int fl = ival(ctx[i], "Flags", 0);
+            if (ctx[i].count("FilePath") && f.nameValues(f.recs[ctx[i]["FilePath"]]).empty()) ctx[i].erase("FilePath");   // not a name
             if (ctx[i].count("FilePath") || ((fl & 8) && used.count((int)i))) remap[(int)i] = (int)remap.size();
         }
         auto copyAt = [&](long rec, uint16_t level) { oct::Rec r = f.recs[rec]; r.level = level; return r; };
