@@ -16,6 +16,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "sys.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -149,11 +150,63 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
     }
 }
 
+// chd::V trees equal (the chd parser is independent of sys::keepRecords' scanner)
+static bool sameTree(const chd::V& a, const chd::V& b)
+{
+    if (a.t != b.t || a.i != b.i || a.s != b.s || memcmp(&a.f, &b.f, 4) || a.named.size() != b.named.size() || a.items.size() != b.items.size())
+        return false;
+    for (size_t k = 0; k < a.named.size(); ++k)
+        if (a.named[k].first != b.named[k].first || !sameTree(a.named[k].second, b.named[k].second)) return false;
+    for (size_t k = 0; k < a.items.size(); ++k)
+        if (!sameTree(a.items[k], b.items[k])) return false;
+    return true;
+}
+static const chd::V* field(const chd::V& t, const char* k)
+{
+    for (auto& e : t.named) if (e.first == k) return &e.second;
+    return nullptr;
+}
+
+// octtest --keep <1.0 table.lua> <3.0 table.lua>...: PS-5 supplement = the 1.0 records whose UID no 3.0 table has
+static int keepTest(int argc, char** argv)
+{
+    std::set<uint32_t> excl;
+    for (int a = 3; a < argc; ++a) {
+        chd::V t = chd::lua(slurp(argv[a]));
+        const chd::V* r = field(t, "Data") ? field(*field(t, "Data"), "Records") : nullptr;
+        if (!r) { printf("no Records in %s\n", argv[a]); return 2; }
+        for (auto& x : r->items) if (auto u = field(x, "UID")) excl.insert((uint32_t)u->i);
+    }
+    std::string src = slurp(argv[2]), out;
+    int kept = 0, total = 0;
+    if (!sys::keepRecords(src, [&](uint32_t u) { return !excl.count(u); }, out, kept, total)) { printf("layout not found\n"); return 1; }
+    chd::V in = chd::lua(src), got = chd::lua(out);
+    const chd::V *ri = field(*field(in, "Data"), "Records"), *ro = field(got, "Data") ? field(*field(got, "Data"), "Records") : nullptr;
+    int bad = 0, want = 0;
+    if (!ro) { printf("output has no Records\n"); return 1; }
+    size_t o = 0;
+    for (auto& x : ri->items) {
+        const chd::V* u = field(x, "UID");
+        if (!u || excl.count((uint32_t)u->i)) continue;
+        ++want;
+        if (o >= ro->items.size() || !sameTree(x, ro->items[o++])) ++bad;
+    }
+    for (const char* k : {"DBName", "Type", "Version", "ID", "TableName"}) {
+        const chd::V *a = field(*field(in, "Data"), k), *b = field(*field(got, "Data"), k);
+        if (!a != !b || (a && !sameTree(*a, *b))) { ++bad; printf("header %s differs\n", k); }
+    }
+    printf("%s: %d records (chd parse %zu), kept %d (expected %d, output parse %zu), 3.0 UIDs %zu, mismatches %d\n", argv[2], total,
+           ri->items.size(), kept, want, ro->items.size(), excl.size(), bad + (int)(ro->items.size() != (size_t)want) + (total != (int)ri->items.size()));
+    if (getenv("KEEP_OUT")) { std::ofstream(getenv("KEEP_OUT"), std::ios::binary) << out; }
+    return bad || kept != want || ro->items.size() != (size_t)want || total != (int)ri->items.size();
+}
+
 int main(int argc, char** argv)
 {
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
+    if (argc > 3 && std::string(argv[1]) == "--keep") return keepTest(argc, argv);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {

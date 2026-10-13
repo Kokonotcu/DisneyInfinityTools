@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "sys.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,8 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool root10 = true;              // sys: read10 also searches the 1.0 root archives (startup*.zip)
+    bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +162,8 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "root10")) g_cfg.root10 = atoi(val) != 0;
+        else if (!strcmp(key, "locks10")) g_cfg.locks10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -216,6 +221,16 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
             if (data) { *where = zr + ":" + member; return data; }
         }
     }
+    // 1.0 mounts its root archives at assets\ (members under full paths): startup3.zip holds
+    // expendables_data/terrainbuildingsexpendables.lua (in-game 2026-10-13: MISSING), startup2.zip the core GameDB
+    // tables, startup5.zip var/*.bin
+    if (g_cfg.root10)
+        for (const char* zr : {"startup.zip", "startup2.zip", "startup3.zip", "startup4.zip", "startup5.zip"}) {
+            mz_zip_archive* z = zipFor(zr);
+            int i = z ? mz_zip_reader_locate_file(z, p.c_str(), nullptr, 0) : -1;
+            void* data = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
+            if (data) { *where = std::string(zr) + ":" + p; return data; }
+        }
     return nullptr;
 }
 
@@ -1213,7 +1228,30 @@ static uint32_t gameDbLoad(GameDbLoadFn orig, const char* tag, void* self, const
 }
 static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
 {
-    return gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
+    uint32_t r = gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    if (g_cfg.locks10 && _stricmp(p, sys::kLocksTrigger) == 0)   // PS-5: the 1.0 tables' records the Locks DB lacks
+        for (const char* s : sys::kLocks10) {
+            sys::setLockUids(sys::loaderUids(self));
+            gameDbLoad(g_loadLocks, "locks", self, s, a2, a3);
+        }
+    return r;
+}
+
+// sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
+static int* sysServe(const char* p)
+{
+    std::string np = norm(p), src, out;
+    size_t pre = strlen(sys::kLocks10Prefix);
+    if (np.compare(0, pre, sys::kLocks10Prefix)) return nullptr;
+    if (!read10s(np.substr(pre), src)) { logf("supplement %s: no 1.0 table", p); return nullptr; }
+    std::set<uint32_t> have = sys::lockUids();
+    int kept = 0, total = 0;
+    bool ok = sys::keepRecords(src, [&](uint32_t u) { return !have.count(u); }, out, kept, total);
+    logf("supplement %s: %d of %d 1.0 lock records (UIDs the Locks DB lacked; it held %u)%s", p, kept, total,
+         (unsigned)have.size(), ok ? "" : " -- layout not found, not served");
+    return ok ? memFile(out.data(), out.size()) : nullptr;
 }
 static uint32_t __fastcall hkLoadInventory(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
 {
@@ -1285,6 +1323,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         logf("%s", line);
     }
     if (!(flags & 1) && endsWith(p, ".lua") && takeChdPath(p)) return chdForLua(p, r);
+    if (!r && !(flags & 1) && g_cfg.serve10 && !_strnicmp(p, "di1sys/", 7)) return sysServe(p);
     if (r && g_cfg.memtest[0] && !(flags & 1) && memtestMatch(p)) {
         size_t n = 0;
         r = copyToMemFile(r, &n);
