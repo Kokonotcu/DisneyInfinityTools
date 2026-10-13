@@ -140,6 +140,7 @@ static struct {
     bool bits10 = true;              // sys: the 1.0 core bitmasks after the playset's (PS-5)
     bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
     bool perc10 = true;              // sys: the 1.0 perceptions 3.0 lacks through 3.0's perceptions loader (GLB-1)
+    bool deliv10 = true;             // sys: 1.0 RewardType Delivery registered with 3.0's Multi reward (SYS-12)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -174,6 +175,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "bits10")) g_cfg.bits10 = atoi(val) != 0;
         else if (!strcmp(key, "econ10")) g_cfg.econ10 = atoi(val) != 0;
         else if (!strcmp(key, "perc10")) g_cfg.perc10 = atoi(val) != 0;
+        else if (!strcmp(key, "deliv10")) g_cfg.deliv10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1279,8 +1281,28 @@ static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint
 // (thiscall, ret 4) -- entries of a package 3.0 lacks get the 1.0 pop-in
 typedef void(__fastcall* ExpPkgFn)(void* ecx, void* edx, const char* path, uint32_t a2);
 static ExpPkgFn g_expPkg;
+// deliv10: 1.0 RewardType "Delivery" (1.0 registry FUN_00cc2580 -> FUN_00b757c0, DeliveryExpendableReward) is the one
+// 1.0 type 3.0's registry (FUN_01232de0: FUN_0160a9c0(name, factory), thiscall on the expendables manager DAT_0228aa40)
+// lacks, so the 15 DELIVERY entries of inc_expendables.lua (INC_Spawn_GlidePack, _HoverBoard, _ZPE, cars ...) get no
+// object (entry reader FUN_01603930 drops a type without factory). On PC its grant 0xbae4d0 runs the Multi grant's
+// EXPENDABLE / UNLOCK / SPAWNACTOR / STAT handlers (FUN_00f99940, FUN_00f75bf0, FUN_00f75c30, FUN_00facb90, as Multi
+// FUN_00facc50) plus DeliveryNode bookkeeping (FUN_00b59940/80, FUN_00b599e0; the network branch is dead, FUN_00493940
+// returns 0). 3.0 kept Multi (factory FUN_016049f0, grant FUN_0160fbd0, same command table), so Delivery is registered
+// with it; the bookkeeping comes with a DeliveryNode port (impl-sys 6.3). Registered before the first package load.
+static void registerDelivery10()
+{
+    static bool done = false;
+    if (done) return;
+    void* mgr = *(void**)rt(0x0228AA40);
+    if (!mgr || !sys::readable(mgr, 0x70)) return;
+    ((void(__fastcall*)(void*, void*, const char*, void*))rt(0x0160A9C0))(mgr, nullptr, "Delivery", (void*)rt(0x016049F0));
+    done = true;
+    logf("deliv10: RewardType Delivery registered with 3.0's MultiExpendableReward factory (FUN_016049f0)");
+}
 static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
 {
+    if (g_cfg.deliv10) registerDelivery10();
+    if (!g_cfg.popin10) return g_expPkg(ecx, nullptr, path, a2);
     char p[300];
     safeCopy(p, sizeof(p), path);
     int* s = g_open(p, 0, 0, 0, nullptr);   // the engine's own open, unhooked: does 3.0 ship this package?
@@ -1930,10 +1952,10 @@ extern "C" void __stdcall Pentane_Main()
         hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad, (void**)&g_cbLoad);
     if (g_cfg.econ10)
         hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath, (void**)&g_econOnDeath);
-    if (g_cfg.popin10) {
+    if (g_cfg.popin10 || g_cfg.deliv10)
         hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
+    if (g_cfg.popin10)
         hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);
-    }
     hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar, (void**)&g_playsetChar);
     if (g_cfg.trace) {
         hook("actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists);
