@@ -14,31 +14,34 @@ inline uint32_t retVa(void* ra) { return (uint32_t)((uintptr_t)ra - g_base + 0x4
 // (FUN_00f1ae90 'particles/%s'). 3.0 ships a different package under that name, so the 1.0 one was never loaded:
 // 8 effects 1.0 data names exist only in it, 2 of them named by files the IN_City run of 2026-10-13 opened
 // (beacon_sparkle_blue / _green: the mission beacon choreographies). It loads under the alias
-// 'particles/universal10' (served from 1.0 particles/universal.zip, di1compat.cpp g_over10) right after 3.0's
-// universal. 3.0's package loader FUN_00672620 keys packages by the name's hash; registration replaces the entry of an
-// already known hash (effects FUN_0066ef20, emitters FUN_0066f7c0 -> FUN_00671830, params FUN_0066ef60), so the
-// later package wins: 3.0 universal < 1.0 universal < the zone package, 1.0's order.
+// 'particles/universal10' (served from 1.0 particles/universal.zip, di1compat.cpp g_over10) right before the first
+// 1.0 zone package (one 1.0 ships and 3.0 does not: particles/IN_City), so 3.0 levels never see it. 3.0's package
+// loader FUN_00672620 keys packages by the name's hash; registration replaces the entry of an already known hash
+// (effects FUN_0066ef20, emitters FUN_0066f7c0 -> FUN_00671830, params FUN_0066ef60), so the later package wins:
+// 3.0 universal (loaded first, log 2026-10-13: its mesh 0f876eca 10 s before IN_City's package) < 1.0 universal <
+// the zone package, 1.0's order. Key headroom: 3.0's global key table holds 30000 (FUN_00658440; over it every key
+// index of the package becomes 0, FUN_00656c00); 3.0 universal 3398 + 1.0 universal 401 + in_city 1655 keys.
 typedef uint32_t*(__cdecl* PkgFn)(const char* name, uint32_t flags);
 static PkgFn g_pkg;
 static volatile LONG g_uni10;
 
-static void loadUniversal10(uint32_t flags)
+static bool only10(const char* leaf)   // particles/<leaf>.zip in the 1.0 install and not in 3.0's
 {
-    if (InterlockedExchange(&g_uni10, 1)) return;
-    uint32_t* p = g_pkg("particles/universal10", flags);
-    logf("vfx: 1.0 universal package (particles/universal10) %s", p ? "registered" : "NOT registered");
+    std::string a = std::string(g_cfg.install10) + "\\assets\\particles\\" + leaf + ".zip";
+    std::string b = g_gameDir + "\\assets\\particles\\" + leaf + ".zip";
+    return GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES && GetFileAttributesA(b.c_str()) == INVALID_FILE_ATTRIBUTES;
 }
 
 static uint32_t* __cdecl hkPkg(const char* name, uint32_t flags)
 {
     char n[128];
     safeCopy(n, sizeof(n), name);
-    bool uni = !_stricmp(n, "particles/universal"), skip = uni || !_stricmp(n, "particles/universal10") ||
-                                                          !_stricmp(n, "particles/frontend");
-    if (!skip) loadUniversal10(flags);   // a zone package before any universal: 1.0's order still holds
+    if (!_strnicmp(n, "particles/", 10) && only10(n + 10) && !InterlockedExchange(&g_uni10, 1)) {
+        uint32_t* u = g_pkg("particles/universal10", flags);
+        logf("vfx: 1.0 universal package (particles/universal10) %s before %s", u ? "registered" : "NOT registered", n);
+    }
     uint32_t* r = g_pkg(name, flags);
     logf("vfx: particle package %s flags=%X caller %08X -> %s", n, flags, retVa(_ReturnAddress()), r ? "ok" : "none");
-    if (uni) loadUniversal10(flags);
     return r;
 }
 
