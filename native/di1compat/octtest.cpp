@@ -175,6 +175,7 @@ int main(int argc, char** argv)
         std::string b = slurp(argv[2]);
         oct::File f = oct::File::parse(b.data(), b.size());
         printf("skin influences redirected: %d\n", octx::skin30(f));
+        printf("locators redirected: %d\n", octx::locator30(f));
         printf("subnetworks with counts added: %d\n", octx::addAllCounts(f));
         std::string o = f.write();
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());

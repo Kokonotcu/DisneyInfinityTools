@@ -353,6 +353,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (f.dropPool("NavMeshPool")) { note += "-NavMeshPool "; changed = true; }
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
     if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
+    if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }
@@ -723,6 +724,42 @@ static void* __fastcall hkHdrMake(void* self, void*, void* out, uint32_t name, u
     return g_hdrMake(self, nullptr, out, name, parent, a4, a5);
 }
 
+// Trace: the spawn lookup StartPositions FUN_013a85d0(player, zone, out xform, out, flags) (thiscall, ret 0x14):
+// 0 = no registered start (the caller then uses the origin); out[4..6] = the translation. And the
+// PlayerStartPositionNode factory (vtable slot 14, FUN_014884f0, ret 4), to see whether a graph builds one.
+typedef uint32_t(__fastcall* StartLookupFn)(void* self, void* edx, uint32_t player, uint32_t zone, float* out, uint32_t* o2, uint32_t flags);
+static StartLookupFn g_startLookup;
+static volatile LONG g_startLogged;
+static uint32_t __fastcall hkStartLookup(void* self, void*, uint32_t player, uint32_t zone, float* out, uint32_t* o2, uint32_t flags)
+{
+    uint32_t r = g_startLookup(self, nullptr, player, zone, out, o2, flags);
+    if (InterlockedIncrement(&g_startLogged) <= 20)
+        logf("start lookup player %u zone %08X flags %X -> %u at (%.2f, %.2f, %.2f)", player, zone, flags, r,
+             out ? out[4] : 0.f, out ? out[5] : 0.f, out ? out[6] : 0.f);
+    return r;
+}
+// Trace: a start node's provider query FUN_0145f720(a1, player, zone, out, a5) (thiscall on the StartPositionBase,
+// ret 0x14): matches when zone is 0 or its +0x88, the player's bit is in byte +0x85 and vfunc +0x68 fills the transform.
+typedef uint8_t(__fastcall* StartQueryFn)(uint8_t* self, void* edx, uint32_t a1, int player, uint32_t zone, float* out, uint32_t a5);
+static StartQueryFn g_startQuery;
+static volatile LONG g_startQueryLogged;
+static uint8_t __fastcall hkStartQuery(uint8_t* self, void*, uint32_t a1, int player, uint32_t zone, float* out, uint32_t a5)
+{
+    uint8_t r = g_startQuery(self, nullptr, a1, player, zone, out, a5);
+    if (InterlockedIncrement(&g_startQueryLogged) <= 12)
+        logf("start query node %p (zone %08X, players %02X) for player %d zone %08X -> %u at (%.2f, %.2f, %.2f)", self,
+             *(uint32_t*)(self + 0x88), self[0x85], player, zone, r, out ? out[4] : 0.f, out ? out[5] : 0.f, out ? out[6] : 0.f);
+    return r;
+}
+
+// Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
+typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
+static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
+static volatile LONG g_nStart, g_nLocator, g_nSpawnExp;
+static void* __cdecl hkMkStart(void* m, uint32_t a2, uint32_t a3) { logf("MNode PlayerStartPosNode %p (#%ld)", m, InterlockedIncrement(&g_nStart)); return g_mkStart(m, a2, a3); }
+static void* __cdecl hkMkLocator(void* m, uint32_t a2, uint32_t a3) { LONG n = InterlockedIncrement(&g_nLocator); if (n <= 2 || n % 100 == 0) logf("MNode LocatorNode #%ld", n); return g_mkLocator(m, a2, a3); }
+static void* __cdecl hkMkSpawnExp(void* m, uint32_t a2, uint32_t a3) { LONG n = InterlockedIncrement(&g_nSpawnExp); if (n <= 2 || n % 50 == 0) logf("MNode SpawnExpendable #%ld", n); return g_mkSpawnExp(m, a2, a3); }
+
 // Trace: instance header clone FUN_004f5900(index, a2, delta, instRoot) (thiscall on the instance header, ret 0x10).
 // Header = [name, parent|rc, sibling|flags, child-or-self|slot, ...]. FUN_004b4470 gave every header of the cloned array
 // a temp slot (DAT_021af260); 0x4f5a25 maps the +0xc target through it without a check, so a +0xc that leads outside
@@ -972,6 +1009,11 @@ extern "C" void __stdcall Pentane_Main()
         hook("asset instance (trace)", 0x007734F0, "6AFF68????????64A100000000", (void*)&hkAssetInst, (void**)&g_assetInst);
         hook("SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst, (void**)&g_inst);
         hook("header clone (trace)", 0x004F5900, "5153555657", (void*)&hkHdrClone, (void**)&g_hdrClone);
+        hook("start lookup (trace)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup, (void**)&g_startLookup);
+        hook("start query (trace)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery);
+        hook("MNode PlayerStartPosNode (trace)", 0x0148A790, "518B442410", (void*)&hkMkStart, (void**)&g_mkStart);
+        hook("MNode LocatorNode (trace)", 0x01480090, "518B442410", (void*)&hkMkLocator, (void**)&g_mkLocator);
+        hook("MNode SpawnExpendable (trace)", 0x017BF020, "518B442410", (void*)&hkMkSpawnExp, (void**)&g_mkSpawnExp);
         hook("header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake);
     }
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
