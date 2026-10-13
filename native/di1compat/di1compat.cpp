@@ -139,6 +139,7 @@ static struct {
     bool text10 = true;              // ui: a 1.0 playset table also carries 1.0 lang/main keys no 3.0 table has
     bool tips10 = true;              // ui: 3.0's data/tips.lua + the 1.0 tip records it lacks
     bool resident10 = true;          // the 1.0 startup*.zip members are served by their full paths (1.0 loads them resident)
+    bool tutorial10 = true;          // ui: tutorial element 61 (1.0's SelectMenu ribbon) is answered by 3.0's ribbon
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -172,6 +173,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "text10")) g_cfg.text10 = atoi(val) != 0;
         else if (!strcmp(key, "tips10")) g_cfg.tips10 = atoi(val) != 0;
         else if (!strcmp(key, "resident10")) g_cfg.resident10 = atoi(val) != 0;
+        else if (!strcmp(key, "tutorial10")) g_cfg.tutorial10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1341,6 +1343,26 @@ static int __fastcall hkFmvPath(void* self, void*, char* out, uint32_t size, con
     return (int)p.size();
 }
 
+// Tutorial element 61 (Mission_Tutorial's first task, "Press Tab to access the Mission Log"): both exes' evaluate
+// (1.0 FUN_00ba3950, 3.0 FUN_00de3a60) test that a screen named "SelectMenu" is open. That was 1.0's playset ribbon
+// (UI_GetRibbonName, 1.0 FUN_00c32cf0: "SelectMenu" in a playset); 3.0's ribbon (FUN_00b42540, thiscall, ecx and
+// args unused, ret 8) opens "MissionLog" in a playset instead (Tab -> TOY_STORE -> ShowRibbonUI,
+// avatar_controls_win32.xldb), so 61 never completed. The literal 0x01D19CDC has one reference in the exe (the
+// case-0x3d push at 0x00DE4C5B), so only that lookup is redirected: it also answers for 3.0's ribbon. 62 is already
+// 3.0's MissionLog and 63 3.0's Mission_MissionActivated event (FUN_00b67560 -> FUN_00dae4e0).
+typedef void*(__fastcall* FindScreenFn)(void* self, void* edx, const char* name, int player, char last);
+static FindScreenFn g_findScreen;
+static void* __fastcall hkFindScreen(void* self, void*, const char* name, int player, char last)
+{
+    void* s = g_findScreen(self, nullptr, name, player, last);
+    if (s || name != (const char*)rt(0x01D19CDC)) return s;
+    typedef const char*(__fastcall* RibbonFn)(void*, void*, int, int);
+    const char* rib = ((RibbonFn)rt(0x00B42540))(nullptr, nullptr, player, 0);
+    if (!rib || !_stricmp(rib, name)) return s;
+    if ((s = g_findScreen(self, nullptr, rib, player, last))) logf("tutorial element 61: %s open (3.0's ribbon) stands for SelectMenu", rib);
+    return s;
+}
+
 // data/tips.lua (3.0's, opened as r) + the 1.0 tip records it lacks (ui::mergeTips); a ZoneTipCategories key naming
 // a registered zone (the zone manager's by-name lookup FUN_01391150, thiscall (uint32_t* out, name), ret 8) stays
 // 3.0's. The stream is consumed; the merged (or, failing that, the original) bytes come back as a MemFile.
@@ -1926,12 +1948,19 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
-    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d", g_cfg.loadScreen10, g_cfg.uiScope10, g_cfg.fmv10,
-         g_cfg.text10, g_cfg.tips10);
+    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d", g_cfg.loadScreen10, g_cfg.uiScope10,
+         g_cfg.fmv10, g_cfg.text10, g_cfg.tips10, g_cfg.tutorial10);
     if (g_cfg.serve10 && g_cfg.loadScreen10)
         hook("zone string field (ui: 1.0 loading screen)", 0x0139E0B0, "83EC08568BF180BEE403000000", (void*)&hkZoneStr, (void**)&g_zoneStr);
     if (g_cfg.serve10 && g_cfg.fmv10)
         hook("FMV path (ui: 1.0 clips)", 0x0067E460, "81EC0401000053568BB42418010000", (void*)&hkFmvPath, (void**)&g_fmvPath);
+    if (g_cfg.serve10 && g_cfg.tutorial10) {
+        // the redirect keys on the case-0x3d push (68 <imm32> at 0x00DE4C5A, relocated) of the literal "SelectMenu"
+        const uint8_t* push = (const uint8_t*)rt(0x00DE4C5A);
+        if (push[0] == 0x68 && *(const uint32_t*)(push + 1) == (uint32_t)rt(0x01D19CDC) && !strcmp((const char*)rt(0x01D19CDC), "SelectMenu"))
+            hook("screen by name (ui: tutorial element 61)", 0x0154FF90, "837C2404007505", (void*)&hkFindScreen, (void**)&g_findScreen);
+        else logf("tutorial10: the element-61 push of \"SelectMenu\" is not where it was analysed: not hooked");
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
