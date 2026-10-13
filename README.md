@@ -165,12 +165,16 @@ converted-copy approach). Research and roadmap: `D:\DI-Extract\_research\PLAN.md
   11. -> RumpusData AV (DBFileLoader_Callback_CHD fed rumpusdata.lua) -> **CHD compiler** (`chd.hpp`, port of
      chd.py, 29/30 exact = the Python result) + hook on FUN_018db450: the .lua opened during that call is compiled
      to CHD (path marker is process-wide: the engine opens it on another thread)
-  12. **now**: IN_City loads, 0 exceptions, avatar spawned as AV_Proxy + "Missing Disney Infinity Figure".
-     Measured (trace hook on FUN_00751750): AV_MrIncredible_PS resolves (exists), then _ProxyAvatar -- the same
-     sequence as a native 3.0 playset (EMP_Tatooine_Tutorial + Luke: EMP_Luke_PS then _ProxyDrivingAvatar). The
-     IGPGameFlow ctor sets proxy mode (DAT_0225f540+0x9a = 1) for every playset; the reader figure then replaces the
-     proxy. Differences vs the control: Players_GetAvatarLevel -1 (control 0), UI_GetAvatarVersion 1 (control 3).
-     Fit scripts of this step: `_research/scratch/impl-2026-10-12`.
+  12. -> avatar stays AV_Proxy + "Missing Disney Infinity Figure": every playset starts in proxy mode (IGPGameFlow
+     ctor) until the playset flow takes the reader figure. A hardware write watchpoint on the reader tag's toy id
+     showed FUN_00b83b90 resetting the selection to none every frame: the PC virtual reader remembers a character
+     per playset only for 3.0's four (FUN_00b7f910) -> **hook**: a playset without a slot keeps the selection (the
+     flow's own Gateway[sku].playset check still applies; Gateway.lua lists Incredibles for the 1.0 figures)
+  13. **now**: no popup; figure check passes for 1000001; actor av_mrincredible_ps creation starts (bundle, model,
+     sound banks) but never completes -- retried about every 60 s, player stays AV_Proxy at 0,0,0, screen black.
+     Next: why creation stalls (compare a native playset after its intro; the 1.0 start positions via .mer are
+     still missing). Trace hooks (cfg trace=1): actor registry, figure check, Gateway playset, reader list/gate,
+     `watch(addr)` write watchpoint. Fit scripts of steps 8-12: `_research/scratch/impl-2026-10-12`.
 
 ## Next (needs the game running)
 1. **Rebuild and launch Metroville** with the rules above (`native30.py ... --dry` first; `diffworld.py` against
