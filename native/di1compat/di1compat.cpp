@@ -134,7 +134,8 @@ static struct {
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
-    bool nullLock10 = true;          // log the caller of a NULL-object spinlock (npcrt.hpp; the E-on-NPC crash)
+    bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
+    bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -163,7 +164,8 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "navmesh10")) g_cfg.navmesh10 = atoi(val) != 0;
-        else if (!strcmp(key, "nulllock10")) g_cfg.nullLock10 = atoi(val) != 0;
+        else if (!strcmp(key, "gamedb30")) g_cfg.gamedb30 = atoi(val) != 0;
+        else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -348,6 +350,8 @@ static void padSmallDxt(std::string& d)
     }
 }
 
+#include "npcrt.hpp"
+
 // The render half of a 1.0 asset with a material bundle -- a world, a mission graph, ... (render.hpp): materials
 // onto 3.0 shaders and, where the asset has buffers, its vertices into formats those shaders take.
 static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string& note)
@@ -360,6 +364,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     if (!read10s(dir + "/" + stem + ".mtb", mtb)) return false;     // nothing to render
     read10s(dir + "/" + stem + "_0.vbuf", vbuf);
     read10s(dir + "/" + stem + "_0.ibuf", ibuf);
+    if (g_cfg.skin10) note += npcrt::skin10(f, vbuf, ibuf);
     render::IO io;
     io.read30 = read30x;
     io.read10 = read10s;
@@ -1701,8 +1706,6 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
     logf("shaders10: vformat.vtxf + %d 1.0 formats", n);
     return t30.substr(0, end30) + add + t30.substr(end30);
 }
-
-#include "npcrt.hpp"
 
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()

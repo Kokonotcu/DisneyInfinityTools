@@ -243,6 +243,45 @@ int main(int argc, char** argv)
         printf("nav: %d files, %d meshes converted, %d files failed\n", files, meshes, failed);
         return failed ? 1 : 0;
     }
+    if (argc > 4 && std::string(argv[1]) == "--skin") {   // --skin <1.0 vformat.vtxf> <out dir> <1.0 .oct>...: REN-3
+        // writes <out>/<stem>_0.vbuf: the .oct's vertex buffer with its InfluenceRemap palettes applied
+        npc::SkinLayouts L = npc::skinLayouts(slurp(argv[2]));
+        int files = 0, prims = 0;
+        for (int k = 4; k < argc; ++k) {
+            fs::path p = argv[k];
+            std::string b = slurp(p), vb = slurp(p.parent_path() / (p.stem().string() + "_0.vbuf")), why;
+            std::string ib = slurp(p.parent_path() / (p.stem().string() + "_0.ibuf"));
+            oct::File f = oct::File::parse(b.data(), b.size());
+            int n = npc::skinRemap(f, vb, ib, L, &why);
+            std::ofstream(fs::path(argv[3]) / (p.stem().string() + "_0.vbuf"), std::ios::binary).write(vb.data(), vb.size());
+            ++files; prims += n;
+            if (!why.empty()) printf("%s: %d primitives; %s\n", p.stem().string().c_str(), n, why.c_str());
+        }
+        printf("skin: %zu skinned 1.0 formats, %d files, %d primitives remapped\n", L.size(), files, prims);
+        return 0;
+    }
+    if (argc > 2 && std::string(argv[1]) == "--dmeval") {   // --dmeval <DataMap.lua>...: npc::dataMap, one line per entry
+        for (int k = 2; k < argc; ++k) {
+            npc::DataMap m;
+            std::string why;
+            if (!npc::dataMap(slurp(argv[k]), m, &why)) { printf("%s: FAILED %s\n", argv[k], why.c_str()); return 1; }
+            for (auto& [key, r] : m) {
+                for (auto& f : r.files) printf("%s|%s|F|%s\n", key.first.c_str(), key.second.c_str(), f.c_str());
+                for (auto& i : r.includes) printf("%s|%s|I|%s\n", key.first.c_str(), key.second.c_str(), i.c_str());
+            }
+        }
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--gamedb") {   // --gamedb <1.0 DataMap> <3.0 ToyBox DataMap>: npc::gamedb30
+        npc::DataMap m10, m30;
+        if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), m30)) { printf("DataMap eval failed\n"); return 1; }
+        npc::GameDb g = npc::gamedb30(m10, m30);
+        std::set<std::string> lines;
+        for (auto& [t, p] : g.playset) lines.insert("P " + t + " " + p);
+        for (auto& [a, v] : g.actor) for (auto& [t, p] : v) lines.insert("A " + a + " " + t + " " + p);
+        for (auto& l : lines) printf("%s\n", l.c_str());
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--oct") {   // --oct <1.0 .oct> <out>: the SubNetwork transforms only
         std::string b = slurp(argv[2]);
         auto t0 = std::chrono::steady_clock::now();

@@ -1,11 +1,15 @@
 // NPC track: actors, navigation, AI. Load-time adaptations of 1.0 data into the 3.0 systems that replaced them.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include "oct.hpp"
+#include "gen30.hpp"
 
 namespace npc {
 
@@ -146,6 +150,318 @@ inline int navmesh30(oct::File& f, std::string* why = nullptr)
         r.pay += conv;
     }
     return (int)done.size();
+}
+
+// ---- skinned vertices: 1.0 InfluenceRemap palettes applied (REN-3) ----
+// A 1.0 skinned geometry node carries NumInfluenceRemaps / InfluenceRemapInfluenceRefs / InfluenceRemapPrimitiveData
+// (per primitive: start, count into the refs): a vertex's bone index k means influence refs[start + k]. 1.0 reads
+// them (FUN_004c3350, dump10: NumInfluenceRemaps << 16 | NumInfluences into the node); 3.0 has none of the names and
+// takes the vertex index as the influence index. Over the 243 1.0 models with remaps that 3.0 also ships (vertices
+// the primitive's indices reach, matched by position, weight > 0; skincheck2.py): 3.0's index == refs[start + 1.0
+// index] for 830,242 bone slots, the raw 1.0 index for 139,739; most of the 101,205 misses sit in the *_monster
+// vehicles and pir_dutchman_crew_ranged, which 3.0 re-rigged.
+
+// 1.0 vformat CRC -> (stream, byte offset) of its BLENDINDICES (U8_4 in all 18 1.0 formats that have one).
+using SkinLayouts = std::unordered_map<uint32_t, std::pair<int, int>>;
+inline SkinLayouts skinLayouts(const std::string& t)
+{
+    static const std::map<std::string, int> size = {{"FLOAT32_2", 8}, {"FLOAT32_3", 12}, {"FLOAT32_4", 16}, {"FLOAT16_2", 4},
+        {"FLOAT16_4", 8}, {"U8_4_NORMALIZED", 4}, {"S16_4_NORMALIZED", 8}, {"U8_4", 4}, {"U16_2", 4}};
+    SkinLayouts out;
+    for (auto& v : gen30::ventries(t)) {
+        size_t m = t.find("main", v.start), s = m == std::string::npos ? m : t.find("streams", m);
+        if (s == std::string::npos || s > v.end) continue;
+        size_t p = t.find('{', s);
+        int depth = 0, stream = -1, off = 0;
+        std::string sem, type;
+        for (; p < v.end; ++p) {
+            if (t[p] == '{') {
+                ++depth;
+                if (depth == 2) { ++stream; off = 0; }
+                if (depth == 3) { sem.clear(); type.clear(); }
+            } else if (t[p] == '}') {
+                if (depth == 3) {
+                    auto z = size.find(type);
+                    if (z == size.end()) break;                         // an unknown type: no layout for this format
+                    if (sem == "BLENDINDICES" && type == "U8_4") out[gen30::ehash(v.guid, true)] = {stream, off};
+                    off += z->second;
+                }
+                if (--depth == 0) break;
+            } else if (depth == 3 && t.compare(p, 12, "semantic = \"") == 0) {
+                size_t e = t.find('"', p + 12);
+                sem = t.substr(p + 12, e - p - 12);
+            } else if (depth == 3 && t.compare(p, 8, "type = \"") == 0) {
+                size_t e = t.find('"', p + 8);
+                type = t.substr(p + 8, e - p - 8);
+            }
+        }
+    }
+    return out;
+}
+
+// Rewrites the bone indices of every remapped skinned primitive in the 1.0 vertex buffer: each vertex the primitive's
+// indices reach (Idata [0] buffer 0, [1] first index, [2] base vertex 0, [3] count; u16 _0.ibuf) gets its palette.
+// The primitives of a node often share one vertex range with their own palettes (tb_mickeymouse: 8 primitives, one
+// 6,153-vertex range); a vertex another palette already claimed sends the primitive to its own copy of the stream
+// (appended to vbuf, its Vdata offset re-pointed; the render transcode copies each primitive's vertices apart anyway).
+// Returns the primitives remapped; copies and indices outside their palette go to *why.
+inline int skinRemap(oct::File& f, std::string& vbuf, const std::string& ibuf, const SkinLayouts& L, std::string* why = nullptr)
+{
+    long pool = f.pool("SceneTreeNodePool");
+    if (pool < 0 || std::find(f.names.begin(), f.names.end(), "InfluenceRemapInfluenceRefs") == f.names.end()) return 0;
+    size_t end = f.blockEnd(pool);
+    std::vector<std::vector<int32_t>> pals;                   // palettes seen; claim value = index + 1
+    std::unordered_map<uint32_t, int> claim;                   // byte offset of a vertex's bone indices -> palette
+    int n = 0, outside = 0, copies = 0, skipped = 0;
+    for (size_t i = pool + 1; i < end; ++i) {
+        if (f.recs[i].level != 2) continue;
+        size_t ne = f.blockEnd(i);
+        std::vector<int32_t> refs, pd;
+        struct P { int32_t crc; size_t vdata = 0, idata = 0; };
+        std::vector<P> prims;
+        for (size_t j = i + 1; j < ne; ++j) {
+            const std::string& nm = f.name(f.recs[j]);
+            if (nm == "InfluenceRemapInfluenceRefs") refs = f.ints(f.recs[j]);
+            else if (nm == "InfluenceRemapPrimitiveData") pd = f.ints(f.recs[j]);
+            else if (nm == "vformatCRC") prims.push_back({f.ints(f.recs[j]).at(0)});
+            else if (nm == "Vdata" && !prims.empty()) prims.back().vdata = j;
+            else if (nm == "Idata" && !prims.empty()) prims.back().idata = j;
+        }
+        if (refs.empty() || pd.size() < 2 * prims.size()) continue;
+        for (size_t k = 0; k < prims.size(); ++k) {
+            auto lay = L.find((uint32_t)prims[k].crc);
+            if (lay == L.end() || !prims[k].vdata || !prims[k].idata) continue;
+            std::vector<int32_t> vd = f.ints(f.recs[prims[k].vdata]), id = f.ints(f.recs[prims[k].idata]);
+            int s = lay->second.first, off = lay->second.second;
+            if (vd.size() < 2 || vd[0] <= s || vd.size() < (size_t)(2 + 3 * vd[0]) || vd[2 + 3 * s] != 0 ||   // [2+3s]: buffer file
+                id.size() < 4 || id[0] != 0 || id[2] != 0) { ++skipped; continue; }
+            int32_t start = pd[2 * k], cnt = pd[2 * k + 1];
+            if (start < 0 || cnt < 0 || (size_t)start + cnt > refs.size()) { ++skipped; continue; }
+            std::vector<int32_t> pal(refs.begin() + start, refs.begin() + start + cnt);
+            int pid = 0;
+            while (pid < (int)pals.size() && pals[pid] != pal) ++pid;
+            if (pid == (int)pals.size()) pals.push_back(pal);
+            uint32_t base = (uint32_t)vd[3 + 3 * s], stride = (uint32_t)vd[4 + 3 * s], count = (uint32_t)vd[1];
+            if ((uint64_t)base + (uint64_t)stride * count > vbuf.size() || stride < (uint32_t)off + 4 ||
+                (uint64_t)2 * ((uint64_t)id[1] + id[3]) > ibuf.size()) { ++skipped; continue; }
+            std::vector<uint32_t> verts;
+            bool clash = false;
+            for (int32_t q = 0; q < id[3]; ++q) {
+                uint32_t v = (uint8_t)ibuf[2 * (id[1] + q)] | (uint32_t)(uint8_t)ibuf[2 * (id[1] + q) + 1] << 8;
+                if (v >= count) { verts.clear(); break; }
+                verts.push_back(v);
+                auto c = claim.find(base + v * stride + off);
+                if (c != claim.end() && c->second != pid + 1) clash = true;
+            }
+            if (verts.empty()) { ++skipped; continue; }
+            if (clash) {                                       // its own copy of the stream
+                uint32_t nb = (uint32_t)((vbuf.size() + 15) & ~(size_t)15);
+                vbuf.resize(nb, '\0');
+                vbuf.append(vbuf, base, (size_t)stride * count);
+                vd[3 + 3 * s] = (int32_t)nb;
+                f.setInts(f.recs[prims[k].vdata], vd);
+                base = nb;
+                ++copies;
+            }
+            for (uint32_t v : verts) {
+                uint32_t at = base + v * stride + off;
+                if (!claim.emplace(at, pid + 1).second) continue;   // done by this palette already
+                uint8_t* b = (uint8_t*)&vbuf[at];
+                for (int c = 0; c < 4; ++c) {
+                    if (b[c] < pal.size()) b[c] = (uint8_t)pal[b[c]];
+                    else ++outside;
+                }
+            }
+            ++n;
+        }
+    }
+    if (why && copies) *why += std::to_string(copies) + " primitives on their own stream copy; ";
+    if (why && outside) *why += std::to_string(outside) + " bone indices outside their palette; ";
+    if (why && skipped) *why += std::to_string(skipped) + " remapped primitives skipped (layout); ";
+    return n;
+}
+
+// ---- DataMaps: the 3.0 GameDB tables a 1.0 DataMap cannot name ----
+// A DataMap chunk is one Lua 5.1 function of NEWTABLE / LOADK / SETTABLE / SETLIST / SETGLOBAL / RETURN only (all 16
+// shipped DataMaps of both games, luaops.py), so it is evaluated here without a Lua state.
+struct LVal { char t = 0; std::string s; double n = 0; int tab = -1; };   // t: 0 nil, 's', 'n', 'b', 't'
+struct LTab { std::vector<std::pair<LVal, LVal>> kv; };
+
+inline bool luaEval(const std::string& b, std::vector<LTab>& tabs, std::vector<std::pair<std::string, LVal>>& globals,
+                    std::string* why = nullptr)
+{
+    auto fail = [&](const char* w) { if (why) *why = w; return false; };
+    static const uint8_t HDR[12] = {0x1b, 'L', 'u', 'a', 0x51, 0, 1, 4, 4, 4, 8, 0};
+    if (b.size() < 12 || memcmp(b.data(), HDR, 12)) return fail("not a Lua 5.1 x86 chunk");
+    size_t at = 12;
+    auto u32 = [&](uint32_t& v) { if (at + 4 > b.size()) return false; memcpy(&v, b.data() + at, 4); at += 4; return true; };
+    uint32_t n, code0, ncode;
+    if (!u32(n) || at + n + 12 > b.size()) return fail("header");
+    at += n + 8;
+    uint8_t maxstack = (uint8_t)b[at + 3];
+    at += 4;
+    if (!u32(ncode) || at + (size_t)ncode * 4 > b.size()) return fail("code");
+    code0 = (uint32_t)at;
+    at += (size_t)ncode * 4;
+    std::vector<LVal> K;
+    uint32_t nk;
+    if (!u32(nk)) return fail("constants");
+    for (uint32_t i = 0; i < nk; ++i) {
+        if (at >= b.size()) return fail("constants");
+        LVal v;
+        uint8_t t = (uint8_t)b[at++];
+        if (t == 1) { v.t = 'b'; v.n = b[at++] != 0; }
+        else if (t == 3) { v.t = 'n'; if (at + 8 > b.size()) return fail("number"); memcpy(&v.n, b.data() + at, 8); at += 8; }
+        else if (t == 4) {
+            uint32_t len;
+            if (!u32(len) || at + len > b.size()) return fail("string");
+            v.t = 's';
+            v.s.assign(b, at, len ? len - 1 : 0);
+            at += len;
+        } else if (t != 0) return fail("constant type");
+        K.push_back(std::move(v));
+    }
+    std::vector<LVal> R(maxstack + 1);
+    auto set = [&](int tab, const LVal& k, const LVal& v) {
+        for (auto& e : tabs[tab].kv)
+            if (e.first.t == k.t && e.first.s == k.s && e.first.n == k.n) { e.second = v; return; }
+        tabs[tab].kv.emplace_back(k, v);
+    };
+    for (uint32_t pc = 0; pc < ncode; ++pc) {
+        uint32_t i;
+        memcpy(&i, b.data() + code0 + 4 * pc, 4);
+        uint32_t op = i & 0x3f, A = (i >> 6) & 0xff, C = (i >> 14) & 0x1ff, B = i >> 23, Bx = i >> 14;
+        auto rk = [&](uint32_t x) -> const LVal& { return x & 0x100 ? K.at(x & 0xff) : R.at(x); };
+        if (A >= R.size()) return fail("register");
+        if (op == 1) R[A] = K.at(Bx);                                                   // LOADK
+        else if (op == 10) { R[A] = LVal{'t', "", 0, (int)tabs.size()}; tabs.emplace_back(); }   // NEWTABLE
+        else if (op == 9) {                                                              // SETTABLE
+            if (R[A].t != 't') return fail("SETTABLE on a non-table");
+            set(R[A].tab, rk(B), rk(C));
+        } else if (op == 34) {                                                           // SETLIST (50 per flush)
+            if (R[A].t != 't' || B == 0) return fail("SETLIST form");
+            if (C == 0 && ++pc < ncode) memcpy(&C, b.data() + code0 + 4 * pc, 4);
+            for (uint32_t j = 1; j <= B; ++j) set(R[A].tab, LVal{'n', "", (double)((C - 1) * 50 + j)}, R.at(A + j));
+        } else if (op == 7) globals.emplace_back(K.at(Bx).s, R[A]);                     // SETGLOBAL
+        else if (op == 30) return true;                                                  // RETURN
+        else return fail("opcode outside the constructor subset");
+    }
+    return fail("no RETURN");
+}
+
+// DataMap.<Group>.<Name> = { Files = {...}, Includes = {"<name>|<Group>", ...} }; group and name lower-case (the engine
+// compares them case-insensitively, FUN_006fd430 / FUN_00705860). A repeated key keeps its last value, as in Lua.
+struct DmRec { std::vector<std::string> files, includes; };
+using DataMap = std::map<std::pair<std::string, std::string>, DmRec>;
+
+inline std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
+
+inline bool dataMap(const std::string& chunk, DataMap& out, std::string* why = nullptr)
+{
+    std::vector<LTab> tabs;
+    std::vector<std::pair<std::string, LVal>> g;
+    if (!luaEval(chunk, tabs, g, why)) return false;
+    const LVal* dm = nullptr;
+    for (auto& [k, v] : g) if (k == "DataMap" && v.t == 't') dm = &v;
+    if (!dm) { if (why) *why = "no DataMap table"; return false; }
+    auto strings = [&](const LVal& t, std::vector<std::string>& to) {
+        if (t.t != 't') return;
+        for (auto& [k, v] : tabs[t.tab].kv) if (v.t == 's') to.push_back(v.s);
+    };
+    for (auto& [gk, gv] : tabs[dm->tab].kv) {
+        if (gk.t != 's' || gv.t != 't') continue;
+        for (auto& [nk, nv] : tabs[gv.tab].kv) {
+            if (nk.t != 's' || nv.t != 't') continue;
+            DmRec r;
+            for (auto& [fk, fv] : tabs[nv.tab].kv) {
+                if (fk.s == "Files") strings(fv, r.files);
+                else if (fk.s == "Includes") strings(fv, r.includes);
+            }
+            out[{lower(gk.s), lower(nk.s)}] = std::move(r);
+        }
+    }
+    return true;
+}
+
+// 'GameDB|<path>|1|<type>' -> (type, path)
+inline bool gamedbEntry(const std::string& e, std::pair<std::string, std::string>& tp)
+{
+    if (e.compare(0, 7, "GameDB|")) return false;
+    size_t a = e.find('|', 7), b = a == std::string::npos ? a : e.find('|', a + 1);
+    if (b == std::string::npos) return false;
+    tp = {e.substr(b + 1), e.substr(7, a - 7)};
+    return true;
+}
+
+inline std::string dnaOf(const DmRec& r)
+{
+    for (auto& f : r.files)
+        if (!f.compare(0, 4, "DNA|")) {
+            std::string p = lower(f.substr(4));
+            for (char& c : p) if (c == '\\') c = '/';
+            if (p.size() > 5 && !p.compare(p.size() - 5, 5, ".dnax")) p.resize(p.size() - 5);
+            return p;
+        }
+    return "";
+}
+
+// Records reachable from (group, name) through Includes ("<name>|<Group>"), the engine's own expansion (FUN_007058c0).
+inline void reach(const DataMap& m, const std::pair<std::string, std::string>& k, std::set<std::pair<std::string, std::string>>& seen)
+{
+    auto it = m.find(k);
+    if (it == m.end() || !seen.insert(k).second) return;
+    for (auto& inc : it->second.includes) {
+        size_t bar = inc.find('|');
+        reach(m, {bar == std::string::npos ? "include" : lower(inc.substr(bar + 1)), lower(inc.substr(0, bar))}, seen);
+    }
+}
+
+// What the engine cannot load for a 1.0 DataMap:
+// - a 1.0 DataMap has no Playset group (7/7; all 9 3.0 DataMaps have one), and 3.0 includes DataMap.Playset.<playset>
+//   for every playset (FUN_0070d9b0 -> FUN_0070d730(name, 0)): the 3.0 playset tables -- CarryStyles, SizeClassifications,
+//   DecisionsInfo, DifficultyInfo, Munitions, SurfaceImpacts -- never load. Taken from ToyBox's Playset.toybox (the 3.0
+//   playset that hosts the 1.0 characters) for every GameDB type the 1.0 DataMap never names; assetDefs stays with the
+//   asset defs fallback (gamedb/incredibles/assetdefs.lua).
+// - a 1.0 Actor record carries no GameDB entries, while the 3.0 DNA served for it reads 3.0 tables: emuInfo by its
+//   Progression Hierarchy, toolset by its ToolSet (68 of 70 3.0 *_ps DNA: every Hierarchy name has its
+//   emuinfo_<name>.lua among the GameDB entries of the ToyBox record with the same DNA minus _ps; psdna.py). Per 1.0
+//   Actor: the GameDB entries reachable from the 3.0 ToyBox Actor record whose DNA is the 1.0 record's DNA (or it
+//   without a trailing _ps; several records: the smallest name), types the 1.0 DataMap names excluded.
+struct GameDb {
+    std::vector<std::pair<std::string, std::string>> playset;                          // (type, path)
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> actor;     // 1.0 actor -> (type, path)
+    DataMap m10;
+};
+
+inline GameDb gamedb30(const DataMap& m10, const DataMap& m30)
+{
+    GameDb g;
+    g.m10 = m10;
+    std::set<std::string> types10;
+    std::pair<std::string, std::string> tp;
+    for (auto& [k, r] : m10) for (auto& f : r.files) if (gamedbEntry(f, tp)) types10.insert(tp.first);
+    if (auto pt = m30.find({"playset", "toybox"}); pt != m30.end())
+        for (auto& f : pt->second.files)
+            if (gamedbEntry(f, tp) && !types10.count(tp.first) && tp.first != "assetDefs") g.playset.push_back(tp);
+    std::map<std::string, std::string> byDna;   // DataMap is ordered: the first record per DNA has the smallest name
+    for (auto& [k, r] : m30) {
+        std::string d = k.first == "actor" ? dnaOf(r) : "";
+        if (!d.empty()) byDna.emplace(d, k.second);
+    }
+    for (auto& [k, r] : m10) {
+        std::string d = k.first == "actor" ? dnaOf(r) : "";
+        if (d.empty()) continue;
+        auto hit = byDna.find(d);
+        if (hit == byDna.end() && d.size() > 3 && !d.compare(d.size() - 3, 3, "_ps")) hit = byDna.find(d.substr(0, d.size() - 3));
+        if (hit == byDna.end()) continue;
+        std::set<std::pair<std::string, std::string>> seen;
+        reach(m30, {"actor", hit->second}, seen);
+        std::set<std::pair<std::string, std::string>> got;
+        for (auto& rk : seen)
+            for (auto& f : m30.at(rk).files)
+                if (gamedbEntry(f, tp) && !types10.count(tp.first) && got.insert(tp).second) g.actor[k.second].push_back(tp);
+    }
+    return g;
 }
 
 }  // namespace npc
