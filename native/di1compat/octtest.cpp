@@ -48,6 +48,8 @@ static int renderTest(char** a)
         ++reads;
         return ok;
     };
+    io.verbose = getenv("RENDER_VERBOSE") != nullptr;
+    io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
     auto t0 = std::chrono::steady_clock::now();
     io.read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
     std::string ob = slurp(world / (stem + ".oct"));
@@ -256,6 +258,36 @@ int main(int argc, char** argv)
         printf("locate %d, extract %s %zu B (%s)\n", i, d ? "ok" : "FAILED", n, mz_zip_get_error_string(mz_zip_get_last_error(&z)));
         mz_free(d);
         return d ? 0 : 1;
+    }
+    if (argc > 4 && std::string(argv[1]) == "--gen30") {   // --gen30 <render table> <1.0 extract root> <gen30.py dump dir>
+        // every shader gen30.py dumped (.shd + <shader>.<program id>.hlsl, compile off): the C++ port must match
+        render::Table T;
+        if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
+        fs::path ext10 = fs::path(argv[3]) / "assets", dump = argv[4];
+        gen30::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(ext10 / p); return !o.empty(); };
+        gen30::VFormats vf = gen30::vformats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
+        size_t ok = 0, bad = 0, progs = 0;
+        for (auto& e : fs::directory_iterator(dump)) {
+            if (e.path().extension() != ".shd") continue;
+            std::string sh = e.path().stem().string();
+            gen30::Generated g;
+            gen30::generate(T.shaders10, read10, vf, sh, nullptr, g);
+            bool same = g.shd == slurp(e.path());
+            for (auto& p : g.programs) {
+                char nm[64];
+                sprintf_s(nm, "%s.%08x.hlsl", sh.c_str(), p.id);
+                ++progs;
+                if (getenv("GEN30_DUMP")) std::ofstream(fs::path(getenv("GEN30_DUMP")) / nm, std::ios::binary) << p.hlsl;
+                if (p.hlsl != slurp(dump / nm)) {
+                    if (same && bad < 3) printf("HLSL differs: %s\n", nm);
+                    same = false;
+                }
+            }
+            if (same) ++ok;
+            else if (++bad <= 5) printf("MISMATCH %s (shd %s)\n", sh.c_str(), g.shd == slurp(e.path()) ? "same" : "differs");
+        }
+        printf("%zu shaders identical to gen30.py, %zu differ (%zu programs)\n", ok, bad, progs);
+        return bad ? 1 : 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--read10") {   // --read10 <1.0 install> <engine path>: read10's candidates
         std::string p = argv[3];

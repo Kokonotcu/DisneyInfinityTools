@@ -14,6 +14,7 @@
 #include <sstream>
 #include <unordered_map>
 #include "oct.hpp"
+#include "gen30.hpp"
 
 namespace render {
 
@@ -47,6 +48,7 @@ struct Table {
     std::map<std::string, std::vector<int>> genericSlots;
     std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
     std::map<std::pair<uint32_t, uint32_t>, Plan> plans;
+    gen30::Tables shaders10;                           // real 1.0 shaders: V / W / Q lines (gen30)
 
     bool load(const std::string& text)
     {
@@ -71,6 +73,14 @@ struct Table {
                 if (!t.fail() && r.extract.size() > 2) matindex[g] = r;
             } else if (k == "F") { std::string r; t >> r; filled.insert(r); }
             else if (k == "N") { std::string g; t >> g; notReal.insert(g); }
+            else if (k == "V") { std::string n; int cb, off, sz; t >> n >> cb >> off >> sz; shaders10.globals[n] = {cb, off, sz}; }
+            else if (k == "W") {
+                std::string th, bits; int kind, x; t >> th >> kind >> x >> bits;
+                shaders10.wordRules[{(uint32_t)std::stoul(th, nullptr, 16), kind, x}] = (uint32_t)std::stoul(bits, nullptr, 16);
+            } else if (k == "Q") {
+                std::string th, w; int v; t >> th >> w >> v;
+                shaders10.passByte[{(uint32_t)std::stoul(th, nullptr, 16), (uint32_t)std::stoul(w, nullptr, 16)}] = v;
+            }
             else if (k == "G") { std::string sh; int i; t >> sh; while (t >> i) genericSlots[sh].push_back(i); }
             else if (k == "T") {
                 std::string a, b; t >> a;
@@ -294,6 +304,7 @@ struct IO {
     std::function<bool(const std::string& path, std::string& out)> read30;   // a 3.0 asset by extract path ('3:...')
     std::function<bool(const std::string& path, std::string& out)> read10;   // a 1.0 asset by path
     std::function<void(const std::string&)> log;
+    bool verbose = false;   // log every substituted material's slot assignment
 };
 
 struct Result {
@@ -373,6 +384,14 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
         auto mi = T.matindex.find(m10.name);
         if (!m10.name.empty() && mi != T.matindex.end() && !T.notReal.count(m10.name)) {
             if (!bundle30(mi->second, bnd)) continue;
+            if (io.verbose) {   // the 1.0 material's textures vs the 3.0 material's (a GUID 3.0 reused shows as a mismatch)
+                const Material& m3 = bnd->mats[mi->second.idx];
+                std::string l = "real " + m10.name + " " + mi->second.extract + " 1.0:";
+                for (int s = 0; s < m10.slots; ++s) { uint32_t t = b10.slot(m10, s); l += " " + (t < b10.textures.size() ? hex8(b10.textures[t]) : std::string("-")); }
+                l += " 3.0:";
+                for (int s = 0; s < m3.slots; ++s) { uint32_t t = bnd->slot(m3, s); l += " " + (t < bnd->textures.size() ? hex8(bnd->textures[t]) : std::string("-")); }
+                io.log(l);
+            }
             srcs.push_back({*bnd, mi->second.idx});
             r.tiers["real"]++;
         } else {
@@ -438,6 +457,16 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
             const std::string &a10 = m10.A;
             if (dm.shader == m10.shader && a10.size() <= dm.A.size()) dm.A = a10 + dm.A.substr(a10.size());
             else if (a10.size() >= 16 && dm.A.size() >= 16) dm.A = a10.substr(0, 16) + dm.A.substr(16);
+            if (io.verbose) {   // octtest --render with RENDER_VERBOSE: which 1.0 texture went to which donor slot
+                std::string l = std::string(tier) + " " + m10.name + " [" + m10.shader + " -> " + dm.shader + "]";
+                const auto& roles = T.shaders.at(dm.shader).roles;
+                for (int s = 0; s < dm.slots; ++s) {
+                    uint32_t t = s < (int)used.size() ? used[s] : UNSET;
+                    l += " " + (s < (int)roles.size() && !roles[s].empty() ? roles[s] : std::string("-")) + "=" +
+                         (t == UNSET || t >= b10.textures.size() ? std::string("none") : hex8(b10.textures[t]));
+                }
+                io.log(l);
+            }
             dm.name = m10.name;
             dm.hash = m10.hash;
             Bundle one;

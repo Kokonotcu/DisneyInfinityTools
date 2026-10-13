@@ -15,6 +15,9 @@ Lines (space-separated; the plugin parses them):
       op = <dst stream> <dst off> <size> C <src stream> <src off>                 copy
          | <dst stream> <dst off> <size> X <src stream> <src off> <src type> <dst type> <n default> <v...>   convert
          | <dst stream> <dst off> <size> K <hex bytes>                            constant (padded element)
+  V <name> <cbuffer register> <byte offset> <size>                                          3.0 global constant (gen30.globals30)
+  W <technique hash> <depth kind> <X> <bits hex>                                            bits 3.0 adds to a converted pass word (gen30.rules)
+  Q <technique hash> <3.0 word hex> <byte>                                                  pass +0x1c byte as 3.0 ships it (gen30.rules)
 python rentable.py [--out <file>]   (default: the install's Pentane\\Plugins\\di1compat_render.txt)
 """
 import argparse
@@ -58,6 +61,13 @@ def main():
     lines += ['F %s' % r for r in sorted(fill)]
     lines += ['G %s %s' % (sh, ' '.join(map(str, s))) for sh, s in autobundle.GENERIC_SLOTS.items()]
     lines += ['N %s' % g for g in sorted(autobundle.NOT_REAL)]
+    # real 1.0 shaders (gen30): 3.0 global constant layout, the pass-word bits 3.0 adds per technique, pass +0x1c bytes
+    import gen30
+    lines += ['V %s %d %d %d' % (n, cb, off, sz) for n, (cb, off, sz) in sorted(gen30.globals30().items())]
+    learned, b1c = gen30.rules()
+    lines += ['W %08x %d %d %x' % (t, k, x, bits) for (t, k, x), bits in sorted(learned.items(), key=str)
+              if t is not None and bits]
+    lines += ['Q %08x %x %d' % (t, w, v) for (t, w), v in sorted(b1c.items(), key=str) if t is not None and v]
     for g in sorted(vtxf.formats(1)):
         crc = vtxf.name_hash(g)
         try:
