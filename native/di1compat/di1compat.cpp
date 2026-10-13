@@ -254,26 +254,33 @@ static bool read30x(const std::string& extract, std::string& out)
 }
 
 // World session: the .oct request transcodes the whole world (its .mtb/.vbuf/.ibuf decisions are coupled), and the
-// engine's next requests for those files are answered from here. 1.0 textures: hash -> (zip, member).
+// engine's next requests for those files are answered from here.
+// 1.0 archive overlay: a 1.0 asset archive also carries files under their full asset paths -- textures/<hash>.tbody,
+// and the motions its entity uses (characters/inc_bob/inc_bob_ps.zip holds characters/biped/motions/*.oct and .banm,
+// which no characters/biped archive has: in-game 2026-10-12 the transcoded inc_bob_ps.bent named them and they were
+// missing). The 1.0 engine sees them once the archive is loaded, so every 1.0 archive a file is served from gets its
+// full-path members indexed (engine path -> "<archive without .zip>/<member>", which read10 resolves); first wins.
 static std::mutex g_sessLock;
 static std::map<std::string, std::string> g_served;
-static std::map<std::string, std::pair<std::string, std::string>> g_tex10;
+static std::map<std::string, std::string> g_over10;
+static std::set<std::string> g_indexed10;
 static render::Table g_render;
 static bool g_renderOk;
 
-static void indexTextures10(const std::string& zipRel)
+static void indexZip10(const std::string& zipRel)
 {
     std::lock_guard<std::mutex> lock(g_zipLock);
     mz_zip_archive* z = zipFor(zipRel);
     if (!z) return;
     std::lock_guard<std::mutex> l2(g_sessLock);
+    if (!g_indexed10.insert(zipRel).second) return;
+    std::string base = zipRel.substr(0, zipRel.size() - 4) + "/";
     for (mz_uint i = 0; i < mz_zip_reader_get_num_files(z); ++i) {
         char name[300];
         mz_zip_reader_get_filename(z, i, name, sizeof(name));
         std::string n = name;
-        for (char& c : n) c = (char)tolower((unsigned char)c);
-        if (n.rfind("textures/", 0) == 0 && endsWith(n.c_str(), ".tbody"))
-            g_tex10.emplace(n.substr(9, n.size() - 9 - 6), std::make_pair(zipRel, std::string(name)));
+        for (char& c : n) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
+        if (n.find('/') != std::string::npos && n.back() != '/') g_over10.emplace(n, base + name);
     }
 }
 
@@ -288,17 +295,6 @@ static void padSmallDxt(std::string& d)
         uint32_t v[2] = {h < 4 ? 4u : h, w < 4 ? 4u : w};
         memcpy(&d[12], v, 8);
     }
-}
-
-// The 1.0 zip a path resolves to (read10's rule), for indexing that asset's own textures/ folder.
-static std::string zip10For(const std::string& path)
-{
-    size_t n = 0;
-    std::string where;
-    void* d = read10(path.c_str(), &n, &where);
-    if (!d) return "";
-    mz_free(d);
-    return where.substr(0, where.find(':'));
 }
 
 // The render half of a 1.0 asset with a material bundle -- a world, a mission graph, ... (render.hpp): materials
@@ -330,8 +326,6 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
         if (!r.ibuf.empty()) g_served[dir + "/" + stem + "_0.ibuf"] = r.ibuf;
         if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
     }
-    std::string zip = zip10For(p);
-    if (!zip.empty()) indexTextures10(zip);
     char buf[200];
     sprintf_s(buf, "+render(real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["real"], r.tiers["same-sh"],
               r.tiers["generic"], (unsigned)r.textures10.size());
@@ -393,8 +387,6 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
             std::lock_guard<std::mutex> lock(g_sessLock);
             g_served[p] = r.mtb;   // the engine reopens bundles; transcode once
         }
-        std::string zip = zip10For(p);
-        if (!zip.empty()) indexTextures10(zip);
         char buf[160];
         sprintf_s(buf, "+materials(real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["real"], r.tiers["same-sh"],
                   r.tiers["generic"], (unsigned)r.textures10.size());
@@ -702,32 +694,33 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         return r;
     }
     if (!r && g_cfg.serve10 && g_cfg.install10[0] && !(flags & 1)) {   // flags bit 0 = write (never served)
-        std::string np = norm(p), hit, from;
+        std::string np = norm(p), hit, over;
         {
             std::lock_guard<std::mutex> lock(g_sessLock);
             auto it = g_served.find(np);                 // a world session product (.mtb/.vbuf/.ibuf)
-            if (it != g_served.end()) { hit = it->second; from = "asset session"; }   // kept: the engine reopens files
-            else if (np.rfind("textures/", 0) == 0 && endsWith(np.c_str(), ".tbody")) {
-                auto t = g_tex10.find(np.substr(9, np.size() - 9 - 6));
-                if (t != g_tex10.end()) from = t->second.first + ":" + t->second.second;
+            if (it != g_served.end()) hit = it->second;  // kept: the engine reopens files
+            else {
+                auto o = g_over10.find(np);              // a full-path member of a loaded 1.0 archive
+                if (o != g_over10.end()) over = o->second;
             }
-        }
-        if (hit.empty() && !from.empty()) {            // a 1.0 texture the transcoded bundle names
-            size_t colon = from.find(':');
-            if (read10s(from.substr(0, colon - 4) + "/" + from.substr(colon + 1), hit)) padSmallDxt(hit);
         }
         if (!hit.empty()) {
             r = memFile(hit.data(), hit.size());
-            logf("served %s %u B from %s -> %s", p, (unsigned)hit.size(), from.c_str(), r ? "ok" : "FAILED");
+            logf("served %s %u B from asset session -> %s", p, (unsigned)hit.size(), r ? "ok" : "FAILED");
             return r;
         }
         size_t n = 0;
         std::string where;
-        if (void* data = read10(p, &n, &where)) {
+        if (void* data = read10(over.empty() ? p : over.c_str(), &n, &where)) {
+            indexZip10(where.substr(0, where.find(':')));
             std::string out, note;
             const char* codec = nullptr;
             try {
-                codec = transcode(p, data, n, out, note);
+                if (endsWith(p, ".tbody")) {             // D3D11 refuses sub-4x4 block textures (padSmallDxt)
+                    out.assign((const char*)data, n);
+                    padSmallDxt(out);
+                    codec = out.size() == n && memcmp(out.data(), data, n) ? "tbody" : nullptr;
+                } else codec = transcode(p, data, n, out, note);
             } catch (std::exception& e) {   // never unwind into engine code (that ends in a silent fail-fast)
                 note += std::string("TRANSCODE EXCEPTION: ") + e.what() + " ";
                 codec = nullptr;
@@ -735,6 +728,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
                 note += "TRANSCODE EXCEPTION ";
                 codec = nullptr;
             }
+            if (!over.empty()) note += "(archive overlay) ";
             r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
             logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
                  codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED");

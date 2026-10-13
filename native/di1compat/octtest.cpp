@@ -112,9 +112,10 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
         auto ours = countFields(g, i);
         bool all = true;
         for (auto& [k, v] : shipped) {
-            bool hit = k.find("AccumulatedSize") != std::string::npos ? ours[k] >= v : ours[k] == v;
-            if (shipped["ConstantHeaderCount"] && (k == "ConstantHeaderCount" || k == "VariableHeaderCount" || k == "ConstantLayoutCount"))
-                hit = k != "VariableHeaderCount" || ours[k] == v + shipped["ConstantHeaderCount"];   // headers all variable by design
+            bool bound = k.find("AccumulatedSize") != std::string::npos || k == "LayerBindAdditionalSize";
+            bool hit = bound ? ours[k] >= v : ours[k] == v;
+            if (!hit && shipped["ConstantHeaderCount"] && (k == "ConstantHeaderCount" || k == "VariableHeaderCount" || k == "ConstantLayoutCount"))
+                hit = k != "VariableHeaderCount" ? ours[k] == 0 : ours[k] == v + shipped["ConstantHeaderCount"];   // all variable by design
             (hit ? g_fieldTally[k].first : g_fieldTally[k].second)++;
             if (!hit && g_fieldTally[k].second <= 3) printf("FIELD %s ours %ld shipped %ld  %s\n", k.c_str(), ours[k], v, path.c_str());
             all &= hit;

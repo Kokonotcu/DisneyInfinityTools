@@ -114,7 +114,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     }
     end = f.blockEnd(sn);
     long typeAt = -1, nameAt = -1, layoutAt = -1, cmudnAt = -1;
-    int hsi = 0, bases = 0, roots = 0, bconv = 0, dn = 0, pn = 0, s32 = 0, s64 = 0, defaultData = -1, defaultIdx = 0;
+    int hsi = 0, hl = 0, bases = 0, roots = 0, bconv = 0, dn = 0, pn = 0, s32 = 0, s64 = 0, defaultData = -1, defaultIdx = 0;
     int statics = 0, dnBytes = 0, cfam = 0, cmem = 0, vgroups = 0, vmem = 0, lbinds = 0, lbBytes = 0;
     bool sized = true;
     std::string pool;
@@ -128,7 +128,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
             else if (n == "ConnectionMapUsedDataNodes") cmudnAt = (long)i;
             if (n == "Type") typeAt = (long)i;
             else if (n == "Name") nameAt = (long)i;
-            else if (n == "HeaderLayout") layoutAt = (long)i;
+            else if (n == "HeaderLayout") { layoutAt = (long)i; hl = (int)f.ints(r).size(); }
             else if (n == "HeaderStringIndices") hsi = (int)f.ints(r).size();
         } else if (r.level == 4) {
             if (pool == "BasisPool" && n == "Basis") ++bases;
@@ -155,16 +155,18 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
             else if (pool == "ComponentFamilyPool" && n == "ComponentNameIndices") cmem += (int)f.ints(r).size();
         }
     }
-    if (typeAt < 0 || nameAt < 0 || layoutAt < 0) { if (why) *why = "no Type/Name/HeaderLayout"; return false; }
+    if (typeAt < 0 || layoutAt < 0) { if (why) *why = "no Type/HeaderLayout"; return false; }   // clips have no Name
     bool exact = !pn && sized;
     if (!exact) {   // ponytail: generous bounds (128 B/node + payload), fit per-type sizes if memory ever matters
         statics = statics < dn ? statics : dn;
         s32 = 128 * (dn - statics + pn) + dnBytes + 4096;
         s64 = 2 * s32;
     } else statics = 0;   // the exact rule counts static DataNodes as variable (in_city root, tested in-game)
+    // every DataNode static (clips: 2,945/2,945 shipped 3.0 ones so): all headers constant, as 3.0 writes them
+    bool allStatic = !exact && !pn && dn && statics == dn;
 
     std::vector<oct::Rec> a;
-    int vals[] = {0, hsi, statics, dn - statics, pn};
+    int vals[] = {allStatic ? hsi : 0, allStatic ? 0 : hsi, statics, dn - statics, pn};
     for (int k = 0; k < 5; ++k) a.push_back(f.intScalar(3, COUNTS_A[k], vals[k]));
     if (statics) {
         int c32 = 128 * statics + dnBytes;
@@ -174,10 +176,12 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
         a.push_back(f.intList(4, "1", {8, 2 * c32, statics}));
     }
     int nvar = exact ? dn : dn - statics + pn;
-    a.push_back(f.node(3, "VariableAccumulatedSize32"));
-    a.push_back(f.intList(4, "1", {4, s32, nvar}));
-    a.push_back(f.node(3, "VariableAccumulatedSize64"));
-    a.push_back(f.intList(4, "1", {8, s64, nvar}));
+    if (!allStatic) {   // 3.0 writes none when nothing is variable
+        a.push_back(f.node(3, "VariableAccumulatedSize32"));
+        a.push_back(f.intList(4, "1", {4, s32, nvar}));
+        a.push_back(f.node(3, "VariableAccumulatedSize64"));
+        a.push_back(f.intList(4, "1", {8, s64, nvar}));
+    }
     int valsB[] = {bases - roots, bconv, cfam, cmem, vgroups, vmem};
     for (int k = 0; k < 6; ++k) a.push_back(f.intScalar(3, COUNTS_B[k], valsB[k]));
     if (cmudnAt >= 0) a.push_back(f.recs[cmudnAt]);                     // moved into its 3.0 place
@@ -186,18 +190,63 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     if (lbinds) a.push_back(f.intScalar(3, "LayerBindAdditionalSize", lbBytes));
     a.push_back(f.intScalar(3, COUNTS_B[7], links));                      // BaseDataNodeLinksCount
     if (hasLinkPool) a.push_back(f.intScalar(3, "BaseDataNodeLinksAdditionalSize", linksExtra));
-    oct::Rec cl = f.intScalar(3, "ConstantLayoutCount", 0);
+    oct::Rec cl = f.intScalar(3, "ConstantLayoutCount", allStatic ? hl : 0);
 
     // later positions first so the earlier indices stay valid
     f.recs.insert(f.recs.begin() + layoutAt + 1, cl);
     if (cmudnAt > layoutAt) f.recs.erase(f.recs.begin() + cmudnAt + 1);
-    size_t after = (size_t)(typeAt > nameAt ? typeAt : nameAt) + 1;
+    size_t after = (size_t)(typeAt > nameAt ? typeAt : nameAt) + 1;   // no Name (clips): after Type
     if (cmudnAt >= 0 && cmudnAt < layoutAt) {
         f.recs.erase(f.recs.begin() + cmudnAt);
         if (cmudnAt < (long)after) --after;
     }
     f.recs.insert(f.recs.begin() + after, a.begin(), a.end());
     return true;
+}
+
+// A 1.0 animation clip (SubNetwork Type Clip: one static ClipData node + a LayerBind) in 3.0 form, on 2,995/2,995
+// shipped 3.0 clips: the ClipData node has External = 1 (after Static), and MinTime / MaxTime (after VariantGroupPool)
+// equal the first two floats of its ClipDataBlock. The reader takes the clip's time range from them (FUN_00500ac0 ->
+// FUN_004b0f70, default FLT_MAX..-FLT_MAX). Returns true if it changed anything.
+inline bool clip30(oct::File& f, size_t sn)
+{
+    size_t end = f.blockEnd(sn);
+    bool isClip = false, hasTime = false, changed = false;
+    long vgEnd = -1, lbAt = -1;
+    std::string block;
+    for (size_t i = sn + 1; i < end; ++i) {
+        const oct::Rec& r = f.recs[i];
+        const std::string& n = f.name(r);
+        if (r.level == 3 && n == "Type") isClip = f.nameValues(r) == std::vector<std::string>{"Clip"};
+        else if (r.level == 3 && (n == "MinTime" || n == "MaxTime")) hasTime = true;
+        else if (r.level == 3 && n == "VariantGroupPool") vgEnd = (long)f.blockEnd(i);
+        else if (r.level == 3 && n == "LayerBindPool") lbAt = (long)i;
+        else if (r.level == 5 && n == "ClipDataBlock" && block.empty()) block = r.pay.substr(oct::spec(r.type).cw);
+    }
+    if (!isClip) return false;
+    if (!hasTime && block.size() >= 8 && (vgEnd >= 0 || lbAt >= 0)) {
+        auto fl = [&](const char* name, size_t off) {
+            oct::Rec r{3, (uint16_t)(oct::SCALAR | oct::FLOAT << 3), f.addName(name), block.substr(off, 4)};
+            return r;
+        };
+        std::vector<oct::Rec> t = {fl("MinTime", 0), fl("MaxTime", 4)};
+        size_t at = (size_t)(vgEnd >= 0 ? vgEnd : lbAt);
+        f.recs.insert(f.recs.begin() + at, t.begin(), t.end());
+        changed = true;
+    }
+    for (size_t i = sn + 1; i < f.blockEnd(sn); ++i) {   // External = 1 on ClipData DataNodes
+        if (f.recs[i].level != 4 || f.name(f.recs[i]) != "DataNode") continue;
+        size_t e = f.blockEnd(i), put = 0;
+        bool clipData = false, ext = false;
+        for (size_t j = i + 1; j < e; ++j) {
+            const std::string& n = f.name(f.recs[j]);
+            if (n == "Type") { clipData = f.nameValues(f.recs[j]) == std::vector<std::string>{"ClipData"}; put = j + 1; }
+            else if (n == "Static") put = j + 1;
+            else if (n == "External") ext = true;
+        }
+        if (clipData && !ext && put) { f.recs.insert(f.recs.begin() + put, f.intScalar(5, "External", 1)); changed = true; }
+    }
+    return changed;
 }
 
 // Every SubNetwork of the SubNetworkPool; returns how many got counts.
@@ -207,7 +256,10 @@ inline int addAllCounts(oct::File& f)
     if (pool < 0) return 0;
     int done = 0;
     for (size_t i = pool + 1; i < f.blockEnd(pool);) {
-        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork" && addCounts(f, i)) ++done;
+        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") {
+            clip30(f, i);
+            if (addCounts(f, i)) ++done;
+        }
         i = f.blockEnd(i);   // the next sibling (recomputed after the insert)
     }
     return done;
