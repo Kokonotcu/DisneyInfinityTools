@@ -8,7 +8,7 @@ namespace gameplay {
 
 // Ledges and rails (plan OCT-4). in_city.oct's CurvesPool holds 3,164 LH_* ledge-hang and 42 rail curves; every one
 // of its 3,207 curves is bound by a Curve association {NodeName, SubNetworkRef, CurveIndices} to a scene node, and
-// its points are local to that node (655/665 resolved root-basis curves sit near the origin, not at the node).
+// its points are local to that node (658/665 resolved root-basis curves sit near the origin, not at the node).
 // 1.0's handler (FUN_006fc6e0) binds NodeName + '|Transform' (the node's Dilation, any basis); 3.0's (FUN_0071c2d0)
 // resolves NodeName itself as a DataNode path (FUN_004ae9b0) and, when nothing resolves, never reads CurveIndices:
 // the curve keeps its node-local points, so every Metroville ledge/rail lay near the world origin. Every shipped 3.0
