@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "gameplay.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,7 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +161,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -397,6 +400,8 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::realm30w(f)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
+    int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
+    if (ncv || nfl) { note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }

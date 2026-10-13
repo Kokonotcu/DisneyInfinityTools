@@ -16,6 +16,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "gameplay.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -232,6 +233,7 @@ int main(int argc, char** argv)
         lap("asset pool added", (int)octx::addAssetPool(f));
         lap("collision aggregates added", octx::collision30(f));
         lap("lighting nodes converted", octx::realm30w(f));
+        lap("curve associations bound", gameplay::curves30(f));
         lap("subnetworks with counts", octx::addAllCounts(f));
         std::string o = f.write();
         lap("write", (int)o.size());
