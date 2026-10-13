@@ -1,0 +1,5 @@
+LIBRARY di1compat
+EXPORTS
+    Pentane_PluginInformation DATA
+    Pentane_PluginDependencyCount DATA
+    Pentane_Main

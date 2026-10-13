@@ -7,3 +7,4 @@ shippedkeys*.json
 shippedpools.json
 filledroles.json
 shippedassociations.json
+native/**/build/
