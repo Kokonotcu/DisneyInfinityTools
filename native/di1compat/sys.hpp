@@ -168,4 +168,22 @@ inline std::set<uint32_t> g_lockUids;
 inline void setLockUids(std::set<uint32_t> u) { std::lock_guard<std::mutex> l(g_lockMx); g_lockUids.swap(u); }
 inline std::set<uint32_t> lockUids() { std::lock_guard<std::mutex> l(g_lockMx); return g_lockUids; }
 
+// ---- PS-8: pop-in of 1.0 expendable definitions ----
+// ExpendablesDefBase (ctor FUN_016022c0, one Lua entry) keeps the pop-in range squared at +0x9c and (range+14)^2 at
+// +0xa0: both stay 0 unless the entry has PopinDistance (an explicit 0 gives 0/196). With 0 a 3.0 expendable never
+// pops in and its model is never requested (FORMATS 11, in-game). 1.0 has no pop-in at all: no PopinDistance string
+// in the 1.0 exe, and its socket handler FUN_00f8b930 binds each world expendable at load. 3.0's own packages leave
+// the key out on purpose (2,910 of their 4,404 entries, e.g. all 205 of tools.lua; 1.0: 0 of 2,371), so only entries
+// of the packages 3.0 does not ship get the 1.0 behaviour, always in range.
+static const float kPopin10 = 100000.0f;   // 100 km: every distance inside a zone
+inline bool applyPopin10(void* def)
+{
+    float* f = (float*)((uint8_t*)def + 0x9c);
+    if (f[0] != 0 || f[1] != 0) return false;
+    f[0] = kPopin10 * kPopin10;
+    f[1] = (kPopin10 + 14) * (kPopin10 + 14);
+    return true;
+}
+inline thread_local int g_pkg10 = -1;   // definitions given the 1.0 pop-in in the 1.0 package loading now; -1: none
+
 }  // namespace sys

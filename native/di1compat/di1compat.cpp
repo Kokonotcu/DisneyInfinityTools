@@ -135,6 +135,7 @@ static struct {
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool root10 = true;              // sys: read10 also searches the 1.0 root archives (startup*.zip)
     bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
+    bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -164,6 +165,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "root10")) g_cfg.root10 = atoi(val) != 0;
         else if (!strcmp(key, "locks10")) g_cfg.locks10 = atoi(val) != 0;
+        else if (!strcmp(key, "popin10")) g_cfg.popin10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1239,6 +1241,29 @@ static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint
     return r;
 }
 
+// PS-8 (sys.hpp): the expendables package loader FUN_0160aa30(path, ?) (ret 8) and the definition ctor FUN_016022c0
+// (thiscall, ret 4) -- entries of a package 3.0 lacks get the 1.0 pop-in
+typedef void(__fastcall* ExpPkgFn)(void* ecx, void* edx, const char* path, uint32_t a2);
+static ExpPkgFn g_expPkg;
+static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
+{
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    int* s = g_open(p, 0, 0, 0, nullptr);   // the engine's own open, unhooked: does 3.0 ship this package?
+    if (s) ((void(__fastcall*)(void*, void*, uint32_t))(*(void***)s)[11])(s, nullptr, 1);
+    sys::g_pkg10 = s ? -1 : 0;
+    g_expPkg(ecx, nullptr, path, a2);
+    if (sys::g_pkg10 >= 0) logf("expendables %s (a 1.0 package): %d entries without PopinDistance pop in as in 1.0", p, sys::g_pkg10);
+    sys::g_pkg10 = -1;
+}
+typedef void(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
+static ExpDefFn g_expDef;
+static void __fastcall hkExpDef(void* self, void*, void* entry)
+{
+    g_expDef(self, nullptr, entry);
+    if (sys::g_pkg10 >= 0 && sys::applyPopin10(self)) ++sys::g_pkg10;
+}
+
 // sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
 static int* sysServe(const char* p)
 {
@@ -1800,6 +1825,10 @@ extern "C" void __stdcall Pentane_Main()
     hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
     hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
     hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
+    if (g_cfg.popin10) {
+        hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
+        hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);
+    }
     hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar, (void**)&g_playsetChar);
     if (g_cfg.trace) {
         hook("actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists);
