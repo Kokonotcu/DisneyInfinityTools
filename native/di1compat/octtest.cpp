@@ -16,11 +16,124 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "ui.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
     std::ifstream in(p, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// octtest --ui <1.0 extract root> <3.0 extract root> <out dir> [3.0 zone names file, one per line]
+// ui.hpp + dct::supplement over the extracts: loading-screen sequence and its movies, flash image ids against every
+// shipped movie, FMV clips, tips merge (written to <out>/tips.lua for the Lua check), lang/IN + lang/main supplement.
+static int uiTest(char** a, int argc)
+{
+    namespace fs = std::filesystem;
+    fs::path e10 = fs::path(a[2]) / "assets", e30 = fs::path(a[3]) / "assets", out = a[4];
+    fs::create_directories(out);
+    int fails = 0;
+    auto check = [&](bool ok, const std::string& what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str()); fails += !ok; };
+    // 1. loading screens: 21 loads of a non-intro zone, and every pick a 1.0 movie that 3.0 lacks
+    int counter = 0;
+    std::string seq;
+    bool movies = true;
+    for (int i = 0; i < 21; ++i) {
+        std::string s = ui::loadingScreen10("LoadingScreen_Inc", counter), f = s;
+        for (char& c : f) c = (char)tolower((unsigned char)c);
+        seq += s.substr(14) + " ";
+        movies &= fs::exists(e10 / "flash/loadingscreen/loadingscreen" / (f + ".gfx")) && !fs::exists(e30 / "flash/loadingscreen/loadingscreen" / (f + ".gfx"));
+    }
+    check(seq == "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 01 02 ", "loading-screen sequence " + seq);
+    check(movies, "every pick is a 1.0 movie (flash/loadingscreen/loadingscreen_NN.gfx) 3.0 does not ship");
+    check(ui::loadingScreen10("LoadingScreen_Intro", counter) == "LoadingScreen_Intro", "an Intro screen is kept");
+    // 2. flash image ids: every shipped <movie>_i<hex>.mtb maps to a movie beside it; 1.0 images named after a 3.0 movie
+    for (auto [root, tag] : {std::pair{e10, "1.0"}, std::pair{e30, "3.0"}}) {
+        size_t imgs = 0, orphan = 0, coll = 0;
+        for (auto& d : fs::directory_iterator(root / "flash")) {
+            if (!d.is_directory()) continue;
+            for (auto& sub : fs::directory_iterator(d.path())) {
+                if (!sub.is_directory()) continue;
+                for (auto& f : fs::directory_iterator(sub.path())) {
+                    std::string n = f.path().filename().string();
+                    for (char& c : n) c = (char)tolower((unsigned char)c);
+                    std::string mv = ui::flashImageMovie("flash/" + d.path().filename().string() + "/" + n);
+                    if (mv.empty()) continue;
+                    ++imgs;
+                    std::string stem = mv.substr(mv.rfind('/') + 1);
+                    bool found = fs::exists(sub.path() / (stem + ".gfx"));
+                    for (int s = 0; s <= 5 && !found; ++s)   // the resident startup archives hold full-path members
+                        found = fs::exists(root / (s ? "startup" + std::to_string(s) : std::string("startup")) / "flash" / d.path().filename() / (stem + ".gfx"));
+                    if (!found) { ++orphan; printf("  orphan %s\n", f.path().string().c_str()); }
+                    if (tag[0] == '1') {
+                        fs::path m30 = e30 / "flash" / d.path().filename() / d.path().filename() / (stem + ".gfx");
+                        if (fs::exists(m30)) { ++coll; printf("  1.0 image of a 3.0 movie: %s\n", f.path().string().c_str()); }
+                    }
+                }
+            }
+        }
+        check(orphan == 0, std::string(tag) + ": " + std::to_string(imgs) + " flash images, " + std::to_string(orphan) + " without their movie");
+        if (tag[0] == '1') printf("     1.0 images named after a movie 3.0 ships (uiscope10 keeps 3.0's miss): %zu\n", coll);
+    }
+    check(ui::flashImageMovie("flash/progresslog/progresslog_i1e.mtb") == "flash/progresslog/progresslog" &&
+          ui::flashImageMovie("flash/loadingscreen/loadingscreen_01_i10.mtb") == "flash/loadingscreen/loadingscreen_01" &&
+          ui::flashImageMovie("flash/hud/hud_info.mtb").empty() && ui::flashImageMovie("ui/icons/x_i1.mtb").empty() &&
+          ui::flashMovie("flash/progresslog/progresslog.gfxmanifest") == "flash/progresslog/progresslog",
+          "flash path forms");
+    // 3. FMV: the clip names the player asks for -> 1.0 fmv/PC1 (only via the install, so names only here)
+    check(ui::fmvClip("PC1\\IN_COM_GP") == "IN_COM_GP" && ui::fmvClip("HOH__Info_MrInc.bik") == "HOH__Info_MrInc" &&
+          ui::fmvClip("http://x/y.bik").empty(), "FMV clip names");
+    // 4. tips
+    std::string t30 = slurp(e30 / "data/tips.lua"), t10 = slurp(e10 / "data/tips.lua"), zl;
+    if (argc > 5) zl = slurp(a[5]);
+    zl.erase(std::remove(zl.begin(), zl.end(), '\r'), zl.end());
+    auto isZone = [&](const std::string& k) {
+        std::string lk = "\n" + k + "\n", z = "\n" + zl;
+        for (char& c : lk) c = (char)tolower((unsigned char)c);
+        for (char& c : z) c = (char)tolower((unsigned char)c);
+        return z.find(lk) != std::string::npos;
+    };
+    std::string merged = t30;
+    int k = ui::mergeTips(merged, t10, isZone);
+    std::ofstream(out / "tips.lua", std::ios::binary).write(merged.data(), merged.size());
+    check(k > 0 && merged.compare(0, 12, "TipCounts = ") == 0, "tips: " + std::to_string(k) + " 1.0 records added -> " + (out / "tips.lua").string());
+    std::string again = merged;
+    check(ui::mergeTips(again, t10, isZone) == 0 && again == merged, "tips merge is idempotent");
+    // 5. text: lang/IN re-keyed + the 1.0 lang/main keys no 3.0 english table has
+    std::string in = slurp(e10 / "lang/in/in/english_ntsc_win32.dct"), ids = slurp(e10 / "lang/in/in/stringids_win32.dct");
+    int kept = dct::reseed(in, ids, dct::SEED30);
+    std::unordered_set<uint32_t> have;
+    for (auto& d : fs::directory_iterator(e30 / "lang")) {
+        for (const char* v : {"_win32.dct", "_pc_con.dct"}) {
+            fs::path f = d.path() / d.path().filename() / (std::string("english_ntsc") + v);
+            if (fs::exists(f)) dct::hashes(slurp(f), have);
+        }
+    }
+    std::string before = in;
+    int add = dct::supplement(in, slurp(e10 / "lang/main/main/english_ntsc_win32.dct"), slurp(e10 / "lang/main/main/stringids_win32.dct"), have);
+    dct::Dict d0, d1;
+    dct::load(before, d0);
+    dct::load(in, d1);
+    std::unordered_set<uint32_t> k1;
+    for (auto& x : d1.keys) k1.insert(x.first);
+    bool allIn = true, shadow = false;
+    for (auto& x : d0.keys) allIn &= k1.count(x.first) > 0;
+    for (auto& x : d1.keys) shadow |= have.count(x.first) && std::find_if(d0.keys.begin(), d0.keys.end(), [&](auto& y) { return y.first == x.first; }) == d0.keys.end();
+    check(kept == 2534 && allIn, "lang/IN: " + std::to_string(kept) + " keys re-keyed, all kept after the supplement");
+    check(add > 0 && !shadow && (int)d1.keys.size() == kept + add, "text10: " + std::to_string(add) + " 1.0 lang/main keys added, none a 3.0 key");
+    auto probe = [&](std::string key) {   // the engine's probe (octtest --dct)
+        for (char& c : key) c = (char)tolower((unsigned char)c);
+        uint32_t h = dct::lookup2((const uint8_t*)key.data(), key.size(), dct::u32(in, 8)), ns = dct::u32(in, 0x10);
+        for (uint32_t i = h % ns; dct::u32(in, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (dct::u32(in, 0x20 + 12 * i) == h) return std::string(in.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(in, 0x24 + 12 * i));
+        return std::string();
+    };
+    int tips = 0;
+    for (int i = 1; i <= 28; ++i) { char b[64]; snprintf(b, sizeof(b), "Load_Tips_Incredibles_%.2d", i); tips += !probe(b).empty(); }
+    check(tips == 28, "Load_Tips_Incredibles_01..28 answered: " + std::to_string(tips) + " (e.g. \"" + probe("Load_Tips_Incredibles_01").substr(0, 60) + "\")");
+    std::ofstream(out / "english_ntsc_win32.dct", std::ios::binary).write(in.data(), in.size());
+    printf("%d failed\n", fails);
+    return fails ? 1 : 0;
 }
 
 // octtest --render <1.0 world dir> <render table> <3.0 extract root> <1.0 extract root> <out dir>
@@ -154,6 +267,7 @@ int main(int argc, char** argv)
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
+    if (argc > 4 && std::string(argv[1]) == "--ui") return uiTest(argv, argc);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {

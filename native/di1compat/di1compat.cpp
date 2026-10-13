@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "ui.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,12 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool loadScreen10 = true;        // ui: 1.0's loading-screen choice for zones with 1.0's LoadingScreen key
+    bool uiScope10 = true;           // ui: a flash image is served from 1.0 only to a movie served from 1.0
+    bool fmv10 = true;               // ui: FMVs 3.0 lacks play from the 1.0 install's fmv\PC1
+    bool text10 = true;              // ui: a 1.0 playset table also carries 1.0 lang/main keys no 3.0 table has
+    bool tips10 = true;              // ui: 3.0's data/tips.lua + the 1.0 tip records it lacks
+    bool resident10 = true;          // the 1.0 startup*.zip members are served by their full paths (1.0 loads them resident)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +166,12 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "loadscreen10")) g_cfg.loadScreen10 = atoi(val) != 0;
+        else if (!strcmp(key, "uiscope10")) g_cfg.uiScope10 = atoi(val) != 0;
+        else if (!strcmp(key, "fmv10")) g_cfg.fmv10 = atoi(val) != 0;
+        else if (!strcmp(key, "text10")) g_cfg.text10 = atoi(val) != 0;
+        else if (!strcmp(key, "tips10")) g_cfg.tips10 = atoi(val) != 0;
+        else if (!strcmp(key, "resident10")) g_cfg.resident10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -295,6 +308,28 @@ static bool read30x(const std::string& extract, std::string& out)
     return arc30::readMember(arc, rel.substr(cut + 1), out);
 }
 
+// The key hashes of every 3.0 table of language `lang` (english_ntsc ...: _win32 and _pc_con of each package under
+// <game>\assets\lang), read from the archives once (text10: 3.0's keys are never shadowed).
+static const std::unordered_set<uint32_t>& lang30(const std::string& lang)
+{
+    static std::mutex mx;
+    static std::map<std::string, std::unordered_set<uint32_t>> cache;
+    std::lock_guard<std::mutex> lock(mx);
+    auto it = cache.find(lang);
+    if (it != cache.end()) return it->second;
+    auto& s = cache[lang];
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((g_gameDir + "\\assets\\lang\\*").c_str(), &fd);
+    for (BOOL ok = h != INVALID_HANDLE_VALUE; ok; ok = FindNextFileA(h, &fd)) {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        std::string pkg = fd.cFileName, t;
+        for (const char* v : {"_win32.dct", "_pc_con.dct"})
+            if (read30x("3:lang/" + pkg + "/" + pkg + "/" + lang + v, t)) dct::hashes(t, s);
+    }
+    if (h != INVALID_HANDLE_VALUE) FindClose(h);
+    return s;
+}
+
 // World session: the .oct request transcodes the whole world (its .mtb/.vbuf/.ibuf decisions are coupled), and the
 // engine's next requests for those files are answered from here.
 // 1.0 archive overlay: a 1.0 asset archive also carries files under their full asset paths -- textures/<hash>.tbody,
@@ -306,6 +341,7 @@ static std::mutex g_sessLock;
 static std::map<std::string, std::string> g_served;
 static std::map<std::string, std::string> g_over10;
 static std::set<std::string> g_indexed10;
+static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1.0 (ui: their images may be too)
 static render::Table g_render;
 static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
 static uint8_t* shader10(const char* name, bool create);
@@ -484,6 +520,11 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         int dropped = 0, kept = dct::reseed(t, ids, dct::SEED30, &dropped);
         if (kept < 0) return nullptr;
         note += "+dct(" + std::to_string(kept) + " keys re-hashed, " + std::to_string(dropped) + " unnamed dropped) ";
+        std::string m10, mids, lang = p.substr(sl + 1, (endsWith(path, "_pc_con.dct") ? p.size() - 11 : us) - sl - 1);
+        if (g_cfg.text10 && read10s("lang/main/" + lang + "_win32.dct", m10) && read10s("lang/main/stringids_win32.dct", mids)) {
+            int k = dct::supplement(t, m10, mids, lang30(lang));
+            note += "+text10(" + std::to_string(k) + " 1.0 lang/main keys no 3.0 table has) ";
+        }
         out.swap(t);
         return "dct";
     }
@@ -1256,6 +1297,69 @@ static void __cdecl hkNormPath(char* dst, unsigned size, const char* src)
     g_normPath(dst, size, src);
 }
 
+// ---- ui (ui.hpp) ----
+// 3.0's zone string getter FUN_0139e0b0 (thiscall on the zone manager *0x0225f548: key, zone, a3, default; ret 0x10).
+// Its only "LoadingScreens" reader is the loading-screen choice FUN_00b78c70; a zone whose record carries 1.0's
+// LoadingScreen key (11 1.0 records, 0 of 3.0's: zonelist30) gets 1.0's choice (ui::loadingScreen10) instead of
+// zonereg's LoadingScreens (in-game 2026-10-13: flash/loadingscreen/in/loadingscreen_inc.gfx MISSING).
+typedef const char*(__fastcall* ZoneStrFn)(void* self, void* edx, const char* key, uint32_t zone, uint32_t a3, const char* def);
+static ZoneStrFn g_zoneStr;
+static const char* __fastcall hkZoneStr(void* self, void*, const char* key, uint32_t zone, uint32_t a3, const char* def)
+{
+    if (key && key[0] == 'L' && !strcmp(key, "LoadingScreens")) {
+        const char* k10 = g_zoneStr(self, nullptr, "LoadingScreen", zone, a3, nullptr);
+        if (k10 && *k10) {
+            static std::mutex mx;
+            static int counter;   // 1.0's profile stat LastLoadingScreen; ponytail: per session, 1.0 kept it in the profile
+            static std::string pick;
+            std::lock_guard<std::mutex> lock(mx);
+            pick = ui::loadingScreen10(k10, counter);
+            logf("loading screen: zone %X has 1.0 LoadingScreen=%s -> %s (1.0 rule)", zone, k10, pick.c_str());
+            return pick.c_str();
+        }
+    }
+    return g_zoneStr(self, nullptr, key, zone, a3, def);
+}
+
+// 3.0's FMV path resolver FUN_0067e460 (thiscall: out, size, name; ret 0xc): "FMV\%s.bik" through the asset open ->
+// path length, or 0; FUN_0067e9a0 then BinkOpen()s that path by name. A clip 3.0 lacks resolves to the 1.0 install's
+// loose assets\fmv\PC1\<clip>.bik, opened in place (ui::fmvClip). bink2w32 accepts Bink 1: it compares the header
+// with 'BIKf'..'BIKi' as well as 'KB2f'..'KB2j' (byte search of bink2w32_orig.dll); the 1.0 clips are 'BIKi', and
+// FUN_0067f260 skips 3.0's de-obfuscation for a 'BIK' header.
+typedef int(__fastcall* FmvPathFn)(void* self, void* edx, char* out, uint32_t size, const char* name);
+static FmvPathFn g_fmvPath;
+static int __fastcall hkFmvPath(void* self, void*, char* out, uint32_t size, const char* name)
+{
+    int n = g_fmvPath(self, nullptr, out, size, name);
+    if (n || !g_cfg.install10[0] || !out) return n;
+    std::string clip = ui::fmvClip(name);
+    if (clip.empty()) return n;
+    std::string p = std::string(g_cfg.install10) + "\\assets\\fmv\\PC1\\" + clip + ".bik";
+    if (p.size() >= size || GetFileAttributesA(p.c_str()) == INVALID_FILE_ATTRIBUTES) return n;
+    strcpy_s(out, size, p.c_str());
+    logf("FMV %s: 3.0 has none -> 1.0 %s", clip.c_str(), p.c_str());
+    return (int)p.size();
+}
+
+// data/tips.lua (3.0's, opened as r) + the 1.0 tip records it lacks (ui::mergeTips); a ZoneTipCategories key naming
+// a registered zone (the zone manager's by-name lookup FUN_01391150, thiscall (uint32_t* out, name), ret 8) stays
+// 3.0's. The stream is consumed; the merged (or, failing that, the original) bytes come back as a MemFile.
+typedef void(__fastcall* ZoneByNameFn)(void* self, void* edx, uint32_t* out, const char* name);
+static int* tips30(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5, int* r)
+{
+    std::string t30, t10;
+    if (!readStream(r, t30)) return g_open(path, flags, a3, a4, a5);
+    if (t30.find("ZoneTipCategories") == std::string::npos || !read10s("data/tips.lua", t10)) return memFile(t30.data(), t30.size());
+    void* zm = *(void**)rt(0x0225F548);
+    int k = ui::mergeTips(t30, t10, [&](const std::string& z) {
+        uint32_t id = 0;
+        if (zm) ((ZoneByNameFn)rt(0x01391150))(zm, nullptr, &id, z.c_str());
+        return id != 0;
+    });
+    logf("tips %s: %d 1.0 records added (zone manager %s)", path, k, zm ? "up" : "NOT up: zone keys unchecked");
+    return memFile(t30.data(), t30.size());
+}
+
 static std::string mergeVtxf(const std::string& t30, const std::string& t10);
 static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
 {
@@ -1278,6 +1382,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         ((DtorFn)vt[11])(r, nullptr, 1);
         return g_open(path, flags, a3, a4, a5);
     }
+    if (r && g_cfg.serve10 && g_cfg.tips10 && !(flags & 1) && endsWith(p, "tips.lua")) return tips30(path, flags, a3, a4, a5, r);
     if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
         char line[600];
         int len = sprintf_s(line, "gamedb package open %s, stack:", p);
@@ -1321,7 +1426,13 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         size_t n = 0;
         std::string where;
         missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)" : " (overlay " + over + " unreadable)";
-        void* data = read10(over.empty() ? p : over.c_str(), &n, &where);
+        std::string movie = g_cfg.uiScope10 ? ui::flashImageMovie(np) : "";
+        bool scoped = false;
+        if (!movie.empty()) {
+            std::lock_guard<std::mutex> lock(g_sessLock);
+            if ((scoped = !g_movies10.count(movie))) missWhy = " (image id of a movie not served from 1.0: not served)";
+        }
+        void* data = scoped ? nullptr : read10(over.empty() ? p : over.c_str(), &n, &where);
         // 3.0 registers a language table only with its controller variant <lang>_pc_con.dct beside it, which 1.0
         // never shipped: without one the whole playset table was dropped (in-game 2026-10-13, lang\IN). The WIN32
         // table stands in (same strings).
@@ -1347,6 +1458,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
                 codec = nullptr;
             }
             if (!over.empty()) note += "(archive overlay) ";
+            if (std::string mv = ui::flashMovie(np); !mv.empty()) { std::lock_guard<std::mutex> lock(g_sessLock); g_movies10.insert(mv); }
             r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
             logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
                  codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED");
@@ -1722,6 +1834,16 @@ extern "C" void __stdcall Pentane_Main()
         } else logf("renderdoc: not loaded (%lu)", GetLastError());
     }
     _setmaxstdio(8192);   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
+    // 1.0 loads assets\startup*.zip resident, so their members are seen by full path: startup3 holds
+    // expendables_data/terrainbuildingsexpendables.lua (in-game 2026-10-13: MISSING), startup4 flash/hud/hud_collection.gfx
+    // (the HudPellet screen's movie) and hud_playerinfo.gfx, startup5 var/*.bin. read10 never looked there.
+    if (g_cfg.serve10 && g_cfg.resident10 && g_cfg.install10[0]) {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((std::string(g_cfg.install10) + "\\assets\\startup*.zip").c_str(), &fd);
+        for (BOOL ok = h != INVALID_HANDLE_VALUE; ok; ok = FindNextFileA(h, &fd)) indexZip10(fd.cFileName);
+        if (h != INVALID_HANDLE_VALUE) FindClose(h);
+        logf("resident10: %u full-path members of the 1.0 startup archives indexed", (unsigned)g_over10.size());
+    }
     auto slurpFile = [&](const char* name) {
         std::string text;
         FILE* tf = nullptr;
@@ -1804,6 +1926,12 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
+    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d", g_cfg.loadScreen10, g_cfg.uiScope10, g_cfg.fmv10,
+         g_cfg.text10, g_cfg.tips10);
+    if (g_cfg.serve10 && g_cfg.loadScreen10)
+        hook("zone string field (ui: 1.0 loading screen)", 0x0139E0B0, "83EC08568BF180BEE403000000", (void*)&hkZoneStr, (void**)&g_zoneStr);
+    if (g_cfg.serve10 && g_cfg.fmv10)
+        hook("FMV path (ui: 1.0 clips)", 0x0067E460, "81EC0401000053568BB42418010000", (void*)&hkFmvPath, (void**)&g_fmvPath);
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
