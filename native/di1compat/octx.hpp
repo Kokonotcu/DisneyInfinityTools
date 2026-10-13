@@ -1,7 +1,9 @@
 // .oct transforms that turn a 1.0 world/mission/exploder tuple file into the form the 3.0 reader takes, in memory.
 // Each one is checked against the shipped 3.0 corpus by octtest.exe (strip the 3.0 records, regenerate, compare).
 #pragma once
+#include <cmath>
 #include <map>
+#include <set>
 #include "oct.hpp"
 
 namespace octx {
@@ -708,6 +710,159 @@ inline int collision30(oct::File& f)
         r.pay = k2 + r.pay;
     }
     return added;
+}
+
+// World lighting in 3.0 form (in-world realms, as interiorlight_test / deathstar_throneroom14_1 ship them; light rule
+// from realm30.py, measured on rlm_intro_day which ships in both games). 3.0 ignores the 1.0 RealmDataPool /
+// RealmVolumePool and reads 1.0's string-typed lights as garbage, so in_city lit with the engine default (red/dark,
+// in-game 2026-10-13). In place, no node index moves:
+//   RealmDataPool entry -> its NodeRef node (a Transform) becomes Type RealmData with the entry's fields, NodeRef and
+//     SkyNodeRef = itself, AddToZone 0 for a realm some volume names, else 1 (inside 0 / outside 1 in
+//     interiorlight_test), RotateToGravity / RotateSkipLighting / BlendWithGravity 0;
+//   RealmVolumePool entry -> its NodeRef node (the volume's Geometry) becomes Type RealmVolume: NumRealmNames 1,
+//     RealmNames [realm], ZoneName, InsideSize, VolumeExtents (1.0's, mesh-local), VolumeExtentsNS = VolumeExtents x
+//     the node's scale (pCube205), TypeName, OverrideType, BlendDistance, InRealmFile 0, BlendWithAvatarPos 0;
+//   Light Directional -> LightType 6, LightData [r, g, b, intensity, 0 x6]; Ambient -> 7, [r, g, b, intensity];
+//     FeatureCaps 0; the 1.0 named fields go;
+//   ponytail: Point / Spot lights become plain Transforms (no 1.0/3.0 twin to fit their LightData from; raw 1.0 point
+//     lights broke all VFX before, 2026-10-03) -- fit a rule from paired exploders if local lights matter;
+//   LightRig gains a Uuid after LightRefs; the two 1.0 pools go.
+// Only worlds (a RealmData NodeRef that is a Transform node); realm files have their own rule (realm30.py).
+inline int realm30w(oct::File& f)
+{
+    long np = f.pool("SceneTreeNodePool");
+    if (np < 0) return 0;
+    std::vector<size_t> nodes;
+    for (size_t i = np + 1, end = f.blockEnd(np); i < end; i = f.blockEnd(i))
+        if (f.recs[i].level == 2) nodes.push_back(i);
+    auto entries = [&](const char* pool) {
+        std::vector<std::vector<oct::Rec>> out;
+        long p = f.pool(pool);
+        if (p < 0) return out;
+        for (size_t i = p + 1, end = f.blockEnd(p); i < end; i = f.blockEnd(i))
+            out.emplace_back(f.recs.begin() + i + 1, f.recs.begin() + f.blockEnd(i));
+        return out;
+    };
+    auto field = [&](const std::vector<oct::Rec>& e, const char* n) -> const oct::Rec* {
+        for (auto& r : e) if (r.level == 3 && f.name(r) == n) return &r;
+        return nullptr;
+    };
+    auto rds = entries("RealmDataPool"), rvs = entries("RealmVolumePool");
+    std::map<size_t, std::vector<oct::Rec>> blocks;   // node index -> its new record block
+    std::set<std::string> volumeRealms;
+    for (auto& v : rvs) if (auto r = field(v, "RealmName")) volumeRealms.insert(f.nameValues(*r)[0]);
+    auto nodeField = [&](size_t n, const char* name) -> const oct::Rec* {
+        for (size_t j = nodes[n] + 1, e = f.blockEnd(nodes[n]); j < e; ++j)
+            if (f.recs[j].level == 3 && f.name(f.recs[j]) == name) return &f.recs[j];
+        return nullptr;
+    };
+    auto head = [&](size_t n, const char* type) {   // Node key, NodeName, Uuid, DisplayLayer, Type
+        std::vector<oct::Rec> b = {f.recs[nodes[n]]};
+        for (const char* k : {"NodeName", "Uuid", "DisplayLayer"}) if (auto r = nodeField(n, k)) b.push_back(*r);
+        b.push_back(f.nameScalar(3, f.addName("Type"), type));
+        return b;
+    };
+    auto tail = [&](size_t n, std::vector<oct::Rec>& b) {
+        for (const char* k : {"ParentNodeReferences", "LocalToParentMatrix"}) if (auto r = nodeField(n, k)) b.push_back(*r);
+    };
+    auto typeOf = [&](size_t n) { auto r = nodeField(n, "Type"); return r ? f.nameValues(*r)[0] : std::string(); };
+    int done = 0;
+    bool worldRealms = false;
+    for (auto& e : rds) {
+        auto ref = field(e, "NodeRef");
+        int n = ref ? f.ints(*ref)[0] : -1;
+        if (n <= 0 || n >= (int)nodes.size() || typeOf(n) != "Transform") continue;
+        worldRealms = true;
+        auto b = head(n, "RealmData");
+        tail(n, b);
+        std::string name = field(e, "Name") ? f.nameValues(*field(e, "Name"))[0] : "";
+        if (auto r = field(e, "Name")) b.push_back(*r);
+        b.push_back(f.intScalar(3, "NodeRef", n));
+        b.push_back(f.intScalar(3, "SkyNodeRef", n));
+        for (const char* k : {"SunLightRef", "AmbientRigRef", "SunRigRef", "SceneSettingsRef", "SettingsName", "ZoneName", "RigBlendType",
+                              "SettingsNonDefault", "SunNoDirection", "SunNoColor", "StartWeight", "FollowsCamera", "ParallaxFactor", "GlobalOverride"})
+            if (auto r = field(e, k)) b.push_back(*r);
+        b.push_back(f.intScalar(3, "AddToZone", volumeRealms.count(name) ? 0 : 1));
+        for (const char* k : {"RotateToGravity", "RotateSkipLighting", "BlendWithGravity"}) b.push_back(f.intScalar(3, k, 0));
+        blocks[n] = b;
+        ++done;
+    }
+    if (!worldRealms && rds.size()) return 0;   // a realm file: realm30.py's rule, not this one
+    for (auto& e : rvs) {
+        auto ref = field(e, "NodeRef");
+        int n = ref ? f.ints(*ref)[0] : -1;
+        if (n <= 0 || n >= (int)nodes.size()) continue;
+        auto b = head(n, "RealmVolume");
+        b.push_back(f.intScalar(3, "NumRealmNames", 1));
+        if (auto r = field(e, "RealmName")) b.push_back(nameList(f, 3, "RealmNames", {f.nameValues(*r)[0]}));
+        for (const char* k : {"ZoneName", "InsideSize", "VolumeExtents"}) if (auto r = field(e, k)) b.push_back(*r);
+        if (auto ve = field(e, "VolumeExtents"); ve && ve->pay.size() >= 13) {
+            float x[3], m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            memcpy(x, ve->pay.data() + 1, 12);
+            if (auto mr = nodeField(n, "LocalToParentMatrix"); mr && mr->pay.size() >= 65) memcpy(m, mr->pay.data() + 1, 64);
+            std::vector<float> ns(3);
+            for (int k = 0; k < 3; ++k) ns[k] = x[k] * sqrtf(m[4 * k] * m[4 * k] + m[4 * k + 1] * m[4 * k + 1] + m[4 * k + 2] * m[4 * k + 2]);
+            b.push_back(floatList(f, 3, "VolumeExtentsNS", ns));
+        }
+        for (const char* k : {"TypeName", "OverrideType", "BlendDistance"}) if (auto r = field(e, k)) b.push_back(*r);
+        b.push_back(f.intScalar(3, "InRealmFile", 0));
+        b.push_back(f.intScalar(3, "BlendWithAvatarPos", 0));
+        tail(n, b);
+        blocks[n] = b;
+        ++done;
+    }
+    for (size_t n = 0; n < nodes.size(); ++n) {   // lights
+        if (blocks.count(n) || typeOf(n) != "Light") continue;
+        auto lt = nodeField(n, "LightType");
+        if (!lt || oct::spec(lt->type).kind != oct::NAME) continue;   // already 3.0 (int)
+        std::string kind = f.nameValues(*lt)[0];
+        if (kind == "Directional" || kind == "Ambient") {
+            std::vector<float> data(kind == "Directional" ? 10 : 4, 0.f);
+            if (auto c = nodeField(n, "LightColor"); c && c->pay.size() >= 13) memcpy(data.data(), c->pay.data() + 1, 12);
+            if (auto i = nodeField(n, "LightIntensity"); i && i->pay.size() >= 4) memcpy(&data[3], i->pay.data(), 4);
+            auto b = head(n, "Light");
+            b.push_back(f.intScalar(3, "LightType", kind == "Directional" ? 6 : 7));
+            b.push_back(f.intScalar(3, "FeatureCaps", 0));
+            b.push_back(floatList(f, 3, "LightData", data));
+            if (auto x = nodeField(n, "ExclusionType")) b.push_back(*x);
+            tail(n, b);
+            blocks[n] = b;
+        } else {
+            auto b = head(n, "Transform");
+            tail(n, b);
+            blocks[n] = b;
+        }
+        ++done;
+    }
+    if (!done) return 0;
+    // replace the node blocks, last first (no node is added or removed, so every index stays)
+    for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+        size_t a = nodes[it->first], b = f.blockEnd(a);
+        f.recs.erase(f.recs.begin() + a, f.recs.begin() + b);
+        f.recs.insert(f.recs.begin() + a, it->second.begin(), it->second.end());
+    }
+    // rigs gain a Uuid after LightRefs (FNV-1a of the rig's ordinal: unique within the file, stable)
+    if (long rp = f.pool("LightRigPool"); rp >= 0) {
+        int k = 0;
+        for (size_t i = rp + 1; i < f.blockEnd(rp); i = f.blockEnd(i), ++k) {
+            bool has = false;
+            size_t refs = 0;
+            for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
+                if (f.name(f.recs[j]) == "Uuid") has = true;
+                if (f.name(f.recs[j]) == "LightRefs") refs = j;
+            }
+            if (has || !refs) continue;
+            std::string id(16, '\0');
+            uint64_t h1 = 1469598103934665603ull, h2 = 0x9e3779b97f4a7c15ull;
+            for (int q = 0; q < 4; ++q) { h1 = (h1 ^ (uint8_t)(k >> (8 * q))) * 1099511628211ull; h2 = (h2 ^ (uint8_t)(k >> (8 * q))) * 0x100000001b3ull + 0x52; }
+            memcpy(&id[0], &h1, 8);
+            memcpy(&id[8], &h2, 8);
+            f.recs.insert(f.recs.begin() + refs + 1, blobRec(f, f.recs[refs].level, "Uuid", id));
+        }
+    }
+    f.dropPool("RealmDataPool");
+    f.dropPool("RealmVolumePool");
+    return done;
 }
 
 // Every SubNetwork of the SubNetworkPool; returns how many got counts.

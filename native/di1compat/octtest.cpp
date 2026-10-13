@@ -189,6 +189,7 @@ int main(int argc, char** argv)
         printf("locators redirected: %d\n", octx::locator30(f));
         printf("asset pool added: %d\n", (int)octx::addAssetPool(f));
         printf("collision aggregates added: %d\n", octx::collision30(f));
+        printf("lighting nodes converted: %d\n", octx::realm30w(f));
         printf("subnetworks with counts added: %d\n", octx::addAllCounts(f));
         std::string o = f.write();
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
