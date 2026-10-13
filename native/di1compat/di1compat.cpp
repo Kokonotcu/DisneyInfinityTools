@@ -132,6 +132,7 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +160,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "events10")) g_cfg.events10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -442,6 +444,17 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         out.swap(t);
         return "missiongraph";
     }
+    // a mission (Mission_Data/<playset>/<line>/<name>.lua): presentation events in the 3.0 enum (mission.hpp)
+    if (g_cfg.events10 && endsWith(path, ".lua") && n && ((const char*)data)[0] != 0x1b && norm(path).rfind("mission_data/", 0) == 0 &&
+        !strstr(path, "__")) {
+        std::string t((const char*)data, n);
+        if (t.compare(0, 9, "Mission =") != 0) return nullptr;
+        int k = mission::luaEvents30(t);
+        if (!k) return nullptr;
+        note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
+        out.swap(t);
+        return "mission";
+    }
     if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
         try {
             oct::File f = oct::File::parse(data, n);
@@ -467,8 +480,8 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         mer::Stats st;
         if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
         char buf[200];
-        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped) ",
-                  st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped);
+        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events) ",
+                  st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events);
         note += buf;
         out = isMtc ? mer::mtc(f) : f.write();
         return isMtc ? "mtc" : "mer";
@@ -1739,6 +1752,7 @@ extern "C" void __stdcall Pentane_Main()
          (unsigned)g_render.plans.size());
     octx::g_slack = 4096;   // instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
+    g_mer.events10 = g_cfg.events10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
     if (g_cfg.shaders10) {

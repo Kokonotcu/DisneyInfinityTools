@@ -19,11 +19,13 @@
 //   classes 3.0 does not register (DeliveryNode, Activate/SpawnDecorationSockets + 8 mission classes) would leave
 //               no node slot and shift every later index (verify-meridian claim 6: out-of-bounds link writes), so
 //               until they are ported (MER-3/6) such a node becomes a pinless NodeGroup and its links are dropped.
+//   Event       MissionPresentationList* 'Event' in the 3.0 mission event enum (mission.hpp; Table::events10)
 #pragma once
 #include <map>
 #include <set>
 #include <sstream>
 #include "oct.hpp"
+#include "mission.hpp"
 
 namespace mer {
 
@@ -48,6 +50,7 @@ inline uint32_t lookup2(const std::string& s, uint32_t seed = 0)
 enum { T_BOOL = 0, T_INT = 1, T_FLOAT = 2, T_STRING = 3, T_VEC3 = 4 };
 struct Class { std::set<std::string> pins; std::map<std::string, int> params; };
 struct Table {
+    bool events10 = true;   // presentation Event ints 1.0 -> 3.0 enum (cfg events10)
     std::set<std::string> registered;
     std::map<std::string, Class> classes;
     bool load(const std::string& text)
@@ -131,7 +134,7 @@ inline int typeOf(const oct::File& f, const oct::Rec& r)
     return -1;
 }
 
-struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0; };
+struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0; };
 
 // False (f unchanged) if the file is not a 1.0 graph (already has descriptions, or no node pool).
 inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::string* why = nullptr)
@@ -311,6 +314,11 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             if (type < 0) continue;
             size_t off = val.size();
             if (!encode(f, r, type, val, strs[ns])) continue;
+            if (T.events10 && type == T_INT && pn == "Event" && !n.type.compare(0, 23, "MissionPresentationList")) {
+                int32_t e = mission::presentEvent30((int32_t)oct::u((const uint8_t*)val.data() + off, 4));
+                memcpy(&val[off], &e, 4);
+                ++s.events;
+            }
             done.insert(pn);
             uint8_t tb = (uint8_t)type;
             uint32_t h = lookup2(pn);
