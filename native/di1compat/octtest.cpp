@@ -236,6 +236,45 @@ static int choTimeTest(int argc, char** a)
     return differ ? 1 : 0;
 }
 
+// --cho-time10 <1.0 assets> <3.0 assets>: time30 on each 1.0 choreography twin; its SubNetworks' MinTime/MaxTime
+// (in order) against the 3.0 twin's records
+static int choTime10Test(char** a)
+{
+    auto A = choIndex(a[2]), B = choIndex(a[3]);
+    auto ranges = [](const oct::File& f) {
+        std::vector<std::pair<float, float>> v;
+        for (size_t i = 0; i < f.recs.size(); ++i) {
+            const std::string& n = f.name(f.recs[i]);
+            if (f.recs[i].level == 3 && (n == "MinTime" || n == "MaxTime")) {
+                float x;
+                memcpy(&x, f.recs[i].pay.data(), 4);
+                if (n == "MinTime") v.push_back({x, 0.f}); else if (!v.empty()) v.back().second = x;
+            }
+        }
+        return v;
+    };
+    size_t same = 0, close = 0, differ = 0, none = 0;
+    for (auto& [n, p] : A) {
+        if (!B.count(n)) continue;
+        std::string b = slurp(p), b3 = slurp(B[n]);
+        oct::File f = oct::File::parse(b.data(), b.size()), g = oct::File::parse(b3.data(), b3.size());
+        cho::time30(f);
+        auto x = ranges(f), y = ranges(g);
+        if (x.empty() && y.empty()) { ++none; continue; }
+        bool nearly = x.size() == y.size();
+        for (size_t k = 0; nearly && k < x.size(); ++k)
+            nearly = fabs(x[k].first - y[k].first) < 1e-4 && fabs(x[k].second - y[k].second) < 1e-4;
+        if (x == y) ++same;
+        else if (nearly) ++close;
+        else if (++differ <= 8) printf("differ %s: %zu ranges vs %zu, first %g..%g vs %g..%g\n", n.c_str(), x.size(), y.size(),
+                                       x.empty() ? 0 : x[0].first, x.empty() ? 0 : x[0].second, y.empty() ? 0 : y[0].first,
+                                       y.empty() ? 0 : y[0].second);
+    }
+    printf("time30 on 1.0 twins: %zu equal to 3.0, %zu within 1e-4, %zu differ, %zu with no range in either\n", same, close,
+           differ, none);
+    return 0;
+}
+
 // --cho-clips <pairs.txt>: lines '<1.0 .oct>|<3.0 .oct>' (clip twins); every 1.0 ClipDataBlock through clipBlock30
 // against the 3.0 twin's block in the same position
 static int choClipsTest(char** a)
@@ -504,6 +543,7 @@ int main(int argc, char** argv)
     if (argc > 2 && std::string(argv[1]) == "--cho-file") return choFileTest(argc, argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-corpus") return choFileTest(argc, argv);
     if (argc > 2 && std::string(argv[1]) == "--banm") return banmTest(argv);
+    if (argc > 3 && std::string(argv[1]) == "--cho-time10") return choTime10Test(argv);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {
