@@ -1826,8 +1826,10 @@ extern "C" void __stdcall Pentane_Main()
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
     if (g_cfg.vfx10 && g_cfg.vfxUniversal10) {
+        std::unique_lock<std::mutex> lock(g_sessLock);   // AssetOpen is live already
         for (const char* e : {".particledata", ".mtb"})   // the alias vfxrt::hkPkg loads -> 1.0 particles/universal.zip
             g_over10.emplace(std::string("particles/universal10") + e, std::string("particles/universal/universal") + e);
+        lock.unlock();
         hook("particle package load (vfx)", 0x00672620, "6AFF68????????64A100000000", (void*)&vfxrt::hkPkg, (void**)&vfxrt::g_pkg);
     }
     if (g_cfg.vfxTrace) {

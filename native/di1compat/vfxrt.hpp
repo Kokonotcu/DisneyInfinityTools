@@ -21,9 +21,12 @@ inline uint32_t retVa(void* ra) { return (uint32_t)((uintptr_t)ra - g_base + 0x4
 // 3.0 universal (loaded first, log 2026-10-13: its mesh 0f876eca 10 s before IN_City's package) < 1.0 universal <
 // the zone package, 1.0's order. Key headroom: 3.0's global key table holds 30000 (FUN_00658440; over it every key
 // index of the package becomes 0, FUN_00656c00); 3.0 universal 3398 + 1.0 universal 401 + in_city 1655 keys.
+// Asked again before every 1.0 zone package: FUN_00672620 returns a package already listed under the name's hash,
+// and loads it anew after the non-permanent sweep (flags bit 0 clear: FUN_00661c30 <- FUN_00670090 <- playset
+// teardown FUN_006fd240) dropped it; a load-once latch lost it for the rest of the session.
 typedef uint32_t*(__cdecl* PkgFn)(const char* name, uint32_t flags);
 static PkgFn g_pkg;
-static volatile LONG g_uni10;
+static std::mutex g_uniLock;   // the engine's list lookup + insert is not atomic
 
 static bool only10(const char* leaf)   // particles/<leaf>.zip in the 1.0 install and not in 3.0's
 {
@@ -36,7 +39,8 @@ static uint32_t* __cdecl hkPkg(const char* name, uint32_t flags)
 {
     char n[128];
     safeCopy(n, sizeof(n), name);
-    if (!_strnicmp(n, "particles/", 10) && only10(n + 10) && !InterlockedExchange(&g_uni10, 1)) {
+    if (!_strnicmp(n, "particles/", 10) && only10(n + 10)) {
+        std::lock_guard<std::mutex> lock(g_uniLock);
         uint32_t* u = g_pkg("particles/universal10", flags);
         logf("vfx: 1.0 universal package (particles/universal10) %s before %s", u ? "registered" : "NOT registered", n);
     }
@@ -65,7 +69,7 @@ static bool readable(const void* p, size_t n)
     return (uintptr_t)p + n <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
 }
 
-static void trace(const char* what, uint32_t key, const char* name, const float* pl, uint32_t site)
+static void trace(const char* what, uint32_t key, const char* name, const float* pl, uint32_t site, const char* note = "")
 {
     {
         std::lock_guard<std::mutex> lock(g_traceLock);
@@ -74,8 +78,9 @@ static void trace(const char* what, uint32_t key, const char* name, const float*
     }
     if (!readable(pl, 28)) { logf("vfx spawn %s %08X %s caller %08X placement unreadable", what, key, name, site); return; }
     float x = pl[0], y = pl[1], z = pl[2], w = pl[3];
-    logf("vfx spawn %s %08X %s caller %08X q (%.3f %.3f %.3f %.3f) pos (%.2f %.2f %.2f) up (%.3f %.3f %.3f)", what, key,
-         name, site, x, y, z, w, pl[4], pl[5], pl[6], 2 * (x * y + w * z), w * w - x * x + y * y - z * z, 2 * (y * z - w * x));
+    logf("vfx spawn %s %08X %s caller %08X q (%.3f %.3f %.3f %.3f) pos (%.2f %.2f %.2f) up (%.3f %.3f %.3f)%s", what, key,
+         name, site, x, y, z, w, pl[4], pl[5], pl[6], 2 * (x * y + w * z), w * w - x * x + y * y - z * z, 2 * (y * z - w * x),
+         note);
 }
 
 // effect names hash lower-cased (3.0 FUN_0040bb80 = 1.0 FUN_0040baf0), so a traced name matches the package entry
@@ -106,14 +111,22 @@ static void* __cdecl hkEmitter(const char* name, const float* pl, void* a3, void
 }
 
 // FUN_0066e7f0(name, transform, secondary, ...): an emitter slaved to a transform DataNode (Particle2Emitter's
-// default, Slave = 1 in 5,749 of 5,757 3.0 nodes); the node's Transform value is at +0x34 (FUN_0048d2b0 returns it)
+// default, Slave = 1 in 5,749 of 5,757 3.0 nodes); the node's Transform value is at +0x34. FUN_0048d2b0 refreshes
+// it first when the node's u16 +0x20 differs from its owner's (+0x1c)->+0x20 (and +0x18 is set); the trace only
+// reads, so such a value is logged as 'stale' (the engine's next FUN_0048d2b0 read refreshes it).
 typedef void*(__cdecl* AttachedFn)(const char* name, uint8_t* xf, uint8_t* xf2, void* a4, void* a5, void* a6);
 static AttachedFn g_attached;
 static void* __cdecl hkAttached(const char* name, uint8_t* xf, uint8_t* xf2, void* a4, void* a5, void* a6)
 {
     char n[64];
     safeCopy(n, sizeof(n), name);
-    trace("attached", nameHash(n), n, xf ? (const float*)(xf + 0x34) : nullptr, retVa(_ReturnAddress()));
+    const char* note = "";
+    if (xf && readable(xf + 0x18, 10)) {
+        const uint8_t* o = *(const uint8_t* const*)(xf + 0x1c);
+        if (*(const void* const*)(xf + 0x18) && readable(o + 0x20, 2) && *(const uint16_t*)(xf + 0x20) != *(const uint16_t*)(o + 0x20))
+            note = " stale";
+    }
+    trace("attached", nameHash(n), n, xf ? (const float*)(xf + 0x34) : nullptr, retVa(_ReturnAddress()), note);
     return g_attached(name, xf, xf2, a4, a5, a6);
 }
 

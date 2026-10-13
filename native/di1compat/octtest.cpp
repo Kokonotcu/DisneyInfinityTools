@@ -264,6 +264,24 @@ int main(int argc, char** argv)
         std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
         return 0;
     }
+    // --mtb <render table> <3.0 extract root> <1.0 extract root> <1.0 .mtb> <engine path>: the plugin's serve of a
+    // stand-alone bundle (di1compat.cpp transcode() .mtb case: donors from the engine path's 3.0 folder); a failure
+    // there serves the 1.0 bundle raw
+    if (argc > 6 && std::string(argv[1]) == "--mtb") {
+        render::Table T;
+        if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
+        std::string ext30 = argv[3], ext10 = argv[4], p = argv[6];
+        render::IO io;
+        io.read30 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / q.substr(2)); return !o.empty(); };
+        io.read10 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / q); return !o.empty(); };
+        render::Result r;
+        bool ok = render::transcodeBundle(T, io, slurp(argv[5]), "3:" + p.substr(0, p.find('/') + 1), r);
+        for (auto& pr : r.problems) printf("problem: %s\n", pr.c_str());
+        int n = 0;
+        for (auto& [t, c] : r.tiers) { printf("tier %s %d\n", t.c_str(), c); n += c; }
+        printf("%s: %d materials, %zu 1.0 textures, %zu B\n", ok ? "ok" : "FAILED", n, r.textures10.size(), r.mtb.size());
+        return ok ? 0 : 1;
+    }
     if (argc > 3 && std::string(argv[1]) == "--zip") {   // --zip <1.0 zip> <member>: the plugin's read10 calls
         mz_zip_archive z{};
         if (!mz_zip_reader_init_file(&z, argv[2], 0)) { printf("init FAILED (%s)\n", mz_zip_get_error_string(mz_zip_get_last_error(&z))); return 1; }

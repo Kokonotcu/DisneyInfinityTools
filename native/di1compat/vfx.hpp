@@ -166,12 +166,13 @@ inline bool transcode(const std::string& in, std::string& out, Stats* st = nullp
     return true;
 }
 
-// .p3d mesh 1.0 (8 B vertices) -> 3.0 (12 B: + colour, white = no tint); false if not a 1.0 mesh
+// .p3d mesh 1.0 (8 B vertices) -> 3.0 (12 B: + colour, white = no tint); false if not a 1.0 mesh. 3.0 reads u8
+// indices (count +0x10) right after the vertices (FUN_006587e0 = +0x20 + 12 nv): all 65 1.0 meshes hold them.
 inline bool p3d30(const std::string& in, std::string& out)
 {
     if (in.size() < 0x20 || in.compare(0, 4, "P3D ") || rd32(in, 0x1c) != 8) return false;
     uint32_t nv = rd32(in, 0xc);
-    if (0x20 + 8ull * nv > in.size()) return false;
+    if (0x20 + 8ull * nv + rd32(in, 0x10) > in.size()) return false;
     out = in.substr(0, 0x20);
     wr32(out, 0x1c, 12);
     for (uint32_t i = 0; i < nv; ++i) { out.append(in, 0x20 + 8 * (size_t)i, 8); out.append(4, '\xff'); }
