@@ -1028,6 +1028,29 @@ struct Vo {
 };
 inline Vo vo;
 
+// Lipsync of a 1.0 line. 3.0 FUN_014c5550 opens 'sound/dialog/<lang>/<letters>/<media name>.anno' with the bank's media
+// name (3.0 'MI0024-1' -> enu/mi/mi0024-1.anno); for a 1.0 line that name is the 1.0 subsound name, which is also what
+// 1.0 named its .anno (FUN_00fb8e30: sound/dialog/<lang>/<character>/<subsound>.anno), kept in 1.0's
+// sound/dialog/ENU/<Character>.zip (Edna.zip: ed019_02_kpr-zo55_01-02.anno). The character is the speaker's 1.0 bank's.
+inline bool annoSource(const char* path, std::string& zipRel, std::string& member)
+{
+    std::string p = path ? lower(path) : "";
+    for (char& c : p) if (c == '\\') c = '/';
+    if (p.rfind("sound/dialog/", 0) || p.size() < 18 || p.compare(p.size() - 5, 5, ".anno")) return false;
+    size_t a = p.find('/', 13), b = a == std::string::npos ? a : p.find('/', a + 1);
+    if (b == std::string::npos || b - a < 3 || p.find('/', b + 1) != std::string::npos) return false;
+    uint16_t prefix = (uint16_t)(toupper((uint8_t)p[a + 1]) | toupper((uint8_t)p[a + 2]) << 8);
+    std::lock_guard<std::recursive_mutex> l(vo.mx);
+    auto it = vo.speakers.find(prefix);
+    if (it == vo.speakers.end() || it->second.banks.empty()) return false;
+    std::string c = it->second.banks.front()->file;
+    c = c.substr(0, c.rfind('.'));
+    if (c.size() > 4 && (!_stricmp(c.c_str() + c.size() - 4, "_str") || !_stricmp(c.c_str() + c.size() - 4, "_ram"))) c.resize(c.size() - 4);
+    zipRel = "sound/dialog/ENU/" + c + ".zip";
+    member = p.substr(b + 1);
+    return true;
+}
+
 // ---- engine glue ----
 struct Cfg {
     bool on = true;       // audio10: the FMOD host and the Wwise-seam mirroring

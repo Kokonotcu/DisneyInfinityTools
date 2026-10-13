@@ -325,6 +325,12 @@ static int voTest(char** argv)
     printf("PLAY ED019 media %s sub %d (%s) id %u: duration cb %.0f ms (subsound %u ms), end cb %d after %lu ms\n", found ? "ours" : "NOT FOUND",
            sub, found ? b->idx().subName(sub) : "-", id, dur, ms, ends, (unsigned long)(endAt - t0));
     bad += !found || !id || ends != 1 || dur != (float)ms;
+    // lipsync: the path 3.0 FUN_014c5550 builds from that media name -> 1.0's Edna.zip member (vocheck.py: 19023 of
+    // 19026 subsounds of the 1.0 characters with a zip have theirs)
+    std::string zr, mem, ap = std::string("sound/dialog/enu/ED/") + (found ? b->idx().subName(sub) : "") + ".anno";
+    bool anno = audio::annoSource(ap.c_str(), zr, mem);
+    printf("ANNO %s -> %s : %s\n", ap.c_str(), anno ? zr.c_str() : "-", anno ? mem.c_str() : "-");
+    bad += !anno || zr != "sound/dialog/ENU/Edna.zip";
     printf("VO bad %d\n", bad);
     return bad != 0;
 }

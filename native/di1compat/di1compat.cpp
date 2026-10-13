@@ -1338,6 +1338,13 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             std::string w = std::string(p, strlen(p) - 11) + "_WIN32.dct";
             data = read10(w.c_str(), &n, &where);
         }
+        std::string annoZip, annoMember;   // a 1.0 dialog line's lipsync (audio.hpp annoSource, vo10)
+        if (!data && g_cfg.audio10 && g_cfg.vo10 && audio::annoSource(p, annoZip, annoMember)) {
+            std::lock_guard<std::mutex> lock(g_zipLock);
+            mz_zip_archive* z = zipFor(annoZip);
+            int i = z ? mz_zip_reader_locate_file(z, annoMember.c_str(), nullptr, 0) : -1;
+            if (i >= 0 && (data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) != nullptr) where = annoZip + ":" + annoMember;
+        }
         if (data) {
             indexZip10(where.substr(0, where.find(':')));
             std::string out, note;
