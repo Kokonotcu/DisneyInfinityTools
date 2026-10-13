@@ -215,7 +215,14 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
         std::string asset = last == std::string::npos ? stem : dir.substr(last + 1);
         if (asset.size() > 2 && asset.compare(asset.size() - 2, 2, "_0") == 0 && last == std::string::npos) asset.resize(asset.size() - 2);
         std::string shard = asset.size() >= 2 ? p.substr(0, top) + "/" + asset.substr(0, 2) + "/" + asset + ".zip" : dir + ".zip";
-        std::string zips[4] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard};
+        // a buffer member (<asset>_0.vbuf) lives in its asset's archive in a shared folder too: characters/omnidroid/
+        // omnidroid_pieces.zip holds omnidroid_pieces_0.vbuf (in-game 2026-10-13: 7 1.0 models served without
+        // geometry; read10sim.py: 3,772 of 3,772 characters/ buffers found, 630 before)
+        size_t us = stem.find_last_of('_');
+        std::string bufAsset = us != std::string::npos && us + 1 < stem.size() &&
+                                       stem.find_first_not_of("0123456789", us + 1) == std::string::npos ? stem.substr(0, us) : stem;
+        std::string zips[5] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard,
+                               dir + "/" + bufAsset + ".zip"};
         for (auto& zr : zips) {
             mz_zip_archive* z = zipFor(zr);
             if (!z) continue;
