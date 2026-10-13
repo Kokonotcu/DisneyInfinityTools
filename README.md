@@ -170,11 +170,27 @@ converted-copy approach). Research and roadmap: `D:\DI-Extract\_research\PLAN.md
      showed FUN_00b83b90 resetting the selection to none every frame: the PC virtual reader remembers a character
      per playset only for 3.0's four (FUN_00b7f910) -> **hook**: a playset without a slot keeps the selection (the
      flow's own Gateway[sku].playset check still applies; Gateway.lua lists Incredibles for the 1.0 figures)
-  13. **now**: no popup; figure check passes for 1000001; actor av_mrincredible_ps creation starts (bundle, model,
-     sound banks) but never completes -- retried about every 60 s, player stays AV_Proxy at 0,0,0, screen black.
-     Next: why creation stalls (compare a native playset after its intro; the 1.0 start positions via .mer are
-     still missing). Trace hooks (cfg trace=1): actor registry, figure check, Gateway playset, reader list/gate,
-     `watch(addr)` write watchpoint. Fit scripts of steps 8-12: `_research/scratch/impl-2026-10-12`.
+  13. -> no popup; figure check passes; av_mrincredible_ps creation starts but never completes (retried ~60 s).
+     Found on the way: 1.0 archives carry their entity's motions under full asset paths -> **archive overlay**
+     (every 1.0 archive served from gets its full-path members indexed; 292 files from it); 1.0 clips -> **clip30**
+     (External, MinTime/MaxTime from ClipDataBlock, all-static header partition; 2,995/2,995 shipped clips)
+  14. -> the world graph was never loaded: 3.0 builds '<name>.mer' only for an .oct with an AssetPool
+     (FUN_0077cb60 / FUN_0076c100) -> **AssetPool** from the 1.0 asset associations (pieces with SubNetworkRef -1
+     left out, as the 3.0 inc_phonebooth twin) + **Meridian transcode** (`mer.hpp`, `mertable.py` ->
+     di1compat_mer.txt): parameters into Mer_ParameterDescription/ParameterValues/ParameterStrings, pins on every
+     instance, links v3, RootNodeCount, stand-ins for the 3 unregistered classes; .mtc rebuilt. in_city.mer/.mtc/.ap
+     and the 4 mission graphs now load. Static DataNodes made variable outside all-static graphs (instancing
+     relocates header node pointers: crash in FUN_004b4470 fixed).
+  15. **now**: AV instancing a 1.0 prop's 'Anchor' (DNA Geometry component -> FUN_007734f0 -> FUN_004ff0e0 ->
+     FUN_004f5900 at 0x4f5a13: the instance header's +0xc handle resolves NULL during the clone). The transcoded
+     inc_phonebooth SubNetwork equals its 3.0 twin record for record (except an empty ProcessorNodePool); the file
+     differs in the scene tree (1.0 keeps debris piece_1..7 Geometry nodes at the root, 3.0 moved them to
+     inc_phonebooth_debris) and associations. Next: find which header's +0xc dies (live breakpoint at 0x4f5a25,
+     eax==0, or a trace on FUN_004b4610 writes), then the remaining graph-runtime issues.
+     The plugin logs the first access violation with a call-site-validated stack ("ACCESS VIOLATION ... stack:").
+     Trace hooks (cfg trace=1): actor registry, figure check, Gateway playset, reader list/gate, playset figure
+     slot, asset instancing, SubNetwork instance guard, header clone, `watch(addr)`. Fit scripts:
+     `_research/scratch/impl-2026-10-12`.
 
 ## Next (needs the game running)
 1. **Rebuild and launch Metroville** with the rules above (`native30.py ... --dry` first; `diffworld.py` against

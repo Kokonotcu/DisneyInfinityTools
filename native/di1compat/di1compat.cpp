@@ -697,6 +697,31 @@ static int __fastcall hkInst(void* self, void*, uint32_t p1, uint32_t root, int 
     return g_inst(self, nullptr, p1, root, no);
 }
 
+// Trace: instance header clone FUN_004f5900(index, a2, delta, instRoot) (thiscall on the instance header, ret 0x10).
+// When the copy's parent handle (+4) does not resolve but the template's does, log both headers and the name.
+typedef void(__fastcall* HdrCloneFn)(void* self, void* edx, uint32_t index, uint32_t a2, int delta, uint32_t instRoot);
+static HdrCloneFn g_hdrClone;
+static volatile LONG g_hdrLogged;
+static void __fastcall hkHdrClone(void* self, void*, uint32_t index, uint32_t a2, int delta, uint32_t instRoot)
+{
+    typedef void*(__fastcall * ResolveFn)(void* handleField, void* edx);
+    ResolveFn res = (ResolveFn)rt(0x004B46D0);
+    uint32_t* inst = (uint32_t*)self;
+    uint32_t* tmpl = (uint32_t*)((char*)self - delta);
+    void* pi = res(inst + 3, nullptr);   // +0xc: resolved without a NULL check at 0x4f5a13
+    if (!pi && InterlockedIncrement(&g_hdrLogged) <= 4) {
+        void* pt = nullptr;
+        char name[80] = "?";
+        __try {
+            pt = res(tmpl + 3, nullptr);
+            if (tmpl[0]) safeCopy(name, sizeof(name), (const char*)(tmpl[0] + 0xc));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        logf("header clone %u '%s' (instRoot %08X): instance %p [%08X %08X %08X %08X %08X], template %p [%08X %08X %08X %08X %08X] +0xc -> %p, delta %d",
+             index, name, instRoot, self, inst[0], inst[1], inst[2], inst[3], inst[4], tmpl, tmpl[0], tmpl[1], tmpl[2], tmpl[3], tmpl[4], pt, delta);
+    }
+    g_hdrClone(self, nullptr, index, a2, delta, instRoot);
+}
+
 // The open half: a .lua stream (3.0's own or served from 1.0) -> CHD bytes. nullptr leaves the open as it was.
 static int* chdForLua(const char* p, int* r)
 {
@@ -907,6 +932,7 @@ extern "C" void __stdcall Pentane_Main()
         hook("playset figure slot (trace)", 0x00DF9FD0, "6AFF68????????64A100000000", (void*)&hkIgpName, (void**)&g_igpName);
         hook("asset instance (trace)", 0x007734F0, "6AFF68????????64A100000000", (void*)&hkAssetInst, (void**)&g_assetInst);
         hook("SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst, (void**)&g_inst);
+        hook("header clone (trace)", 0x004F5900, "5153555657", (void*)&hkHdrClone, (void**)&g_hdrClone);
     }
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
