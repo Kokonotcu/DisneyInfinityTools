@@ -135,6 +135,7 @@ static struct {
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (audio.hpp)
     bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
+    bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
     bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
 } g_cfg;
 
@@ -165,6 +166,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "audio10")) g_cfg.audio10 = atoi(val) != 0;
         else if (!strcmp(key, "music10")) g_cfg.music10 = atoi(val) != 0;
+        else if (!strcmp(key, "vo10")) g_cfg.vo10 = atoi(val) != 0;
         else if (!strcmp(key, "audiotrace10")) g_cfg.audioTrace10 = atoi(val) != 0;
     }
     fclose(f);
@@ -1814,6 +1816,7 @@ extern "C" void __stdcall Pentane_Main()
     if (g_cfg.audio10 && g_cfg.install10[0]) {
         audio::logfn = logf;
         audio::cfg.music = g_cfg.music10;
+        audio::cfg.vo = g_cfg.vo10;
         audio::cfg.trace = g_cfg.audioTrace10;
         if (!audio::install(hook, rt, g_cfg.install10, g_gameDir)) logf("audio10: off (FMOD host failed)");
     }

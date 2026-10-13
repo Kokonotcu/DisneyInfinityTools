@@ -241,11 +241,100 @@ static int fmodTest(int argc, char** argv)
     return 0;
 }
 
+// octtest --vo <1.0 install> <out dir>  vo10 offline acceptance (audio.hpp), real FMOD DLLs, no output:
+//  DLG   every 1.0 DLG v11 script through dlgTranscode -> <out>\<name>.dlg30 (vocheck.py resolves every 1.0 line and
+//        named entry through the 3.0 tables and compares with the 1.0 file read on its own)
+//  NAME  every 1.0 dialog bank opened as 1.0 opens it (subsound count == .name), its 3.0-layout bank built, every line
+//        and variant resolved through 3.0's reader (FUN_0182bf80 / FUN_0182c000 / FUN_0182d2f0, ported here) down to
+//        the media record the post hook reads (vocheck.py compares with the .name read by 1.0's rule, FUN_01132360)
+//  PLAY  ED019 through the post hook's path: Edna.fev's dialog_edna with the subsound as programmer sound; AK_Duration
+//        and AK_EndOfEvent as 3.0's callback LAB_01830120 takes them
+static int voTest(char** argv)
+{
+    namespace fs = std::filesystem;
+    audio::logfn = stdoutLog;
+    std::string inst = argv[2], outDir = argv[3];
+    if (!audio::g.init(inst, true)) return 1;
+    audio::vo.dir10 = inst + "\\assets\\sound\\dialog\\ENU";
+    audio::vo.buildEvNames(audio::g.sound10);
+    int bad = 0;
+    for (auto& e : fs::directory_iterator(inst + "\\assets\\sound\\dialog")) {
+        if (e.path().extension() != ".dlg") continue;
+        std::string file = e.path().filename().string();
+        std::vector<uint8_t> in, out;
+        audio::slurp(e.path().string(), in);
+        uint32_t ver = in.size() >= 4 ? *(uint32_t*)in.data() : 0;
+        if (ver != 11) { printf("DLG %s skipped (v%u)\n", file.c_str(), ver); continue; }
+        audio::DlgStats st;
+        std::string err;
+        bool ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err);
+        bad += !ok;
+        printf("DLG %s %s classes %d lines %d dup %d ranges %d named %d events %d unresolved %d %s\n", file.c_str(), ok ? "ok" : "FAIL",
+               st.classes, st.lines, st.dupLines, st.ranges, st.named, st.events, st.unresolved, err.c_str());
+        if (ok) std::ofstream(outDir + "\\" + e.path().stem().string() + ".dlg30", std::ios::binary).write((const char*)out.data(), out.size());
+    }
+    auto mediaOf = [](const uint8_t* d, uint32_t m) {   // FUN_0182c000 / FUN_0182d2f0's view of media m
+        return (const uint32_t*)(d + 0x20 + ((size_t)*(const uint16_t*)(d + 0x14) + (size_t)m * 3) * 4);
+    };
+    for (auto& e : fs::directory_iterator(audio::vo.dir10)) {
+        if (e.path().extension() != ".fsb") continue;
+        std::string file = e.path().filename().string();
+        audio::DlgBank* b = audio::vo.open(file);
+        if (!b) { printf("BANK %s FAIL\n", file.c_str()); ++bad; continue; }
+        std::vector<uint8_t> h = audio::dbnkFromName10(b->idx().prefix(), {b});
+        const uint8_t* d = h.data();
+        uint16_t lo = *(const uint16_t*)(d + 0x10), hi = *(const uint16_t*)(d + 0x12);
+        int lines = 0;
+        for (uint32_t l = lo; l <= hi; ++l) {
+            const uint8_t* le = d + 0x20 + (l - lo) * 4;
+            if (*(const int32_t*)le == -1) continue;
+            ++lines;
+            for (int v = 0; v < (le[1] > 1 ? le[1] : 1); ++v) {   // FUN_0182bf80's random pick, enumerated
+                const uint32_t* me = mediaOf(d, *(const uint16_t*)(le + 2) + v);
+                bool inMem = *(const uint32_t*)(d + 0x18) > me[1] && me[2] == 8;
+                const uint32_t* rec = (const uint32_t*)(d + me[1]);
+                bool ok = inMem && me[0] && (audio::DlgBank*)(uintptr_t)rec[0] == b && rec[1] < b->idx().subs();
+                bad += !ok;
+                printf("NAME %s %c%c%03u %d %s %u %s\n", file.c_str(), d[8], d[9], l, v, me[0] ? (const char*)d + me[0] : "-", rec[1], ok ? "ok" : "BAD");
+            }
+        }
+        printf("BANK %s ok prefix %c%c lines %d subsounds %u header %u B\n", file.c_str(), d[8], d[9], lines, b->idx().subs(), (unsigned)h.size());
+        audio::vo.unload(file);
+    }
+    audio::g.load("Edna.fev");
+    if (!audio::vo.load("Edna_str.fsb")) { printf("PLAY no Edna_str.fsb\n"); return 1; }   // vo.mgr null: no registry step
+    const uint8_t* d = audio::vo.speakers[audio::vo.banks["edna_str.fsb"]->idx().prefix()].hdrs.back()->data();
+    const uint8_t* le = d + 0x20 + (19 - *(const uint16_t*)(d + 0x10)) * 4;
+    const uint32_t* me = mediaOf(d, *(const uint16_t*)(le + 2));
+    audio::DlgBank* b = nullptr;
+    int sub = -1;
+    bool found = audio::vo.media(d + me[1], &b, &sub);
+    static float dur = -1;
+    static int ends = 0;
+    static DWORD endAt = 0;
+    audio::AkCallback cb = [](uint32_t type, void* info) {
+        if (type == 8) dur = ((float*)info)[4];
+        if (type == 1) { ++ends; endAt = GetTickCount(); }
+    };
+    DWORD t0 = GetTickCount();
+    uint32_t id = found ? audio::g.playLine(audio::fnv1("dialog_edna"), 7, 1 | 4 | 8, (void*)cb, nullptr, b->snd, sub) : 0;
+    for (int t = 0; t < 20000 && !ends; t += 16) { Sleep(16); audio::tickAndDeliver(); }
+    unsigned ms = 0;
+    void* s = nullptr;
+    if (b && b->snd && !audio::g.f.Sound_GetSubSound(b->snd, sub, &s) && s) audio::g.f.Sound_GetLength(s, &ms, 1);
+    printf("PLAY ED019 media %s sub %d (%s) id %u: duration cb %.0f ms (subsound %u ms), end cb %d after %lu ms\n", found ? "ours" : "NOT FOUND",
+           sub, found ? b->idx().subName(sub) : "-", id, dur, ms, ends, (unsigned long)(endAt - t0));
+    bad += !found || !id || ends != 1 || dur != (float)ms;
+    printf("VO bad %d\n", bad);
+    return bad != 0;
+}
+
 int main(int argc, char** argv)
 {
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 3 && std::string(argv[1]) == "--fmod") return fmodTest(argc, argv);
+    if (argc > 3 && std::string(argv[1]) == "--vo") return voTest(argv);
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
