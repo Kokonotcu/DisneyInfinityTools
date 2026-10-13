@@ -148,9 +148,29 @@ converted-copy approach). Research and roadmap: `D:\DI-Extract\_research\PLAN.md
      entry strings of IncrediblesDataMap into 3.0 path forms, chunk rewritten by `luachunk.hpp`; lupa loads it)
   7. -> 1.0 characters with default data + base links -> OCT-1 extended (DefaultDataSize, BaseDataNodeLinksCount /
      AdditionalSize, links converted; `octtest --counts` 4,305/4,305; the 1.0 inc_phonebooth == 3.0's twin)
-  8. **now**: 1.0 character rigs WITH processors (inc_delivery_box: 15 processor types, Rotor/Scale/... DataNodes,
-     components) -> NULL basis conversion again: OCT-1 needs the processor-graph rule (per-type sizes for VAS32/64,
-     component/variant counts) fitted on the 3.0 character corpus.
+  8. -> 1.0 character rigs WITH processors (inc_delivery_box) -> NULL basis conversion -> **OCT-1 for processor
+     graphs** (`octx.hpp`): content counts exact on 7,129/7,129 shipped 3.0 processor/constant graphs (Basis,
+     BasisConversion, ProcessorNode, ComponentFamily/Member, VariantGroup/Member, LayerBind; headers all variable,
+     ConstantHeaderCount/ConstantLayoutCount 0 -- FUN_004fe4d0 builds header tables independent of Static); arena
+     sizes as upper bounds (FUN_004b4970 sums count*(align-1)+size per capability key; arenas grow / DataNodes fall
+     back to the heap; bound >= shipped on 7,129/7,129); DefaultDataSize = floor4(DefaultData + DefaultDataIndices
+     payloads) 1,516/1,518. All 1.0-only processor types are registered in 3.0 (FUN_00501670).
+  9. -> particles/IN_City.mtb raw -> int3 in Shader_LookupCrc -> **standalone bundle transcode**
+     (`render::transcodeBundle`: 207/233 materials real by GUID, generic donors limited to 3.0 particle bundles;
+     world path byte-identical after the refactor)
+  10. -> playset avatars inc_*_ps.bent 4.1 rejected by the "4.1f" gate FUN_0076fb50 -> **.bent codec** (`bent.hpp`,
+     NPC-4): FileSets/Layouts flattened to Model{Filename,Channels}/Files sorted, paths resolved; over 583 1.0 .bent:
+     1 model / 1 instance each, Type follows the extension, non-default Base ConnectionMaps go onto their Channel
+     (FUN_00787200 reads it there). inc_bob vs 3.0's: 352/361 shared Files resolve to the same motion
+  11. -> RumpusData AV (DBFileLoader_Callback_CHD fed rumpusdata.lua) -> **CHD compiler** (`chd.hpp`, port of
+     chd.py, 29/30 exact = the Python result) + hook on FUN_018db450: the .lua opened during that call is compiled
+     to CHD (path marker is process-wide: the engine opens it on another thread)
+  12. **now**: IN_City loads, 0 exceptions, avatar spawned as AV_Proxy + "Missing Disney Infinity Figure".
+     Measured (trace hook on FUN_00751750): AV_MrIncredible_PS resolves (exists), then _ProxyAvatar -- the same
+     sequence as a native 3.0 playset (EMP_Tatooine_Tutorial + Luke: EMP_Luke_PS then _ProxyDrivingAvatar). The
+     IGPGameFlow ctor sets proxy mode (DAT_0225f540+0x9a = 1) for every playset; the reader figure then replaces the
+     proxy. Differences vs the control: Players_GetAvatarLevel -1 (control 0), UI_GetAvatarVersion 1 (control 3).
+     Fit scripts of this step: `_research/scratch/impl-2026-10-12`.
 
 ## Next (needs the game running)
 1. **Rebuild and launch Metroville** with the rules above (`native30.py ... --dry` first; `diffworld.py` against

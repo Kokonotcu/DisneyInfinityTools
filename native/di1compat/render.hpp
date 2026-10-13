@@ -320,10 +320,12 @@ inline int32_t rendercaps30(int32_t v)
     return (v & 0xfff) | ((v & 0x1000) ? 0x200 : 0) | ((v & 0x2000) ? 0x400 : 0);
 }
 
-// Materials, vertices and the .oct primitive records of one 1.0 world. stem = 'in_city'; f = the 1.0 .oct (edited
-// in place); mtb10/vbuf10/ibuf10 = the 1.0 files. Returns false with r.problems if a material cannot be placed.
-inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std::string& stem, const std::string& mtb10,
-                           const std::string& vbuf10, const std::string& ibuf10, Result& r)
+// The material half (autobundle.resolve): the 1.0 bundle's materials onto 3.0 shaders -> r.mtb, r.textures10.
+// drawn: material -> the 1.0 vformats it is drawn with (the generic tier needs a shader taking a twin of each);
+// donorPrefix: generic donors only from 3.0 bundles whose extract path starts with it ("" = any);
+// shaderVf: material -> the vformats its final shader declares.
+inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& mtb10, const std::map<int, std::set<uint32_t>>& drawn,
+                               const std::string& donorPrefix, Result& r, std::map<int, const std::set<uint32_t>*>& shaderVf)
 {
     auto sizes3 = [&](const std::string& sh, int& A, int& B, int& slots) {
         auto it = T.shaders.find(sh);
@@ -348,22 +350,6 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     Bundle b10;
     if (!parseBundle(mtb10, b10, 4, sizes1, &err)) { r.problems.push_back("1.0 bundle: " + err); return false; }
 
-    // primitives: (MaterialReference, vformatCRC) per primitive in record order (autobundle.prim_pairs)
-    std::map<uint32_t, std::set<int>> users;
-    std::map<int, std::set<uint32_t>> drawn;
-    {
-        int ref = -1;
-        for (auto& rec : f.recs) {
-            const std::string& n = f.name(rec);
-            if (n == "MaterialReference") ref = f.ints(rec)[0];
-            else if (n == "vformatCRC") {
-                uint32_t crc = (uint32_t)f.ints(rec)[0];
-                users[crc].insert(ref);
-                drawn[ref].insert(crc);
-            }
-        }
-    }
-
     std::map<std::string, Bundle> cache30;
     auto bundle30 = [&](const Ref& ref, Bundle*& out) {
         auto it = cache30.find(ref.extract);
@@ -381,7 +367,6 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     };
 
     std::vector<Src> srcs;
-    std::map<int, const std::set<uint32_t>*> shaderVf;   // material -> vformats its final shader declares
     for (size_t k = 0; k < b10.mats.size(); ++k) {
         const Material& m10 = b10.mats[k];
         Bundle* bnd = nullptr;
@@ -410,6 +395,7 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
                 for (auto& [sh, ref] : T.donors) {
                     auto si = T.shaders.find(sh);
                     if (si == T.shaders.end() || si->second.slots < 1) continue;
+                    if (ref.extract.compare(0, donorPrefix.size(), donorPrefix)) continue;
                     bool ok = true;
                     for (auto& c : need) {
                         bool any = false;
@@ -483,6 +469,38 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     }
     for (auto& t : tex) r.textures10.insert(hex8(t));
     r.mtb = buildBundle(tex, mats);
+    return true;
+}
+
+// A material bundle without geometry of its own (particles/<x>.mtb): materials only, generic donors from donorPrefix.
+inline bool transcodeBundle(const Table& T, const IO& io, const std::string& mtb10, const std::string& donorPrefix, Result& r)
+{
+    std::map<int, const std::set<uint32_t>*> vf;
+    return transcodeMaterials(T, io, mtb10, {}, donorPrefix, r, vf);
+}
+
+// Materials, vertices and the .oct primitive records of one 1.0 world. stem = 'in_city'; f = the 1.0 .oct (edited
+// in place); mtb10/vbuf10/ibuf10 = the 1.0 files. Returns false with r.problems if a material cannot be placed.
+inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std::string& stem, const std::string& mtb10,
+                           const std::string& vbuf10, const std::string& ibuf10, Result& r)
+{
+    // primitives: (MaterialReference, vformatCRC) per primitive in record order (autobundle.prim_pairs)
+    std::map<uint32_t, std::set<int>> users;
+    std::map<int, std::set<uint32_t>> drawn;
+    {
+        int ref = -1;
+        for (auto& rec : f.recs) {
+            const std::string& n = f.name(rec);
+            if (n == "MaterialReference") ref = f.ints(rec)[0];
+            else if (n == "vformatCRC") {
+                uint32_t crc = (uint32_t)f.ints(rec)[0];
+                users[crc].insert(ref);
+                drawn[ref].insert(crc);
+            }
+        }
+    }
+    std::map<int, const std::set<uint32_t>*> shaderVf;   // material -> vformats its final shader declares
+    if (!transcodeMaterials(T, io, mtb10, drawn, "", r, shaderVf)) return false;
 
     // (material, 1.0 vformat) -> the first 3.0 target that material's shader takes
     std::map<std::pair<int, uint32_t>, uint32_t> vmap;

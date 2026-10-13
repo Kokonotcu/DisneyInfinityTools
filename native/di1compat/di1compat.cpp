@@ -16,6 +16,8 @@
 #include <string>
 #include "minhook/MinHook.h"
 #include "octx.hpp"
+#include "bent.hpp"
+#include "chd.hpp"
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
@@ -364,6 +366,41 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
             return nullptr;
         }
     }
+    // an entity description (.bent 4.1 -> 4.1f, bent.hpp, NPC-4): characters, playset avatars, choreographies
+    if (endsWith(path, ".bent") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
+        oct::File f = oct::File::parse(data, n);
+        std::string why;
+        if (!bent::transcode(f, norm(path), &why)) { note += "bent: " + why + " "; return nullptr; }
+        out = f.write();
+        return "bent";
+    }
+    // a material bundle outside any asset session (particles/<x>.mtb): its materials onto 3.0 shaders, generic donors
+    // from the same 3.0 asset family (in-game 2026-10-12: raw particles/IN_City.mtb -> int3 in Shader_LookupCrc)
+    if (endsWith(path, ".mtb") && n >= 4 && !memcmp(data, "BNDL", 4)) {
+        if (!g_renderOk) { note += "render table missing "; return nullptr; }
+        std::string p = norm(path);
+        render::IO io;
+        io.read30 = read30x;
+        io.read10 = read10s;
+        render::Result r;
+        if (!render::transcodeBundle(g_render, io, std::string((const char*)data, n), "3:" + p.substr(0, p.find('/') + 1), r)) {
+            for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
+            note += "render FAILED ";
+            return nullptr;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_sessLock);
+            g_served[p] = r.mtb;   // the engine reopens bundles; transcode once
+        }
+        std::string zip = zip10For(p);
+        if (!zip.empty()) indexTextures10(zip);
+        char buf[160];
+        sprintf_s(buf, "+materials(real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["real"], r.tiers["same-sh"],
+                  r.tiers["generic"], (unsigned)r.textures10.size());
+        note += buf;
+        out = r.mtb;
+        return "mtb";
+    }
     // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
     if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
         int k = luachunk::rewrite(std::string((const char*)data, n), out, datamap::normalise);
@@ -383,20 +420,84 @@ static bool memtestMatch(const char* p)
     return false;
 }
 
-// Reads a whole engine stream through the Genie::File interface (+0x10 size, +0x14 read, +0x2c destroy) and
-// returns a MemFile copy; the original stream is destroyed.
-static int* copyToMemFile(int* s, size_t* outSize)
+// Reads a whole engine stream through the Genie::File interface (+0x10 size, +0x14 read, +0x2c destroy); the
+// stream is destroyed. False if the read came up short.
+static bool readStream(int* s, std::string& buf)
 {
     typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
     typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
     typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
     void** vt = *(void***)s;
     uint32_t n = ((SizeFn)vt[4])(s, nullptr);
-    std::string buf(n, '\0');
+    buf.assign(n, '\0');
     uint32_t got = ((ReadFn)vt[5])(s, nullptr, &buf[0], n);
     ((DtorFn)vt[11])(s, nullptr, 1);
-    *outSize = got;
-    return got == n ? memFile(buf.data(), n) : nullptr;
+    buf.resize(got);
+    return got == n;
+}
+
+// ... and returns a MemFile copy of it.
+static int* copyToMemFile(int* s, size_t* outSize)
+{
+    std::string buf;
+    bool ok = readStream(s, buf);
+    *outSize = buf.size();
+    return ok ? memFile(buf.data(), buf.size()) : nullptr;
+}
+
+// GameDB CHD-only callback loaders (DBFileLoader_Callback_CHD::load, FUN_018db450 -- RumpusData, FUN_00f63e70) given
+// a 1.0 .lua table: the file opened during that call is the table compiled to CHD (chd.hpp), not its Lua text
+// (which the CHD parser reads as a wild pointer: in-game 2026-10-12 AV in FUN_01824810 after rumpusdata.lua).
+// thiscall, three stack arguments (ret 0xc), as the dispatcher FUN_018da710 calls vtable[1]
+typedef uint8_t(__fastcall* ChdLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
+static ChdLoadFn g_loadChdCallback;
+// the path whose next open compiles to CHD; process-wide because the engine opens files on other threads
+static std::mutex g_chdLock;
+static std::string g_chdPath;
+static bool takeChdPath(const char* p)
+{
+    std::lock_guard<std::mutex> lock(g_chdLock);
+    return !g_chdPath.empty() && norm(p) == g_chdPath;
+}
+static uint8_t __fastcall hkLoadChdCallback(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
+{
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    if (!endsWith(p, ".lua")) return g_loadChdCallback(self, nullptr, path, a2, a3);
+    { std::lock_guard<std::mutex> lock(g_chdLock); g_chdPath = norm(p); }
+    uint8_t r = g_loadChdCallback(self, nullptr, path, a2, a3);
+    { std::lock_guard<std::mutex> lock(g_chdLock); g_chdPath.clear(); }
+    logf("gamedb CHD callback loader given %s -> %u", p, r);
+    return r;
+}
+
+// Trace only: the actor registry's "does <name> exist" (FUN_00751750, thiscall, ret 4), which the playset avatar
+// choice FUN_013a4250 asks for <avatar> + avatarSuffix, then <avatar>, before taking FallbackAvatar.
+typedef uint8_t(__fastcall* ActorExistsFn)(void* self, void* edx, const char** name);
+static ActorExistsFn g_actorExists;
+static uint8_t __fastcall hkActorExists(void* self, void*, const char** name)
+{
+    uint8_t r = g_actorExists(self, nullptr, name);
+    char n[200];
+    safeCopy(n, sizeof(n), name && *name ? *name : "(null)");
+    logf("actor exists? %s -> %u", n, r);
+    return r;
+}
+
+// The open half: a .lua stream (3.0's own or served from 1.0) -> CHD bytes. nullptr leaves the open as it was.
+static int* chdForLua(const char* p, int* r)
+{
+    std::string src;
+    if (r) { if (!readStream(r, src)) return memFile(src.data(), src.size()); }
+    else if (!read10s(norm(p), src)) return nullptr;
+    try {
+        std::string c = chd::compile(chd::lua(src));
+        logf("compiled %s %u B -> CHD %u B (%s)", p, (unsigned)src.size(), (unsigned)c.size(), r ? "3.0 file" : "1.0 file");
+        return memFile(c.data(), c.size());
+    } catch (std::exception& e) {
+        logf("CHD compile of %s failed: %s; served as it is", p, e.what());
+        return memFile(src.data(), src.size());
+    }
 }
 
 // GameDB tables (plan PS-4). 3.0's DataMaps point its locks / inventory loaders at compiled .chd files and the
@@ -471,6 +572,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     int* r = g_open(path, flags, a3, a4, a5);
     char p[300];
     safeCopy(p, sizeof(p), path);
+    if (!(flags & 1) && endsWith(p, ".lua") && takeChdPath(p)) return chdForLua(p, r);
     if (r && g_cfg.memtest[0] && !(flags & 1) && memtestMatch(p)) {
         size_t n = 0;
         r = copyToMemFile(r, &n);
@@ -563,6 +665,8 @@ extern "C" void __stdcall Pentane_Main()
     hook("AssetOpen", 0x0041CB10, "6AFF68????????", (void*)&hkOpen, (void**)&g_open);
     hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
     hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
+    hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
+    if (g_cfg.trace) hook("actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
 }

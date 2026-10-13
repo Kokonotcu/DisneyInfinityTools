@@ -82,10 +82,24 @@ inline int convertLink(oct::File& f, size_t link)
 }
 
 // Adds the count records to the SubNetwork whose level-2 record is at index sn. Returns false (file unchanged)
-// if it already has counts or does not fit the rule (processors, constant data, an unsized DataNode type).
-// SubNetworks with default data and base links (characters, props) also get DefaultDataSize (data + 4),
+// if it already has counts or lacks Type/Name/HeaderLayout.
+// SubNetworks with default data and base links (characters, props) also get DefaultDataSize
+// (floor4 of the DefaultData + DefaultDataIndices payloads, count bytes included: 1,516/1,518 shipped, the other 2 are
+// 4 short, ddfit.py),
 // BaseDataNodeLinksCount and BaseDataNodeLinksAdditionalSize, their links in 3.0 form, and
 // ConnectionMapUsedDataNodes in its 3.0 place (after VariantMemberCount), as the 15 shipped ones.
+//
+// Graphs outside the exact rule (processors: 1.0 character/prop rigs; or a DataNode type without a known size) get
+// the content counts, exact on the 6,143 shipped 3.0 processor SubNetworks (countfit.py): ProcessorNodeCount =
+// #ProcessorNode, ComponentFamilyCount = #ComponentFamily, ComponentMemberCount = sum #ComponentNameIndices,
+// VariantGroupCount = #VariantGroup, VariantMemberCount = sum of their member lists, LayerBindCount = #LayerBind,
+// ConstantDataNodeCount = #Static (3.0 differs on 7 static ClothData). Headers stay all variable (ConstantHeaderCount
+// and ConstantLayoutCount 0): 3.0 puts constant headers first (FUN_004fe4d0 builds headers 1..CHC from the first
+// ConstantLayoutCount layout entries), 1.0 interleaves them, and the header tables do not depend on Static.
+// Arena sizes are upper bounds, not fits: FUN_00500ac0 sums [align, size, count] triples per capability key
+// (FUN_004b4970: count*(align-1)+size) into the variable (+0x88) / constant (+0x84) arenas, which grow on demand
+// (FUN_00412220) and DataNodes fall back to the heap (FUN_0050a720); only basis / conversion slots trap, and those
+// counts are exact. 3.0 processor graphs need at most 64 B per node in total over all keys (vasfit.py).
 inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
 {
     size_t end = f.blockEnd(sn);
@@ -100,14 +114,17 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     }
     end = f.blockEnd(sn);
     long typeAt = -1, nameAt = -1, layoutAt = -1, cmudnAt = -1;
-    int hsi = 0, bases = 0, roots = 0, bconv = 0, dn = 0, pn = 0, s32 = 0, s64 = 0, defaultData = -1;
+    int hsi = 0, bases = 0, roots = 0, bconv = 0, dn = 0, pn = 0, s32 = 0, s64 = 0, defaultData = -1, defaultIdx = 0;
+    int statics = 0, dnBytes = 0, cfam = 0, cmem = 0, vgroups = 0, vmem = 0, lbinds = 0, lbBytes = 0;
+    bool sized = true;
     std::string pool;
     for (size_t i = sn + 1; i < end; ++i) {
         const oct::Rec& r = f.recs[i];
         const std::string& n = f.name(r);
         if (r.level == 3) {
             pool = n;
-            if (n == "DefaultData") defaultData = (int)r.pay.size() - oct::spec(r.type).cw;
+            if (n == "DefaultData") defaultData = (int)r.pay.size();   // whole payloads, count included
+            else if (n == "DefaultDataIndices") defaultIdx = (int)r.pay.size();
             else if (n == "ConnectionMapUsedDataNodes") cmudnAt = (long)i;
             if (n == "Type") typeAt = (long)i;
             else if (n == "Name") nameAt = (long)i;
@@ -118,34 +135,55 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
             else if (pool == "BasisConversionPool" && n == "BasisConversion") ++bconv;
             else if (pool == "DataNodePool" && n == "DataNode") ++dn;
             else if (pool == "ProcessorNodePool" && n == "ProcessorNode") ++pn;
-        } else if (r.level == 5) {
+            else if (pool == "ComponentFamilyPool") ++cfam;
+            else if (pool == "VariantGroupPool") { ++vgroups; vmem += (int)f.ints(r).size(); }
+            else if (pool == "LayerBindPool") ++lbinds;
+        } else {
+            if (pool == "DataNodePool") dnBytes += (int)r.pay.size();
+            else if (pool == "LayerBindPool") lbBytes += (int)r.pay.size();
+            if (r.level != 5) continue;
             if (pool == "BasisPool" && n == "Behavior") {
                 auto v = f.nameValues(r);
                 if (!v.empty() && v[0] == "Root") ++roots;
             } else if (pool == "DataNodePool" && n == "Type") {
                 auto v = f.nameValues(r);
                 int a = v.empty() ? -1 : typeSize(v[0], false), b = v.empty() ? -1 : typeSize(v[0], true);
-                if (a < 0) { if (why) *why = "unsized DataNode type " + (v.empty() ? std::string("?") : v[0]); return false; }
+                if (a < 0) sized = false;
                 s32 += a;
                 s64 += b;
-            }
+            } else if (pool == "DataNodePool" && n == "Static" && f.ints(r)[0]) ++statics;
+            else if (pool == "ComponentFamilyPool" && n == "ComponentNameIndices") cmem += (int)f.ints(r).size();
         }
     }
-    if (pn) { if (why) *why = "has processors"; return false; }
     if (typeAt < 0 || nameAt < 0 || layoutAt < 0) { if (why) *why = "no Type/Name/HeaderLayout"; return false; }
+    bool exact = !pn && sized;
+    if (!exact) {   // ponytail: generous bounds (128 B/node + payload), fit per-type sizes if memory ever matters
+        statics = statics < dn ? statics : dn;
+        s32 = 128 * (dn - statics + pn) + dnBytes + 4096;
+        s64 = 2 * s32;
+    } else statics = 0;   // the exact rule counts static DataNodes as variable (in_city root, tested in-game)
 
     std::vector<oct::Rec> a;
-    int vals[] = {0, hsi, 0, dn, 0};
+    int vals[] = {0, hsi, statics, dn - statics, pn};
     for (int k = 0; k < 5; ++k) a.push_back(f.intScalar(3, COUNTS_A[k], vals[k]));
+    if (statics) {
+        int c32 = 128 * statics + dnBytes;
+        a.push_back(f.node(3, "ConstantAccumulatedSize32"));
+        a.push_back(f.intList(4, "1", {4, c32, statics}));
+        a.push_back(f.node(3, "ConstantAccumulatedSize64"));
+        a.push_back(f.intList(4, "1", {8, 2 * c32, statics}));
+    }
+    int nvar = exact ? dn : dn - statics + pn;
     a.push_back(f.node(3, "VariableAccumulatedSize32"));
-    a.push_back(f.intList(4, "1", {4, s32, dn}));
+    a.push_back(f.intList(4, "1", {4, s32, nvar}));
     a.push_back(f.node(3, "VariableAccumulatedSize64"));
-    a.push_back(f.intList(4, "1", {8, s64, dn}));
-    int valsB[] = {bases - roots, bconv, 0, 0, 0, 0};
+    a.push_back(f.intList(4, "1", {8, s64, nvar}));
+    int valsB[] = {bases - roots, bconv, cfam, cmem, vgroups, vmem};
     for (int k = 0; k < 6; ++k) a.push_back(f.intScalar(3, COUNTS_B[k], valsB[k]));
     if (cmudnAt >= 0) a.push_back(f.recs[cmudnAt]);                     // moved into its 3.0 place
-    if (defaultData >= 0) a.push_back(f.intScalar(3, "DefaultDataSize", defaultData + 4));
-    a.push_back(f.intScalar(3, COUNTS_B[6], 0));                          // LayerBindCount
+    if (defaultData >= 0) a.push_back(f.intScalar(3, "DefaultDataSize", (defaultData + defaultIdx) & ~3));
+    a.push_back(f.intScalar(3, COUNTS_B[6], lbinds));                     // LayerBindCount
+    if (lbinds) a.push_back(f.intScalar(3, "LayerBindAdditionalSize", lbBytes));
     a.push_back(f.intScalar(3, COUNTS_B[7], links));                      // BaseDataNodeLinksCount
     if (hasLinkPool) a.push_back(f.intScalar(3, "BaseDataNodeLinksAdditionalSize", linksExtra));
     oct::Rec cl = f.intScalar(3, "ConstantLayoutCount", 0);
