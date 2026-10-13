@@ -15,7 +15,7 @@
 #   UI_LaunchLevel(..., characterSelected = true) loads the world with that avatar (FUN_00b81350 arg 6).
 #   Without the title-screen press there is no profile: the world loads with no avatar (camera at the origin).
 param([string]$Zone = 'OUT_Intro2', [int]$Sku = 1000206, [string[]]$Probe = @(), [string[]]$MenuProbe = @(), [switch]$MenuOnly,
-      [switch]$Keep, [switch]$Attach, [int]$BootTimeout = 300, [int]$LoadTimeout = 180, [int]$Settle = 3,
+      [switch]$Keep, [switch]$Attach, [int]$BootTimeout = 300, [int]$LoadTimeout = 180, [int]$Settle = 3, [int]$AfterProbe = 0,
       [string]$Game = 'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition',
       [string]$Out = "$env:TEMP\di3harness")
 $ErrorActionPreference = 'Stop'
@@ -52,6 +52,10 @@ function Until([string]$code, [string]$want, [int]$timeout) {
 
 function Shot([string]$name) {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    # DPI-aware first: otherwise a scaled desktop reports 1536x864 and only the top-left of the screen is captured
+    # (bottom-of-screen dialogs were missing from every shot until 2026-10-13)
+    if (-not ('W.Dpi' -as [type])) { Add-Type -Name Dpi -Namespace W -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' }
+    [W.Dpi]::SetProcessDPIAware() | Out-Null
     $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
     $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
     [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
@@ -121,7 +125,9 @@ $tl = Get-Date
 $state = Until $POS '^= avatar' $LoadTimeout
 "world: $state ($([int]((Get-Date) - $tl).TotalSeconds)s after launch)"
 Start-Sleep $Settle   # the avatar handle exists from the proxy on; the real avatar's creation runs after it
+if ($AfterProbe -and $Probe) { "screenshot before probes: " + (Shot "$Zone-pre-$(Get-Date -Format HHmmss)") }
 foreach ($p in $Probe) { "probe $p : " + (Lua (Get-Content -Raw $p) 60) }
+if ($AfterProbe) { Start-Sleep $AfterProbe }   # what the probes started, on screen
 "screenshot: " + (Shot "$Zone-$(Get-Date -Format HHmmss)")
 
 $exc = @(Select-String -Path $pent -Pattern 'Exception Caught' -ErrorAction SilentlyContinue)

@@ -132,11 +132,22 @@ struct File {
 
     uint16_t addName(const std::string& s)
     {
-        for (size_t i = 0; i < names.size(); ++i)
-            if (names[i] == s) return (uint16_t)i;
+        // indexed: the load-time transforms add thousands of records to files with ~15k names (in_city), and a
+        // linear scan per record made locator30 take a second
+        if (nameIndexed != names.size()) {   // names changed outside addName (or first use): reindex
+            nameIndex.clear();
+            for (size_t i = 0; i < names.size(); ++i) nameIndex.emplace(names[i], (uint16_t)i);   // first wins
+            nameIndexed = names.size();
+        }
+        auto it = nameIndex.find(s);
+        if (it != nameIndex.end()) return it->second;
         names.push_back(s);
+        nameIndex.emplace(s, (uint16_t)(names.size() - 1));
+        nameIndexed = names.size();
         return (uint16_t)(names.size() - 1);
     }
+    std::unordered_map<std::string, uint16_t> nameIndex;
+    size_t nameIndexed = 0;
 
     // ---- value access ----
     // Int elements of an int/name/byte record (signed for ints), key and count stripped.

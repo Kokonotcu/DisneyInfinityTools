@@ -78,57 +78,67 @@ inline const Aes& cipher(int which)
 }
 inline std::mutex& cipherLock() { static std::mutex m; return m; }
 
-// One member of the archive at `archivePath`, by name; false if absent or unreadable.
+// n bytes at file offset `at` (positional; the handle's file pointer is not used).
+inline bool readAt(HANDLE h, uint64_t at, void* dst, size_t n)
+{
+    OVERLAPPED o{};
+    o.Offset = (DWORD)at;
+    o.OffsetHigh = (DWORD)(at >> 32);
+    DWORD got = 0;
+    return ReadFile(h, dst, (DWORD)n, &got, &o) && got == n;
+}
+
+// One member of the archive at `archivePath`, by name; false if absent or unreadable. Reads the index and that
+// member only (reading whole archives per member cost in_city's render ~0.3 s over 92 donor reads).
 inline bool readMember(const std::string& archivePath, const std::string& member, std::string& out)
 {
     HANDLE h = CreateFileA(archivePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
+    struct Closer { HANDLE h; ~Closer() { CloseHandle(h); } } closer{h};
     LARGE_INTEGER sz;
     GetFileSizeEx(h, &sz);
-    std::vector<uint8_t> raw((size_t)sz.QuadPart);
-    DWORD got = 0;
-    bool ok = ReadFile(h, raw.data(), (DWORD)raw.size(), &got, nullptr) && got == raw.size();
-    CloseHandle(h);
-    if (!ok || raw.size() < 8) return false;
+    const uint64_t size = (uint64_t)sz.QuadPart;
+    uint8_t hdr[8];
+    if (size < 8 || !readAt(h, 0, hdr, 8)) return false;
     std::lock_guard<std::mutex> lock(cipherLock());
     // key: the one that turns the first 4 bytes into the index magic
     int which = -1;
     for (int k = 0; k < 3 && which < 0; ++k) {
         uint8_t t[4];
-        memcpy(t, raw.data(), 4);
+        memcpy(t, hdr, 4);
         if (k) cipher(k).x(t, 4, 0);
         if (!memcmp(t, "PK\xff\xff", 4)) which = k;
     }
     if (which < 0) return false;
     auto dec = [&](uint8_t* b, size_t n, size_t at) { if (which) cipher(which).x(b, n, at); };
-    uint8_t hdr[8];
-    memcpy(hdr, raw.data(), 8);
     dec(hdr, 8, 0);
     uint32_t count = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
-    if (8 + 8ull * count > raw.size()) return false;
-    std::vector<uint8_t> idx(raw.begin() + 8, raw.begin() + 8 + 8 * count);
+    if (8 + 8ull * count > size) return false;
+    std::vector<uint8_t> idx(8 * (size_t)count);
+    if (!readAt(h, 8, idx.data(), idx.size())) return false;
     dec(idx.data(), idx.size(), 8);
     uint32_t want = mm3(member);
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t hh, off;
         memcpy(&hh, &idx[8 * i], 4);
         memcpy(&off, &idx[8 * i + 4], 4);
-        if (hh != want || (size_t)off + 30 > raw.size()) continue;
+        if (hh != want || (uint64_t)off + 30 > size) continue;
         uint8_t lh[30];
-        memcpy(lh, &raw[off], 30);
+        if (!readAt(h, off, lh, 30)) return false;
         dec(lh, 30, 0);
         uint16_t method = lh[8] | lh[9] << 8, nl = lh[26] | lh[27] << 8, el = lh[28] | lh[29] << 8;
         uint32_t comp, ucomp;
         memcpy(&comp, lh + 18, 4);
         memcpy(&ucomp, lh + 22, 4);
-        size_t body = (size_t)off + 30 + nl + el;
-        if (body + comp > raw.size()) return false;
-        std::vector<uint8_t> blk(raw.begin() + off, raw.begin() + body + comp);
+        size_t body = 30 + (size_t)nl + el;
+        if ((uint64_t)off + body + comp > size) return false;
+        std::vector<uint8_t> blk(body + comp);
+        if (!readAt(h, off, blk.data(), blk.size())) return false;
         bool dct = member.size() >= 4 && _stricmp(member.c_str() + member.size() - 4, ".dct") == 0;
-        size_t span = 30 + nl + el + (dct ? comp : (comp < 0x200 ? comp : 0x200));
+        size_t span = body + (dct ? comp : (comp < 0x200 ? comp : 0x200));
         dec(blk.data(), span, 0);
         if (std::string((const char*)blk.data() + 30, nl) != member) continue;   // hash collision
-        const uint8_t* data = blk.data() + 30 + nl + el;
+        const uint8_t* data = blk.data() + body;
         if (method == 0) { out.assign((const char*)data, comp); return true; }
         out.assign(ucomp, '\0');
         size_t n = tinfl_decompress_mem_to_mem(&out[0], ucomp, data, comp, 0);

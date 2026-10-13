@@ -680,35 +680,49 @@ inline int collision30(oct::File& f)
         if ((a.type == "Transform" || a.type == "Geometry") && a.stn != -1 && !scene.count({a.sn, a.node})) scene[{a.sn, a.node}] = a.stn;
     std::map<int, int> perAsset;
     int added = 0;
-    for (auto it = as.rbegin(); it != as.rend(); ++it) {   // last first: inserts keep earlier indices
-        const A& a = *it;
+    // one forward rebuild of the pool (inserting per association into a ~200k-record file took over a second):
+    // each association's block, then for a redirected DataNode link its AssetIndex and the aggregate; keys '0',
+    // '1', ... in file order, as shipped
+    std::vector<oct::Rec> pool;
+    pool.reserve(f.blockEnd(ap) - ap + as.size() * 8);
+    pool.push_back(f.recs[ap]);
+    int key = 0;
+    auto keyed = [&](oct::Rec r) {
+        if (oct::spec(r.type).keyed) {
+            std::string k2;
+            oct::File::put(k2, f.addName(std::to_string(key++)), 2);
+            r.pay = k2 + r.pay.substr(2);
+        }
+        return r;
+    };
+    for (const A& a : as) {
+        pool.push_back(keyed(f.recs[a.at]));
+        pool.insert(pool.end(), f.recs.begin() + a.at + 1, f.recs.begin() + a.end);
         if (a.type != "CollisionInstanceToDataNode" || a.node.find("|Transform") == std::string::npos) continue;   // redirected only
         auto ai = assetOf.find(a.sn);
         if (ai == assetOf.end()) continue;
+        if (!a.hasIndex) pool.push_back(f.intScalar(3, "AssetIndex", ai->second));
         std::string slot = a.node.substr(0, a.node.find("|Transform"));
         auto sc = scene.find({a.sn, slot});
-        std::vector<oct::Rec> agg = {keyedNode(f, 2, "Association", 0), f.nameScalar(3, f.addName("NodeName"), a.node),
-                                     f.nameScalar(3, f.addName("Type"), "CollisionAggregate"), f.intScalar(3, "CollisionInstanceRef", a.inst),
-                                     f.intScalar(3, "SubNetworkRef", a.sn), f.intScalar(3, "SceneTreeNodeRef", sc == scene.end() ? -1 : sc->second),
-                                     f.intScalar(3, "AssetIndex", ai->second)};
-        f.recs.insert(f.recs.begin() + a.end, agg.begin(), agg.end());
-        if (!a.hasIndex) f.recs.insert(f.recs.begin() + a.end, f.intScalar(3, "AssetIndex", ai->second));
+        pool.push_back(keyed(keyedNode(f, 2, "Association", 0)));
+        pool.push_back(f.nameScalar(3, f.addName("NodeName"), a.node));
+        pool.push_back(f.nameScalar(3, f.addName("Type"), "CollisionAggregate"));
+        pool.push_back(f.intScalar(3, "CollisionInstanceRef", a.inst));
+        pool.push_back(f.intScalar(3, "SubNetworkRef", a.sn));
+        pool.push_back(f.intScalar(3, "SceneTreeNodeRef", sc == scene.end() ? -1 : sc->second));
+        pool.push_back(f.intScalar(3, "AssetIndex", ai->second));
         ++perAsset[ai->second];
         ++added;
     }
-    for (auto& kv : perAsset)
+    for (auto& kv : perAsset)   // AssetPool sits before AssociationPool (addAssetPool), so aggAt indices still hold
         if (kv.first < (int)aggAt.size() && aggAt[kv.first] >= 0) f.setInt(f.recs[aggAt[kv.first]], kv.second);
-    // associations are keyed '0','1',... in file order (as shipped); renumber after the inserts
-    ap = f.pool("AssociationPool");
-    int key = 0;
-    for (size_t i = ap + 1, end = f.blockEnd(ap); i < end; i = f.blockEnd(i)) {
-        oct::Rec& r = f.recs[i];
-        if (!oct::spec(r.type).keyed) continue;
-        r.pay = r.pay.substr(2);
-        std::string k2;
-        oct::File::put(k2, f.addName(std::to_string(key++)), 2);
-        r.pay = k2 + r.pay;
-    }
+    size_t poolEnd = f.blockEnd(ap);
+    std::vector<oct::Rec> out;
+    out.reserve(f.recs.size() - (poolEnd - ap) + pool.size());
+    out.insert(out.end(), std::make_move_iterator(f.recs.begin()), std::make_move_iterator(f.recs.begin() + ap));
+    out.insert(out.end(), std::make_move_iterator(pool.begin()), std::make_move_iterator(pool.end()));
+    out.insert(out.end(), std::make_move_iterator(f.recs.begin() + poolEnd), std::make_move_iterator(f.recs.end()));
+    f.recs.swap(out);
     return added;
 }
 

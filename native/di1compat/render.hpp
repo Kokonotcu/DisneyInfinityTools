@@ -3,6 +3,7 @@
 // DI3Tools autobundle.resolve + conv.convert_geometry/build_buffers; octtest --render checks it byte for byte against
 // them. The 3.0-side knowledge comes from di1compat_render.txt (rentable.py); the 1.0 data from the 1.0 files.
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <tuple>
@@ -18,9 +19,23 @@ namespace render {
 
 constexpr uint32_t UNSET = 0xffffffff;
 
+// ---- vertex element types (vtxf.TYPES / decode / encode, Python's rounding exactly) ----
+struct VType { char code; int n, csize; double norm; };
+inline bool vtype(const std::string& t, VType& v)
+{
+    static const std::map<std::string, VType> T = {
+        {"FLOAT32_2", {'f', 2, 4, 0}}, {"FLOAT32_3", {'f', 3, 4, 0}}, {"FLOAT32_4", {'f', 4, 4, 0}},
+        {"FLOAT16_2", {'e', 2, 2, 0}}, {"FLOAT16_4", {'e', 4, 2, 0}}, {"U8_4_NORMALIZED", {'B', 4, 1, 255.0}},
+        {"S16_4_NORMALIZED", {'h', 4, 2, 32767.0}}, {"U8_4", {'B', 4, 1, 0}}, {"U16_2", {'H', 2, 2, 0}}};
+    auto it = T.find(t);
+    if (it == T.end()) return false;
+    v = it->second;
+    return true;
+}
+
 // ---- the table ----
 struct Shader { int A = 0, B = 0, slots = 0; std::set<uint32_t> vf; std::vector<std::string> roles; };
-struct Op { int dsi, doff, size; char kind; int ssi = 0, soff = 0; std::string st, dt; std::vector<double> dflt; std::string bytes; };
+struct Op { int dsi, doff, size; char kind; int ssi = 0, soff = 0; std::string st, dt; VType sv{}, dv{}; std::vector<double> dflt; std::string bytes; };
 struct Plan { std::vector<int> ss, ds; std::vector<Op> ops; };
 struct Ref { std::string engine, extract; int idx = 0, count = 0; };
 
@@ -69,7 +84,10 @@ struct Table {
                 for (int i = 0; i < n; ++i) {
                     Op o; t >> o.dsi >> o.doff >> o.size >> o.kind;
                     if (o.kind == 'C') t >> o.ssi >> o.soff;
-                    else if (o.kind == 'X') { int m; t >> o.ssi >> o.soff >> o.st >> o.dt >> m; o.dflt.resize(m); for (auto& d : o.dflt) t >> d; }
+                    else if (o.kind == 'X') {
+                        int m; t >> o.ssi >> o.soff >> o.st >> o.dt >> m; o.dflt.resize(m); for (auto& d : o.dflt) t >> d;
+                        if (!vtype(o.st, o.sv) || !vtype(o.dt, o.dv) || o.sv.n > 4 || o.dv.n > 4) return false;
+                    }
                     else { std::string hex; t >> hex; if (hex != "-") for (size_t j = 0; j + 1 < hex.size(); j += 2) o.bytes.push_back((char)std::stoi(hex.substr(j, 2), nullptr, 16)); }
                     p.ops.push_back(o);
                 }
@@ -79,20 +97,6 @@ struct Table {
         return !shaders.empty() && !plans.empty();
     }
 };
-
-// ---- vertex element types (vtxf.TYPES / decode / encode, Python's rounding exactly) ----
-struct VType { char code; int n, csize; double norm; };
-inline bool vtype(const std::string& t, VType& v)
-{
-    static const std::map<std::string, VType> T = {
-        {"FLOAT32_2", {'f', 2, 4, 0}}, {"FLOAT32_3", {'f', 3, 4, 0}}, {"FLOAT32_4", {'f', 4, 4, 0}},
-        {"FLOAT16_2", {'e', 2, 2, 0}}, {"FLOAT16_4", {'e', 4, 2, 0}}, {"U8_4_NORMALIZED", {'B', 4, 1, 255.0}},
-        {"S16_4_NORMALIZED", {'h', 4, 2, 32767.0}}, {"U8_4", {'B', 4, 1, 0}}, {"U16_2", {'H', 2, 2, 0}}};
-    auto it = T.find(t);
-    if (it == T.end()) return false;
-    v = it->second;
-    return true;
-}
 
 inline double halfToDouble(uint16_t h)
 {
@@ -123,10 +127,9 @@ inline uint16_t doubleToHalf(double x)
     return (uint16_t)(bits | (e << 10) | (sign << 15));
 }
 
-inline std::vector<double> decode(const std::string& ty, const uint8_t* b)
+// One element of type v at b -> out[0..v.n).
+inline void decode(const VType& v, const uint8_t* b, double* out)
 {
-    VType v; vtype(ty, v);
-    std::vector<double> out;
     for (int i = 0; i < v.n; ++i) {
         const uint8_t* p = b + i * v.csize;
         double x;
@@ -138,17 +141,15 @@ inline std::vector<double> decode(const std::string& ty, const uint8_t* b)
         default: x = (uint16_t)(p[0] | p[1] << 8); break;
         }
         if (v.norm) { x /= v.norm; if (x < -1.0) x = -1.0; }
-        out.push_back(x);
+        out[i] = x;
     }
-    return out;
 }
 
-inline std::string encode(const std::string& ty, std::vector<double> vals)
+// vals[0..v.n) as one element of type v at out (v.n * v.csize bytes).
+inline void encode(const VType& v, const double* vals, char* out)
 {
-    VType v; vtype(ty, v);
-    vals.resize(v.n, 0.0);
-    std::string out;
-    for (double x : vals) {
+    for (int i = 0; i < v.n; ++i) {
+        double x = vals[i];
         if (v.norm) {
             double lo = v.code == 'B' ? 0.0 : -1.0;
             x = std::nearbyint((x < lo ? lo : x > 1.0 ? 1.0 : x) * v.norm);   // Python round(): half to even
@@ -158,35 +159,34 @@ inline std::string encode(const std::string& ty, std::vector<double> vals)
             x = x < 0 ? 0 : x > hi ? hi : x;
         }
         switch (v.code) {
-        case 'f': { float f = (float)x; out.append((const char*)&f, 4); break; }
-        case 'e': { uint16_t h = doubleToHalf(x); out.append((const char*)&h, 2); break; }
-        case 'B': out.push_back((char)(int)x); break;
-        default: { int16_t s = (int16_t)(int)x; out.append((const char*)&s, 2); break; }
+        case 'f': { float f = (float)x; memcpy(out, &f, 4); out += 4; break; }
+        case 'e': { uint16_t h = doubleToHalf(x); memcpy(out, &h, 2); out += 2; break; }
+        case 'B': *out++ = (char)(int)x; break;
+        default: { int16_t s = (int16_t)(int)x; memcpy(out, &s, 2); out += 2; break; }
         }
     }
-    return out;
 }
 
-inline std::string convertVertex(const std::vector<const uint8_t*>& src, const Plan& p)
+// One vertex through plan p, appended to the destination streams per[0..p.ds.size()). Per vertex of a 52 MB
+// world, so no allocation here (the string/vector form cost in_city ~1.5 s of load).
+inline void convertVertex(const std::vector<const uint8_t*>& src, const Plan& p, std::vector<std::string>& per)
 {
-    std::vector<std::string> out;
-    for (int n : p.ds) out.emplace_back(n, '\0');
+    for (size_t s = 0; s < p.ds.size(); ++s) per[s].append(p.ds[s], '\0');
     for (const Op& o : p.ops) {
-        std::string& d = out[o.dsi];
-        if (o.kind == 'K') memcpy(&d[o.doff], o.bytes.data(), o.size < (int)o.bytes.size() ? o.size : o.bytes.size());
-        else if (o.kind == 'C') memcpy(&d[o.doff], src[o.ssi] + o.soff, o.size);
+        std::string& ds = per[o.dsi];
+        char* d = &ds[ds.size() - p.ds[o.dsi] + o.doff];
+        if (o.kind == 'K') memcpy(d, o.bytes.data(), o.size < (int)o.bytes.size() ? o.size : o.bytes.size());
+        else if (o.kind == 'C') memcpy(d, src[o.ssi] + o.soff, o.size);
         else {
-            std::vector<double> vals = decode(o.st, src[o.ssi] + o.soff);
-            VType dv; vtype(o.dt, dv);
-            std::vector<double> pad = o.dflt.empty() ? std::vector<double>(dv.n, 0.0) : o.dflt;
-            for (size_t i = vals.size(); i < (size_t)dv.n && i < pad.size(); ++i) vals.push_back(pad[i]);
-            std::string e = encode(o.dt, vals);
-            memcpy(&d[o.doff], e.data(), o.size);
+            double vals[4] = {0, 0, 0, 0};   // source values, then the default's tail, then zeros (to dv.n)
+            decode(o.sv, src[o.ssi] + o.soff, vals);
+            for (int i = o.sv.n; i < o.dv.n; ++i) vals[i] = o.dflt.empty() ? 0.0 : i < (int)o.dflt.size() ? o.dflt[i] : 0.0;
+            char e[16];
+            encode(o.dv, vals, e);
+            int n = o.dv.n * o.dv.csize;
+            memcpy(d, e, o.size < n ? o.size : n);
         }
     }
-    std::string all;
-    for (auto& s : out) all += s;   // streams back to back; the caller splits by p.ds
-    return all;
 }
 
 // ---- material bundles (matp.py) ----
@@ -527,7 +527,8 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     std::string& ni = r.ibuf;
     std::string& ni2 = r.ibuf2;
     long stp = geometry ? f.pool("SceneTreeNodePool") : -1;
-    for (size_t n = stp + 1; stp >= 0 && n < f.blockEnd(stp); n = f.blockEnd(n)) {
+    const size_t stpEnd = stp >= 0 ? f.blockEnd(stp) : 0;   // the loop edits records in place, never adds
+    for (size_t n = stp + 1; stp >= 0 && n < stpEnd; n = f.blockEnd(n)) {
         if (f.recs[n].level != 2 || f.name(f.recs[n]) != "Node") continue;
         size_t end = f.blockEnd(n);
         bool geo = false;
@@ -542,7 +543,7 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
         std::vector<P> ps;
         for (size_t pi : prims) {
             P p{};
-            for (size_t j = pi + 1; j < f.blockEnd(pi); ++j) {
+            for (size_t j = pi + 1, pe = f.blockEnd(pi); j < pe; ++j) {
                 const std::string& nm = f.name(f.recs[j]);
                 if (nm == "Idata") p.idata = j;
                 else if (nm == "Vdata") p.vdata = j;
@@ -583,11 +584,9 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
                     if (lo + plan.ss[s] > vbuf10.size()) { r.problems.push_back("vertex past the vbuf"); return false; }
                     srcp[s] = vb + lo;
                 }
-                std::string all = convertVertex(srcp, plan);
-                size_t off = 0;
-                for (size_t s = 0; s < plan.ds.size(); ++s) { per[s].append(all, off, plan.ds[s]); off += plan.ds[s]; }
+                convertVertex(srcp, plan, per);
             }
-            streams.push_back(per); strides.push_back(plan.ds); subs.push_back(sub);
+            streams.push_back(std::move(per)); strides.push_back(plan.ds); subs.push_back(std::move(sub));
             counts.push_back((uint32_t)order.size()); dsts.push_back(dst);
         }
         // stream-major within the node
@@ -641,10 +640,9 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
         }
     }
     // 1.0-only Material RenderCaps removed (conv.prepare)
-    long mp = f.pool("MaterialPool");
-    for (size_t j = mp + 1; mp >= 0 && j < f.blockEnd(mp);) {
-        if (f.recs[j].level >= 3 && f.name(f.recs[j]) == "RenderCaps") f.recs.erase(f.recs.begin() + j);
-        else ++j;
+    if (long mp = f.pool("MaterialPool"); mp >= 0) {
+        auto b = f.recs.begin() + mp + 1, e = f.recs.begin() + f.blockEnd(mp);
+        f.recs.erase(std::remove_if(b, e, [&](const oct::Rec& x) { return x.level >= 3 && f.name(x) == "RenderCaps"; }), e);
     }
     return true;
 }

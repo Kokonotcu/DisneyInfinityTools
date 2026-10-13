@@ -25,6 +25,7 @@
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
+#include "dct.hpp"
 #include "luachunk.hpp"
 #include "third_party/miniz/miniz.h"
 
@@ -117,6 +118,7 @@ static struct {
     char install10[MAX_PATH] = "";   // the 1.0 install (its assets\ holds plain zips)
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
     bool trace = true;               // log every open
+    bool missionTrace = false;       // log IN_ mission context state changes (one cheap hook; trace's cost frames)
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
@@ -136,6 +138,7 @@ static void loadConfig(const char* dir)
         if (!strcmp(key, "install10")) strcpy_s(g_cfg.install10, val);
         else if (!strcmp(key, "serve10")) g_cfg.serve10 = atoi(val) != 0;
         else if (!strcmp(key, "trace")) g_cfg.trace = atoi(val) != 0;
+        else if (!strcmp(key, "missiontrace")) g_cfg.missionTrace = atoi(val) != 0;
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
@@ -377,8 +380,46 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
 }
 
 // -> codec name if out holds transcoded bytes, nullptr to serve the 1.0 bytes unchanged.
+// A 1.0 mission line (<line>__missiongraph.lua, the Unlocks database) in 3.0 terms. 1.0 started a story line's
+// opening mission -- the one with no Unlocks -- by itself, even with its giver far away (IN_City_DockFire: giver
+// IN_Edna, who spawns at HQ ~550 m from the start; Edna's call, the compass and ledge tutorials open the 1.0 game,
+// user screenshots 2026-10-13). 3.0 waits for the player to talk to a named giver unless the record says
+// ForceActivateFirstTime = true (3.0 ships it on its own named-giver openers: MBA_Side_Tutorial_Quest_01,
+// PSX_L1_Main04). Adds that field to story-line records with empty Unlocks. Returns the records changed.
+static int missionGraph30(std::string& t)
+{
+    static const std::string emptyUnlocks = "\t\t\tUnlocks = \n\t\t\t{\n\t\t\t},\n\t\t\tline = \"";
+    int n = 0;
+    for (size_t pos = t.find(emptyUnlocks); pos != std::string::npos; pos = t.find(emptyUnlocks, pos + 1)) {
+        size_t q = pos + emptyUnlocks.size(), e = t.find('"', q);
+        if (e == std::string::npos) break;
+        std::string line = t.substr(q, e - q);
+        for (char& c : line) c = (char)tolower((unsigned char)c);
+        size_t start = t.rfind("\n\t\t{\n", pos);
+        if (start == std::string::npos || line.find("story") == std::string::npos) continue;
+        std::string rec = t.substr(start, pos - start);
+        size_t ar = rec.find("\t\t\t\tAvatarReady = ");
+        if (rec.find("Type = \"MissionContext\"") == std::string::npos || rec.find("ForceActivateFirstTime") != std::string::npos ||
+            ar == std::string::npos)
+            continue;
+        static const std::string add = "\t\t\t\tForceActivateFirstTime = true,\n";
+        t.insert(start + ar, add);
+        pos += add.size();
+        ++n;
+    }
+    return n;
+}
+
 static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note)
 {
+    if (endsWith(path, "__missiongraph.lua") && n && ((const char*)data)[0] != 0x1b) {
+        std::string t((const char*)data, n);
+        int k = missionGraph30(t);
+        if (!k) return nullptr;
+        note += "+missiongraph(" + std::to_string(k) + " opening missions force-activated) ";
+        out.swap(t);
+        return "missiongraph";
+    }
     if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
         try {
             oct::File f = oct::File::parse(data, n);
@@ -410,6 +451,20 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         out = isMtc ? mer::mtc(f) : f.write();
         return isMtc ? "mtc" : "mer";
     }
+    // a localisation table: keys re-hashed under 3.0's one seed (dct.hpp), names from the stringids table beside it
+    if (endsWith(path, ".dct") && n >= 4 && !memcmp(data, "DICT", 4)) {
+        std::string p = norm(path), ids;
+        size_t us = p.rfind('_'), sl = p.rfind('/');
+        if (us == std::string::npos || sl == std::string::npos || us < sl) return nullptr;
+        std::string plat = endsWith(path, "_pc_con.dct") ? "_win32.dct" : p.substr(us);   // its stand-in (hkOpen)
+        if (!read10s(p.substr(0, sl + 1) + "stringids" + plat, ids)) { note += "dct: no stringids beside it "; return nullptr; }
+        std::string t((const char*)data, n);
+        int dropped = 0, kept = dct::reseed(t, ids, dct::SEED30, &dropped);
+        if (kept < 0) return nullptr;
+        note += "+dct(" + std::to_string(kept) + " keys re-hashed, " + std::to_string(dropped) + " unnamed dropped) ";
+        out.swap(t);
+        return "dct";
+    }
     // collision (.btd blocks in the 3.0 layout, btd.hpp) and its block table (.btm, rebuilt from the converted
     // sibling .btd); raw 1.0 collision gave a world without ground (in-game 2026-10-13: the avatar fell, respawned)
     bool isBtm = endsWith(path, ".btm");
@@ -437,6 +492,17 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
     // a material bundle outside any asset session (particles/<x>.mtb): its materials onto 3.0 shaders, generic donors
     // from the same 3.0 asset family (in-game 2026-10-12: raw particles/IN_City.mtb -> int3 in Shader_LookupCrc)
     if (endsWith(path, ".mtb") && n >= 4 && !memcmp(data, "BNDL", 4)) {
+        // texture-only bundles (UI images: ui/charactericons, flash/<screen>/*_iN.mtb) hold a named TEXB laid out as
+        // in 3.0 (count, name length, name, hash) and no materials: served as they are. The material path read them
+        // as unnamed TEXB and wrote garbage (in-game 2026-10-13: Edna's dialog icon fell back to the IN badge).
+        bool hasMatp = false;
+        for (size_t o = 16, c = 0, nc = n >= 16 ? oct::u((const uint8_t*)data + 12, 4) : 0; c < nc && o + 16 <= n; ++c) {
+            if (!memcmp((const char*)data + o, "MATP", 4)) hasMatp = true;
+            uint32_t cs = oct::u((const uint8_t*)data + o + 8, 4);
+            if (!cs) break;
+            o += cs;
+        }
+        if (!hasMatp) return nullptr;
         if (!g_renderOk) { note += "render table missing "; return nullptr; }
         std::string p = norm(path);
         render::IO io;
@@ -955,6 +1021,31 @@ static uint32_t* __fastcall hkChoMake(void* self, void*, uint32_t* out, const ch
 typedef void(__cdecl* PlaceToyFn)(void* msg);
 static PlaceToyFn g_placeToy;
 static void __cdecl hkPlaceToy(void* msg) { logf("ToyCreation_PlaceToy callback (msg %p)", msg); g_placeToy(msg); }
+// MissionContext update (FUN_0166ffb0, per frame per context): logs an IN_ context's activation state when it changes.
+// Offsets from the context parser FUN_016748d0 and the update itself; +0x10 is the context's name string.
+typedef void(__fastcall* MissionTickFn)(uint8_t* self, void* edx, float dt);
+static MissionTickFn g_missionTick;
+static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
+{
+    g_missionTick(self, nullptr, dt);
+    const char* name = *(const char**)(self + 0x10);
+    if (!name || _strnicmp(name, "IN_", 3)) return;
+    static const uint32_t stateVa[] = {0x0228a2c0, 0x0228a2c4, 0x0228a2c8, 0x0228a2cc, 0x0228a2d0, 0x0228a2d4, 0x0228a2d8,
+                                       0x0228a2dc, 0x0228a2e0, 0x0228a2e4, 0x0228a2e8, 0x0228a2ec, 0x0228a2f0, 0x0228a2f4};
+    auto stateName = [](uint32_t v) {
+        for (int i = 0; i < 14; ++i) if (*(uint32_t*)rt(stateVa[i]) == v) return i;
+        return -1;
+    };
+    uint32_t state = *(uint32_t*)(self + 0x44), m = *(uint32_t*)(self + 0x198);
+    char sig[256];
+    sprintf_s(sig, "state=%d(%08X) mission=%08X mflags=%02X faft=%d trig=%d b159=%d b15f=%d inzone=%d ignzone=%d avready=%d reason=%d "
+                   "f3f=%08X beh=%d init=%d", stateName(state), state, m, m ? *(uint8_t*)(m + 0x3d9) : 0xff, self[0x112], self[0x113],
+              self[0x159], self[0x15f], self[0x114], self[0x135], self[0x137], *(int*)(self + 0x290), *(uint32_t*)(self + 0xfc),
+              *(int*)(self + 0xc8), self[0x224]);
+    static std::unordered_map<uint8_t*, std::string> last;
+    std::string& l = last[self];
+    if (l != sig) { l = sig; logf("mission %.60s: %s", name, sig); }
+}
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -1103,6 +1194,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         return r;
     }
     bool blocked = false;
+    std::string missWhy = " (not served)";
     if (g_cfg.block10[0]) {
         std::string np = norm(p), list = g_cfg.block10;
         for (size_t a = 0, b; a < list.size(); a = b + 1) {
@@ -1130,7 +1222,16 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         }
         size_t n = 0;
         std::string where;
-        if (void* data = read10(over.empty() ? p : over.c_str(), &n, &where)) {
+        missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)" : " (overlay " + over + " unreadable)";
+        void* data = read10(over.empty() ? p : over.c_str(), &n, &where);
+        // 3.0 registers a language table only with its controller variant <lang>_pc_con.dct beside it, which 1.0
+        // never shipped: without one the whole playset table was dropped (in-game 2026-10-13, lang\IN). The WIN32
+        // table stands in (same strings).
+        if (!data && endsWith(p, "_pc_con.dct")) {
+            std::string w = std::string(p, strlen(p) - 11) + "_WIN32.dct";
+            data = read10(w.c_str(), &n, &where);
+        }
+        if (data) {
             indexZip10(where.substr(0, where.find(':')));
             std::string out, note;
             const char* codec = nullptr;
@@ -1155,7 +1256,8 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             return r;
         }
     }
-    if (g_cfg.trace) logf("open %s flags=%X -> %s", p, flags & 0xff, r ? "ok" : "MISSING");
+    // misses always (rare and cheap; what an unexplained fallback asks for), hits only when tracing
+    if (g_cfg.trace || !r) logf("open %s flags=%X -> %s%s", p, flags & 0xff, r ? "ok" : "MISSING", r ? "" : missWhy.c_str());
     return r;
 }
 
@@ -1178,6 +1280,7 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     loadConfig(dir);
+    _setmaxstdio(8192);   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
     auto slurpFile = [&](const char* name) {
         std::string text;
         FILE* tf = nullptr;
@@ -1236,6 +1339,8 @@ extern "C" void __stdcall Pentane_Main()
         hook("MNode SpawnExpendable (trace)", 0x017BF020, "518B442410", (void*)&hkMkSpawnExp, (void**)&g_mkSpawnExp);
         hook("header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake);
     }
+    if (g_cfg.missionTrace)
+        hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);

@@ -1,6 +1,7 @@
 // octtest <root>...           parse and rewrite every tuple file under the roots (oct.py --selftest is the oracle)
 // octtest --counts <root>...  OCT-1 check: in every shipped processor-free SubNetwork, strip the count records and
 //                             regenerate them with octx::addCounts; the file must come back byte-identical
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,7 @@
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
+#include "dct.hpp"
 #include "luachunk.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
@@ -32,16 +34,29 @@ static int renderTest(char** a)
     if (!T.load(slurp(a[3]))) { printf("table load failed\n"); return 2; }
     std::string ext30 = a[4], ext10 = a[5];
     render::IO io;
+    // ARC30_GAME=<3.0 install>: read donors from the install's archives as the plugin does (arc30), timed
+    const char* game = getenv("ARC30_GAME");
+    int reads = 0;
+    double readMs = 0;
     io.read30 = [&](const std::string& p, std::string& o) {   // '3:<extract path>'
-        o = slurp(fs::path(ext30) / "assets" / p.substr(2));
-        return !o.empty();
+        if (!game) { o = slurp(fs::path(ext30) / "assets" / p.substr(2)); return !o.empty(); }
+        auto t = std::chrono::steady_clock::now();
+        std::string rel = p.substr(2);
+        size_t cut = rel.rfind('/');
+        bool ok = cut != std::string::npos && arc30::readMember(std::string(game) + "/assets/" + rel.substr(0, cut) + ".zip", rel.substr(cut + 1), o);
+        readMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+        ++reads;
+        return ok;
     };
+    auto t0 = std::chrono::steady_clock::now();
     io.read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
     std::string ob = slurp(world / (stem + ".oct"));
     oct::File f = oct::File::parse(ob.data(), ob.size());
     render::Result r;
     bool ok = render::transcodeWorld(T, io, f, stem, slurp(world / (stem + ".mtb")), slurp(world / (stem + "_0.vbuf")),
                                      slurp(world / (stem + "_0.ibuf")), r);
+    printf("render %.0f ms, %d 3.0 reads %.0f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+           reads, readMs);
     for (auto& p : r.problems) printf("problem: %s\n", p.c_str());
     if (!ok) return 1;
     fs::create_directories(out);
@@ -163,6 +178,21 @@ int main(int argc, char** argv)
                st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, o.size());
         return 0;
     }
+    if (argc > 4 && std::string(argv[1]) == "--dct") {   // --dct <1.0 table> <its stringids> <key name>
+        std::string raw = slurp(argv[2]), ids = slurp(argv[3]);
+        dct::Dict d;
+        if (!dct::load(raw, d) || dct::dump(d) != raw) { printf("round trip FAILED\n"); return 1; }
+        int dropped = 0, kept = dct::reseed(raw, ids, dct::SEED30, &dropped);
+        printf("reseeded: %d keys kept, %d unnamed dropped\n", kept, dropped);
+        // the engine's probe: lowercase key, hash with the table's seed, slot = hash % slots, linear
+        std::string k = argv[4];
+        for (char& c : k) c = (char)tolower((unsigned char)c);
+        uint32_t h = dct::lookup2((const uint8_t*)k.data(), k.size(), dct::u32(raw, 8)), ns = dct::u32(raw, 0x10);
+        for (uint32_t i = h % ns; dct::u32(raw, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (dct::u32(raw, 0x20 + 12 * i) == h) { printf("%s = \"%s\"\n", argv[4], raw.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(raw, 0x24 + 12 * i)); return 0; }
+        printf("%s not found\n", argv[4]);
+        return 1;
+    }
     if (argc > 3 && std::string(argv[1]) == "--btd") {   // --btd <1.0 .btd> <out .btd>: + <out>.btm beside it
         std::string b = slurp(argv[2]), o;
         if (!btd::convert(b, o)) { printf("not the 1.0 block layout\n"); return 1; }
@@ -184,14 +214,22 @@ int main(int argc, char** argv)
     }
     if (argc > 3 && std::string(argv[1]) == "--oct") {   // --oct <1.0 .oct> <out>: the SubNetwork transforms only
         std::string b = slurp(argv[2]);
+        auto t0 = std::chrono::steady_clock::now();
+        auto lap = [&](const char* what, int n) {
+            auto t1 = std::chrono::steady_clock::now();
+            printf("%-28s %8d  %7.1f ms\n", what, n, std::chrono::duration<double, std::milli>(t1 - t0).count());
+            t0 = t1;
+        };
         oct::File f = oct::File::parse(b.data(), b.size());
-        printf("skin influences redirected: %d\n", octx::skin30(f));
-        printf("locators redirected: %d\n", octx::locator30(f));
-        printf("asset pool added: %d\n", (int)octx::addAssetPool(f));
-        printf("collision aggregates added: %d\n", octx::collision30(f));
-        printf("lighting nodes converted: %d\n", octx::realm30w(f));
-        printf("subnetworks with counts added: %d\n", octx::addAllCounts(f));
+        lap("parse", 0);
+        lap("skin influences redirected", octx::skin30(f));
+        lap("locators redirected", octx::locator30(f));
+        lap("asset pool added", (int)octx::addAssetPool(f));
+        lap("collision aggregates added", octx::collision30(f));
+        lap("lighting nodes converted", octx::realm30w(f));
+        lap("subnetworks with counts", octx::addAllCounts(f));
         std::string o = f.write();
+        lap("write", (int)o.size());
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
         return 0;
     }
@@ -207,6 +245,34 @@ int main(int argc, char** argv)
         for (auto& [k, c] : kinds) printf("%s %d\n", k.c_str(), c);
         printf("%d constants rewritten, %zu -> %zu B\n", n, in.size(), out.size());
         if (argc > 3) std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--zip") {   // --zip <1.0 zip> <member>: the plugin's read10 calls
+        mz_zip_archive z{};
+        if (!mz_zip_reader_init_file(&z, argv[2], 0)) { printf("init FAILED (%s)\n", mz_zip_get_error_string(mz_zip_get_last_error(&z))); return 1; }
+        int i = mz_zip_reader_locate_file(&z, argv[3], nullptr, 0);
+        size_t n = 0;
+        void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(&z, (mz_uint)i, &n, 0);
+        printf("locate %d, extract %s %zu B (%s)\n", i, d ? "ok" : "FAILED", n, mz_zip_get_error_string(mz_zip_get_last_error(&z)));
+        mz_free(d);
+        return d ? 0 : 1;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--read10") {   // --read10 <1.0 install> <engine path>: read10's candidates
+        std::string p = argv[3];
+        for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
+        for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1)) {
+            std::string dir = p.substr(0, cut), member = p.substr(cut + 1), stem = member.substr(0, member.find('.'));
+            std::string zips[3] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip"};
+            for (auto& zr : zips) {
+                std::string full = std::string(argv[2]) + "\\assets\\" + zr;
+                for (char& c : full) if (c == '/') c = '\\';
+                mz_zip_archive z{};
+                bool ok = GetFileAttributesA(full.c_str()) != INVALID_FILE_ATTRIBUTES && mz_zip_reader_init_file(&z, full.c_str(), 0);
+                int i = ok ? mz_zip_reader_locate_file(&z, member.c_str(), nullptr, 0) : -2;
+                printf("%s : %s -> %d\n", zr.c_str(), member.c_str(), i);
+                if (ok) mz_zip_reader_end(&z);
+            }
+        }
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--member") {   // --member <archive> <name>: one read, its size
