@@ -1240,6 +1240,22 @@ static void __fastcall hkMsgSend(uint8_t* node, void*, void* payload)
         logf("message send '%s' target '%s' data '%s'", cstr(node + 0x1c, n, sizeof(n)), cstr(node + 0x28, t, sizeof(t)), cstr(node + 0x34, d, sizeof(d)));
     g_msgSend(node, nullptr, payload);
 }
+// MessageHandler delivery (FUN_018049f0 on the listener at node+0x20, which points back at the node from +0x20;
+// MessageName CString at node+0x4c, registered by FUN_017fd6b0): a sent name without this line reached no graph.
+typedef void(__fastcall* MsgRecvFn)(uint8_t* listener, void* edx, const char* data, uint32_t a2, uint32_t a3);
+static MsgRecvFn g_msgRecv;
+static void __fastcall hkMsgRecv(uint8_t* listener, void*, const char* data, uint32_t a2, uint32_t a3)
+{
+    char n[128], d[128];
+    if (lockTraceRoom()) {
+        const void* node = nullptr;
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(listener + 0x20, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT) node = *(void* const*)(listener + 0x20);
+        safeCopy(d, sizeof(d), data);
+        logf("message recv '%s' data '%s'", node ? cstr((const uint8_t*)node + 0x4c, n, sizeof(n)) : "?", d);
+    }
+    g_msgRecv(listener, nullptr, data, a2, a3);
+}
 
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
@@ -1924,6 +1940,7 @@ extern "C" void __stdcall Pentane_Main()
         hook("choreography node play (locktrace10)", 0x017E91B0, "83EC1C5556578BF1E8", (void*)&hkChoPlay, (void**)&g_choPlay);
         hook("choreography node event (locktrace10)", 0x017E5890, "538BD9568D73D057", (void*)&hkChoEvent, (void**)&g_choEvent);
         hook("message sender send (locktrace10)", 0x018120B0, "6AFF68????????64A100000000", (void*)&hkMsgSend, (void**)&g_msgSend);
+        hook("message handler delivery (locktrace10)", 0x018049F0, "83EC08568BF18B4E20", (void*)&hkMsgRecv, (void**)&g_msgRecv);
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
