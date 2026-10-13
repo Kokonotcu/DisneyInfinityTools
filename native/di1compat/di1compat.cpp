@@ -139,6 +139,7 @@ static struct {
     bool chest10 = true;             // sys: 1.0 ChestInfo.bin through 3.0's chestInfo loader (GLB-1)
     bool bits10 = true;              // sys: the 1.0 core bitmasks after the playset's (PS-5)
     bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
+    bool perc10 = true;              // sys: the 1.0 perceptions 3.0 lacks through 3.0's perceptions loader (GLB-1)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -172,6 +173,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "chest10")) g_cfg.chest10 = atoi(val) != 0;
         else if (!strcmp(key, "bits10")) g_cfg.bits10 = atoi(val) != 0;
         else if (!strcmp(key, "econ10")) g_cfg.econ10 = atoi(val) != 0;
+        else if (!strcmp(key, "perc10")) g_cfg.perc10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1234,6 +1236,24 @@ static uint32_t gameDbLoad(GameDbLoadFn orig, const char* tag, void* self, const
     }
     return orig(self, nullptr, path, a2, a3);
 }
+// DBFileLoader_Callback::load FUN_018db270 is vtable[1] (as the router FUN_018da710 calls it) and takes an engine
+// CString: it add-refs the header at path-0xc (FUN_00caa0d0 unless the count is 0x7fffffff), so a plain char* path
+// would be written through. The path goes in as a CString (ctor FUN_00418310, release FUN_00418230).
+static uint8_t cbLoad(void* loader, const char* path, uint32_t a2, uint32_t a3)
+{
+    char* cs = nullptr;
+    ((void*(__fastcall*)(void*, void*, const char*))rt(0x00418310))(&cs, nullptr, path);
+    uint8_t ok = ((uint8_t(__fastcall*)(void*, void*, char*, uint32_t, uint32_t))(*(void***)loader)[1])(loader, nullptr, cs, a2, a3);
+    ((void(__fastcall*)(void*, void*))rt(0x00418230))(&cs, nullptr);
+    return ok;
+}
+// a 3.0 singleton's DBFileLoader_Callback (+4: ChestInfo DAT_022896fc, PerceptionInfo DAT_02289700), null if unreadable
+static void* singletonLoader(uint32_t global)
+{
+    uint8_t* o = *(uint8_t**)rt(global);
+    void* loader = o && sys::readable(o + 4, 4) ? *(void**)(o + 4) : nullptr;
+    return loader && sys::readable(loader, 4) ? loader : nullptr;
+}
 static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
 {
     uint32_t r = gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
@@ -1244,16 +1264,11 @@ static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint
             sys::setLockUids(sys::loaderUids(self));
             gameDbLoad(g_loadLocks, "locks", self, s, a2, a3);
         }
-    // GLB-1: 1.0 ChestInfo.bin through 3.0's chestInfo loader (ChestInfo singleton DAT_022896fc, +4 its
-    // DBFileLoader_Callback; vtable[1] = FUN_018db270(CString path, a2, a3), as the router FUN_018da710 calls it)
-    uint8_t* ci = g_cfg.chest10 && _stricmp(p, sys::kLocksTrigger) == 0 ? *(uint8_t**)rt(0x022896FC) : nullptr;
-    void* loader = ci && sys::readable(ci + 4, 4) ? *(void**)(ci + 4) : nullptr;
-    if (loader && sys::readable(loader, 4)) {
-        char* cs = nullptr;   // an engine CString (ctor FUN_00418310, release FUN_00418230)
-        ((void*(__fastcall*)(void*, void*, const char*))rt(0x00418310))(&cs, nullptr, sys::kChest10);
-        uint8_t ok = ((uint8_t(__fastcall*)(void*, void*, char*, uint32_t, uint32_t))(*(void***)loader)[1])(loader, nullptr, cs, a2, a3);
-        ((void(__fastcall*)(void*, void*))rt(0x00418230))(&cs, nullptr);
-        uint8_t* chests = ci + 0x1c;
+    // GLB-1: 1.0 ChestInfo.bin through 3.0's chestInfo loader
+    void* loader = g_cfg.chest10 && _stricmp(p, sys::kLocksTrigger) == 0 ? singletonLoader(0x022896FC) : nullptr;
+    if (loader) {
+        uint8_t ok = cbLoad(loader, sys::kChest10, a2, a3);
+        uint8_t *ci = *(uint8_t**)rt(0x022896FC), *chests = ci + 0x1c;
         logf("chestInfo loader given %s -> %u; ChestInfo holds %d chests, %d resources, %d choreographies", sys::kChest10, ok,
              *(int*)(chests + 4), *(int*)(ci + 0x10), *(int*)(ci + 0x30));
     }
@@ -1275,8 +1290,9 @@ static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
     if (sys::g_pkg10 >= 0) logf("expendables %s (a 1.0 package): %d entries without PopinDistance pop in as in 1.0", p, sys::g_pkg10);
     sys::g_pkg10 = -1;
 }
-// PS-5 (sys.hpp): DBFileLoader_Callback::load FUN_018db270 (thiscall path, a2, a3; ret 0xc) -- every Lua callback
-// loader (bitMask, stats, chestInfo ...); after the playset's bitmasks, the 1.0 core masks as one more package
+// PS-5 (sys.hpp): DBFileLoader_Callback::load FUN_018db270 (thiscall CString path, a2, a3; ret 0xc) -- every Lua
+// callback loader (bitMask, stats, chestInfo ...); after the playset's bitmasks, the 1.0 core masks as one more package,
+// then (GLB-1) the 1.0 perceptions 3.0 lacks, whose actor types those masks register
 typedef uint8_t(__fastcall* CbLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
 static CbLoadFn g_cbLoad;
 static uint8_t __fastcall hkCbLoad(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
@@ -1284,9 +1300,15 @@ static uint8_t __fastcall hkCbLoad(void* self, void*, const char* path, uint32_t
     uint8_t r = g_cbLoad(self, nullptr, path, a2, a3);
     char p[300];
     safeCopy(p, sizeof(p), path);
-    if (_stricmp(p, sys::kBitsTrigger) == 0) {
-        uint8_t s = g_cbLoad(self, nullptr, sys::kBits10, a2, a3);
-        logf("bitMask loader given %s after %s -> %u", sys::kBits10, p, s);
+    if (_stricmp(p, sys::kBitsTrigger) != 0) return r;
+    if (g_cfg.bits10) logf("bitMask loader given %s after %s -> %u", sys::kBits10, p, cbLoad(self, sys::kBits10, a2, a3));
+    void* pl = g_cfg.perc10 ? singletonLoader(0x02289700) : nullptr;
+    const uint8_t* pi = pl ? *(uint8_t**)rt(0x02289700) : nullptr;
+    if (pi && sys::snapshotPerc30(pi)) {
+        int before = *(const int*)(pi + 0x104);
+        uint8_t ok = cbLoad(pl, sys::kPerc10, a2, a3);
+        logf("perceptions loader given %s -> %u; PerceptionInfo holds %d perceptions (%d before)", sys::kPerc10, ok,
+             *(const int*)(pi + 0x104), before);
     }
     return r;
 }
@@ -1336,6 +1358,15 @@ static int* sysServe(const char* p)
         bool ok = read10s(bin, src) && sys::chestInfoLua(src, out, &why);
         logf("served %s from 1.0 %s (%u B) -> chestInfo Lua %u B%s%s", p, bin.c_str(), (unsigned)src.size(), (unsigned)out.size(),
              ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
+        return ok ? memFile(out.data(), out.size()) : nullptr;
+    }
+    size_t ppre = strlen(sys::kPerc10Prefix);
+    if (!np.compare(0, ppre, sys::kPerc10Prefix) && endsWith(p, ".lua")) {   // GLB-1 PerceptionInfo.bin -> Lua
+        std::string bin = np.substr(ppre, np.size() - ppre - 4) + ".bin", why;
+        int added = 0;
+        bool ok = read10s(bin, src) && sys::perceptionInfoLua(src, sys::perc30(), out, added, &why);
+        logf("served %s from 1.0 %s (%u B) -> perceptions Lua %u B, %d perceptions 3.0 lacks%s%s", p, bin.c_str(),
+             (unsigned)src.size(), (unsigned)out.size(), added, ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
         return ok ? memFile(out.data(), out.size()) : nullptr;
     }
     size_t pre = strlen(sys::kLocks10Prefix);
@@ -1895,7 +1926,7 @@ extern "C" void __stdcall Pentane_Main()
     hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
     hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
     hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
-    if (g_cfg.bits10)
+    if (g_cfg.bits10 || g_cfg.perc10)
         hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad, (void**)&g_cbLoad);
     if (g_cfg.econ10)
         hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath, (void**)&g_econOnDeath);

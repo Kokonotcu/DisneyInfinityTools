@@ -10,9 +10,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace sys {
 
@@ -280,6 +282,302 @@ inline bool chestInfoLua(const std::string& b, std::string& out, std::string* wh
     }
     out += "\t},\n}\n";
     return ok || fail("offset out of range");
+}
+
+// ---- GLB-1: var/perceptions/PerceptionInfo.bin -> 3.0's perceptions loader ----
+// 1.0 PerceptionInfo ctor FUN_00f7ac10 maps the .bin: [u32 size, string pool] [u32 size, list words] then 9 blocks
+// [size, n, n records]: Detect 0x4c, TargetMode 0x10, Reticule 0x14, Ricochet 0xc, PartnerCheck 0x18,
+// InteractionCheck 0x10, Groups 0x10, UIText 0x14, Perceptions 0x60. Fields are string offsets (-1 none), block indices,
+// or list indices; a plain list (FUN_00f6bf10) is read in place up to -1, a TypePriority list (FUN_00f76830) and a
+// state-priority list (FUN_00f70300) start with a 0 flag word. 3.0 keeps the system (PerceptionInfo DAT_02289700, ctor
+// FUN_014b6560, DBFileLoader_Callback "perceptions") and reads the Lua global PerceptionInfo in callback FUN_014afd30,
+// which appends every block to the arrays it already holds and resolves references by record name; Perceptions go in a
+// name map that a later load overwrites (FUN_0149a090), so only the perceptions 3.0 lacks are sent (37 of 250: AvatarChest,
+// Activity*, Summon*, Ricochet_* ...), their Detect/UIText/.. records under new DI1_ names. Slot -> key: the 3.0 struct
+// slot the callback stores each key in; tested over the 213 perceptions both games have (perccheck.py): every Detect key
+// equal in >= 196/210 records once 1.0 slot 15 is read as maxHeightAboveGround (210/210; 3.0 inserted
+// targetPersistence before it), TargetMode 37-40/40, UIText 49-50/50, Groups by GroupName 211/213. A 1.0 group is the 3.0
+// group with its GroupName (all 31 exist); 1.0 Reticule's three floats have no proven 3.0 key and are not sent.
+// Booleans go as 0/1: 3.0 reads them as numbers (type 3).
+struct Perc30 {
+    std::function<bool(const std::string&)> has;                // 3.0 holds a perception of this name
+    std::function<std::string(const std::string&)> group;       // 3.0 Groups record with this GroupName, "" if none
+};
+
+inline bool perceptionInfoLua(const std::string& b, const Perc30& p30, std::string& out, int& added, std::string* why = nullptr)
+{
+    enum { DET, TM, RET, RIC, PC, IC, GRP, UI, PER, NB };
+    static const uint32_t rs[NB] = {0x4c, 0x10, 0x14, 0x0c, 0x18, 0x10, 0x10, 0x14, 0x60};
+    const uint32_t NONE = 0xffffffff;
+    added = 0;
+    auto fail = [&](const char* w) { if (why) *why = w; return false; };
+    auto u32 = [&](size_t o, uint32_t& v) { if (o + 4 > b.size()) return false; memcpy(&v, b.data() + o, 4); return true; };
+    uint32_t s1, s2;
+    if (!u32(0, s1) || s1 < 4 || !u32(s1, s2) || s2 < 4 || (size_t)s1 + s2 > b.size()) return fail("pool headers");
+    const size_t lw = s1 + 4, lwEnd = (size_t)s1 + s2;
+    size_t base[NB], o = lwEnd;
+    uint32_t n[NB];
+    for (int k = 0; k < NB; ++k) {
+        uint32_t size;
+        if (!u32(o, size) || !u32(o + 4, n[k]) || size != 8 + (uint64_t)n[k] * rs[k] || o + size > b.size()) return fail("record blocks");
+        base[k] = o + 8;
+        o += size;
+    }
+    if (o != b.size()) return fail("trailing bytes");
+    bool ok = true;
+    auto field = [&](int blk, uint32_t i, int f) { uint32_t v = NONE; ok &= u32(base[blk] + (size_t)i * rs[blk] + 4 * f, v); return v; };
+    auto str = [&](uint32_t off, std::string& s) {
+        if (off == NONE) return false;
+        size_t at = 4 + (size_t)off, e = at < s1 ? b.find('\0', at) : npos;
+        if (e == npos || e >= s1) { ok = false; return false; }
+        s.assign(b, at, e - at);
+        return true;
+    };
+    auto word = [&](size_t i, uint32_t& v) {
+        if (lw + 4 * i + 4 > lwEnd) { ok = false; return false; }
+        return u32(lw + 4 * i, v);
+    };
+    auto words = [&](uint32_t i, std::vector<uint32_t>& w) {
+        w.clear();
+        uint32_t v;
+        if (i != NONE)
+            for (size_t k = i; word(k, v) && v != NONE; ++k) w.push_back(v);
+    };
+    std::string s;
+    auto num = [&](uint32_t off) { char f[32]; sprintf_s(f, "%.9g", str(off, s) ? atof(s.c_str()) : 0.0); return std::string(f); };
+    auto flag = [&](uint32_t off) { return std::string(str(off, s) && (s[0] == 't' || s[0] == 'T' || s[0] == '1') ? "1" : "0"); };
+    auto inum = [&](uint32_t off) { return std::to_string(str(off, s) ? atoi(s.c_str()) : 0); };
+    auto name = [](const char* pre, uint32_t i) { return std::string(pre) + std::to_string(i); };
+
+    // the perceptions 3.0 lacks and every record they reach
+    std::vector<uint32_t> per, w;
+    std::set<uint32_t> use[NB], tpl, spl;
+    for (uint32_t i = 0; i < n[PER]; ++i) {
+        if (!str(field(PER, i, 0), s)) return fail(ok ? "perception without a name" : "string offset");
+        if (p30.has(s)) continue;
+        per.push_back(i);
+        static const struct { int f, blk; } ix[] = {{2, GRP}, {18, DET}, {19, TM}, {21, RET}, {22, RIC}};
+        for (auto& x : ix) {
+            uint32_t v = field(PER, i, x.f);
+            if (v == NONE) continue;
+            if (v >= n[x.blk]) return fail("record index");
+            use[x.blk].insert(v);
+        }
+        static const struct { int f, blk; } il[] = {{9, PC}, {14, IC}, {20, UI}};
+        for (auto& x : il) {
+            words(field(PER, i, x.f), w);
+            for (uint32_t v : w) { if (v >= n[x.blk]) return fail("list record index"); use[x.blk].insert(v); }
+        }
+    }
+    for (uint32_t d : use[DET]) {
+        uint32_t t = field(DET, d, 18), v;
+        if (t == NONE) continue;
+        tpl.insert(t);
+        for (size_t k = (size_t)t + 1; word(k, v) && v != NONE; k += 3) {
+            uint32_t val, isRef;
+            if (!word(k + 1, val) || !word(k + 2, isRef)) break;
+            if (flag(isRef) == "1") spl.insert(val);
+        }
+    }
+    if (!ok) return fail("offset out of range");
+
+    auto kv = [&](const char* key, uint32_t off) { if (str(off, s)) out += std::string("\t\t\t") + key + " = " + luaQuote(s) + ",\n"; };
+    auto kraw = [&](const char* key, const std::string& v) { out += std::string("\t\t\t") + key + " = " + v + ",\n"; };
+    auto kn = [&](const char* key, uint32_t off) { if (off != NONE) kraw(key, num(off)); };
+    auto kb = [&](const char* key, uint32_t off) { if (off != NONE) kraw(key, flag(off)); };
+    auto ki = [&](const char* key, uint32_t off) { if (off != NONE) kraw(key, inum(off)); };
+    auto refs = [&](const char* key, uint32_t list, const char* pre) {
+        words(list, w);
+        std::string v;
+        for (uint32_t x : w) v += (v.empty() ? "" : ",") + name(pre, x);
+        if (!v.empty()) kraw(key, luaQuote(v));
+    };
+    auto section = [&](const char* sec) { out += std::string("\t") + sec + " =\n\t{\n"; };
+    auto rec = [&](const std::string& key) { out += "\t\t[" + luaQuote(key) + "] =\n\t\t{\n"; };
+    const char* endRec = "\t\t},\n";
+
+    out = "-- 1.0 var/perceptions/PerceptionInfo.bin: the perceptions 3.0 lacks, in the form of 3.0's perceptions loader"
+          " (di1compat sys.hpp)\nPerceptionInfo =\n{\n";
+    section("StatePriority");
+    for (uint32_t l : spl) {
+        rec(name("DI1_SP", l));
+        uint32_t st, v;
+        for (size_t k = (size_t)l + 1; word(k, st) && st != NONE && word(k + 1, v); k += 2)
+            if (str(st, s)) {
+                std::string key = "[" + luaQuote(s) + "]";
+                kraw(key.c_str(), num(v));
+            }
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("TypePriority");
+    for (uint32_t l : tpl) {
+        rec(name("DI1_TP", l));
+        uint32_t ty, v, isRef;
+        for (size_t k = (size_t)l + 1; word(k, ty) && ty != NONE && word(k + 1, v) && word(k + 2, isRef); k += 3)
+            if (str(ty, s)) {
+                std::string key = "[" + luaQuote(s) + "]";
+                kraw(key.c_str(), flag(isRef) == "1" ? luaQuote(name("DI1_SP", v)) : num(v));
+            }
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("Detect");
+    static const char* const detF[] = {"AggroRadius", "PriorityOverrideThreshhold", "FocusWeight", "Distance", "AwareDistance",
+                                       "nearHeight", "farHeight", "useCenter", "focusMethod", "FOV", "FOVNotMoving",
+                                       "ellipsePercent", "ellipsePercentNotMoving", "lineOfSight", "targetFacing",
+                                       "maxHeightAboveGround", "foundTargetIgnoresPriority", "allowRumpusTerrain"};
+    for (uint32_t d : use[DET]) {
+        rec(name("DI1_D", d));
+        for (int f = 0; f < 18; ++f) {
+            uint32_t v = field(DET, d, f);
+            if (f == 8) kv(detF[f], v);
+            else if (f == 7 || f == 13 || f == 16 || f == 17) kb(detF[f], v);
+            else kn(detF[f], v);
+        }
+        if (field(DET, d, 18) != NONE) kraw("TypePriority", luaQuote(name("DI1_TP", field(DET, d, 18))));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("TargetMode");
+    for (uint32_t t : use[TM]) {
+        rec(name("DI1_TM", t));
+        kn("Distance", field(TM, t, 0)); kn("Distance2Radius", field(TM, t, 1));
+        kb("lineOfSight", field(TM, t, 2)); kb("allowRumpusTerrain", field(TM, t, 3));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("Reticule");
+    for (uint32_t r : use[RET]) {   // ponytail: floats 2..4 unmapped (no proven 3.0 key); map them if a 1.0-only reticle matters
+        rec(name("DI1_R", r));
+        kv("ChoName", field(RET, r, 0)); kv("Anchor", field(RET, r, 1));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("Ricochet");
+    for (uint32_t r : use[RIC]) {
+        rec(name("DI1_RC", r));
+        ki("MaxRicochets", field(RIC, r, 0)); ki("NumRequiredNetworkedHandles", field(RIC, r, 1)); kv("Perception", field(RIC, r, 2));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("PartnerCheck");
+    static const char* const pcF[] = {"Interaction", "Initiator", "PartnerMustBeOfThisType", "PartnerMustHaveAllTheseStates",
+                                      "PartnerMustHaveAnyOfTheseStates", "PartnerCannotHaveAnyOfTheseStates"};
+    for (uint32_t r : use[PC]) {
+        rec(name("DI1_PC", r));
+        for (int f = 0; f < 6; ++f) f == 1 ? kb(pcF[f], field(PC, r, f)) : kv(pcF[f], field(PC, r, f));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("InteractionCheck");
+    for (uint32_t r : use[IC]) {
+        rec(name("DI1_IC", r));
+        kv("TargetActorType", field(IC, r, 0)); kv("Interaction", field(IC, r, 1));
+        kv("InteractionActorType", field(IC, r, 2)); kb("InteractionCentric", field(IC, r, 3));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("Groups");
+    std::vector<std::string> grp(n[GRP]);
+    for (uint32_t g : use[GRP]) {
+        if (str(field(GRP, g, 0), s) && !(grp[g] = p30.group(s)).empty()) continue;
+        grp[g] = name("DI1_G", g);
+        rec(grp[g]);
+        kv("GroupName", field(GRP, g, 0)); ki("MaxTargets", field(GRP, g, 2)); kb("OnePerceptionAllowed", field(GRP, g, 3));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("UIText");
+    for (uint32_t u : use[UI]) {
+        rec(name("DI1_U", u));
+        kv("Text", field(UI, u, 0)); kv("Button", field(UI, u, 1)); ki("Priority", field(UI, u, 2));
+        kn("Timer", field(UI, u, 3)); kv("WiiMotebutton", field(UI, u, 4));
+        out += endRec;
+    }
+    out += "\t},\n";
+    section("Perceptions");
+    static const struct { int f; const char* key; char kind; } perF[] = {
+        {3, "FromTrigger", 'b'}, {4, "AutoEliminateTargets", 'b'}, {5, "PerceiverMustBeOfThisType", 's'},
+        {6, "PerceiverMustHaveAllTheseStates", 's'}, {7, "PerceiverMustHaveAnyOfTheseStates", 's'},
+        {8, "PerceiverCannotHaveAnyOfTheseStates", 's'}, {10, "TargetMustBeOfThisType", 's'},
+        {11, "TargetMustHaveAllTheseStates", 's'}, {12, "TargetMustHaveAnyOfTheseStates", 's'},
+        {13, "TargetCannotHaveAnyOfTheseStates", 's'}, {15, "PerceiveRider", 'b'}, {16, "BasePriority", 'f'},
+        {17, "AllowInTargetMode", 'b'}};
+    for (uint32_t i : per) {
+        str(field(PER, i, 0), s);
+        rec(s);
+        uint32_t g = field(PER, i, 2);
+        if (g != NONE) kraw("Groups", luaQuote(grp[g]));
+        for (auto& x : perF) {
+            uint32_t v = field(PER, i, x.f);
+            x.kind == 'b' ? kb(x.key, v) : x.kind == 'f' ? kn(x.key, v) : kv(x.key, v);
+        }
+        static const struct { int f; const char *key, *pre; } ref[] = {{18, "Detect", "DI1_D"}, {19, "TargetMode", "DI1_TM"},
+                                                                       {21, "Reticule", "DI1_R"}, {22, "Ricochet", "DI1_RC"}};
+        for (auto& x : ref)
+            if (field(PER, i, x.f) != NONE) kraw(x.key, luaQuote(name(x.pre, field(PER, i, x.f))));
+        refs("PartnerCheck", field(PER, i, 9), "DI1_PC");
+        refs("InteractionCheck", field(PER, i, 14), "DI1_IC");
+        refs("UIText", field(PER, i, 20), "DI1_U");
+        words(field(PER, i, 23), w);
+        std::string cc, c;
+        for (uint32_t x : w) if (str(x, c)) cc += (cc.empty() ? "" : ",") + c;
+        if (!cc.empty()) kraw("ControlContext", luaQuote(cc));
+        out += endRec;
+        ++added;
+    }
+    out += "\t},\n}\n";
+    return ok || fail("offset out of range");
+}
+
+// the perceptions supplement is sent once the playset's bitmasks (and kBits10) are in, so its 1.0 actor types resolve;
+// the 3.0 names / groups are read from PerceptionInfo before the load (the open that serves it may run on another thread)
+static const char* const kPerc10Prefix = "di1sys/perc10/";   // + the 1.0 path with .lua for .bin
+static const char* const kPerc10 = "di1sys/perc10/var/perceptions/perceptioninfo.lua";
+inline std::mutex g_percMx;
+inline std::set<std::string> g_perc30;
+inline std::map<std::string, std::string> g_group30;   // GroupName -> 3.0 Groups record name (first, as 3.0's lookup)
+inline Perc30 perc30()
+{
+    std::lock_guard<std::mutex> l(g_percMx);
+    auto names = g_perc30;
+    auto groups = g_group30;
+    return {[names](const std::string& s) { return names.count(s) != 0; },
+            [groups](const std::string& s) { auto it = groups.find(s); return it == groups.end() ? std::string() : it->second; }};
+}
+// PerceptionInfo (DAT_02289700): Perceptions +0x100 records / +0x104 count, record +0 name; Groups +0xe0 / +0xe4,
+// record +0 name, +8 GroupName (callback FUN_014afd30). False if the object is not readable.
+inline bool snapshotPerc30(const uint8_t* pi)
+{
+    std::set<std::string> names;
+    std::map<std::string, std::string> groups;
+    auto cstr = [](const void* p, std::string& s) {
+        if (!readable(p, 1)) return false;
+        const char* c = (const char*)p;
+        size_t k = 0;
+        while (k < 256 && readable(c + k, 1) && c[k]) ++k;
+        s.assign(c, k);
+        return k < 256;
+    };
+    for (int sec = 0; sec < 2; ++sec) {
+        size_t at = sec ? 0xe0 : 0x100;
+        if (!readable(pi + at, 8)) return false;
+        void* const* arr = *(void* const**)(pi + at);
+        int cnt = *(const int*)(pi + at + 4);
+        if (cnt < 0 || cnt > 100000 || (cnt && !readable(arr, cnt * 4))) return false;
+        for (int i = 0; i < cnt; ++i) {
+            const uint8_t* r = (const uint8_t*)arr[i];
+            std::string a, g;
+            if (!readable(r, 12) || !cstr(*(void* const*)r, a)) continue;
+            if (!sec) names.insert(a);
+            else if (cstr(*(void* const*)(r + 8), g)) groups.emplace(g, a);
+        }
+    }
+    std::lock_guard<std::mutex> l(g_percMx);
+    g_perc30.swap(names);
+    g_group30.swap(groups);
+    return true;
 }
 
 // the chestInfo loader runs once per process, after the playset locks (its callback appends; the loader skips a

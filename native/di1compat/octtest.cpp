@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -216,6 +217,26 @@ int main(int argc, char** argv)
         for (const char* k : {"Resource", "Choreography", "Chests"})
             printf("%s %zu  ", k, c && field(*c, k) ? field(*c, k)->named.size() : 0);
         printf("(%zu B)\n", out.size());
+        return 0;
+    }
+    if (argc > 5 && std::string(argv[1]) == "--perc") {   // --perc <1.0 perceptioninfo.bin> <3.0 names> <3.0 groups tsv> <out.lua>
+        std::set<std::string> names;
+        std::map<std::string, std::string> groups;
+        std::istringstream nl(slurp(argv[3])), gl(slurp(argv[4]));
+        for (std::string l; std::getline(nl, l);) if (!l.empty()) names.insert(l);
+        for (std::string l; std::getline(gl, l);) if (l.find('\t') != std::string::npos) groups.emplace(l.substr(0, l.find('\t')), l.substr(l.find('\t') + 1));
+        sys::Perc30 p30{[&](const std::string& s) { return names.count(s) != 0; },
+                        [&](const std::string& s) { auto it = groups.find(s); return it == groups.end() ? std::string() : it->second; }};
+        std::string out, why;
+        int added = 0;
+        if (!sys::perceptionInfoLua(slurp(argv[2]), p30, out, added, &why)) { printf("FAILED: %s\n", why.c_str()); return 1; }
+        std::ofstream(argv[5], std::ios::binary) << out;
+        chd::V t = chd::lua(out);   // independent parse: the sections and their entry counts
+        const chd::V* c = field(t, "PerceptionInfo");
+        for (const char* k : {"StatePriority", "TypePriority", "Detect", "TargetMode", "Reticule", "Ricochet", "PartnerCheck",
+                              "InteractionCheck", "Groups", "UIText", "Perceptions"})
+            printf("%s %zu  ", k, c && field(*c, k) ? field(*c, k)->named.size() : 0);
+        printf("(added %d, %zu B)\n", added, out.size());
         return 0;
     }
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
