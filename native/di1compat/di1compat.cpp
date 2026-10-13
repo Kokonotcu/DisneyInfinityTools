@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "vfx.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,7 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +161,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "vfx10")) g_cfg.vfx10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -327,6 +330,7 @@ static void indexZip10(const std::string& zipRel)
         std::string n = name;
         for (char& c : n) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
         if (n.find('/') != std::string::npos && n.back() != '/') g_over10.emplace(n, base + name);
+        if (g_cfg.vfx10) if (std::string a = vfx::p3dAlias(n); !a.empty()) g_over10.emplace(a, base + name);   // 3.0 opens meshes by hash
     }
 }
 
@@ -547,6 +551,17 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         out = r.mtb;
         return "mtb";
     }
+    // a particle package (trailer v12 -> v47; 3.0's loader rejects 1.0's, so nothing of it registered) and its meshes
+    if (g_cfg.vfx10 && endsWith(path, ".particledata")) {
+        vfx::Stats st;
+        if (!vfx::transcode(std::string((const char*)data, n), out, &st)) return nullptr;
+        note += "+particles(" + std::to_string(st.emitters) + " emitters, " + std::to_string(st.effects) + " effects, " +
+                std::to_string(st.params) + " params, " + std::to_string(st.keys) + " keys, " + std::to_string(st.meshes) +
+                " mesh emitters) ";
+        return "particledata";
+    }
+    if (g_cfg.vfx10 && endsWith(path, ".p3d"))
+        return vfx::p3d30(std::string((const char*)data, n), out) ? "p3d" : nullptr;
     // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
     if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
         int k = luachunk::rewrite(std::string((const char*)data, n), out, datamap::normalise);

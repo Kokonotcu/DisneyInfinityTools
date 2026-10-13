@@ -16,6 +16,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "vfx.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -250,6 +251,17 @@ int main(int argc, char** argv)
         for (auto& [k, c] : kinds) printf("%s %d\n", k.c_str(), c);
         printf("%d constants rewritten, %zu -> %zu B\n", n, in.size(), out.size());
         if (argc > 3) std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
+        return 0;
+    }
+    // --pd <1.0 .particledata | .p3d> <out>: vfx.hpp's transcode (particles.py writes the oracle's bytes to compare)
+    if (argc > 3 && std::string(argv[1]) == "--pd") {
+        std::string in = slurp(argv[2]), out;
+        vfx::Stats st;
+        bool ok = vfx::isPd10(in) ? vfx::transcode(in, out, &st) : vfx::p3d30(in, out);
+        if (!ok) { printf("not a 1.0 particle package or mesh\n"); return 1; }
+        printf("%u -> %u B, %d emitters %d effects %d params %d keys %d mesh emitters\n", (unsigned)in.size(),
+               (unsigned)out.size(), st.emitters, st.effects, st.params, st.keys, st.meshes);
+        std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--zip") {   // --zip <1.0 zip> <member>: the plugin's read10 calls
