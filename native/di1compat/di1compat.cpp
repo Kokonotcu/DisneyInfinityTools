@@ -137,6 +137,7 @@ static struct {
     bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
     bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)
     bool chest10 = true;             // sys: 1.0 ChestInfo.bin through 3.0's chestInfo loader (GLB-1)
+    bool bits10 = true;              // sys: the 1.0 core bitmasks after the playset's (PS-5)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -168,6 +169,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "locks10")) g_cfg.locks10 = atoi(val) != 0;
         else if (!strcmp(key, "popin10")) g_cfg.popin10 = atoi(val) != 0;
         else if (!strcmp(key, "chest10")) g_cfg.chest10 = atoi(val) != 0;
+        else if (!strcmp(key, "bits10")) g_cfg.bits10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1271,6 +1273,22 @@ static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
     if (sys::g_pkg10 >= 0) logf("expendables %s (a 1.0 package): %d entries without PopinDistance pop in as in 1.0", p, sys::g_pkg10);
     sys::g_pkg10 = -1;
 }
+// PS-5 (sys.hpp): DBFileLoader_Callback::load FUN_018db270 (thiscall path, a2, a3; ret 0xc) -- every Lua callback
+// loader (bitMask, stats, chestInfo ...); after the playset's bitmasks, the 1.0 core masks as one more package
+typedef uint8_t(__fastcall* CbLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
+static CbLoadFn g_cbLoad;
+static uint8_t __fastcall hkCbLoad(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
+{
+    uint8_t r = g_cbLoad(self, nullptr, path, a2, a3);
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    if (_stricmp(p, sys::kBitsTrigger) == 0) {
+        uint8_t s = g_cbLoad(self, nullptr, sys::kBits10, a2, a3);
+        logf("bitMask loader given %s after %s -> %u", sys::kBits10, p, s);
+    }
+    return r;
+}
+
 typedef void(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
 static ExpDefFn g_expDef;
 static void __fastcall hkExpDef(void* self, void*, void* entry)
@@ -1283,6 +1301,12 @@ static void __fastcall hkExpDef(void* self, void*, void* entry)
 static int* sysServe(const char* p)
 {
     std::string np = norm(p), src, out;
+    size_t rpre = strlen(sys::kRaw10Prefix);
+    if (!np.compare(0, rpre, sys::kRaw10Prefix)) {   // the 1.0 file at a path 3.0 also has
+        bool ok = read10s(np.substr(rpre), src);
+        logf("served %s %u B from 1.0 %s%s", p, (unsigned)src.size(), np.substr(rpre).c_str(), ok ? "" : " -- MISSING");
+        return ok ? memFile(src.data(), src.size()) : nullptr;
+    }
     size_t cpre = strlen(sys::kChest10Prefix);
     if (!np.compare(0, cpre, sys::kChest10Prefix) && endsWith(p, ".lua")) {   // GLB-1 ChestInfo.bin -> Lua
         std::string bin = np.substr(cpre, np.size() - cpre - 4) + ".bin", why;
@@ -1848,6 +1872,8 @@ extern "C" void __stdcall Pentane_Main()
     hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
     hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
     hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
+    if (g_cfg.bits10)
+        hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad, (void**)&g_cbLoad);
     if (g_cfg.popin10) {
         hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
         hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);

@@ -287,6 +287,18 @@ inline bool chestInfoLua(const std::string& b, std::string& out, std::string* wh
 static const char* const kChest10Prefix = "di1sys/chest10/";   // + the 1.0 path with .lua for .bin
 static const char* const kChest10 = "di1sys/chest10/var/chests/chestinfo.lua";
 
+// ---- PS-5: the 1.0 core bitmasks, as one more bitMask package ----
+// 1.0's core bitmasks.lua has 201 masks no 3.0 package has (by set + name; 0 UID collisions within a set): AvatarAction
+// 102 (the blockhead BH* actions), ActorType 50, ActorState 27, ActorTag 16 (MissionGivers_Active/_Available ...),
+// QBGroup 2 (ScourgeQuarterback, IntroQuarterback), BehaviorMod 2, Interaction 1, Interrupt 1
+// (GrabbedByZeroPointEnergy), and 5 ActorType + 1 ActorState filters. 3.0 merges every bitMask package into the same
+// sets (bitmask callback FUN_00711020: a mask already in its set is flagged and skipped, FUN_0070e7a0; an existing
+// filter is OR-ed with the package's, FUN_00710d60 -> FUN_006f99c0; 3.0's own packages grow sets past their declared
+// count, e.g. ActorType 167 declared, 918 masks), so the 1.0 file goes in verbatim after the playset's.
+static const char* const kRaw10Prefix = "di1sys/raw10/";   // + a 1.0 path 3.0 also has: the 1.0 bytes
+static const char* const kBitsTrigger = "GameDB/Incredibles/bitmasks.lua";
+static const char* const kBits10 = "di1sys/raw10/gamedb/core/bitmasks.lua";
+
 // ---- PS-8: pop-in of 1.0 expendable definitions ----
 // ExpendablesDefBase (ctor FUN_016022c0, one Lua entry) keeps the pop-in range squared at +0x9c and (range+14)^2 at
 // +0xa0: both stay 0 unless the entry has PopinDistance (an explicit 0 gives 0/196). With 0 a 3.0 expendable never
