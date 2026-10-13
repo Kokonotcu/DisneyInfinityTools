@@ -16,6 +16,8 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "audio.hpp"
+#include <cstdarg>
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -149,10 +151,101 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
     }
 }
 
+// octtest --fmod <1.0 install> <names.tsv> <fev>...  AUD-2 offline acceptance: the plugin's FMOD host (audio.hpp) loads
+// the unmodified 1.0 FMOD DLLs with no output, loads Initialize.fev:Permanent and the given FEVs with 1.0's load and
+// registration rules, then resolves every name of names.tsv (kind, source, name, uses: the graph references from the
+// research catalogues) as a posted event or, for cues, through the playset's Music_<X>.fev. EV lines list every
+// registered event (checked against the FEV string tables by fevcheck.py).
+static void stdoutLog(const char* fmt, ...)
+{
+    va_list a;
+    va_start(a, fmt);
+    vprintf(fmt, a);
+    va_end(a);
+    printf("\n");
+}
+
+static int fmodTest(int argc, char** argv)
+{
+    audio::logfn = stdoutLog;
+    std::map<std::string, std::string> dropped;
+    audio::g.dropped = &dropped;
+    if (!audio::g.init(argv[2], true)) return 1;
+    audio::g.load("Initialize.fev", "Permanent");
+    for (int i = 4; i < argc; ++i) {
+        std::string n = audio::g.name10(argv[i]);
+        if (n.empty()) printf("NOFILE %s\n", argv[i]);
+        else audio::g.load(n);
+    }
+    std::map<void*, std::string> projName;
+    for (auto& p : audio::g.projects) projName[p.second.p] = p.first;
+    for (auto& e : audio::g.byId) printf("EV\t%s\t%s\t%u\n", projName[e.second.proj].c_str(), e.second.name.c_str(), e.second.flags);
+    std::ifstream in(argv[3]);
+    std::string line;
+    std::map<std::string, int> tally;
+    while (std::getline(in, line)) {
+        size_t a = line.find('\t'), b = line.find('\t', a + 1), c = line.find('\t', b + 1);
+        if (c == std::string::npos) continue;
+        std::string kind = line.substr(0, a), src = line.substr(a + 1, b - a - 1), name = line.substr(b + 1, c - b - 1);
+        std::string verdict;
+        if (kind == "cue") {
+            size_t u = name.find('_');
+            std::string x = u == std::string::npos ? "" : name.substr(0, u);
+            unsigned id = 0;
+            if (x.empty() || !audio::music.ensure(x)) verdict = "MISS (no Music_" + x + ".fev)";
+            else verdict = audio::Music::cue(name.c_str(), &id) ? "OK " + audio::music.file : "MISS (not a cue of " + audio::music.file + ")";
+        } else {
+            auto it = audio::g.byId.find(audio::fnv1(name));
+            if (it != audio::g.byId.end()) verdict = "OK " + projName[it->second.proj] + " flags " + std::to_string(it->second.flags);
+            else if (dropped.count(name)) verdict = "MISS (left out by the 1.0 rule: " + dropped[name] + ")";
+            else verdict = "MISS";
+        }
+        ++tally[kind + " " + src + (verdict[0] == 'O' ? " ok" : " miss")];
+        printf("%s\t%s\t%s\t%s\n", kind.c_str(), src.c_str(), name.c_str(), verdict.c_str());
+    }
+    // the Music_<X>.fev loaded last: its full cue list (fevcheck.py compares it with the file's cues chunk)
+    struct Entity { const char* name; unsigned id; };
+    struct Iter { const Entity* value; const char* filter; } it{};
+    if (audio::g.ms && !audio::g.f.MusicSystem_GetCues(audio::g.ms, &it, nullptr))
+        for (; it.value; audio::g.f.MusicSystem_GetNextCue(audio::g.ms, &it)) printf("CUE\t%s\t%u\n", it.value->name, it.value->id);
+    for (auto& t : tally) printf("TALLY %s %d\n", t.first.c_str(), t.second);
+
+    // lifecycle (needs IN_City.fev): a one-shot ends by itself and calls back once, a loop runs until stopped, a music
+    // cue's prompt turns active and ends; what the plugin's tick thread delivers, run here on the main thread
+    static int calls = 0;
+    static uint32_t lastPid = 0;
+    audio::AkCallback cb = [](uint32_t type, void* info) { calls += type == 1; lastPid = ((uint32_t*)info)[2]; };
+    uint32_t one = audio::g.play(audio::fnv1("billboardStart"), 7, 1, (void*)cb, nullptr);
+    uint32_t loop = audio::g.play(audio::fnv1("fire_loop"), 7, 1, (void*)cb, nullptr);
+    auto run = [](int ms) { for (int t = 0; t < ms; t += 16) { Sleep(16); audio::tickAndDeliver(); } };
+    run(6000);
+    int afterOne = calls;
+    uint32_t pidOne = lastPid;
+    audio::g.act(loop, 0);
+    run(2000);
+    printf("LIFE one-shot id %u: %d callback(s) in 6 s (pid %u); loop id %u: %s before its stop, %d after\n", one, afterOne,
+           pidOne, loop, afterOne == 1 ? "running" : "ENDED", calls - afterOne);
+    int active = -1, activeAfter = -1;
+    if (audio::music.ensure("Inc") && audio::music.begin("Inc_mx_Metroville")) {
+        run(1000);
+        audio::g.f.MusicPrompt_IsActive(audio::music.prompt, &active);
+        audio::music.endPrompt();
+        audio::g.f.MusicSystem_Reset(audio::g.ms);
+        run(500);
+        unsigned id;
+        void* p = nullptr;
+        if (audio::Music::cue("Inc_mx_Metroville", &id)) audio::g.f.MusicSystem_PrepareCue(audio::g.ms, id, &p);
+        if (p) { audio::g.f.MusicPrompt_IsActive(p, &activeAfter); audio::g.f.MusicPrompt_Release(p); }
+    }
+    printf("LIFE music Inc_mx_Metroville: active %d after 1 s, fresh prompt active %d after end+reset\n", active, activeAfter);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
+    if (argc > 3 && std::string(argv[1]) == "--fmod") return fmodTest(argc, argv);
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;

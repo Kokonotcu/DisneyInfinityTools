@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "audio.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,9 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (audio.hpp)
+    bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
+    bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +163,9 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "audio10")) g_cfg.audio10 = atoi(val) != 0;
+        else if (!strcmp(key, "music10")) g_cfg.music10 = atoi(val) != 0;
+        else if (!strcmp(key, "audiotrace10")) g_cfg.audioTrace10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1804,6 +1811,12 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
+    if (g_cfg.audio10 && g_cfg.install10[0]) {
+        audio::logfn = logf;
+        audio::cfg.music = g_cfg.music10;
+        audio::cfg.trace = g_cfg.audioTrace10;
+        if (!audio::install(hook, rt, g_cfg.install10, g_gameDir)) logf("audio10: off (FMOD host failed)");
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
