@@ -1,5 +1,6 @@
 # Unattended in-game test: boot 3.0, travel to a zone with a character, run Lua probes, screenshot, quit.
 #   powershell -File harness.ps1 [-Zone OUT_Intro2] [-Sku 1000206] [-Probe a.lua,b.lua] [-Keep] [-Attach]
+#                                [-MenuProbe m.lua] [-MenuOnly]   (probes in the main menu; MenuOnly stops there)
 # Needs CrabeLoader (bink2w32.dll proxy, built from source with its engine guards off): it runs
 # <game>\crabe_remote_cmd.txt in the game Lua state and logs the result to loader.log as '= ...' / '! ...'.
 # Commands only run while the game itself calls Lua (CrabeLoader ticks from its lua_pcall hook): an idle menu
@@ -13,7 +14,7 @@
 #   VirtualReaderPC_SetCurrentCharacter(sku) + VirtualReaderPC_ActivateChanges(0, true), then
 #   UI_LaunchLevel(..., characterSelected = true) loads the world with that avatar (FUN_00b81350 arg 6).
 #   Without the title-screen press there is no profile: the world loads with no avatar (camera at the origin).
-param([string]$Zone = 'OUT_Intro2', [int]$Sku = 1000206, [string[]]$Probe = @(),
+param([string]$Zone = 'OUT_Intro2', [int]$Sku = 1000206, [string[]]$Probe = @(), [string[]]$MenuProbe = @(), [switch]$MenuOnly,
       [switch]$Keep, [switch]$Attach, [int]$BootTimeout = 300, [int]$LoadTimeout = 180,
       [string]$Game = 'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition',
       [string]$Out = "$env:TEMP\di3harness")
@@ -110,6 +111,8 @@ if (-not $Attach) {
 $menu = Until $MENU '^= menu' 90
 "menu: $menu ($([int]((Get-Date) - $t0).TotalSeconds)s)"
 if ($menu -notmatch '^= menu') { 'FAIL: main menu not reached'; exit 1 }
+foreach ($p in $MenuProbe) { "menu probe $p : " + (Lua (Get-Content -Raw $p) 60) }
+if ($MenuOnly) { if (-not $Keep) { Lua 'Game.QuitGame(); return "quit"' 5 | Out-Null; Start-Sleep 8; if (Alive) { Stop-Process -Name DisneyInfinity3 -Force } }; exit 0 }
 "openvr: " + (Lua $OPENVR)
 "vr: " + (Until $VRUP '^= vr' 30)
 "sku: " + (Lua $SETSKU)

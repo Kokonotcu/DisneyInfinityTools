@@ -9,12 +9,17 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <share.h>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
 #include "octx.hpp"
+#include "render.hpp"
+#include "arc30.hpp"
+#include "datamap.hpp"
+#include "luachunk.hpp"
 #include "third_party/miniz/miniz.h"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
@@ -151,13 +156,20 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
     if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
     std::lock_guard<std::mutex> lock(g_zipLock);
     for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1)) {
-        mz_zip_archive* z = zipFor(p.substr(0, cut) + ".zip");
-        if (!z) continue;
-        std::string member = p.substr(cut + 1);
-        int i = mz_zip_reader_locate_file(z, member.c_str(), nullptr, 0);
-        if (i < 0) continue;
-        void* data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
-        if (data) { *where = p.substr(0, cut) + ".zip:" + member; return data; }
+        std::string dir = p.substr(0, cut), member = p.substr(cut + 1);
+        // <dir>.zip (worlds/in_city.zip), a folder-named archive inside <dir> (gamedb/core/core.zip,
+        // shaders/shaders.zip: the engine path leaves the archive's own name out), or a per-asset archive inside
+        // <dir> named after the member (characters/inc_bob/inc_bob_ps.zip holds inc_bob_ps.oct)
+        std::string stem = member.substr(0, member.find('.'));
+        std::string zips[3] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip"};
+        for (auto& zr : zips) {
+            mz_zip_archive* z = zipFor(zr);
+            if (!z) continue;
+            int i = mz_zip_reader_locate_file(z, member.c_str(), nullptr, 0);   // case-insensitive
+            if (i < 0) continue;
+            void* data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
+            if (data) { *where = zr + ":" + member; return data; }
+        }
     }
     return nullptr;
 }
@@ -187,14 +199,152 @@ static bool endsWith(const char* s, const char* suffix)
     return a >= b && _stricmp(s + a - b, suffix) == 0;
 }
 
+static std::string norm(const char* path)
+{
+    std::string p = path;
+    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
+    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
+    return p;
+}
+
+static bool read10s(const std::string& path, std::string& out)
+{
+    size_t n = 0;
+    std::string where;
+    void* d = read10(path.c_str(), &n, &where);
+    if (!d) return false;
+    out.assign((const char*)d, n);
+    mz_free(d);
+    return true;
+}
+
+typedef int*(__cdecl* OpenFn)(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5);
+static OpenFn g_open;
+
+// A 3.0 asset through the engine's own open (archives, keys, index), read whole; the stream is destroyed.
+static bool read30(const std::string& path, std::string& out)
+{
+    typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
+    typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
+    typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
+    int* s = g_open(path.c_str(), 0, 0, 0, nullptr);
+    if (!s) return false;
+    void** vt = *(void***)s;
+    uint32_t n = ((SizeFn)vt[4])(s, nullptr);
+    out.assign(n, '\0');
+    uint32_t got = n ? ((ReadFn)vt[5])(s, nullptr, &out[0], n) : 0;
+    ((DtorFn)vt[11])(s, nullptr, 1);
+    return got == n;
+}
+
+// A 3.0 asset by its extract path ('3:X/name/member' = member of <game>/assets/X/name.zip, the extract.py layout),
+// read straight from the install's archive (arc30.hpp) -- the engine's own path conventions vary by asset kind.
+static std::string g_gameDir;
+static bool read30x(const std::string& extract, std::string& out)
+{
+    std::string rel = extract.substr(2);
+    size_t cut = rel.rfind('/');
+    if (cut == std::string::npos) return false;
+    std::string arc = g_gameDir + "/assets/" + rel.substr(0, cut) + ".zip";
+    for (char& c : arc) if (c == '/') c = '\\';
+    return arc30::readMember(arc, rel.substr(cut + 1), out);
+}
+
+// World session: the .oct request transcodes the whole world (its .mtb/.vbuf/.ibuf decisions are coupled), and the
+// engine's next requests for those files are answered from here. 1.0 textures: hash -> (zip, member).
+static std::mutex g_sessLock;
+static std::map<std::string, std::string> g_served;
+static std::map<std::string, std::pair<std::string, std::string>> g_tex10;
+static render::Table g_render;
+static bool g_renderOk;
+
+static void indexTextures10(const std::string& zipRel)
+{
+    std::lock_guard<std::mutex> lock(g_zipLock);
+    mz_zip_archive* z = zipFor(zipRel);
+    if (!z) return;
+    std::lock_guard<std::mutex> l2(g_sessLock);
+    for (mz_uint i = 0; i < mz_zip_reader_get_num_files(z); ++i) {
+        char name[300];
+        mz_zip_reader_get_filename(z, i, name, sizeof(name));
+        std::string n = name;
+        for (char& c : n) c = (char)tolower((unsigned char)c);
+        if (n.rfind("textures/", 0) == 0 && endsWith(n.c_str(), ".tbody"))
+            g_tex10.emplace(n.substr(9, n.size() - 9 - 6), std::make_pair(zipRel, std::string(name)));
+    }
+}
+
+// D3D11 rejects block-compressed textures below 4x4; a 1x1/2x2 single-mip DXT file already holds one whole
+// 4x4 block, so only the header size changes (conv.copy_texture).
+static void padSmallDxt(std::string& d)
+{
+    if (d.size() < 128 || d.compare(0, 4, "DDS ") || d.compare(84, 3, "DXT")) return;
+    uint32_t h = oct::u((const uint8_t*)d.data() + 12, 4), w = oct::u((const uint8_t*)d.data() + 16, 4);
+    uint32_t mips = oct::u((const uint8_t*)d.data() + 28, 4);
+    if ((w < 4 || h < 4) && mips <= 1) {
+        uint32_t v[2] = {h < 4 ? 4u : h, w < 4 ? 4u : w};
+        memcpy(&d[12], v, 8);
+    }
+}
+
+// The 1.0 zip a path resolves to (read10's rule), for indexing that asset's own textures/ folder.
+static std::string zip10For(const std::string& path)
+{
+    size_t n = 0;
+    std::string where;
+    void* d = read10(path.c_str(), &n, &where);
+    if (!d) return "";
+    mz_free(d);
+    return where.substr(0, where.find(':'));
+}
+
+// The render half of a 1.0 asset with a material bundle -- a world, a mission graph, ... (render.hpp): materials
+// onto 3.0 shaders and, where the asset has buffers, its vertices into formats those shaders take.
+static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string& note)
+{
+    if (!g_renderOk) { note += "render table missing "; return false; }
+    size_t b = p.rfind('/');
+    if (b == std::string::npos) return false;
+    std::string dir = p.substr(0, b), stem = p.substr(b + 1, p.size() - b - 1 - 4);
+    std::string mtb, vbuf, ibuf;
+    if (!read10s(dir + "/" + stem + ".mtb", mtb)) return false;     // nothing to render
+    read10s(dir + "/" + stem + "_0.vbuf", vbuf);
+    read10s(dir + "/" + stem + "_0.ibuf", ibuf);
+    render::IO io;
+    io.read30 = read30x;
+    io.read10 = read10s;
+    io.log = [](const std::string& s) { logf("%s", s.c_str()); };
+    render::Result r;
+    if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
+        for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
+        note += "render FAILED ";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_sessLock);
+        g_served[dir + "/" + stem + ".mtb"] = r.mtb;
+        if (!r.vbuf.empty()) g_served[dir + "/" + stem + "_0.vbuf"] = r.vbuf;
+        if (!r.ibuf.empty()) g_served[dir + "/" + stem + "_0.ibuf"] = r.ibuf;
+        if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
+    }
+    std::string zip = zip10For(p);
+    if (!zip.empty()) indexTextures10(zip);
+    char buf[200];
+    sprintf_s(buf, "+render(real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["real"], r.tiers["same-sh"],
+              r.tiers["generic"], (unsigned)r.textures10.size());
+    note += buf;
+    return true;
+}
+
 // .oct (worlds, missions, exploders ...). Steps, each from the research plan (PLAN.md section 4):
 //   NavMeshPool removed: 3.0's blob parser FUN_01909fb0 trusts the layout, and the 1.0 layout differs (in-game
 //   2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it). Interim until the navmesh codec (OCT-8).
 //   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
 //   DataNodeBasisConversion in FUN_004d0160).
-static bool transcodeOct(oct::File& f, std::string& note)
+//   World render (render.hpp, REN-5 + geometry): the 1.0 .mtb named 1.0 shaders (int3 in Shader_LookupCrc).
+static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
 {
-    bool changed = false;
+    bool changed = transcodeAssetRender(path, f, note);
     if (f.dropPool("NavMeshPool")) { note += "-NavMeshPool "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
@@ -206,7 +356,7 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
     if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
         try {
             oct::File f = oct::File::parse(data, n);
-            if (!transcodeOct(f, note)) return nullptr;
+            if (!transcodeOct(norm(path), f, note)) return nullptr;
             out = f.write();
             return "oct";
         } catch (std::exception& e) {
@@ -214,12 +364,14 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
             return nullptr;
         }
     }
+    // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
+    if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
+        int k = luachunk::rewrite(std::string((const char*)data, n), out, datamap::normalise);
+        note += std::to_string(k) + " entries normalised ";
+        return k ? "datamap" : nullptr;
+    }
     return nullptr;
 }
-
-// FUN_0041cb10: the engine's asset open (cdecl; path, flags, ...) -> stream object or NULL.
-typedef int*(__cdecl* OpenFn)(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5);
-static OpenFn g_open;
 
 static bool memtestMatch(const char* p)
 {
@@ -247,6 +399,73 @@ static int* copyToMemFile(int* s, size_t* outSize)
     return got == n ? memFile(buf.data(), n) : nullptr;
 }
 
+// GameDB tables (plan PS-4). 3.0's DataMaps point its locks / inventory loaders at compiled .chd files and the
+// loader objects are built in CHD mode (byte +0x2d = 1); the 1.0 DataMap points them at the Lua tables
+// (GameDB/Incredibles/locks__lua.lua), whose text read as CHD is a wild pointer (in-game 2026-10-12: AV in
+// FUN_018249d0 under the locks loader). The same 3.0 loaders read Lua when +0x2d == 0 (FUN_01612fa0: Lua state +
+// FUN_018d9200(path), else FUN_018d91f0), so a .lua path runs the loader in its own Lua mode for that one call.
+typedef uint32_t(__fastcall* GameDbLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
+static GameDbLoadFn g_loadLocks, g_loadInventory;
+
+static uint32_t gameDbLoad(GameDbLoadFn orig, const char* tag, void* self, const char* path, uint32_t a2, uint32_t a3)
+{
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    uint8_t* mode = (uint8_t*)self + 0x2d;
+    if (*mode && endsWith(p, ".lua")) {
+        *mode = 0;
+        uint32_t r = orig(self, nullptr, path, a2, a3);
+        *mode = 1;
+        logf("gamedb %s %s: CHD loader run in its Lua mode -> %u", tag, p, r);
+        return r;
+    }
+    return orig(self, nullptr, path, a2, a3);
+}
+static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
+{
+    return gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
+}
+static uint32_t __fastcall hkLoadInventory(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
+{
+    return gameDbLoad(g_loadInventory, "inventory", self, path, a2, a3);
+}
+
+// __invoke_watson (0x12CA1D1): the CRT's invalid-parameter fail-fast terminates without any exception handler
+// seeing it (in-game 2026-10-12: 0xC0000417 loading the 1.0 side-missions graph). Log who called it, then die.
+typedef void(__cdecl* WatsonFn)(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t);
+static WatsonFn g_watson;
+static void __cdecl hkWatson(const wchar_t* a, const wchar_t* b, const wchar_t* c, unsigned d, uintptr_t e)
+{
+    void* frames[24];
+    USHORT n = CaptureStackBackTrace(0, 24, frames, nullptr);
+    char line[600] = "CRT invalid parameter (__invoke_watson); stack (static):";
+    for (USHORT i = 0; i < n; ++i) {
+        uintptr_t f = (uintptr_t)frames[i];
+        char s[24];
+        if (f >= g_base && f < g_base + 0x2100000) sprintf_s(s, " %08X", (unsigned)(f - g_base + 0x400000));
+        else sprintf_s(s, " ext:%08X", (unsigned)f);
+        strcat_s(line, s);
+    }
+    logf("%s", line);
+    g_watson(a, b, c, d, e);
+}
+
+// FUN_0041fef0: the resident-file handlers' path normaliser, strcpy_s into a 0x80-byte stack buffer; a longer path
+// is a CRT fail-fast (found through the watson hook). A too-long path is logged and truncated (the lookup misses).
+typedef void(__cdecl* NormPathFn)(char* dst, unsigned size, const char* src);
+static NormPathFn g_normPath;
+static void __cdecl hkNormPath(char* dst, unsigned size, const char* src)
+{
+    size_t n = src ? strnlen(src, 4096) : 0;
+    if (src && n >= size) {
+        logf("path too long for the engine's %u-byte buffer (%u): %s", size, (unsigned)n, src);
+        std::string cut(src, size - 1);
+        g_normPath(dst, size, cut.c_str());
+        return;
+    }
+    g_normPath(dst, size, src);
+}
+
 static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
 {
     int* r = g_open(path, flags, a3, a4, a5);
@@ -259,11 +478,39 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         return r;
     }
     if (!r && g_cfg.serve10 && g_cfg.install10[0] && !(flags & 1)) {   // flags bit 0 = write (never served)
+        std::string np = norm(p), hit, from;
+        {
+            std::lock_guard<std::mutex> lock(g_sessLock);
+            auto it = g_served.find(np);                 // a world session product (.mtb/.vbuf/.ibuf)
+            if (it != g_served.end()) { hit = it->second; from = "asset session"; }   // kept: the engine reopens files
+            else if (np.rfind("textures/", 0) == 0 && endsWith(np.c_str(), ".tbody")) {
+                auto t = g_tex10.find(np.substr(9, np.size() - 9 - 6));
+                if (t != g_tex10.end()) from = t->second.first + ":" + t->second.second;
+            }
+        }
+        if (hit.empty() && !from.empty()) {            // a 1.0 texture the transcoded bundle names
+            size_t colon = from.find(':');
+            if (read10s(from.substr(0, colon - 4) + "/" + from.substr(colon + 1), hit)) padSmallDxt(hit);
+        }
+        if (!hit.empty()) {
+            r = memFile(hit.data(), hit.size());
+            logf("served %s %u B from %s -> %s", p, (unsigned)hit.size(), from.c_str(), r ? "ok" : "FAILED");
+            return r;
+        }
         size_t n = 0;
         std::string where;
         if (void* data = read10(p, &n, &where)) {
             std::string out, note;
-            const char* codec = transcode(p, data, n, out, note);
+            const char* codec = nullptr;
+            try {
+                codec = transcode(p, data, n, out, note);
+            } catch (std::exception& e) {   // never unwind into engine code (that ends in a silent fail-fast)
+                note += std::string("TRANSCODE EXCEPTION: ") + e.what() + " ";
+                codec = nullptr;
+            } catch (...) {
+                note += "TRANSCODE EXCEPTION ";
+                codec = nullptr;
+            }
             r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
             logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
                  codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED");
@@ -283,9 +530,10 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(nullptr, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
     if (slash) strcpy_s(slash + 1, path + MAX_PATH - (slash + 1), "di1compat.log");
-    fopen_s(&g_log, path, "w");
+    g_log = _fsopen(path, "w", _SH_DENYNO);   // readable while the game runs
     g_base = (uintptr_t)GetModuleHandleA(nullptr);
-    logf("di1compat 0.2.0 loaded; exe base %08X", (unsigned)g_base);
+    g_gameDir.assign(path, slash ? slash - path : 0);
+    logf("di1compat 0.3.0 loaded; exe base %08X", (unsigned)g_base);
     char dir[MAX_PATH];
     HMODULE self = nullptr;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -293,12 +541,30 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     loadConfig(dir);
+    {
+        std::string text;
+        FILE* tf = nullptr;
+        if (!fopen_s(&tf, (std::string(dir) + "\\di1compat_render.txt").c_str(), "rb") && tf) {
+            char buf[65536];
+            size_t got;
+            while ((got = fread(buf, 1, sizeof(buf), tf)) > 0) text.append(buf, got);
+            fclose(tf);
+        }
+        g_renderOk = g_render.load(text);
+        logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
+             (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
+             (unsigned)g_render.plans.size());
+    }
 
     if (MH_Initialize() != MH_OK) {
         logf("MinHook init failed; no hooks");
         return;
     }
     hook("AssetOpen", 0x0041CB10, "6AFF68????????", (void*)&hkOpen, (void**)&g_open);
+    hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
+    hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
+    hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
+    hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

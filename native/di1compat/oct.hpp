@@ -175,6 +175,40 @@ struct File {
     }
     static void put(std::string& s, uint32_t v, int w) { for (int i = 0; i < w; ++i) s.push_back((char)(v >> (8 * i))); }
 
+    // In-place writes with oct.py's rules: an int scalar/list keeps its widths unless the values outgrow them
+    // (never narrows); values >= 2^31 are written as their signed 32-bit twin.
+    void setInt(Rec& r, int64_t v)
+    {
+        Spec s = spec(r.type);
+        if (v >= (int64_t)1 << 31) v -= (int64_t)1 << 32;
+        int w = width({(int32_t)v});
+        if (s.ew > w) w = s.ew;
+        r.type = (uint16_t)(SCALAR | (s.keyed << 2) | INT << 3 | (w - 1) << 8);
+        std::string pay = r.pay.substr(0, 2 * s.keyed);
+        put(pay, (uint32_t)(int32_t)v, w);
+        r.pay = pay;
+    }
+    void setInts(Rec& r, const std::vector<int32_t>& vals)
+    {
+        Spec s = spec(r.type);
+        int w = width(vals);
+        if (s.ew > w) w = s.ew;
+        int cw = s.cw < 1 ? 1 : s.cw;
+        while (vals.size() >= ((size_t)1 << (8 * cw))) ++cw;
+        r.type = (uint16_t)(LIST | (s.keyed << 2) | INT << 3 | (cw - 1) << 6 | (w - 1) << 8);
+        std::string pay = r.pay.substr(0, 2 * s.keyed);
+        put(pay, (uint32_t)vals.size(), cw);
+        for (int32_t v : vals) put(pay, (uint32_t)v, w);
+        r.pay = pay;
+    }
+    // A scalar name record (0x0b) with this string.
+    Rec nameScalar(uint16_t level, uint16_t nameIdx, const std::string& value)
+    {
+        Rec r{level, 0x0b, nameIdx, {}};
+        put(r.pay, addName(value), 2);
+        return r;
+    }
+
     Rec node(uint16_t level, const std::string& n) { return Rec{level, NODE, addName(n), {}}; }
     Rec intScalar(uint16_t level, const std::string& n, int32_t v)
     {

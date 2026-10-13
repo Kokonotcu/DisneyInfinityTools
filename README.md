@@ -134,8 +134,23 @@ converted-copy approach). Research and roadmap: `D:\DI-Extract\_research\PLAN.md
 - In-game ladder so far (harness, zone IN_City):
   1. raw in_city.oct -> AV in the NavMesh blob parser FUN_01909fb0 -> NavMeshPool removed in memory (interim)
   2. -> NULL basis conversion in FUN_004d0160 -> SubNetwork counts (OCT-1) -> .oct accepted
-  3. -> in_city.mtb raw -> int3 in Shader_LookupCrc FUN_004509d0 (1.0 shaders unknown to 3.0) -> **next: REN-5**,
-     the material translation at load time (1.0 material onto a 3.0 shader with its own textures).
+  3. -> in_city.mtb raw -> int3 in Shader_LookupCrc FUN_004509d0 -> **render transcode** (`render.hpp`, port of
+     autobundle.resolve + conv.convert_geometry; `octtest --render` output == `renderoracle.py` byte for byte on
+     in_city: .oct/.mtb/52 MB .vbuf/.ibuf; donors read straight from the 3.0 archives, `arc30.hpp`, 10,177/10,177
+     equal the extract; table `rentable.py` -> Pentane/Plugins/di1compat_render.txt, 3.0-side data only)
+  4. -> world loads, avatar at the origin; playset avatar rejected ("Missing figure") until the playset's own 1.0
+     files are served: `IncrediblesDataMap.lua` / `Incredibles_actors.lua` / `lang/IN` (resolver: folder-named and
+     per-asset archives) -> locks loader AV on Lua text -> **GameDB hook**: CHD-mode locks/inventory loaders run in
+     their own Lua mode for a .lua path (PS-4)
+  5. -> 1.0 mission .mtb raw -> asset sessions for every 1.0 .oct with a .mtb (missions, characters, props)
+  6. -> CRT fail-fast 0xC0000417 (found by hooking __invoke_watson): 128-byte path buffer of the resident-file
+     handlers FUN_0041fef0, overrun by doubled DataMap paths -> **DataMap transcode** (`datamap.hpp`, PS-2: 1,235
+     entry strings of IncrediblesDataMap into 3.0 path forms, chunk rewritten by `luachunk.hpp`; lupa loads it)
+  7. -> 1.0 characters with default data + base links -> OCT-1 extended (DefaultDataSize, BaseDataNodeLinksCount /
+     AdditionalSize, links converted; `octtest --counts` 4,305/4,305; the 1.0 inc_phonebooth == 3.0's twin)
+  8. **now**: 1.0 character rigs WITH processors (inc_delivery_box: 15 processor types, Rotor/Scale/... DataNodes,
+     components) -> NULL basis conversion again: OCT-1 needs the processor-graph rule (per-type sizes for VAS32/64,
+     component/variant counts) fitted on the 3.0 character corpus.
 
 ## Next (needs the game running)
 1. **Rebuild and launch Metroville** with the rules above (`native30.py ... --dry` first; `diffworld.py` against
