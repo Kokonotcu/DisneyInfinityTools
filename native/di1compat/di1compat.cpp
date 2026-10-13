@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "sx.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,9 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
+    bool sxNatives10 = true;         // sx10's imports bound to 1.0-semantics natives by a linker hook (SX-3/4)
+    bool sxPorts10 = true;           // sxNatives10 with the ported natives (0: stack-balanced stubs only)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,6 +163,9 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "sx10")) g_cfg.sx10 = atoi(val) != 0;
+        else if (!strcmp(key, "sxnatives10")) g_cfg.sxNatives10 = atoi(val) != 0;
+        else if (!strcmp(key, "sxports10")) g_cfg.sxPorts10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -552,6 +559,14 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         int k = luachunk::rewrite(std::string((const char*)data, n), out, datamap::normalise);
         note += std::to_string(k) + " entries normalised ";
         return k ? "datamap" : nullptr;
+    }
+    // a 1.0 Slang script (sx.hpp SX-1): 3.0's fix-up FUN_007366f0 takes only 0x100d containers
+    if (g_cfg.sx10 && endsWith(path, ".sx") && sx::is10(data, n)) {
+        std::string why;
+        int k = sx::transcode(data, n, norm(path), out, &why);
+        if (k < 0) { note += "sx: " + why + " "; return nullptr; }
+        note += "+sx(" + std::to_string(k) + " imports) ";
+        return "sx";
     }
     return nullptr;
 }
@@ -1804,6 +1819,12 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
+    if (g_cfg.sx10 && g_cfg.sxNatives10) {
+        sx::g_exe = g_base;
+        sx::g_log = logf;
+        sx::init(g_cfg.sxPorts10);
+        hook("Slang linker (1.0 natives)", 0x00736DA0, "51538B5C240C568BF18BCBE8", (void*)&sx::hkLink, (void**)&sx::g_link);
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

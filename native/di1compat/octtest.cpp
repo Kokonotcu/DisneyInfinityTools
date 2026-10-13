@@ -16,6 +16,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "sx.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -154,6 +155,28 @@ int main(int argc, char** argv)
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
+    if (argc > 3 && std::string(argv[1]) == "--sx") {   // --sx <out dir> <dir>...: SX-1 over every .sx (sxcheck.py checks
+        fs::path out = argv[2];                        // the files); <out>/natives.tsv, keys.tsv: the embedded tables
+        fs::create_directories(out);
+        size_t ok = 0, bad = 0, imports = 0;
+        for (int i = 3; i < argc; ++i)
+            for (auto& e : fs::directory_iterator(argv[i])) {
+                if (e.path().extension() != ".sx") continue;
+                std::string b = slurp(e.path()), o, why;
+                std::string name = e.path().parent_path().filename().string() + "/" + e.path().filename().string();
+                int k = sx::transcode(b.data(), b.size(), name, o, &why);
+                if (k < 0) { ++bad; printf("REFUSED %s: %s\n", e.path().string().c_str(), why.c_str()); continue; }
+                ++ok; imports += k;
+                std::ofstream(out / e.path().filename(), std::ios::binary).write(o.data(), o.size());
+            }
+        std::ofstream nt(out / "natives.tsv"), kt(out / "keys.tsv");
+        for (auto& n : sx::g_natives) nt << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
+        for (auto& n : sx::g_ports) nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
+        for (auto& k : sx::KEYS30) kt << k.name << '\t' << k.id << '\n';
+        printf("sx transcoded %zu (%zu imports), refused %zu; %zu natives, %zu ports, %zu keys\n", ok, imports, bad,
+               std::size(sx::g_natives), std::size(sx::g_ports), std::size(sx::KEYS30));
+        return bad ? 1 : 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {
