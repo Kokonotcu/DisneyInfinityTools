@@ -132,6 +132,20 @@ static int uiTest(char** a, int argc)
     for (int i = 1; i <= 28; ++i) { char b[64]; snprintf(b, sizeof(b), "Load_Tips_Incredibles_%.2d", i); tips += !probe(b).empty(); }
     check(tips == 28, "Load_Tips_Incredibles_01..28 answered: " + std::to_string(tips) + " (e.g. \"" + probe("Load_Tips_Incredibles_01").substr(0, 60) + "\")");
     std::ofstream(out / "english_ntsc_win32.dct", std::ios::binary).write(in.data(), in.size());
+    // 6. controller-context lists: the 1.0 IN exclusion lists (nodeflds.py ControllerContextNode) and every 3.0
+    // exclusion list shipped (ctx30.py over 1,464 3.0 graphs)
+    check(ui::contextList10("TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM") == "TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM,-TUT_DISABLE_WEAPONWHEEL" &&
+          ui::contextList10("TUT_DISABLE_*, !TUT_DISABLE_SELECT_ITEM ") == "TUT_DISABLE_*, !TUT_DISABLE_SELECT_ITEM ,-TUT_DISABLE_WEAPONWHEEL" &&
+          ui::contextList10("TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM,-TUT_DISABLE_WEAPONWHEEL").empty(),
+          "1.0 list keeping SELECT_ITEM also keeps 3.0's TUT_DISABLE_WEAPONWHEEL");
+    bool same = true;
+    for (const char* l : {"TUT_DISABLE_*,-TUT_DISABLE_TOY_STORE", "TUT_DISABLE_*", "TUT_DISABLE", "TUT_DISABLE_SELECT_ITEM",
+                          "UI_TUT_DISABLE_GN_LST_*,-UI_TUT_DISABLE_GN_LST_SELECT",
+                          "UI_TUT_DISABLE_PROG_LOG_*,-UI_TUT_DISABLE_PROG_LOG_ACTIVATE_MISSION",
+                          "UI_TUT_DISABLE_TOOL_SELECT_*,-UI_TUT_DISABLE_TOOL_SELECT_TOGGLE_LISTS", "TUT_DISABLE_*,-TUT_DISABLE_CAM",
+                          "UI_TUT_DISABLE_GEN_*,-UI_TUT_DISABLE_GEN_CANCEL", "UI_TUT_DISABLE_GEN_*,-UI_TUT_DISABLE_GEN_OK"})
+        same &= ui::contextList10(l).empty();
+    check(same, "every other 1.0 IN list and every shipped 3.0 exclusion list is unchanged");
     printf("%d failed\n", fails);
     return fails ? 1 : 0;
 }

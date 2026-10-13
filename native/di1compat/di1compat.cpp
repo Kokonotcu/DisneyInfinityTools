@@ -140,6 +140,7 @@ static struct {
     bool tips10 = true;              // ui: 3.0's data/tips.lua + the 1.0 tip records it lacks
     bool resident10 = true;          // the 1.0 startup*.zip members are served by their full paths (1.0 loads them resident)
     bool tutorial10 = true;          // ui: tutorial element 61 (1.0's SelectMenu ribbon) is answered by 3.0's ribbon
+    bool context10 = true;           // ui: a 1.0 controller-context list keeps 3.0's extra gates of the actions it keeps
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -174,6 +175,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "tips10")) g_cfg.tips10 = atoi(val) != 0;
         else if (!strcmp(key, "resident10")) g_cfg.resident10 = atoi(val) != 0;
         else if (!strcmp(key, "tutorial10")) g_cfg.tutorial10 = atoi(val) != 0;
+        else if (!strcmp(key, "context10")) g_cfg.context10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1363,6 +1365,27 @@ static void* __fastcall hkFindScreen(void* self, void*, const char* name, int pl
     return s;
 }
 
+// ControllerContextNode list parse FUN_01224880 (thiscall on the node, no args): ContextName is the engine string at
+// +0x98 (copied to +0xa8 and split on ','; +0xa4 = UseAsPrefix). A 1.0 list gets the 3.0 contexts that gate the
+// same action as one it keeps enabled (ui::contextList10); the string is reassigned with the engine's own
+// assign (FUN_0041a250, thiscall (const char*), ret 4) before the parse. No shipped 3.0 graph negates
+// TUT_DISABLE_SELECT_ITEM (its exclusions: -TUT_DISABLE_CAM, -UI_TUT_DISABLE_GEN_CANCEL/_OK), so only 1.0 lists change.
+typedef void(__fastcall* CtxParseFn)(void* self, void* edx);
+static CtxParseFn g_ctxParse;
+static void __fastcall hkCtxParse(void* self, void*)
+{
+    char** name = (char**)((char*)self + 0x98);
+    if (*name) {
+        std::string s = ui::contextList10(*name);
+        if (!s.empty()) {
+            typedef void*(__fastcall* StrAssignFn)(void* str, void* edx, const char* v);
+            ((StrAssignFn)rt(0x0041A250))(name, nullptr, s.c_str());
+            logf("controller context %s (3.0 gates of the actions 1.0 kept)", *name);
+        }
+    }
+    g_ctxParse(self, nullptr);
+}
+
 // data/tips.lua (3.0's, opened as r) + the 1.0 tip records it lacks (ui::mergeTips); a ZoneTipCategories key naming
 // a registered zone (the zone manager's by-name lookup FUN_01391150, thiscall (uint32_t* out, name), ret 8) stays
 // 3.0's. The stream is consumed; the merged (or, failing that, the original) bytes come back as a MemFile.
@@ -1948,8 +1971,8 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
-    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d", g_cfg.loadScreen10, g_cfg.uiScope10,
-         g_cfg.fmv10, g_cfg.text10, g_cfg.tips10, g_cfg.tutorial10);
+    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d context10=%d", g_cfg.loadScreen10,
+         g_cfg.uiScope10, g_cfg.fmv10, g_cfg.text10, g_cfg.tips10, g_cfg.tutorial10, g_cfg.context10);
     if (g_cfg.serve10 && g_cfg.loadScreen10)
         hook("zone string field (ui: 1.0 loading screen)", 0x0139E0B0, "83EC08568BF180BEE403000000", (void*)&hkZoneStr, (void**)&g_zoneStr);
     if (g_cfg.serve10 && g_cfg.fmv10)
@@ -1961,6 +1984,8 @@ extern "C" void __stdcall Pentane_Main()
             hook("screen by name (ui: tutorial element 61)", 0x0154FF90, "837C2404007505", (void*)&hkFindScreen, (void**)&g_findScreen);
         else logf("tutorial10: the element-61 push of \"SelectMenu\" is not where it was analysed: not hooked");
     }
+    if (g_cfg.serve10 && g_cfg.context10)
+        hook("controller context list (ui: 1.0 tutorial contexts)", 0x01224880, "5153558BE98A85A4000000", (void*)&hkCtxParse, (void**)&g_ctxParse);
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

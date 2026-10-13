@@ -62,6 +62,34 @@ inline std::string fmvClip(const char* name)
     return n;
 }
 
+// A ControllerContextNode list (ContextName: comma list, '-' '!' '~' negate, '*' = prefix; 3.0 parser FUN_01224880 /
+// FUN_012095e0) from a 1.0 graph, with every 3.0 context that gates the same action as a context 1.0 kept enabled
+// also kept enabled. 1.0 lists like "TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM" leave one action usable, but the 3.0
+// wildcard also catches context names 1.0 never had: 3.0's ToolSelectionUI needs !TUT_DISABLE_SELECT_ITEM
+// (WEAPON_WHEEL_filter) and !TUT_DISABLE_WEAPONWHEEL (ToolSelectionUI_filter, avatar_controls_win32.xldb), and the
+// latter is in no 1.0 controls table. TOY_STORE's 3.0 path (Tab -> ShowRibbonUI) has no other TUT gate, and the UI
+// lists' exclusions (GN_LST_SELECT, PROG_LOG_*, TOOL_SELECT_TOGGLE_LISTS) gate no extra 3.0 context. -> the list, or
+// "" when nothing changes.
+inline std::string contextList10(const std::string& s)
+{
+    static const char* const kept[][2] = {{"TUT_DISABLE_SELECT_ITEM", "TUT_DISABLE_WEAPONWHEEL"}};
+    std::vector<std::string> neg;
+    for (size_t b = 0; b <= s.size();) {
+        size_t e = s.find(',', b);
+        if (e == std::string::npos) e = s.size();
+        std::string t = s.substr(b, e - b);
+        size_t i = t.find_first_not_of(" \t"), j = t.find_last_not_of(" \t");
+        t = i == std::string::npos ? "" : t.substr(i, j - i + 1);
+        if (!t.empty() && (t[0] == '-' || t[0] == '!' || t[0] == '~')) neg.push_back(t.substr(1));
+        b = e + 1;
+    }
+    std::string out = s;
+    for (auto& k : kept)
+        for (auto& n : neg)
+            if (n == k[0] && out.find(k[1]) == std::string::npos) out += std::string(",-") + k[1];
+    return out == s ? "" : out;
+}
+
 // ---- data/tips.lua: TipCounts{category = n} and ZoneTipCategories{zone or playset = {categories}} ----
 // Both exes pick loading-screen tips the same way (3.0 FUN_00b70da0 = 1.0 FUN_00b4af50, 3.0 adds UIPlaysetFilter):
 // ZoneTipCategories[zone] or [playset] (lower case), weights TipCounts, text "Load_Tips_%s_%.2d". 3.0's table has no
