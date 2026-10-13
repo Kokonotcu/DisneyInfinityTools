@@ -248,9 +248,11 @@ static int fmodTest(int argc, char** argv)
     return 0;
 }
 
-// octtest --vo <1.0 install> <out dir>  vo10 offline acceptance (audio.hpp), real FMOD DLLs, no output:
-//  DLG   every 1.0 DLG v11 script through dlgTranscode -> <out>\<name>.dlg30 (vocheck.py resolves every 1.0 line and
-//        named entry through the 3.0 tables and compares with the 1.0 file read on its own)
+// octtest --vo <1.0 install> <out dir> [<dir of decrypted 3.0 scripts>]  vo10 offline acceptance (audio.hpp), real
+// FMOD DLLs, no output:
+//  DLG   every 1.0 DLG v11 script through dlgTranscode -> <out>\<name>.dlg30, and with 3.0's script of the same name
+//        when given -> <name>.merged.dlg30 (vocheck.py resolves every 1.0 line and named entry, and every 3.0 one
+//        1.0 does not define, through the 3.0 tables and compares with the source files read on their own)
 //  NAME  every 1.0 dialog bank opened as 1.0 opens it (subsound count == .name), its 3.0-layout bank built, every line
 //        and variant resolved through 3.0's reader (FUN_0182bf80 / FUN_0182c000 / FUN_0182d2f0, ported here) down to
 //        the media record the post hook reads (vocheck.py compares with the .name read by 1.0's rule, FUN_01132360)
@@ -279,6 +281,16 @@ static int voTest(char** argv)
         printf("DLG %s %s classes %d lines %d dup %d ranges %d named %d events %d unresolved %d %s\n", file.c_str(), ok ? "ok" : "FAIL",
                st.classes, st.lines, st.dupLines, st.ranges, st.named, st.events, st.unresolved, err.c_str());
         if (ok) std::ofstream(outDir + "\\" + e.path().stem().string() + ".dlg30", std::ios::binary).write((const char*)out.data(), out.size());
+        std::string stem = e.path().stem().string();   // with 3.0's own script of the name (decrypted copies in argv[4])
+        for (char& c : stem) c = (char)tolower((unsigned char)c);
+        std::vector<uint8_t> b30;
+        if (argv[4] && audio::slurp(std::string(argv[4]) + "\\3.0_assets_sound_dialog_" + stem + ".dlg", b30)) {
+            ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err, &b30);
+            bad += !ok;
+            printf("DLG %s +3.0 %s classes %d named %d events %d kept30 %d lines30 %d %s\n", file.c_str(), ok ? "ok" : "FAIL", st.classes,
+                   st.named, st.events, st.kept30, st.lines30, err.c_str());
+            if (ok) std::ofstream(outDir + "\\" + e.path().stem().string() + ".merged.dlg30", std::ios::binary).write((const char*)out.data(), out.size());
+        }
     }
     auto mediaOf = [](const uint8_t* d, uint32_t m) {   // FUN_0182c000 / FUN_0182d2f0's view of media m
         return (const uint32_t*)(d + 0x20 + ((size_t)*(const uint16_t*)(d + 0x14) + (size_t)m * 3) * 4);

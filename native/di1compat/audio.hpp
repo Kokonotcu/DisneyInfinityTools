@@ -738,9 +738,14 @@ inline std::vector<uint8_t> dbnkFromName10(uint16_t prefix, const std::vector<Dl
 //  (FUN_01830370 'pri_%u' = 0x40 - p; presentations pass the cap 0x7f to FUN_0073daf0). Same order, lower = more
 //  important in both (1.0 FUN_01136850, 3.0 FUN_01830370 block a line while the speaker's current one is <= it); 18
 //  of 28 twin entries of Inc_TBScript.dlg go 0x80 -> 0x40, so 3.0 = 1.0 >> 1.
-struct DlgStats { int classes = 0, lines = 0, named = 0, ranges = 0, events = 0, unresolved = 0, dupLines = 0; };
+//  base30: 3.0's own script of the same name (3.0 re-authored inc_tbscript.dlg for its Incredibles figures: 115 of its
+//  named entries are not in 1.0's). Its entries and range lines that 1.0's script does not define are kept, so 3.0's
+//  figures keep their lines; where both define one, 1.0's wins (1.0's playset loads 1.0's script). 3.0 type 3
+//  {8-byte header ([4] n), n x (u32 prefix, u16 number, u16, u32 source name offset, u32)} keeps its names.
+struct DlgStats { int classes = 0, lines = 0, named = 0, ranges = 0, events = 0, unresolved = 0, dupLines = 0, kept30 = 0, lines30 = 0; };
 inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_map<uint32_t, std::string>& evNames,
-                         std::vector<uint8_t>& out, DlgStats* st = nullptr, std::string* err = nullptr)
+                         std::vector<uint8_t>& out, DlgStats* st = nullptr, std::string* err = nullptr,
+                         const std::vector<uint8_t>* base30 = nullptr)
 {
     auto fail = [&](const char* why) { if (err) *err = why; return false; };
     auto rd32 = [&](size_t o) { return o + 4 <= in.size() ? *(const uint32_t*)(in.data() + o) : 0u; };
@@ -749,18 +754,22 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
     if (0x10 + (size_t)n * 8 > in.size()) return fail("entry table past the end");
     DlgStats s;
     std::vector<std::string> events{"dialog_unassigned"};   // index 0: 3.0 'use the range default'; never used here
-    std::unordered_map<uint32_t, uint8_t> evIdx;
+    std::map<std::string, uint8_t> evIdx;
     bool evOverflow = false;
-    auto ev = [&](uint32_t h) -> uint8_t {
-        auto it = evIdx.find(h);
+    auto evName = [&](const std::string& nm) -> uint8_t {
+        auto it = evIdx.find(nm);
         if (it != evIdx.end()) return it->second;
+        if (events.size() > 255) { evOverflow = true; return 0; }
+        events.push_back(nm);
+        return evIdx[nm] = (uint8_t)(events.size() - 1);
+    };
+    auto ev = [&](uint32_t h) -> uint8_t {
         auto nm = evNames.find(h);
         char hex[16];
-        if (nm == evNames.end()) { ++s.unresolved; sprintf_s(hex, "%08x", h); }
-        if (events.size() > 255) { evOverflow = true; return 0; }
-        events.push_back(nm != evNames.end() ? nm->second : hex);
-        return evIdx[h] = (uint8_t)(events.size() - 1);
+        if (nm == evNames.end()) { sprintf_s(hex, "%08x", h); if (!evIdx.count(hex)) ++s.unresolved; }
+        return evName(nm != evNames.end() ? nm->second : hex);
     };
+    // lists: blobs written after the entry, their absolute offset stored at the given position (rebased at load)
     struct Ent { uint32_t hash; std::vector<uint8_t> bytes; std::vector<std::pair<size_t, std::vector<uint8_t>>> lists; };
     std::vector<Ent> classes, named;
     std::map<uint32_t, std::map<uint16_t, uint8_t>> ranges;   // packed prefix -> number -> class index
@@ -822,6 +831,81 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
         o.bytes[7] = 0;   // plays: runtime state
         named.push_back(std::move(o));
         ++s.named;
+    }
+    if (base30 && base30->size() >= 0x30 && !memcmp(base30->data(), "DLG\0\x15", 5)) {
+        const std::vector<uint8_t>& t = *base30;
+        auto t32 = [&](size_t o) { return o + 4 <= t.size() ? *(const uint32_t*)(t.data() + o) : 0u; };
+        auto t16 = [&](size_t o) { return o + 2 <= t.size() ? *(const uint16_t*)(t.data() + o) : (uint16_t)0; };
+        auto tstr = [&](size_t o) { return o < t.size() && memchr(t.data() + o, 0, t.size() - o) ? std::string((const char*)t.data() + o) : std::string(); };
+        uint16_t ne3 = t16(6), nn3 = t16(8), nr3 = t16(10);
+        uint32_t te = t32(0x10), tn = t32(0x18), tr = t32(0x20);
+        if (te + ne3 * 8u > t.size() || tn + nn3 * 8u > t.size() || tr + nr3 * 8u > t.size()) return fail("3.0 script tables past the end");
+        auto ev3 = [&](uint8_t i) { return i < ne3 ? evName(tstr(t32(te + i * 8u))) : (uint8_t)0; };
+        std::unordered_set<uint32_t> named10;
+        for (auto& e : named) named10.insert(e.hash);
+        std::map<std::pair<uint32_t, uint8_t>, uint8_t> classOf;   // (3.0 class index, default event) -> merged class
+        for (uint16_t r = 0; r < nr3; ++r) {
+            uint32_t pfx = t32(tr + r * 8u), ro = t32(tr + r * 8u + 4);
+            uint16_t lo = t16(ro), hi = t16(ro + 2);
+            if (hi < lo || ro + 5u + (hi - lo) >= t.size()) return fail("3.0 range past the end");
+            auto& slot = ranges[pfx];
+            for (uint32_t num = lo; num <= hi; ++num) {
+                uint8_t c = t[ro + 5 + (num - lo)];
+                if (c == 0xff || slot.count((uint16_t)num)) continue;   // none, or 1.0 defines the line
+                if (c >= nn3) return fail("3.0 range class past the entries");
+                uint32_t co = t32(tn + c * 8u + 4);
+                if (co + 8 > t.size() || t[co] != 0) return fail("3.0 range class is no class");
+                uint8_t def = t[ro + 4];
+                auto key = std::make_pair((uint32_t)c, t[co + 4] ? (uint8_t)0 : def);
+                auto it = classOf.find(key);
+                if (it == classOf.end()) {   // a class with event 0 takes its range's default (FUN_0073daf0): made explicit
+                    if (classes.size() >= 255) return fail("more than 255 line classes");
+                    Ent o{t32(tn + c * 8u), std::vector<uint8_t>(t.data() + co, t.data() + co + 8), {}};
+                    o.bytes[4] = ev3(t[co + 4] ? t[co + 4] : def);
+                    o.bytes[3] = 0;
+                    it = classOf.emplace(key, (uint8_t)classes.size()).first;
+                    classes.push_back(std::move(o));
+                }
+                slot[(uint16_t)num] = it->second;
+                ++s.lines30;
+            }
+        }
+        for (uint16_t i = 0; i < nn3; ++i) {
+            uint32_t h = t32(tn + i * 8u), o = t32(tn + i * 8u + 4);
+            if (o + 8 > t.size()) return fail("3.0 entry past the end");
+            uint8_t type = t[o];
+            if (type == 0 || named10.count(h)) continue;
+            Ent e{h, {}, {}};
+            if (type == 1 || type == 2) {
+                uint8_t cnt = o + 0x10 <= t.size() ? t[o + 0xc] : 0;
+                size_t len = 0x10 + (size_t)cnt * (type == 1 ? 8 : 16);
+                if (o + len > t.size()) return fail("3.0 entry past the end");
+                e.bytes.assign(t.data() + o, t.data() + o + len);
+                for (uint8_t k = 0; k < cnt; ++k) {
+                    if (type == 1) { e.bytes[0x10 + k * 8 + 6] = ev3(t[o + 0x10 + k * 8 + 6]); continue; }
+                    size_t so = 0x10 + (size_t)k * 16;
+                    uint32_t lp = t32(o + so);
+                    uint8_t c = t[o + so + 0xd];
+                    if (lp + c * 2u > t.size()) return fail("3.0 speaker list past the end");
+                    e.bytes[so + 0xc] = ev3(t[o + so + 0xc]);
+                    e.lists.emplace_back(so, std::vector<uint8_t>(t.data() + lp, t.data() + lp + c * 2u));
+                }
+            } else if (type == 3) {
+                uint8_t cnt = t[o + 4];
+                size_t len = 8 + (size_t)cnt * 16;
+                if (o + len > t.size()) return fail("3.0 entry past the end");
+                e.bytes.assign(t.data() + o, t.data() + o + len);
+                for (uint8_t k = 0; k < cnt; ++k) {
+                    std::string nm = tstr(t32(o + 8 + k * 16u + 8));
+                    e.lists.emplace_back(8 + (size_t)k * 16 + 8, std::vector<uint8_t>(nm.c_str(), nm.c_str() + nm.size() + 1));
+                }
+            } else
+                return fail("unknown 3.0 entry type");
+            e.bytes[3] = 0;
+            if (e.bytes.size() > 7 && type != 3) e.bytes[7] = 0;
+            named.push_back(std::move(e));
+            ++s.kept30;
+        }
     }
     if (evOverflow) return fail("more than 255 events");
     // layout: header, the three tables, event names, entries (classes first: a range byte indexes them), ranges
@@ -1357,34 +1441,42 @@ inline uint32_t __cdecl hkPostExt(uint32_t ev, uint32_t obj, uint32_t flags, voi
 // from there through dlgTranscode (the 1.0 playset loads its own scripts: Audio|Inc_TBScript.dlg).
 typedef void*(__cdecl* LoadFileFn)(const char* path, uint32_t* size);
 typedef void*(__cdecl* AllocFn)(uint32_t size, char flag, uint32_t* got, uint32_t align);
+typedef void(__cdecl* FreeFn)(void* p);
 inline LoadFileFn oLoadFile;
 inline AllocFn engineAlloc;
+inline FreeFn engineFree;
 inline void* __cdecl hkLoadFile(const char* path, uint32_t* size)
 {
     size_t n = path ? strlen(path) : 0;
-    if (n > 11 && !_strnicmp(path, "dialog/", 7) && !_stricmp(path + n - 4, ".dlg")) {
-        std::vector<uint8_t> in, out;
-        DlgStats st;
-        std::string err;
-        if (slurp(vo.dir10.substr(0, vo.dir10.rfind('\\')) + "\\" + (path + 7), in) && in.size() >= 4 && *(uint32_t*)in.data() == 11) {
-            std::lock_guard<std::recursive_mutex> l(vo.mx);
-            vo.buildEvNames(g.sound10);
-            if (dlgTranscode(in, vo.evNames, out, &st, &err)) {
-                uint32_t got = 0;
-                uint8_t* p = (uint8_t*)engineAlloc((uint32_t)out.size(), 0, &got, 0xffffffffu);
-                if (p) {
-                    memcpy(p, out.data(), out.size());
-                    if (size) *size = (uint32_t)out.size();
-                    vo.scripts.insert(p);
-                    AUDLOG("vo10: %s from 1.0: %d line classes (%d lines in %d ranges), %d named, %d events (%d unresolved)",
-                           path, st.classes, st.lines, st.ranges, st.named, st.events, st.unresolved);
-                    return p;
-                }
-            } else
-                AUDLOG("vo10: %s: 1.0 script not taken (%s)", path, err.c_str());
-        }
+    std::vector<uint8_t> in;
+    if (n <= 11 || _strnicmp(path, "dialog/", 7) || _stricmp(path + n - 4, ".dlg") ||
+        !slurp(vo.dir10.substr(0, vo.dir10.rfind('\\')) + "\\" + (path + 7), in) || in.size() < 4 || *(uint32_t*)in.data() != 11)
+        return oLoadFile(path, size);
+    uint32_t n30 = 0;
+    uint8_t* d30 = (uint8_t*)oLoadFile(path, &n30);   // 3.0's own script of that name, if any (its entries are kept)
+    std::vector<uint8_t> b30, out;
+    if (d30) b30.assign(d30, d30 + n30);
+    DlgStats st;
+    std::string err;
+    std::lock_guard<std::recursive_mutex> l(vo.mx);
+    vo.buildEvNames(g.sound10);
+    uint8_t* p = nullptr;
+    if (dlgTranscode(in, vo.evNames, out, &st, &err, d30 ? &b30 : nullptr)) {
+        uint32_t got = 0;
+        p = (uint8_t*)engineAlloc((uint32_t)out.size(), 0, &got, 0xffffffffu);
+    } else
+        AUDLOG("vo10: %s: 1.0 script not taken (%s)", path, err.c_str());
+    if (!p) {
+        if (size) *size = n30;
+        return d30;
     }
-    return oLoadFile(path, size);
+    memcpy(p, out.data(), out.size());
+    if (size) *size = (uint32_t)out.size();
+    if (d30) engineFree(d30);
+    vo.scripts.insert(p);
+    AUDLOG("vo10: %s from 1.0: %d line classes (%d lines in %d ranges), %d named, %d events (%d unresolved); 3.0's kept: %d named, %d lines",
+           path, st.classes, st.lines, st.ranges, st.named, st.events, st.unresolved, st.kept30, st.lines30);
+    return p;
 }
 
 // FUN_0073bf50 (thiscall on the DialogueManager's request pool, its +0xa4; ret 8): a dialog request for {name, ...}.
@@ -1479,6 +1571,7 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
         mapPut = (MapPutFn)rt(0x006EAA00);
         dialogMgr = (uint8_t*)rt(0x02204128);
         engineAlloc = (AllocFn)rt(0x00409E90);
+        engineFree = (FreeFn)rt(0x00409ED0);
         hook("dialog line post (vo10)", 0x01948D80, "558BEC83EC105356578B7D1C", (void*)&hkPostExt, (void**)&oPostExt);
         hook("sound file read (vo10)", 0x0182F570, "8B44240485C0741F803800741A", (void*)&hkLoadFile, (void**)&oLoadFile);
         hook("dialog request (vo10)", 0x0073BF50, "53568BF1E8????????8D4618", (void*)&hkDlgReq, (void**)&oDlgReq);
