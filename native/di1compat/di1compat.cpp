@@ -134,6 +134,7 @@ static struct {
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
+    bool lockTrace10 = true;         // log control locks, controller contexts, choreography play/end, messages
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -163,6 +164,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "events10")) g_cfg.events10 = atoi(val) != 0;
         else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
+        else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1158,6 +1160,87 @@ static void __cdecl hkMerRegistry()
     mer::addAliases(g_mer);
 }
 
+// locktrace10: who takes the player's controls and gives them back, and the mission chain around it (in-game
+// 2026-10-13: control lost a while after IN_City_DockFire starts). The 598 Incredibles graphs hold 29
+// LockIndividualPlayerControl (21 graphs), 84 ControllerContextNode (21) and 111 AnimatedCameraNode; DockFire's
+// help-capsule ghosts lock when collected and unlock only when their choreography ends (nodes 272/273/253).
+//   GamePlayers lock/unlock (vtable +0x14/+0x18, FUN_0139b8d0/FUN_0139b960: player, CString reason; the
+//     LockIndividualPlayerControl node passes "MerLockInd%d", FUN_0180ecf0 / FUN_017ffee0)
+//   ControllerContextNode apply/remove per agent (FUN_0121d5c0/FUN_0121d8c0; ContextName CString at node+0xa8,
+//     FUN_01224880; DisableByDefault applies at init, FUN_012246e0)
+//   Choreography node play (Link_In -> FUN_017e91b0; resolved path CString at node+0x8c, FUN_017e8680) and its
+//     event handler at node+0x30 (FUN_017e5890: events 0/2 turn 'Playing' on, 1/3 off through FUN_017deef0)
+//   MessageSender send (Link_In -> FUN_018120b0; MessageName/Target/Data CStrings at node+0x1c/+0x28/+0x34)
+static const char* cstr(const void* at, char* buf, size_t cap)   // the char* a CString member at 'at' holds
+{
+    const char* p = nullptr;
+    MEMORY_BASIC_INFORMATION mbi;
+    if ((uintptr_t)at >= 0x10000 && VirtualQuery(at, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+        !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && mbi.Protect)
+        p = *(const char* const*)at;
+    safeCopy(buf, cap, p);
+    return buf;
+}
+static uint32_t callerVa(void* ret) { return (uint32_t)((uintptr_t)ret - g_base + 0x400000u); }
+static volatile LONG g_lockTraceLines;
+static bool lockTraceRoom() { return InterlockedIncrement(&g_lockTraceLines) <= 4000; }
+typedef void(__fastcall* CtlLockFn)(void* self, void* edx, int player, const void* reason);
+static CtlLockFn g_ctlLock, g_ctlUnlock;
+static void __fastcall hkCtlLock(void* self, void*, int player, const void* reason)
+{
+    char r[128];
+    if (lockTraceRoom()) logf("control LOCK player %d reason '%s' (from %08X)", player, cstr(reason, r, sizeof(r)), callerVa(_ReturnAddress()));
+    g_ctlLock(self, nullptr, player, reason);
+}
+static void __fastcall hkCtlUnlock(void* self, void*, int player, const void* reason)
+{
+    char r[128];
+    if (lockTraceRoom()) logf("control unlock player %d reason '%s' (from %08X)", player, cstr(reason, r, sizeof(r)), callerVa(_ReturnAddress()));
+    g_ctlUnlock(self, nullptr, player, reason);
+}
+typedef void(__fastcall* CtxFn)(uint8_t* node, void* edx, uint32_t agent);
+static CtxFn g_ctxOn, g_ctxOff;
+static void __fastcall hkCtxOn(uint8_t* node, void*, uint32_t agent)
+{
+    char n[200];
+    if (lockTraceRoom()) logf("controller context ON (inputs disabled) '%s' agent %08X (from %08X)", cstr(node + 0xa8, n, sizeof(n)), agent, callerVa(_ReturnAddress()));
+    g_ctxOn(node, nullptr, agent);
+}
+static void __fastcall hkCtxOff(uint8_t* node, void*, uint32_t agent)
+{
+    char n[200];
+    if (lockTraceRoom()) logf("controller context off '%s' agent %08X (from %08X)", cstr(node + 0xa8, n, sizeof(n)), agent, callerVa(_ReturnAddress()));
+    g_ctxOff(node, nullptr, agent);
+}
+typedef void(__fastcall* ChoPlayFn)(uint8_t* node, void* edx);
+static ChoPlayFn g_choPlay;
+static void __fastcall hkChoPlay(uint8_t* node, void*)
+{
+    g_choPlay(node, nullptr);
+    char n[200];
+    if (lockTraceRoom()) logf("cho node %p play '%s'", node, cstr(node + 0x8c, n, sizeof(n)));
+}
+typedef void(__fastcall* ChoEventFn)(uint8_t* handler, void* edx, const int* ev);
+static ChoEventFn g_choEvent;
+static void __fastcall hkChoEvent(uint8_t* handler, void*, const int* ev)
+{
+    int type = ev ? ev[0] : -1;
+    if (type >= 0 && type <= 3 && lockTraceRoom()) {
+        char n[200];
+        logf("cho node %p event %d (Playing %s) '%s'", handler - 0x30, type, type == 0 || type == 2 ? "on" : "off", cstr(handler - 0x30 + 0x8c, n, sizeof(n)));
+    }
+    g_choEvent(handler, nullptr, ev);
+}
+typedef void(__fastcall* MsgSendFn)(uint8_t* node, void* edx, void* payload);
+static MsgSendFn g_msgSend;
+static void __fastcall hkMsgSend(uint8_t* node, void*, void* payload)
+{
+    char n[128], t[128], d[128];
+    if (lockTraceRoom())
+        logf("message send '%s' target '%s' data '%s'", cstr(node + 0x1c, n, sizeof(n)), cstr(node + 0x28, t, sizeof(t)), cstr(node + 0x34, d, sizeof(d)));
+    g_msgSend(node, nullptr, payload);
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -1833,6 +1916,15 @@ extern "C" void __stdcall Pentane_Main()
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
     if (g_cfg.aliases10 && g_merOk)
         hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry, (void**)&g_merRegistry);
+    if (g_cfg.lockTrace10) {
+        hook("GamePlayers lock controls (locktrace10)", 0x0139B8D0, "833D????????00558BE9", (void*)&hkCtlLock, (void**)&g_ctlLock);
+        hook("GamePlayers unlock controls (locktrace10)", 0x0139B960, "55578B7C240C8BE985FF", (void*)&hkCtlUnlock, (void**)&g_ctlUnlock);
+        hook("controller context apply (locktrace10)", 0x0121D5C0, "8B44240483EC0C53568BD9", (void*)&hkCtxOn, (void**)&g_ctxOn);
+        hook("controller context remove (locktrace10)", 0x0121D8C0, "8B44240483EC0C56578BF9", (void*)&hkCtxOff, (void**)&g_ctxOff);
+        hook("choreography node play (locktrace10)", 0x017E91B0, "83EC1C5556578BF1E8", (void*)&hkChoPlay, (void**)&g_choPlay);
+        hook("choreography node event (locktrace10)", 0x017E5890, "538BD9568D73D057", (void*)&hkChoEvent, (void**)&g_choEvent);
+        hook("message sender send (locktrace10)", 0x018120B0, "6AFF68????????64A100000000", (void*)&hkMsgSend, (void**)&g_msgSend);
+    }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
