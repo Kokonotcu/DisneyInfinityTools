@@ -19,6 +19,7 @@
 #include "minhook/MinHook.h"
 #include "octx.hpp"
 #include "bent.hpp"
+#include "btd.hpp"
 #include "chd.hpp"
 #include "mer.hpp"
 #include "render.hpp"
@@ -361,6 +362,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
     if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
+    if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }
@@ -398,6 +400,22 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         note += buf;
         out = isMtc ? mer::mtc(f) : f.write();
         return isMtc ? "mtc" : "mer";
+    }
+    // collision (.btd blocks in the 3.0 layout, btd.hpp) and its block table (.btm, rebuilt from the converted
+    // sibling .btd); raw 1.0 collision gave a world without ground (in-game 2026-10-13: the avatar fell, respawned)
+    bool isBtm = endsWith(path, ".btm");
+    if (endsWith(path, ".btd") || isBtm) {
+        std::string src, conv;
+        if (isBtm) {
+            std::string p = norm(path);
+            if (!read10s(p.substr(0, p.size() - 4) + ".btd", src)) return nullptr;
+        } else src.assign((const char*)data, n);
+        if (!btd::convert(src, conv)) { note += "btd: not the 1.0 block layout "; return nullptr; }
+        char buf[64];
+        sprintf_s(buf, "+btd(%u blocks) ", (unsigned)btd::blocks(conv, 3).size());
+        note += buf;
+        out = isBtm ? btd::btm(conv) : conv;
+        return isBtm ? "btm" : "btd";
     }
     // an entity description (.bent 4.1 -> 4.1f, bent.hpp, NPC-4): characters, playset avatars, choreographies
     if (endsWith(path, ".bent") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {

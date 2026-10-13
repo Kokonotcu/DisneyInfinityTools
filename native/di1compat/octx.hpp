@@ -600,31 +600,114 @@ inline int skin30(oct::File& f)
 // bound nothing and the start lookup found no start (in-game 2026-10-13: PlayerStartPosNode built, its transform query
 // failed every respawn). A basis without a direct root conversion goes through its parents' conversions ('In Basis<n>'
 // per hop); a root-basis Dilation only gets the DilationToTransform step. Returns the locators redirected.
-inline int locator30(oct::File& f)
+// The node a 1.0 binding path names, in 3.0 form: a graph header whose 'Transform' child is a Dilation becomes
+// '<path>|Transform|In WorldBasis.Transform' with the exporter's chain (see locator30); "" if the path does not have
+// that shape or already names a node.
+inline std::string worldTransform30(SnEdit& e, const std::string& path)
 {
-    return redirectAssociations(f, "MeridianLocator", [&](SnEdit& e, const std::string& path) -> std::string {
-        int loc = e.find(path);
-        if (loc <= 0 || e.dnOf(loc) >= 0) return "";   // unresolved, or already names a node (3.0 form)
-        int xf = e.child(loc, "Transform"), src = xf > 0 ? e.dnOf(xf) : -1;
-        if (src < 0 || e.dns[src].type != "Dilation") return "";
-        std::string to = path + "|Transform|In WorldBasis.Transform";
-        if (e.child(xf, "In WorldBasis.Transform") >= 0) return to;
-        bool found = false;
-        auto steps = e.toWorld(e.dns[src].basis, found);
-        if (!found) return "";
-        int in = src;
-        for (auto& s : steps) {
-            std::string bn = s.second == 0 ? "WorldBasis" : "Basis" + std::to_string(s.second);
-            int ho = e.header("In " + bn, xf), hp = e.header("Convert To " + bn, xf);
-            int out = e.node(ho, "Dilation", s.second, false);
-            e.processor(hp, "TransformDilationWithDilation", {in, s.first, out}, {"Input", "Converter", "Output"});
-            in = out;
+    int loc = e.find(path);
+    if (loc <= 0 || e.dnOf(loc) >= 0) return "";   // unresolved, or already names a node (3.0 form)
+    int xf = e.child(loc, "Transform"), src = xf > 0 ? e.dnOf(xf) : -1;
+    if (src >= 0 && e.dns[src].type == "Transform" && e.dns[src].basis == 0) return path + "|Transform";   // already one
+    if (src < 0 || e.dns[src].type != "Dilation") return "";
+    std::string to = path + "|Transform|In WorldBasis.Transform";
+    if (e.child(xf, "In WorldBasis.Transform") >= 0) return to;
+    bool found = false;
+    auto steps = e.toWorld(e.dns[src].basis, found);
+    if (!found) return "";
+    int in = src;
+    for (auto& s : steps) {
+        std::string bn = s.second == 0 ? "WorldBasis" : "Basis" + std::to_string(s.second);
+        int ho = e.header("In " + bn, xf), hp = e.header("Convert To " + bn, xf);
+        int out = e.node(ho, "Dilation", s.second, false);
+        e.processor(hp, "TransformDilationWithDilation", {in, s.first, out}, {"Input", "Converter", "Output"});
+        in = out;
+    }
+    int ht = e.header("In WorldBasis.Transform", xf), hc = e.header("ConvertDilationToTransform", ht);
+    int nt = e.node(ht, "Transform", 0, true);
+    e.processor(hc, "DilationToTransformVariantProcessor", {in, nt}, {"Input", "Output"});
+    return to;
+}
+
+inline int locator30(oct::File& f) { return redirectAssociations(f, "MeridianLocator", worldTransform30); }
+
+// Collision in 3.0 form, as every shipped instance (24,287 aggregates in the 3.0 worlds + exploders checked):
+//   CollisionInstanceToDataNode names '<slot>|Transform|In WorldBasis.Transform' (1.0: the slot header, e.g.
+//     'FountainCol' in its own SubNetwork) and carries AssetIndex = the AssetPool entry with its SubNetworkRef
+//     (48,574/48,574);
+//   right after it a CollisionAggregate with the same NodeName, CollisionInstanceRef, SubNetworkRef,
+//     SceneTreeNodeRef = that of the Transform/Geometry association named by the path before '|Transform'
+//     (else -1; 24,287/24,287) and AssetIndex;
+//   each asset's AggregateCount = the aggregates with its index (5,998/5,998).
+// 1.0 has neither the suffix, the index nor any aggregate (in_city: 947 instances, no collision in-game: the avatar
+// fell through the start, 2026-10-13). Runs after addAssetPool. Returns the aggregates added.
+inline int collision30(oct::File& f)
+{
+    redirectAssociations(f, "CollisionInstanceToDataNode", worldTransform30);
+    long ap = f.pool("AssociationPool"), asp = f.pool("AssetPool");
+    if (ap < 0 || asp < 0) return 0;
+    std::map<int, int> assetOf;   // SubNetworkRef -> asset index
+    std::vector<long> aggAt;      // per asset: its AggregateCount record
+    for (size_t i = asp + 1, k = 0, end = f.blockEnd(asp); i < end; i = f.blockEnd(i), ++k) {
+        aggAt.push_back(-1);
+        for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
+            const std::string& n = f.name(f.recs[j]);
+            if (n == "SubNetworkRef" && !assetOf.count(f.ints(f.recs[j])[0])) assetOf[f.ints(f.recs[j])[0]] = (int)k;
+            else if (n == "AggregateCount") aggAt.back() = (long)j;
         }
-        int ht = e.header("In WorldBasis.Transform", xf), hc = e.header("ConvertDilationToTransform", ht);
-        int nt = e.node(ht, "Transform", 0, true);
-        e.processor(hc, "DilationToTransformVariantProcessor", {in, nt}, {"Input", "Output"});
-        return to;
-    });
+    }
+    struct A { size_t at, end; std::string type, node; int sn = -1, inst = -1, stn = -1; bool hasIndex = false; };
+    std::vector<A> as;
+    for (size_t i = ap + 1, end = f.blockEnd(ap); i < end; i = f.blockEnd(i)) {
+        A a{i, f.blockEnd(i)};
+        for (size_t j = i + 1; j < a.end; ++j) {
+            const oct::Rec& r = f.recs[j];
+            const std::string& n = f.name(r);
+            if (n == "Type") a.type = f.nameValues(r)[0];
+            else if (n == "NodeName") a.node = f.nameValues(r)[0];
+            else if (n == "SubNetworkRef") a.sn = f.ints(r)[0];
+            else if (n == "CollisionInstanceRef") a.inst = f.ints(r)[0];
+            else if (n == "SceneTreeNodeRef") a.stn = f.ints(r)[0];
+            else if (n == "AssetIndex") a.hasIndex = true;
+        }
+        if (a.type == "CollisionAggregate") return 0;   // already 3.0 form
+        as.push_back(a);
+    }
+    std::map<std::pair<int, std::string>, int> scene;
+    for (auto& a : as)
+        if ((a.type == "Transform" || a.type == "Geometry") && a.stn != -1 && !scene.count({a.sn, a.node})) scene[{a.sn, a.node}] = a.stn;
+    std::map<int, int> perAsset;
+    int added = 0;
+    for (auto it = as.rbegin(); it != as.rend(); ++it) {   // last first: inserts keep earlier indices
+        const A& a = *it;
+        if (a.type != "CollisionInstanceToDataNode" || a.node.find("|Transform") == std::string::npos) continue;   // redirected only
+        auto ai = assetOf.find(a.sn);
+        if (ai == assetOf.end()) continue;
+        std::string slot = a.node.substr(0, a.node.find("|Transform"));
+        auto sc = scene.find({a.sn, slot});
+        std::vector<oct::Rec> agg = {keyedNode(f, 2, "Association", 0), f.nameScalar(3, f.addName("NodeName"), a.node),
+                                     f.nameScalar(3, f.addName("Type"), "CollisionAggregate"), f.intScalar(3, "CollisionInstanceRef", a.inst),
+                                     f.intScalar(3, "SubNetworkRef", a.sn), f.intScalar(3, "SceneTreeNodeRef", sc == scene.end() ? -1 : sc->second),
+                                     f.intScalar(3, "AssetIndex", ai->second)};
+        f.recs.insert(f.recs.begin() + a.end, agg.begin(), agg.end());
+        if (!a.hasIndex) f.recs.insert(f.recs.begin() + a.end, f.intScalar(3, "AssetIndex", ai->second));
+        ++perAsset[ai->second];
+        ++added;
+    }
+    for (auto& kv : perAsset)
+        if (kv.first < (int)aggAt.size() && aggAt[kv.first] >= 0) f.setInt(f.recs[aggAt[kv.first]], kv.second);
+    // associations are keyed '0','1',... in file order (as shipped); renumber after the inserts
+    ap = f.pool("AssociationPool");
+    int key = 0;
+    for (size_t i = ap + 1, end = f.blockEnd(ap); i < end; i = f.blockEnd(i)) {
+        oct::Rec& r = f.recs[i];
+        if (!oct::spec(r.type).keyed) continue;
+        r.pay = r.pay.substr(2);
+        std::string k2;
+        oct::File::put(k2, f.addName(std::to_string(key++)), 2);
+        r.pay = k2 + r.pay;
+    }
+    return added;
 }
 
 // Every SubNetwork of the SubNetworkPool; returns how many got counts.

@@ -7,6 +7,7 @@
 #include <iterator>
 #include "octx.hpp"
 #include "bent.hpp"
+#include "btd.hpp"
 #include "chd.hpp"
 #include "mer.hpp"
 #include "render.hpp"
@@ -162,6 +163,16 @@ int main(int argc, char** argv)
                st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, o.size());
         return 0;
     }
+    if (argc > 3 && std::string(argv[1]) == "--btd") {   // --btd <1.0 .btd> <out .btd>: + <out>.btm beside it
+        std::string b = slurp(argv[2]), o;
+        if (!btd::convert(b, o)) { printf("not the 1.0 block layout\n"); return 1; }
+        std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
+        std::string m = btd::btm(o), mp = std::string(argv[3]);
+        mp = mp.substr(0, mp.size() - 4) + ".btm";
+        std::ofstream(mp, std::ios::binary).write(m.data(), m.size());
+        printf("%u blocks, %u B\n", (unsigned)btd::blocks(o, 3).size(), (unsigned)o.size());
+        return 0;
+    }
     if (argc > 4 && std::string(argv[1]) == "--bent") {   // --bent <1.0 .bent> <engine path> <out>: 4.1 -> 4.1f
         std::string b = slurp(argv[2]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
@@ -176,6 +187,8 @@ int main(int argc, char** argv)
         oct::File f = oct::File::parse(b.data(), b.size());
         printf("skin influences redirected: %d\n", octx::skin30(f));
         printf("locators redirected: %d\n", octx::locator30(f));
+        printf("asset pool added: %d\n", (int)octx::addAssetPool(f));
+        printf("collision aggregates added: %d\n", octx::collision30(f));
         printf("subnetworks with counts added: %d\n", octx::addAllCounts(f));
         std::string o = f.write();
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
