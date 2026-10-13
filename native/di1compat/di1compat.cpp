@@ -136,6 +136,7 @@ static struct {
     bool root10 = true;              // sys: read10 also searches the 1.0 root archives (startup*.zip)
     bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
     bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)
+    bool chest10 = true;             // sys: 1.0 ChestInfo.bin through 3.0's chestInfo loader (GLB-1)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -166,6 +167,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "root10")) g_cfg.root10 = atoi(val) != 0;
         else if (!strcmp(key, "locks10")) g_cfg.locks10 = atoi(val) != 0;
         else if (!strcmp(key, "popin10")) g_cfg.popin10 = atoi(val) != 0;
+        else if (!strcmp(key, "chest10")) g_cfg.chest10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1238,6 +1240,19 @@ static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint
             sys::setLockUids(sys::loaderUids(self));
             gameDbLoad(g_loadLocks, "locks", self, s, a2, a3);
         }
+    // GLB-1: 1.0 ChestInfo.bin through 3.0's chestInfo loader (ChestInfo singleton DAT_022896fc, +4 its
+    // DBFileLoader_Callback; vtable[1] = FUN_018db270(CString path, a2, a3), as the router FUN_018da710 calls it)
+    uint8_t* ci = g_cfg.chest10 && _stricmp(p, sys::kLocksTrigger) == 0 ? *(uint8_t**)rt(0x022896FC) : nullptr;
+    void* loader = ci && sys::readable(ci + 4, 4) ? *(void**)(ci + 4) : nullptr;
+    if (loader && sys::readable(loader, 4)) {
+        char* cs = nullptr;   // an engine CString (ctor FUN_00418310, release FUN_00418230)
+        ((void*(__fastcall*)(void*, void*, const char*))rt(0x00418310))(&cs, nullptr, sys::kChest10);
+        uint8_t ok = ((uint8_t(__fastcall*)(void*, void*, char*, uint32_t, uint32_t))(*(void***)loader)[1])(loader, nullptr, cs, a2, a3);
+        ((void(__fastcall*)(void*, void*))rt(0x00418230))(&cs, nullptr);
+        uint8_t* chests = ci + 0x1c;
+        logf("chestInfo loader given %s -> %u; ChestInfo holds %d chests, %d resources, %d choreographies", sys::kChest10, ok,
+             *(int*)(chests + 4), *(int*)(ci + 0x10), *(int*)(ci + 0x30));
+    }
     return r;
 }
 
@@ -1268,6 +1283,14 @@ static void __fastcall hkExpDef(void* self, void*, void* entry)
 static int* sysServe(const char* p)
 {
     std::string np = norm(p), src, out;
+    size_t cpre = strlen(sys::kChest10Prefix);
+    if (!np.compare(0, cpre, sys::kChest10Prefix) && endsWith(p, ".lua")) {   // GLB-1 ChestInfo.bin -> Lua
+        std::string bin = np.substr(cpre, np.size() - cpre - 4) + ".bin", why;
+        bool ok = read10s(bin, src) && sys::chestInfoLua(src, out, &why);
+        logf("served %s from 1.0 %s (%u B) -> chestInfo Lua %u B%s%s", p, bin.c_str(), (unsigned)src.size(), (unsigned)out.size(),
+             ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
+        return ok ? memFile(out.data(), out.size()) : nullptr;
+    }
     size_t pre = strlen(sys::kLocks10Prefix);
     if (np.compare(0, pre, sys::kLocks10Prefix)) return nullptr;
     if (!read10s(np.substr(pre), src)) { logf("supplement %s: no 1.0 table", p); return nullptr; }

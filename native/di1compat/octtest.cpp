@@ -207,6 +207,17 @@ int main(int argc, char** argv)
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--keep") return keepTest(argc, argv);
+    if (argc > 3 && std::string(argv[1]) == "--chest") {   // --chest <1.0 chestinfo.bin> <out.lua>: GLB-1 transcode
+        std::string out, why;
+        if (!sys::chestInfoLua(slurp(argv[2]), out, &why)) { printf("FAILED: %s\n", why.c_str()); return 1; }
+        std::ofstream(argv[3], std::ios::binary) << out;
+        chd::V t = chd::lua(out);   // independent parse: the three tables and their entry counts
+        const chd::V* c = field(t, "ChestInfo");
+        for (const char* k : {"Resource", "Choreography", "Chests"})
+            printf("%s %zu  ", k, c && field(*c, k) ? field(*c, k)->named.size() : 0);
+        printf("(%zu B)\n", out.size());
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {

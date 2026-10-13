@@ -168,6 +168,125 @@ inline std::set<uint32_t> g_lockUids;
 inline void setLockUids(std::set<uint32_t> u) { std::lock_guard<std::mutex> l(g_lockMx); g_lockUids.swap(u); }
 inline std::set<uint32_t> lockUids() { std::lock_guard<std::mutex> l(g_lockMx); return g_lockUids; }
 
+// ---- GLB-1: var/chests/ChestInfo.bin -> 3.0's chestInfo GameDB loader ----
+// 1.0 ChestInfo ctor FUN_00faac30 maps the .bin (little-endian): [u32 size, string pool] [u32 size, list pool: per
+// list a u32 flag then string offsets up to -1] [size, n, n x 0x20 choreographies] [size, n, n x 0xc resources]
+// [size, n, n x 0x48 chests]; every field is a string offset or a list / record index, -1 = none.
+// 3.0 dropped the .bin for a DBFileLoader_Callback "chestInfo" (built in ChestInfo ctor FUN_014b6420; ships no data):
+// its callback FUN_014adef0 reads the Lua global ChestInfo = {Resource = {[name] = {...}}, Choreography = {...},
+// Chests = {...}}, lists as " ,"-separated strings (tokenizer FUN_004727b0), and resolves chests' resources and
+// choreographies by name (FUN_0148d4d0 stricmp), where 1.0 used record indices: those get the names R<i> / C<i>.
+// Field correspondence (1.0 converter per field -> 3.0 key of the same type and role):
+//   choreography [0] bool PauseAtLoadTime, [1] ChoName, [2] AnchorName, [3] list LockLayer, [4] list LockClips,
+//     [5] DoorLayer, [6] DoorOpen, [7] float SpawnAward
+//   resource [0] Currency, [1] list Locks, [2] list (empty in all 41 records; 3.0 reads no third field)
+//   chest [0] name, [1]/[3] hashes of name/group (3.0 compares names), [2] Group, [4] bitmask list ActorType,
+//     [5] bool Spawnable, [6] int Awards, [7] CommercialName, [8]/[9] resource GuaranteedRes/SharedRes,
+//     [10] int BitOffset, [11] UnlockedStat (1.0 looks it up as a stat, FUN_00fa6e70; 3.0 FUN_014bb710 reads its
+//     bits at BitOffset), [12] list UnlockSfx, [13] OpenSfx, [14] AwardSfx, [15] list LockEntityName,
+//     [16]/[17] choreography OpenCho/RewardCho
+inline std::string luaQuote(const std::string& s)
+{
+    std::string o = "\"";
+    for (unsigned char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += (char)c; }
+        else if (c < 32 || c >= 127) { char b[8]; sprintf_s(b, "\\%03u", c); o += b; }
+        else o += (char)c;
+    }
+    return o + "\"";
+}
+
+inline bool chestInfoLua(const std::string& b, std::string& out, std::string* why = nullptr)
+{
+    auto fail = [&](const char* w) { if (why) *why = w; return false; };
+    auto u32 = [&](size_t o, uint32_t& v) { if (o + 4 > b.size()) return false; memcpy(&v, b.data() + o, 4); return true; };
+    uint32_t s1, s2, s3, s4, nc, nr, nk;
+    if (!u32(0, s1) || !u32(s1, s2) || !u32(s1 + s2, s3) || !u32(s1 + s2 + 4, nc) || !u32(s1 + s2 + s3, s4) ||
+        !u32(s1 + s2 + s3 + 4, nr) || !u32(s1 + s2 + s3 + s4 + 4, nk))
+        return fail("block headers");
+    size_t strings = 4, lists = s1 + 4, cho = s1 + s2 + 8, res = s1 + s2 + s3 + 8, ch = s1 + s2 + s3 + s4 + 8;
+    if (s3 != 8 + nc * 0x20 || s4 != 8 + nr * 0xc || ch + (size_t)nk * 0x48 > b.size()) return fail("record blocks");
+    bool ok = true;
+    auto field = [&](size_t rec, int k) { uint32_t v = 0xffffffff; ok &= u32(rec + 4 * k, v); return (int32_t)v; };
+    auto str = [&](int32_t off, std::string& s) {
+        if (off < 0) return false;
+        size_t at = strings + off, e = at < s1 + 4 ? b.find('\0', at) : npos;
+        if (e == npos || e > s1 + 4) { ok = false; return false; }
+        s.assign(b, at, e - at);
+        return true;
+    };
+    auto list = [&](int32_t idx, std::string& s) {
+        if (idx < 0) return false;
+        s.clear();
+        for (size_t p = lists + 4 * (size_t)idx + 4;; p += 4) {
+            uint32_t v;
+            if (p >= s1 + 4 + s2 || !u32(p, v)) { ok = false; return false; }
+            if (v == 0xffffffff) break;
+            std::string t;
+            if (!str((int32_t)v, t)) return false;
+            s += (s.empty() ? "" : ",") + t;
+        }
+        return true;
+    };
+    auto kv = [&](const char* key, const std::string& v) { out += std::string("\t\t\t") + key + " = " + luaQuote(v) + ",\n"; };
+    auto kn = [&](const char* key, const std::string& v) { out += std::string("\t\t\t") + key + " = " + v + ",\n"; };
+    std::string s;
+    out = "-- 1.0 var/chests/ChestInfo.bin in the form of 3.0's chestInfo loader (di1compat sys.hpp)\nChestInfo =\n{\n\tResource =\n\t{\n";
+    for (uint32_t i = 0; i < nr; ++i) {
+        size_t r = res + 0xc * i;
+        out += "\t\t[\"R" + std::to_string(i) + "\"] =\n\t\t{\n";
+        if (str(field(r, 0), s)) kv("Currency", s);
+        if (list(field(r, 1), s)) kv("Locks", s);
+        out += "\t\t},\n";
+    }
+    out += "\t},\n\tChoreography =\n\t{\n";
+    for (uint32_t i = 0; i < nc; ++i) {
+        size_t r = cho + 0x20 * i;
+        out += "\t\t[\"C" + std::to_string(i) + "\"] =\n\t\t{\n";
+        if (str(field(r, 0), s)) kn("PauseAtLoadTime", s[0] == 't' || s[0] == 'T' || s[0] == '1' ? "1" : "0");
+        if (str(field(r, 1), s)) kv("ChoName", s);
+        if (str(field(r, 2), s)) kv("AnchorName", s);
+        if (list(field(r, 3), s)) kv("LockLayer", s);
+        if (list(field(r, 4), s)) kv("LockClips", s);
+        if (str(field(r, 5), s)) kv("DoorLayer", s);
+        if (str(field(r, 6), s)) kv("DoorOpen", s);
+        if (str(field(r, 7), s)) { char f[32]; sprintf_s(f, "%.9g", atof(s.c_str())); kn("SpawnAward", f); }
+        out += "\t\t},\n";
+    }
+    out += "\t},\n\tChests =\n\t{\n";
+    for (uint32_t i = 0; i < nk; ++i) {
+        size_t r = ch + 0x48 * i;
+        std::string name;
+        if (!str(field(r, 0), name)) return fail(ok ? "chest without a name" : "string offset");
+        out += "\t\t[" + luaQuote(name) + "] =\n\t\t{\n";
+        if (str(field(r, 2), s)) kv("Group", s);
+        if (list(field(r, 4), s)) kv("ActorType", s);
+        if (str(field(r, 5), s)) kn("Spawnable", s[0] == 't' || s[0] == 'T' || s[0] == '1' ? "1" : "0");
+        if (str(field(r, 6), s)) kn("Awards", std::to_string(atoi(s.c_str())));
+        if (str(field(r, 7), s)) kv("CommercialName", s);
+        int32_t g = field(r, 8), h = field(r, 9), o = field(r, 16), w = field(r, 17);
+        if (g >= (int32_t)nr || h >= (int32_t)nr || o >= (int32_t)nc || w >= (int32_t)nc) return fail("record index");
+        if (g >= 0) kv("GuaranteedRes", "R" + std::to_string(g));
+        if (h >= 0) kv("SharedRes", "R" + std::to_string(h));
+        if (str(field(r, 10), s)) kn("BitOffset", std::to_string(atoi(s.c_str())));
+        if (str(field(r, 11), s)) kv("UnlockedStat", s);
+        if (list(field(r, 12), s)) kv("UnlockSfx", s);
+        if (str(field(r, 13), s)) kv("OpenSfx", s);
+        if (str(field(r, 14), s)) kv("AwardSfx", s);
+        if (list(field(r, 15), s)) kv("LockEntityName", s);
+        if (o >= 0) kv("OpenCho", "C" + std::to_string(o));
+        if (w >= 0) kv("RewardCho", "C" + std::to_string(w));
+        out += "\t\t},\n";
+    }
+    out += "\t},\n}\n";
+    return ok || fail("offset out of range");
+}
+
+// the chestInfo loader runs once per process, after the playset locks (its callback appends; the loader skips a
+// path it has seen, FUN_018daf30)
+static const char* const kChest10Prefix = "di1sys/chest10/";   // + the 1.0 path with .lua for .bin
+static const char* const kChest10 = "di1sys/chest10/var/chests/chestinfo.lua";
+
 // ---- PS-8: pop-in of 1.0 expendable definitions ----
 // ExpendablesDefBase (ctor FUN_016022c0, one Lua entry) keeps the pop-in range squared at +0x9c and (range+14)^2 at
 // +0xa0: both stay 0 unless the entry has PopinDistance (an explicit 0 gives 0/196). With 0 a 3.0 expendable never
