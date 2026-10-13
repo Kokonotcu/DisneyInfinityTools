@@ -262,6 +262,51 @@ int main(int argc, char** argv)
         }
         return 0;
     }
+    if (argc > 4 && std::string(argv[1]) == "--activity") {   // --activity <mer table> <out dir> <1.0 file>...: activity
+        // missions -> challenge (gameplay.hpp); .mer: activityGraph30 (<name>.pre.mer) then mer::transcode (<name>.mer);
+        // mission .lua: activityTasks30; a missiongraph .ap: apGivers30 gated by activityGivers (files beside it)
+        namespace fs = std::filesystem;
+        mer::Table T;
+        if (!T.load(slurp(argv[2]))) { printf("mer table load failed\n"); return 2; }
+        for (int a = 4; a < argc; ++a) {
+            fs::path in = argv[a];
+            std::string t = slurp(in), name = in.filename().string();
+            fs::path outp = fs::path(argv[3]) / name;
+            if (in.extension() == ".mer") {
+                oct::File f = oct::File::parse(t.data(), t.size());
+                int re = 0, dr = 0, k = gameplay::activityGraph30(f, &re, &dr);
+                if (!k) { printf("mer %-52s unchanged\n", name.c_str()); continue; }
+                std::string pre = f.write();
+                std::ofstream(fs::path(argv[3]) / (in.stem().string() + ".pre.mer"), std::ios::binary).write(pre.data(), pre.size());
+                mer::Stats st;
+                std::string why;
+                bool ok = mer::transcode(T, f, &st, &why);
+                std::string o = f.write();
+                std::ofstream(outp, std::ios::binary).write(o.data(), o.size());
+                printf("mer %-52s %d nodes, %d rerouted, %d dropped; mer %s: %d nodes %d stubs %d links %d dropped\n", name.c_str(), k, re, dr,
+                       ok ? "ok" : why.c_str(), st.nodes, st.stubs, st.links, st.linksDropped);
+            } else if (in.extension() == ".lua") {
+                int k = gameplay::activityTasks30(t);
+                if (k) std::ofstream(outp, std::ios::binary).write(t.data(), t.size());
+                printf("lua %-52s %d\n", name.c_str(), k);
+            } else if (in.extension() == ".ap") {
+                fs::path dir = in.parent_path();
+                std::string graph = slurp(dir / (in.stem().string() + ".lua"));
+                auto ok = gameplay::activityGivers(graph, [&](const std::string& n, std::string& o) {
+                    std::string m = n + ".lua";
+                    for (char& c : m) c = (char)tolower((unsigned char)c);
+                    o = slurp(dir / m);
+                    return !o.empty();
+                });
+                int k = gameplay::apGivers30(t, &ok);
+                std::ofstream(outp, std::ios::binary).write(t.data(), t.size());
+                printf("ap  %-52s %d givers redirected:", name.c_str(), k);
+                for (auto& g : ok) printf(" %s", g.c_str());
+                printf("\n");
+            }
+        }
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--surf") {   // --surf <3.0 surfacetypes.lua> <1.0 .oct>...: OCT-5 (surf.py)
         std::string lua = slurp(argv[2]);
         std::vector<std::string> names30;   // entries '{ name = "dynamic" | "static" }' in order

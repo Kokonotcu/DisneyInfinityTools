@@ -474,13 +474,27 @@ static int missionGraph30(std::string& t)
 static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note)
 {
     // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp): type data, giver sections, giver DNA
-    bool types = !gameplay::challengeTypePath(norm(path)).empty(), ap = endsWith(path, ".ap"), dna = endsWith(path, ".dnax");
-    if (g_cfg.challenge10 && n && (types || ap || dna)) {
+    std::string np = norm(path);
+    bool types = !gameplay::challengeTypePath(np).empty(), ap = endsWith(path, ".ap"), dna = endsWith(path, ".dnax");
+    bool mlua = endsWith(path, ".lua") && np.rfind("mission_data/", 0) == 0 && !endsWith(path, "__missiongraph.lua");
+    if (g_cfg.challenge10 && n && (types || ap || dna || mlua)) {
         std::string t((const char*)data, n);
         int k = 0;
         const char* codec = nullptr;
         if (types && t[0] != 0x1b) { k = gameplay::challengeTypes30(t); codec = "challengetypes"; }
-        else if (ap) { k = gameplay::apGivers30(t); codec = "apgivers"; }
+        else if (mlua && t[0] != 0x1b) { k = gameplay::activityTasks30(t); codec = "activitytasks"; }
+        else if (ap) {   // givers of the missions activityTasks30 converts (the missiongraph beside the .ap names them)
+            std::string graph, dir = np.substr(0, np.rfind('/') + 1);
+            std::set<std::string> ok;
+            if (read10s(np.substr(0, np.size() - 3) + ".lua", graph))
+                ok = gameplay::activityGivers(graph, [&](const std::string& name, std::string& o) {
+                    std::string m = dir + name + ".lua";
+                    for (char& c : m) c = (char)tolower((unsigned char)c);
+                    return read10s(m, o);
+                });
+            k = gameplay::apGivers30(t, &ok);
+            codec = "apgivers";
+        }
         else if (dna && t[0] == 0x1b) {
             std::string o;
             try { k = gameplay::dnaGadgets30(t, o); } catch (std::exception&) { k = 0; }
@@ -523,6 +537,9 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         } else graph.assign((const char*)data, n);
         if (graph.size() < 4 || oct::u((const uint8_t*)graph.data(), 4) != oct::MAGIC) return nullptr;
         oct::File f = oct::File::parse(graph.data(), graph.size());
+        int actRe = 0, actDrop = 0, act = g_cfg.challenge10 ? gameplay::activityGraph30(f, &actRe, &actDrop) : 0;   // gp
+        if (act) note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) + " participant links, " +
+                         std::to_string(actDrop) + " dropped) ";
         mer::Stats st;
         if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
         char buf[200];

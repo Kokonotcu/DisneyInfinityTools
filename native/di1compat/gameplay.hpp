@@ -2,9 +2,11 @@
 // replaced it, at load time. The 1.0 files are never rewritten; each transform is checked offline (octtest, scratch
 // oracles) against the shipped 3.0 corpus.
 #pragma once
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <set>
 #include "octx.hpp"
 #include "luachunk.hpp"
@@ -285,15 +287,21 @@ inline std::string challengeTypePath(const std::string& normPath)
 // .ap activity giver sections (AddComponent_MG_Activity, 19 in Incredibles, all with ActivityIcon) get the 3.0 keys
 // the MissionGiverChallenge init reads: ChallengeType = the activity type, BeaconType = the 1.0 beacon. 1.0 takes the
 // beacon from the type's ActivityBeaconName, default DefaultActivityBeacon (FUN_00f938a0); no Incredibles type sets
-// it (0 of 16). Returns the sections changed.
-inline int apGivers30(std::string& ap)
+// it (0 of 16). Only givers whose ActorTagName is in `only` (when given): a giver without ChallengeType stays inert in
+// 3.0 (its init returns at once), so an activity whose mission cannot run yet is not offered. Returns sections changed.
+inline int apGivers30(std::string& ap, const std::set<std::string>* only = nullptr)
 {
     int n = 0;
     for (size_t sec = ap.find('['); sec != std::string::npos;) {
         size_t next = ap.find("\n[", sec + 1);
         size_t end = next == std::string::npos ? ap.size() : next + 1;
-        size_t icon = ap.find("\nActivityIcon=", sec);
-        if (icon != std::string::npos && icon < end && ap.find("\nChallengeType=", sec) >= end) {
+        size_t icon = ap.find("\nActivityIcon=", sec), tag = ap.find("\nActorTagName=", sec);
+        bool want = !only;
+        if (only && tag < end) {
+            size_t te = ap.find_first_of("\r\n", tag + 14);
+            want = only->count(ap.substr(tag + 14, (te == std::string::npos ? ap.size() : te) - tag - 14)) > 0;
+        }
+        if (want && icon != std::string::npos && icon < end && ap.find("\nChallengeType=", sec) >= end) {
             size_t vs = icon + 14, ve = ap.find_first_of("\r\n", vs);
             if (ve == std::string::npos) ve = ap.size();
             std::string eol = ve < ap.size() && ap[ve] == '\r' ? "\r\n" : "\n";
@@ -308,6 +316,241 @@ inline int apGivers30(std::string& ap)
         sec = end < ap.size() ? end : std::string::npos;
     }
     return n;
+}
+
+// ---- activity missions: the task classes with a 3.0 counterpart ----
+// Pins bind by name in both engines (verify-meridian claim 2: 3.0 0x6c7dd0 / 1.0 0x6bd670 read each pin's index from
+// the node field of that name), so a class swap renames pin records and keeps link pin numbers. Pin tables of the 3.0
+// classes are the shipped ones (pins30.py, identical in all 61 / 9 shipped graphs); 3.0 keeps the task parameters in
+// the node (011b4db0 / 011b4f20 declare them; the eval reads them from the bound node, e.g. 00cc0e20 via eval+0xc0).
+//   StateMachine 1.0 pins StartPosition CompleteIntro EndPosition SetupStart IntroStart InProgStart ActivityExit
+//                Participants; 3.0 StartPosition EndPosition Preload PreIntro PreInProgress PostInProgress
+//                PostInProgressTeleport ParticipantCount. Census (pinuse.py, 35 1.0 / all 3.0 graphs): IntroStart
+//                54 links ~ PreIntro 162, ActivityExit 17 (cleanup) ~ PostInProgress 176. CompleteIntro has no 3.0
+//                input (3.0 runs its own intro). Participants (out list, 37 links) -> an AvatarList node with
+//                ParticipantsOnly = 1 (a 1.0 and 3.0 class; 3.0's challenge graphs read participants that way)
+//   CheckpointRace CheckpointPositions / RacePath identical; ShowLapHUD / ShowTimerHUD inputs have none (3.0 shows its
+//                own HUD); Easy/Medium/HardTime -> Bronze/Silver/GoldTime (lenient -> strict in both: 1.0 60/50/45,
+//                3.0 e.g. 135/115/55); GuideSpeed / RaceType left to the node defaults (no 1.0 value)
+// CombatTimeTrial (fires SpawnNextEnemy per kill: 7 graphs need it) and Collector (spawns its own collectibles; 3.0's
+// spawns through a Lua bridge) have no counterpart that keeps the 1.0 graph working; a graph or mission that uses one
+// is left as it is.
+struct ActClass {
+    const char *cls10, *cls30, *eval10, *eval30;
+    std::vector<std::pair<std::string, std::string>> pins;     // "" = no counterpart (links dropped), "*" = Participants
+    std::vector<std::pair<std::string, std::string>> params;
+};
+inline const std::vector<ActClass>& actClasses()
+{
+    static const std::vector<ActClass> m = {
+        {"MissionTask_ActivityStateMachine", "MissionTask_ChallengeStateMachine", "Eval_ActivityStateMachine", "Eval_ChallengeStateMachine",
+         {{"StartPosition", "StartPosition"}, {"EndPosition", "EndPosition"}, {"SetupStart", "Preload"}, {"IntroStart", "PreIntro"},
+          {"InProgStart", "PreInProgress"}, {"ActivityExit", "PostInProgress"}, {"CompleteIntro", ""}, {"Participants", "*"}},
+         {{"LineUpSpacing", "Spacing"}, {"EndLineUpSpacing", "EndSpacing"}}},
+        {"MissionTask_ActivityCheckpointRace", "MissionTask_Challenge_CheckpointRace", "Eval_Activity_CheckpointRace", "Eval_Challenge_CheckpointRace",
+         {{"CheckpointPositions", "CheckpointPositions"}, {"RacePath", "RacePath"}, {"ShowLapHUD", ""}, {"ShowTimerHUD", ""}},
+         {{"EasyTime", "BronzeTime"}, {"MediumTime", "SilverTime"}, {"HardTime", "GoldTime"}}},
+    };
+    return m;
+}
+inline const ActClass* actClass(const std::string& t, bool eval)
+{
+    for (auto& c : actClasses()) if (t == (eval ? c.eval10 : c.cls10)) return &c;
+    return nullptr;
+}
+
+// 1.0 activity graph (.mer, before mer::transcode) -> 3.0 Challenge classes, when every activity class in it has a
+// counterpart and the file is one namespace (all 35 activity graphs). Returns the nodes converted (0: unchanged).
+inline int activityGraph30(oct::File& f, int* rerouted = nullptr, int* dropped = nullptr)
+{
+    long pool = f.pool("MeridianNodePool"), lpool = f.pool("MeridianLinkPool");
+    if (pool < 0 || lpool < 0) return 0;
+    uint16_t nl = (uint16_t)(f.recs[pool].level + 1), fl = (uint16_t)(nl + 1);
+    struct N { size_t at, end; std::string type; };
+    std::vector<N> nodes;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; i = f.blockEnd(i)) {
+        if (f.recs[i].level != nl) continue;
+        N n{i, f.blockEnd(i), ""};
+        for (size_t j = i + 1; j < n.end; ++j)
+            if (f.recs[j].level == fl && f.name(f.recs[j]) == "Type") { n.type = f.nameValues(f.recs[j])[0]; break; }
+        nodes.push_back(n);
+    }
+    int begins = 0, mapped = 0;
+    for (auto& n : nodes) {
+        begins += n.type == "NameSpaceBegin";
+        if (n.type.rfind("MissionTask_Activity", 0) == 0) { if (!actClass(n.type, false)) return 0; ++mapped; }
+    }
+    if (!mapped || begins != 1 || nodes.back().type != "NameSpaceEnd") return 0;
+    auto isInt = [&](const oct::Rec& r) { oct::Spec s = oct::spec(r.type); return s.shape == oct::SCALAR && s.kind == oct::INT && !s.keyed; };
+    // per class: pin name -> index (the first instance listing it; 1.0 writes a class's table once per layout)
+    std::map<std::string, std::map<std::string, int>> pinIdx;
+    for (auto& n : nodes)
+        if (const ActClass* c = actClass(n.type, false))
+            for (size_t j = n.at + 1; j < n.end; ++j)
+                for (auto& p : c->pins)
+                    if (f.recs[j].level == fl && isInt(f.recs[j]) && f.name(f.recs[j]) == p.first) pinIdx[n.type].emplace(p.first, f.ints(f.recs[j])[0]);
+    auto pinOf = [&](const std::string& cls, int idx) -> const std::pair<std::string, std::string>* {
+        const ActClass* c = actClass(cls, false);
+        for (auto& p : c->pins) { auto it = pinIdx[cls].find(p.first); if (it != pinIdx[cls].end() && it->second == idx) return &p; }
+        return nullptr;
+    };
+    // links: drop the ones on pins without a counterpart, reroute Participants to the new AvatarList node
+    size_t newIdx = nodes.size() - 1;   // takes NameSpaceEnd's index; End moves up one
+    std::map<size_t, int> dIn, dOut;
+    int nRe = 0, nDrop = 0;
+    for (size_t i = lpool + 1; i < f.blockEnd(lpool); ++i) {
+        oct::Rec& r = f.recs[i];
+        if (f.name(r) != "Data") continue;
+        bool isBuf = false;
+        for (size_t j = i; j-- > lpool + 1 && f.recs[j].level >= r.level;)
+            if (f.recs[j].level == r.level && f.name(f.recs[j]) == "Type") { isBuf = f.nameValues(f.recs[j])[0] == "LinksBuffer"; break; }
+        if (!isBuf) continue;
+        oct::Spec sp = oct::spec(r.type);
+        std::string d = r.pay.substr(sp.cw);
+        if (d.size() < 5 || d[4]) continue;   // the global-index form (all 1.0 graphs, linkcodec.py)
+        uint32_t n = oct::u((const uint8_t*)d.data(), 4);
+        if (d.size() != 5 + 6ull * n) continue;
+        std::vector<uint16_t> code(n), a(n), z(n);
+        for (uint32_t k = 0; k < n; ++k) {
+            code[k] = (uint16_t)oct::u((const uint8_t*)d.data() + 5 + 2 * k, 2);
+            a[k] = (uint16_t)oct::u((const uint8_t*)d.data() + 5 + 2 * n + 4 * k, 2);
+            z[k] = (uint16_t)oct::u((const uint8_t*)d.data() + 5 + 2 * n + 4 * k + 2, 2);
+        }
+        std::vector<uint16_t> c2, a2, z2;
+        for (uint32_t k = 0; k < n; ++k) {
+            int fromPin = code[k] >> 10, toPin = (code[k] >> 4) & 63;
+            const std::pair<std::string, std::string>* pa = a[k] < nodes.size() && actClass(nodes[a[k]].type, false) ? pinOf(nodes[a[k]].type, fromPin) : nullptr;
+            const std::pair<std::string, std::string>* pz = z[k] < nodes.size() && actClass(nodes[z[k]].type, false) ? pinOf(nodes[z[k]].type, toPin) : nullptr;
+            if ((pa && pa->second.empty()) || (pz && (pz->second.empty() || pz->second == "*"))) { ++dOut[a[k]]; ++dIn[z[k]]; ++nDrop; continue; }
+            if (pa && pa->second == "*") {
+                ++dOut[a[k]];
+                c2.push_back((uint16_t)(code[k] & 0x3ff));   // from pin 0 = AvatarList.List
+                a2.push_back((uint16_t)newIdx);
+                z2.push_back(z[k]);
+                ++nRe;
+                continue;
+            }
+            c2.push_back(code[k]); a2.push_back(a[k]); z2.push_back(z[k]);
+        }
+        if (c2.size() == n && !nRe) continue;
+        std::string o((const char*)&(n = (uint32_t)c2.size()), 4);
+        o.push_back('\0');
+        for (uint16_t v : c2) o.append((const char*)&v, 2);
+        for (size_t k = 0; k < c2.size(); ++k) { o.append((const char*)&a2[k], 2); o.append((const char*)&z2[k], 2); }
+        r.pay.clear();
+        int cw = o.size() < 0x100 ? 1 : o.size() < 0x10000 ? 2 : 3;
+        r.type = (uint16_t)(oct::SCALAR | oct::BYTE << 3 | (cw - 1) << 6);
+        oct::File::put(r.pay, (uint32_t)o.size(), cw);
+        r.pay += o;
+    }
+    // node records: class / eval type / pins / parameters; NumIn/OutLinks less the dropped links
+    auto setName = [&](oct::Rec& r, const std::string& v) { r.pay.clear(); oct::File::put(r.pay, f.addName(v), 2); };   // scalar name / MNode key
+    std::vector<oct::Rec> out(f.recs.begin(), f.recs.begin() + pool + 1);
+    std::string smUuid;
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        const N& n = nodes[k];
+        const ActClass* c = actClass(n.type, false);
+        if (k == newIdx && nRe) {   // the Participants list: AvatarList (ParticipantsOnly) before NameSpaceEnd
+            oct::Rec hdr = f.recs[n.at];
+            setName(hdr, std::to_string(k));
+            out.push_back(hdr);
+            out.push_back(f.nameScalar(fl, f.addName("Type"), "AvatarList"));
+            if (!smUuid.empty()) {
+                oct::Rec u{fl, (uint16_t)(oct::SCALAR | oct::BYTE << 3), f.addName("Uuid"), smUuid};
+                u.pay.back() = (char)(u.pay.back() ^ 0x5a);   // unique beside the state machine it stands for
+                out.push_back(u);
+            }
+            out.push_back(f.intScalar(fl, "List", 0));
+            out.push_back(f.intScalar(fl, "NetSyncType", 2));
+            out.push_back(f.intScalar(fl, "LocalsOnly", 0));
+            out.push_back(f.intScalar(fl, "SpectatorsOnly", 0));
+            out.push_back(f.intScalar(fl, "ParticipantsOnly", 1));
+            out.push_back(f.intScalar(fl, "IsRootObject", 1));
+            out.push_back(f.nameScalar(fl, f.addName("AuthoredName"), "Activity: Participants"));
+            out.push_back(f.intScalar(fl, "NumOutLinks", nRe));
+            oct::Rec end = f.recs[n.at];
+            setName(end, std::to_string(k + 1));
+            out.push_back(end);
+            for (size_t j = n.at + 1; j < n.end; ++j) out.push_back(f.recs[j]);
+            continue;
+        }
+        out.push_back(f.recs[n.at]);
+        bool firstType = true;
+        for (size_t j = n.at + 1; j < n.end; ++j) {
+            oct::Rec r = f.recs[j];
+            const std::string nm = r.level == fl ? f.name(r) : std::string();
+            if (r.level == fl && nm == "NumInLinks" && dIn.count(k)) f.setInt(r, f.ints(r)[0] - dIn[k]);
+            if (r.level == fl && nm == "NumOutLinks" && dOut.count(k)) f.setInt(r, f.ints(r)[0] - dOut[k]);
+            if (c && r.level == fl) {
+                if (nm == "Type") { setName(r, firstType ? c->cls30 : c->eval30); firstType = false; }
+                else if (nm == "Uuid" && smUuid.empty() && std::string(c->cls10) == "MissionTask_ActivityStateMachine") smUuid = r.pay;
+                bool drop = false;
+                for (auto& p : c->pins)
+                    if (nm == p.first && isInt(r)) { if (p.second.empty() || p.second == "*") drop = true; else r.name = f.addName(p.second); }
+                for (auto& p : c->params) if (nm == p.first) r.name = f.addName(p.second);
+                if (drop) continue;
+            }
+            out.push_back(r);
+        }
+        if (c && std::string(c->cls30) == "MissionTask_ChallengeStateMachine")
+            out.push_back(f.nameScalar(fl, f.addName("ChallengeZone"), "NONE"));   // 53/61 shipped graphs
+    }
+    for (size_t i = f.blockEnd(pool); i < f.recs.size(); ++i) out.push_back(f.recs[i]);
+    f.recs = std::move(out);
+    if (rerouted) *rerouted = nRe;
+    if (dropped) *dropped = nDrop;
+    return mapped;
+}
+
+// A 1.0 mission table (.lua text) of an activity whose task types all have a 3.0 counterpart: each such Data table's
+// Type and renamed keys (the same maps as activityGraph30; the 3.0 factory FUN_00df42a0 builds the eval from Type),
+// ChallengeZone added to the state machine (61/61 shipped tables carry it). Returns the tables changed (0: unchanged).
+inline int activityTasks30(std::string& lua)
+{
+    auto toks = luaTokens(lua);
+    struct Edit { size_t at, len; std::string text; };
+    std::vector<Edit> edits;
+    int n = 0;
+    for (size_t k = 0; k < toks.size(); ++k) {
+        if (toks[k].kind != 'i' || lua.compare(toks[k].at, toks[k].len, "Type") || !assignedAt(lua, toks[k].at + 4)) continue;
+        size_t q = lua.find('"', toks[k].at), e = q == std::string::npos ? q : lua.find('"', q + 1);
+        if (e == std::string::npos || lua.find_first_not_of(" \t=", toks[k].at + 4) != q) continue;
+        std::string t = lua.substr(q + 1, e - q - 1);
+        if (t.rfind("Eval_Activity", 0)) continue;
+        const ActClass* c = actClass(t, true);
+        if (!c) return 0;
+        edits.push_back({q + 1, t.size(), c->eval30});
+        int d = toks[k].depth;
+        size_t open = k, close = k;
+        while (open > 0 && !(toks[open].kind == '{' && toks[open].depth < d)) --open;
+        while (close < toks.size() && !(toks[close].kind == '}' && toks[close].depth < d)) ++close;
+        for (size_t j = open + 1; j < close; ++j)
+            if (toks[j].kind == 'i' && toks[j].depth == d && assignedAt(lua, toks[j].at + toks[j].len))
+                for (auto& p : c->params)
+                    if (!lua.compare(toks[j].at, toks[j].len, p.first)) edits.push_back({toks[j].at, toks[j].len, p.second});
+        if (std::string(c->cls30) == "MissionTask_ChallengeStateMachine" && close < toks.size())
+            edits.push_back({toks[close].at, 0, "\tChallengeZone = \"NONE\",\n"});
+        ++n;
+    }
+    std::sort(edits.begin(), edits.end(), [](const Edit& a, const Edit& b) { return a.at > b.at; });
+    for (auto& e : edits) lua.replace(e.at, e.len, e.text);
+    return n;
+}
+
+// The activity givers to redirect: the MissionGiver tags of a missiongraph's records whose mission converts
+// (activityTasks30 != 0 on the mission table read by readMission(name)).
+inline std::set<std::string> activityGivers(const std::string& graphLua, const std::function<bool(const std::string&, std::string&)>& readMission)
+{
+    std::set<std::string> ok;
+    static const std::string g = "MissionGiver = \"", m = "MissionName = \"";
+    for (size_t p = graphLua.find(g); p != std::string::npos; p = graphLua.find(g, p + 1)) {
+        size_t ge = graphLua.find('"', p + g.size()), q = graphLua.find(m, p), qe = q == std::string::npos ? q : graphLua.find('"', q + m.size());
+        size_t nextG = graphLua.find(g, p + 1);
+        if (ge == std::string::npos || qe == std::string::npos || (nextG != std::string::npos && q > nextG)) continue;
+        std::string tag = graphLua.substr(p + g.size(), ge - p - g.size()), name = graphLua.substr(q + m.size(), qe - q - m.size()), t;
+        if (!tag.empty() && !name.empty() && readMission(name, t) && activityTasks30(t)) ok.insert(tag);
+    }
+    return ok;
 }
 
 // A 1.0 DNA chunk's MissionGiverActivity gadget as 3.0's MissionGiverChallenge. Returns constants renamed.
