@@ -240,6 +240,21 @@ int main(int argc, char** argv)
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
         return 0;
     }
+    if (argc > 3 && std::string(argv[1]) == "--surf") {   // --surf <3.0 surfacetypes.lua> <1.0 .oct>...: OCT-5 (surf.py)
+        std::string lua = slurp(argv[2]);
+        std::vector<std::string> names30;   // entries '{ name = "dynamic" | "static" }' in order
+        for (size_t p = lua.find('{', lua.find('{') + 1); p != std::string::npos; p = lua.find('{', p + 1)) {
+            size_t a = lua.find_first_not_of(" \t\r\n", p + 1), b = lua.find_first_of(" \t=", a);
+            if (a != std::string::npos && b != std::string::npos) names30.push_back(lua.substr(a, b - a));
+        }
+        printf("%u names in the 3.0 table\n", (unsigned)names30.size());
+        for (int a = 3; a < argc; ++a) {
+            std::string b = slurp(argv[a]);
+            oct::File f = oct::File::parse(b.data(), b.size());
+            if (int n = gameplay::surfaces30(f, names30)) printf("%s: %d shapes remapped\n", argv[a], n);
+        }
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--datamap") {   // --datamap <1.0 *datamap.lua> [out]: PS-2 rewrite
         std::string in = slurp(argv[2]), out;
         std::map<std::string, int> kinds;

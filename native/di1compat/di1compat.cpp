@@ -134,6 +134,7 @@ static struct {
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
+    bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -162,6 +163,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
+        else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -391,6 +393,26 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
 //   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
 //   DataNodeBasisConversion in FUN_004d0160).
 //   World render (render.hpp, REN-5 + geometry): the 1.0 .mtb named 1.0 shaders (int3 in Shader_LookupCrc).
+// gp: the engine's global surface table, in index order (FUN_00754eb0 fills *(0x2204830): +0xc {char*, bool}[],
+// +0x10 count; loaded from startup2 at boot, before any world). Empty until then.
+static std::vector<std::string> surfaceTable30()
+{
+    std::vector<std::string> t;
+    MEMORY_BASIC_INFORMATION mbi;
+    auto ok = [&](uintptr_t p) { return p >= 0x10000 && VirtualQuery((void*)p, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT; };
+    uintptr_t obj = *(const uintptr_t*)rt(0x02204830);
+    if (!ok(obj)) return t;
+    uintptr_t arr = *(const uintptr_t*)(obj + 0xc);
+    uint32_t n = *(const uint32_t*)(obj + 0x10);
+    if (n > 1024 || !ok(arr)) return t;
+    for (uint32_t i = 0; i < n; ++i) {
+        char s[64];
+        safeCopy(s, sizeof(s), *(const char* const*)(arr + 8 * i));
+        t.push_back(s);
+    }
+    return t;
+}
+
 static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
 {
     bool changed = transcodeAssetRender(path, f, note);
@@ -402,6 +424,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (int n = octx::realm30w(f)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
     int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
     if (ncv || nfl) { note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) "; changed = true; }
+    if (int n = g_cfg.surfaces10 ? gameplay::surfaces30(f, surfaceTable30()) : 0) { note += "+surfaces(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }
