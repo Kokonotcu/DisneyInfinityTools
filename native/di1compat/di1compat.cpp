@@ -1137,9 +1137,12 @@ static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
         return -1;
     };
     uint32_t state = *(uint32_t*)(self + 0x44), m = *(uint32_t*)(self + 0x198);
-    char sig[256];
-    sprintf_s(sig, "state=%d(%08X) mission=%08X mflags=%02X faft=%d trig=%d b159=%d b15f=%d inzone=%d ignzone=%d avready=%d reason=%d "
-                   "f3f=%08X beh=%d init=%d", stateName(state), state, m, m ? *(uint8_t*)(m + 0x3d9) : 0xff, self[0x112], self[0x113],
+    // state objects carry their name at +8: m_state +0x44, m_presentationState +0x54 (FUN_01662730, the context dump)
+    auto stName = [](uint32_t st, char* buf) { safeCopy(buf, 48, st ? *(const char**)(uintptr_t)(st + 8) : "<null>"); return buf; };
+    char sn[48], pn[48], sig[320];
+    sprintf_s(sig, "state=%d(%s) pres=%s mission=%08X mflags=%02X faft=%d trig=%d b159=%d b15f=%d inzone=%d ignzone=%d avready=%d reason=%d "
+                   "f3f=%08X beh=%d init=%d", stateName(state), stName(state, sn), stName(*(uint32_t*)(self + 0x54), pn), m,
+              m ? *(uint8_t*)(m + 0x3d9) : 0xff, self[0x112], self[0x113],
               self[0x159], self[0x15f], self[0x114], self[0x135], self[0x137], *(int*)(self + 0x290), *(uint32_t*)(self + 0xfc),
               *(int*)(self + 0xc8), self[0x224]);
     static std::unordered_map<uint8_t*, std::string> last;
