@@ -28,6 +28,7 @@
 #include "datamap.hpp"
 #include "dct.hpp"
 #include "luachunk.hpp"
+#include "cho.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -132,6 +133,11 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
+    bool choTime10 = true;           // cho.hpp: SubNetwork MinTime/MaxTime (choreography play range)
+    bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
+    bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
+    bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
+    bool choAlias10 = true;          // cho.hpp: Cho DataMap paths outside choreographies/<n>/<n> (vault bolts, door)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -159,10 +165,17 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
+        else if (!strcmp(key, "chotime10")) g_cfg.choTime10 = atoi(val) != 0;
+        else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
+        else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
+        else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
+        else if (!strcmp(key, "choalias10")) g_cfg.choAlias10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
          g_cfg.memtest);
+    logf("config cho: chotime10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d", g_cfg.choTime10,
+         g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10);
 }
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
@@ -186,12 +199,22 @@ static mz_zip_archive* zipFor(const std::string& rel)
     return z;
 }
 
+static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
+
 // -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
+static void* read10z(const std::string& p, size_t* size, std::string* where);
 static void* read10(const char* enginePath, size_t* size, std::string* where)
 {
     std::string p = enginePath;
     for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
     if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
+    void* d = read10z(p, size, where);
+    std::string a = d || !g_cfg.choAlias10 ? "" : g_choAlias.resolve(p);
+    return a.empty() ? d : read10z(a, size, where);
+}
+
+static void* read10z(const std::string& p, size_t* size, std::string* where)
+{
     std::lock_guard<std::mutex> lock(g_zipLock);
     for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1)) {
         std::string dir = p.substr(0, cut), member = p.substr(cut + 1);
@@ -382,6 +405,36 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     return true;
 }
 
+// Choreographies, exploders and clips in 3.0 form (cho.hpp, plan CHO-1 / NPC-6): clip output tables re-packed,
+// ContextNodes as InstanceNodes, SubNetwork play ranges. A motion clip is re-packed only when the owner of its
+// ConnectionTemplate ('characters/kiosk' of 'characters/kiosk/kiosk.ct') is absent from the 3.0 install.
+static bool has30(std::string dir)
+{
+    std::string a = g_gameDir + "\\assets\\" + dir;
+    for (char& c : a) if (c == '/') c = '\\';
+    return GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA((a + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+static bool transcodeCho(oct::File& f, std::string& note)
+{
+    bool changed = false;
+    if (g_cfg.clip10) {
+        std::function<bool(const std::string&)> motion;
+        if (g_cfg.clip10Motions)
+            motion = [](const std::string& t) { size_t s = t.find_last_of("/\\"); return s != std::string::npos && !has30(t.substr(0, s)); };
+        int failed = 0;
+        if (int n = cho::clips30(f, motion, &failed)) { note += "+clips(" + std::to_string(n) + ") "; changed = true; }
+        if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
+    }
+    if (g_cfg.choLayout10) {
+        int inst = 0;
+        if (int n = cho::layout30(f, &inst)) { note += "+layout(" + std::to_string(n) + ", " + std::to_string(inst) + " instances) "; changed = true; }
+    }
+    if (g_cfg.choTime10)
+        if (int n = cho::time30(f)) { note += "+time(" + std::to_string(n) + " subnetworks) "; changed = true; }
+    return changed;
+}
+
 // .oct (worlds, missions, exploders ...). Steps, each from the research plan (PLAN.md section 4):
 //   NavMeshPool removed: 3.0's blob parser FUN_01909fb0 trusts the layout, and the 1.0 layout differs (in-game
 //   2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it). Interim until the navmesh codec (OCT-8).
@@ -397,6 +450,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::realm30w(f)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
+    if (transcodeCho(f, note)) changed = true;
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }
@@ -549,7 +603,10 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
     }
     // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
     if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        int k = luachunk::rewrite(std::string((const char*)data, n), out, datamap::normalise);
+        int k = luachunk::rewrite(std::string((const char*)data, n), out, [](std::string& s) {
+            if (g_cfg.choAlias10) g_choAlias.add(s);
+            return datamap::normalise(s);
+        });
         note += std::to_string(k) + " entries normalised ";
         return k ? "datamap" : nullptr;
     }
