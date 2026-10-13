@@ -160,7 +160,26 @@ struct Project {
     int refs = 0;
     int events = 0;
     bool registered = false;   // 1.0's load handler 0x01138830 registers only when its group lookup succeeds
+    std::map<std::string, std::vector<std::string>> deps;   // lower-case group -> its 'Load' list (1.0 FUN_011348e0)
 };
+
+// 1.0 FUN_01134440: a 'Load' property value split at ' ', ',' and ';'; an item without extension is a '.fev'; an item
+// may name a group ('mu_campus.fev:mu_exploders'), kept in the item
+inline void splitLoad(const char* v, std::vector<std::string>& out)
+{
+    std::string cur;
+    for (const char* c = v;; ++c) {
+        if (*c && *c != ' ' && *c != ',' && *c != ';') { cur += *c; continue; }
+        if (!cur.empty()) {
+            size_t colon = cur.find(':');
+            std::string file = cur.substr(0, colon);
+            if (file.find('.') == std::string::npos) file += ".fev";
+            out.push_back(colon == std::string::npos ? file : file + cur.substr(colon));
+            cur.clear();
+        }
+        if (!*c) break;
+    }
+}
 
 // One FMOD event standing in for a Wwise playing id
 struct Play {
@@ -333,18 +352,50 @@ struct Host {
         return count;
     }
 
+    // 1.0 FUN_011348e0: the 'Load' property of a group and of every group under it
+    void collectDeps(void* g, std::vector<std::string>& out)
+    {
+        const char* v = nullptr;
+        if (!f.EventGroup_GetProperty(g, "Load", &v) && v) splitLoad(v, out);
+        int n = 0;
+        f.EventGroup_GetNumGroups(g, &n);
+        for (int i = 0; i < n; ++i) {
+            void* sub = nullptr;
+            if (!f.EventGroup_GetGroupByIndex(g, i, 0, &sub) && sub) collectDeps(sub, out);
+        }
+    }
+
     // 1.0's '.fev' handler 0x01138830 for a request 'X.fev[:Group]': EventSystem::load, then the request's group (the
     // file's stem when none is named; FUN_011342e0/FUN_011330a0: getGroup(name, cacheevents) + loadSampleData of it);
     // only if that group exists (or the project has none) are the project's events registered. Refcounted per file.
-    void* load(const std::string& file, const char* group = nullptr)
+    // deps: the group's 'Load' list, which 1.0 requests through its dispatcher on every load of the file (0x0113887b,
+    // 0x011389cc) and every unload (FUN_01136e80): IN_City.fev -> Inc_OmniSky_Spawner.fev, Inc_Buildings.fev;
+    // Inc_Townspeople.fev -> the townspeople's dialog banks; Edna.fev -> Edna_str.fsb (143 of the 316 FEVs have one).
+    // the 'Load' list of the request's group, read once per group (an item may name another group of the same file:
+    // mu_campus.fev lists mu_campus.fev:mu_exploders, whose own list is what that request walks)
+    const std::vector<std::string>& depsOf(Project& pr, const std::string& gname)
+    {
+        auto it = pr.deps.find(lower(gname));
+        if (it != pr.deps.end()) return it->second;
+        std::vector<std::string>& v = pr.deps[lower(gname)];
+        void* g = nullptr;
+        if (!f.EventProject_GetGroup(pr.p, gname.c_str(), 0, &g) && g) collectDeps(g, v);
+        return v;
+    }
+
+    void* load(const std::string& file, const char* group = nullptr, std::vector<std::string>* deps = nullptr)
     {
         std::lock_guard<std::recursive_mutex> l(mx);
         Project& pr = projects[lower(file)];
-        if (pr.p) { ++pr.refs; return pr.p; }
+        std::string gname = group ? group : file.substr(0, file.rfind('.'));
+        if (pr.p) {
+            ++pr.refs;
+            if (deps) *deps = depsOf(pr, gname);
+            return pr.p;
+        }
         FR r = f.EventSystem_Load(es, file.c_str(), nullptr, &pr.p);
         if (r || !pr.p) { AUDLOG("audio10: load %s failed (%d)", file.c_str(), r); projects.erase(lower(file)); return nullptr; }
         pr.refs = 1;
-        std::string gname = group ? group : file.substr(0, file.rfind('.'));
         int ng = 0;
         f.EventProject_GetNumGroups(pr.p, &ng);
         void* g = nullptr;
@@ -360,18 +411,39 @@ struct Host {
             }
             pr.registered = true;
         }
+        const std::vector<std::string>& dv = depsOf(pr, gname);
+        if (deps) *deps = dv;
         applyVolumes();   // the categories a project defines exist once it is loaded
-        AUDLOG("audio10: loaded %s: %d events%s", file.c_str(), pr.events, found ? "" : " (no group named after it: 1.0 leaves it unregistered)");
+        std::string dl;
+        for (auto& d : dv) dl += (dl.empty() ? "" : ", ") + d;
+        AUDLOG("audio10: loaded %s: %d events%s%s%s", file.c_str(), pr.events, found ? "" : " (no group named after it: 1.0 leaves it unregistered)",
+               dl.empty() ? "" : "; Load: ", dl.c_str());
         return pr.p;
     }
 
-    void unload(const std::string& file)
+    // a load before 3.0's dispatcher exists (plugin start: Initialize.fev:Permanent lists Dialog.fev, Reverbs.fev,
+    // UI.fev, LoadScreen.fev, TOYBOX_TBScript.dlg): its '.fev' items load here, the rest is left to 3.0
+    void loadTree(const std::string& file, const char* group, int depth = 0)
+    {
+        std::vector<std::string> deps;
+        if (!load(file, group, &deps) || depth > 8) return;
+        for (auto& d : deps) {
+            size_t c = d.find(':');
+            std::string fn = d.substr(0, c), n10 = fn.size() > 4 && !_stricmp(fn.c_str() + fn.size() - 4, ".fev") ? name10(fn) : "";
+            if (n10.empty()) AUDLOG("audio10: %s -> %s left to 3.0", file.c_str(), d.c_str());
+            else loadTree(n10, c == std::string::npos ? nullptr : d.c_str() + c + 1, depth + 1);
+        }
+    }
+
+    void unload(const std::string& file, const char* group = nullptr, std::vector<std::string>* deps = nullptr)
     {
         std::vector<uint32_t> finished;
         {
             std::lock_guard<std::recursive_mutex> l(mx);
             auto it = projects.find(lower(file));
-            if (it == projects.end() || !it->second.p || --it->second.refs > 0) return;
+            if (it == projects.end() || !it->second.p) return;
+            if (deps) *deps = depsOf(it->second, group ? group : file.substr(0, file.rfind('.')));
+            if (--it->second.refs > 0) return;
             void* p = it->second.p;
             for (auto& pl : plays)
                 if (pl.second.proj == p && pl.second.ev) { f.Event_Stop(pl.second.ev, 1); pl.second.ev = nullptr; finished.push_back(pl.first); }
@@ -1232,19 +1304,9 @@ inline uint32_t __fastcall hkBankReq(void* mgr, void*, uint32_t* req)
         else vo.unload(f);
         return r;
     }
-    if (cfg.vo && ext == ".dbnk") {   // a speaker bank 3.0 loads: the same speaker's 1.0 banks with it
-        size_t s = stem.find_last_of("/\\");
-        std::string spk = s == std::string::npos ? stem : stem.substr(s + 1);
-        for (const char* kind : {"_str.fsb", "_ram.fsb"}) {
-            WIN32_FIND_DATAA fd;
-            HANDLE h = FindFirstFileA((vo.dir10 + "\\" + spk + kind).c_str(), &fd);
-            if (h == INVALID_HANDLE_VALUE) continue;
-            FindClose(h);
-            if (load) vo.load(fd.cFileName);
-            else vo.unload(fd.cFileName);
-        }
-        return r;
-    }
+    std::string group;   // 'x.fev:Group' (1.0 request form; a 'Load' item may carry one)
+    size_t colon = ext.find(':');
+    if (colon != std::string::npos) { group = ext.substr(colon + 1); ext.resize(colon); }
     if (ext != ".bnk" && ext != ".fev") return r;
     std::string ls = lower(stem);
     if (cfg.music && ext == ".bnk" && ls.size() > 6 && ls.compare(ls.size() - 6, 6, "_music") == 0) {
@@ -1257,8 +1319,19 @@ inline uint32_t __fastcall hkBankReq(void* mgr, void*, uint32_t* req)
     }
     std::string fev = g.name10(stem + ".fev");
     if (fev.empty()) return r;
-    if (load) { if (g.load(fev) && ext == ".fev") r = 1; }
-    else g.unload(fev);
+    std::vector<std::string> deps;
+    const char* gp = group.empty() ? nullptr : group.c_str();
+    if (load) { if (g.load(fev, gp, &deps) && ext == ".fev") r = 1; }
+    else g.unload(fev, gp, &deps);
+    static thread_local int depth = 0;   // ponytail: 1.0 has no guard; no 1.0 'Load' chain is deeper than 3
+    if (depth > 8) { AUDLOG("audio10: 'Load' chain too deep at %s", fev.c_str()); return r; }
+    ++depth;
+    for (auto& d : deps) {   // 1.0 FUN_01134440: each item through the dispatcher with the request's type ('%s -> %s')
+        std::string desc = fev + " -> " + d;
+        uint32_t dreq[5] = {req[0], req[1], (uint32_t)(uintptr_t)d.c_str(), req[3], (uint32_t)(uintptr_t)desc.c_str()};
+        hkBankReq(mgr, nullptr, dreq);
+    }
+    --depth;
     return r;
 }
 
@@ -1545,7 +1618,7 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
     if (!g.init(install10, false)) return false;
     sound30 = game30 + "\\assets\\sound";
     g.idCounter = (volatile LONG*)rt(0x022AFBE8);
-    g.load("Initialize.fev", "Permanent");   // 1.0 FUN_01138210 at audio init: 'Initialize.fev:Permanent'
+    g.loadTree("Initialize.fev", "Permanent");   // 1.0 FUN_01138210 at audio init: 'Initialize.fev:Permanent'
     idPauseAll = fnv1("Pause_All");
     idPauseExUi = fnv1("Pause_All_Except_UI");
     idResumeAll = fnv1("Resume_All");

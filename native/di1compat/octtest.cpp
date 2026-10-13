@@ -171,11 +171,11 @@ static int fmodTest(int argc, char** argv)
     std::map<std::string, std::string> dropped;
     audio::g.dropped = &dropped;
     if (!audio::g.init(argv[2], true)) return 1;
-    audio::g.load("Initialize.fev", "Permanent");
+    audio::g.loadTree("Initialize.fev", "Permanent");
     for (int i = 4; i < argc; ++i) {
         std::string n = audio::g.name10(argv[i]);
         if (n.empty()) printf("NOFILE %s\n", argv[i]);
-        else audio::g.load(n);
+        else audio::g.loadTree(n, nullptr);
     }
     std::map<void*, std::string> projName;
     for (auto& p : audio::g.projects) projName[p.second.p] = p.first;
@@ -369,11 +369,34 @@ static int voTest(char** argv)
     return bad != 0;
 }
 
+// octtest --fevdeps <1.0 install>: every 1.0 FEV's 'Load' list as the plugin reads it through FMOD (the file's stem
+// group and the groups under it, 1.0 FUN_011348e0) -> DEPS lines; fevdeps.py compares with the FEV bytes
+static int fevDeps(char** argv)
+{
+    namespace fs = std::filesystem;
+    audio::logfn = stdoutLog;
+    if (!audio::g.init(argv[2], true)) return 1;
+    for (auto& e : fs::directory_iterator(audio::g.sound10)) {
+        if (e.path().extension() != ".fev") continue;
+        std::string file = e.path().filename().string();
+        void* p = nullptr;
+        if (audio::g.f.EventSystem_Load(audio::g.es, file.c_str(), nullptr, &p) || !p) { printf("DEPS %s LOADFAIL\n", file.c_str()); continue; }
+        audio::Project pr;
+        pr.p = p;
+        std::string list;
+        for (auto& d : audio::g.depsOf(pr, e.path().stem().string())) list += (list.empty() ? "" : "|") + d;
+        printf("DEPS %s %s\n", file.c_str(), list.c_str());
+        audio::g.f.EventProject_Release(p);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 3 && std::string(argv[1]) == "--fmod") return fmodTest(argc, argv);
+    if (argc > 2 && std::string(argv[1]) == "--fevdeps") return fevDeps(argv);
     if (argc > 3 && std::string(argv[1]) == "--vo") return voTest(argv);
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
