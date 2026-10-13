@@ -385,6 +385,98 @@ static int choFileTest(int argc, char** a)
     return bad ? 1 : 0;
 }
 
+// --banm <pairs.txt>: lines '<1.0 .banm>|<3.0 .banm (text)>|<engine path>'; cho::banm30 on the 1.0 binary tuple must
+// give the 3.0 twin's records ("depth|name|values", numbers %.6g), the text read by a minimal tuple-text reader
+static std::vector<std::string> canonBin(const oct::File& f)
+{
+    std::vector<std::string> out;
+    for (size_t i = 1; i < f.recs.size(); ++i) {
+        const oct::Rec& r = f.recs[i];
+        oct::Spec s = oct::spec(r.type);
+        std::string l = std::to_string(r.level - 1) + "|" + f.name(r) + "|";
+        if (s.kind == oct::NAME || s.keyed) for (auto& v : f.nameValues(r)) l += v + ",";
+        if (s.kind == oct::FLOAT || s.kind == oct::INT)
+            for (int32_t v : f.ints(r)) {
+                char b[32];
+                float x;
+                memcpy(&x, &v, 4);
+                sprintf_s(b, "%.6g,", s.kind == oct::FLOAT ? (double)x : (double)v);
+                l += b;
+            }
+        out.push_back(l);
+    }
+    return out;
+}
+
+static std::vector<std::string> canonText(const std::string& t)
+{
+    std::vector<std::string> out, tok;
+    for (size_t i = 0; i < t.size();) {
+        char c = t[i];
+        if (isspace((unsigned char)c)) { ++i; continue; }
+        if (c == '"') { size_t e = t.find('"', i + 1); tok.push_back(t.substr(i, e - i + 1)); i = e + 1; continue; }
+        if (strchr("={}[]", c)) { tok.push_back(std::string(1, c)); ++i; continue; }
+        size_t e = i;
+        while (e < t.size() && !isspace((unsigned char)t[e]) && !strchr("={}[]\"", t[e])) ++e;
+        tok.push_back(t.substr(i, e - i));
+        i = e;
+    }
+    int depth = 0;
+    auto val = [](const std::string& s) {
+        if (s[0] == '"') return s.substr(1, s.size() - 2) + ",";
+        char b[32];
+        sprintf_s(b, "%.6g,", atof(s.c_str()));
+        return std::string(b);
+    };
+    for (size_t i = 0; i < tok.size(); ++i) {
+        if (tok[i] == "}") { --depth; continue; }
+        std::string l = std::to_string(depth) + "|" + tok[i] + "|";
+        size_t j = i + 1;
+        if (j < tok.size() && tok[j][0] == '"' && j + 1 < tok.size() && tok[j + 1] == "=") l += val(tok[j++]);
+        ++j;   // '='
+        if (j < tok.size() && tok[j] == "{") { ++depth; i = j; }
+        else if (j < tok.size() && tok[j] == "[") { while (++j < tok.size() && tok[j] != "]") l += val(tok[j]); i = j; }
+        else { l += val(tok[j]); i = j; }
+        out.push_back(l);
+    }
+    return out;
+}
+
+static int banmTest(char** a)
+{
+    std::ifstream in(a[2]);
+    std::string line;
+    size_t same = 0, differ = 0, rejected = 0, otherDiff = 0;
+    while (std::getline(in, line)) {
+        size_t b1 = line.find('|'), b2 = line.find('|', b1 + 1);
+        if (b2 == std::string::npos) continue;
+        std::string b = slurp(line.substr(0, b1));
+        oct::File f = oct::File::parse(b.data(), b.size());
+        if (!cho::banm30(f, line.substr(b2 + 1))) { ++rejected; continue; }
+        std::string w = f.write();
+        oct::File g = oct::File::parse(w.data(), w.size());
+        auto A = canonBin(g), B = canonText(slurp(line.substr(b1 + 1, b2 - b1 - 1)));
+        if (A == B) { ++same; continue; }
+        ++differ;
+        // a difference outside Filename lines is the re-export, not the codec
+        auto strip = [](std::vector<std::string> v) {
+            std::vector<std::string> o;
+            for (auto& s : v) if (s.find("|Filename|") == std::string::npos) o.push_back(s);
+            return o;
+        };
+        bool onlyNames = strip(A) == strip(B);
+        if (!onlyNames) ++otherDiff;
+        if (differ - otherDiff <= 5 && onlyNames) {
+            printf("names differ %s\n", line.substr(b2 + 1).c_str());
+            for (size_t k = 0; k < A.size() && k < B.size(); ++k)
+                if (A[k] != B[k]) { printf("  ours %s\n  3.0  %s\n", A[k].c_str(), B[k].c_str()); break; }
+        }
+    }
+    printf("banm: %zu identical to the 3.0 twin, %zu differ (%zu of them outside Filename lines: re-exported), %zu not 1.0f\n",
+           same, differ, otherDiff, rejected);
+    return 0;
+}
+
 // --cho-clipdump <oct> <out>: the re-packed blocks of one file, concatenated (for the Python oracle clip10.py)
 static int choClipDump(char** a)
 {
@@ -411,6 +503,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-clipdump") return choClipDump(argv);
     if (argc > 2 && std::string(argv[1]) == "--cho-file") return choFileTest(argc, argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-corpus") return choFileTest(argc, argv);
+    if (argc > 2 && std::string(argv[1]) == "--banm") return banmTest(argv);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {

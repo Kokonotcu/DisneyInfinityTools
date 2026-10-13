@@ -58,6 +58,7 @@
 #include <map>
 #include <set>
 #include "octx.hpp"
+#include "bent.hpp"
 
 namespace cho {
 
@@ -257,6 +258,30 @@ inline int time30(oct::File& f)
         ++n;
     }
     return n;
+}
+
+// ---- blended animations (.banm, plan NPC-5) ----
+// 3.0's loader FUN_0076f810 parses the tuple (FUN_0182b760, binary or text) and drops it unless Version is "1.0g"
+// (FUN_0076f480 -> FUN_015e89d0 = 0), so every 1.0 .banm ('1.0f', binary) was discarded. On the 1,249 twins only two
+// things differ: the Version, and ReferencedTrack Filenames, relative to the .banm's folder in 1.0
+// ('Blk_BM_HeadTurns_R.oct') and full lowercase paths in 3.0 ('characters/_townspeople/motions/blk_bm_headturns_r.oct').
+// path: the engine path of the .banm. False (f unchanged) if it is not 1.0f.
+inline bool banm30(oct::File& f, const std::string& path)
+{
+    long ver = -1;
+    for (size_t i = 0; i < f.recs.size(); ++i)
+        if (f.recs[i].level == 1 && f.name(f.recs[i]) == "Version") ver = (long)i;
+    if (ver < 0 || f.nameValues(f.recs[ver]) != std::vector<std::string>{"1.0f"}) return false;
+    f.recs[ver] = f.nameScalar(1, f.recs[ver].name, "1.0g");
+    size_t cut = path.find_last_of('/');
+    std::string dir = cut == std::string::npos ? "" : path.substr(0, cut);
+    for (size_t i = 1; i < f.recs.size(); ++i) {
+        oct::Rec& r = f.recs[i];
+        if (f.name(r) != "Filename" || oct::spec(r.type).kind != oct::NAME) continue;
+        auto v = f.nameValues(r);
+        if (!v.empty()) r = f.nameScalar(r.level, r.name, bent::resolve(dir, v[0]));
+    }
+    return true;
 }
 
 // ---- Cho paths ----

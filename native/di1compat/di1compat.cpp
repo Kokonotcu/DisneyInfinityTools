@@ -138,6 +138,7 @@ static struct {
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
     bool choAlias10 = true;          // cho.hpp: Cho DataMap paths outside choreographies/<n>/<n> (vault bolts, door)
+    bool banm10 = true;              // cho.hpp: .banm 1.0f -> 1.0g (version gate, full track paths)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -170,12 +171,13 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
         else if (!strcmp(key, "choalias10")) g_cfg.choAlias10 = atoi(val) != 0;
+        else if (!strcmp(key, "banm10")) g_cfg.banm10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
          g_cfg.memtest);
-    logf("config cho: chotime10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d", g_cfg.choTime10,
-         g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10);
+    logf("config cho: chotime10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d banm10=%d", g_cfg.choTime10,
+         g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10);
 }
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
@@ -564,6 +566,13 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         if (!bent::transcode(f, norm(path), &why)) { note += "bent: " + why + " "; return nullptr; }
         out = f.write();
         return "bent";
+    }
+    // a blended animation (.banm 1.0f -> 1.0g, cho.hpp, NPC-5): 3.0 dropped every 1.0 one at its version gate
+    if (g_cfg.banm10 && endsWith(path, ".banm") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
+        oct::File f = oct::File::parse(data, n);
+        if (!cho::banm30(f, norm(path))) { note += "banm: not 1.0f "; return nullptr; }
+        out = f.write();
+        return "banm";
     }
     // a material bundle outside any asset session (particles/<x>.mtb): its materials onto 3.0 shaders, generic donors
     // from the same 3.0 asset family (in-game 2026-10-12: raw particles/IN_City.mtb -> int3 in Shader_LookupCrc)
