@@ -135,6 +135,7 @@ static struct {
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
     bool lockTrace10 = true;         // log control locks, controller contexts, choreography play/end, messages
+    bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -165,6 +166,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "events10")) g_cfg.events10 = atoi(val) != 0;
         else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
         else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
+        else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1870,6 +1872,7 @@ extern "C" void __stdcall Pentane_Main()
     octx::g_slack = 4096;   // instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
     g_mer.events10 = g_cfg.events10;
+    g_mer.portRefs = g_cfg.portRefs10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
     if (g_cfg.shaders10) {

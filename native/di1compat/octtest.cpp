@@ -169,9 +169,10 @@ int main(int argc, char** argv)
         printf("chd compiled exact: %zu, mismatch %zu\n", ok, bad);
         return 0;
     }
-    if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc] [--aliases]
+    if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc] [--aliases] [--noportrefs]
         mer::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
+        if (std::string(argv[argc - 1]) == "--noportrefs") { T.portRefs = false; --argc; }   // cfg portrefs10=0
         if (std::string(argv[argc - 1]) == "--aliases") { mer::addAliases(T); --argc; }   // as after hkMerRegistry
         std::string b = slurp(argv[3]), why;
         oct::File f = oct::File::parse(b.data(), b.size());

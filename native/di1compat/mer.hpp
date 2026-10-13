@@ -15,7 +15,8 @@
 //   types       a parameter's type is the one 3.0 reads it as (the table), else the record's own
 //   second Type the parameter 'Type' (2,127 1.0 mission nodes; 3.0 data stores it so)
 //   LeafName    + LeafNameHash = lookup2(port name: LeafName, else the owner field naming the sub-node); a DataFetch's
-//               'Value' becomes the parameter of that port name (3.0 form)
+//               'Value' becomes the parameter of that port name (3.0 form); the owner field stays an int record only
+//               (no parameter, no pin-table copy: Table::portRefs)
 //   links       u32 n, u8 0, u16 3, n x (u16 code, u16 from, u16 to), from/to = node index - Begin - 1
 //   classes 3.0 does not register (DeliveryNode, Activate/SpawnDecorationSockets + 8 mission classes) would leave
 //               no node slot and shift every later index (verify-meridian claim 6: out-of-bounds link writes), so
@@ -52,6 +53,7 @@ enum { T_BOOL = 0, T_INT = 1, T_FLOAT = 2, T_STRING = 3, T_VEC3 = 4 };
 struct Class { std::set<std::string> pins; std::map<std::string, int> params; };
 struct Table {
     bool events10 = true;   // presentation Event ints 1.0 -> 3.0 enum (cfg events10)
+    bool portRefs = true;   // owner fields naming port sub-nodes: not described, not copied as pins (cfg portrefs10)
     std::set<std::string> registered;
     std::map<std::string, Class> classes;
     bool load(const std::string& text)
@@ -186,20 +188,50 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         return -1;
     };
     auto isInt = [&](const oct::Rec& r) { oct::Spec sp = oct::spec(r.type); return sp.shape == oct::SCALAR && sp.kind == oct::INT && !sp.keyed; };
+
+    // port names: a sub-node's LeafName, else the owner field naming it (1.0 camera/LuaNode/EventSurge ports carry no
+    // LeafName; their owner lists '<port> = <sub-node index>' and the sub-nodes sit right before it). 3.0 needs it as
+    // LeafNameHash (FUN_006c8be0 -> node+0x18) and names a DataFetch's constant after it: over 400 3.0 graphs every
+    // owned sub-node's LeafNameHash = lookup2(owner field) (9,629/9,629) and every DataFetch parameter hash = its
+    // LeafNameHash (2,638/2,638), while 1.0 stores that constant as 'Value' (808 DataFetch nodes) -- read raw, camera
+    // priorities and transition times, AI attack counts and the like fell back to defaults.
+    // The owner's field itself is a port reference: 3.0 owners keep it as an int record and never describe it as a
+    // parameter (2,937 3.0 mission/choreography graphs: 3,984 DataFetch ports, 0 owners with a same-named parameter),
+    // and it is no pin either, so it is neither described nor copied between instances (portRefs).
+    static const std::set<std::string> subTypes = {"Event", "DataFetch", "DataSource", "DataListSource", "DataListFetch",
+                                                   "Handler", "EventSurge", "DataWritable", "DataWrite"};
+    std::vector<std::string> port(nodes.size());
+    std::vector<std::set<std::string>> portRefs(nodes.size());
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        long leaf = field(nodes[k], "LeafName");
+        if (leaf >= 0) port[k] = f.nameValues(f.recs[leaf])[0];
+    }
+    for (size_t k = 0; k < nodes.size(); ++k)
+        for (size_t j = nodes[k].at + 1; j < nodes[k].end; ++j) {
+            const oct::Rec& r = f.recs[j];
+            if (r.level != fl || !isInt(r) || isGeneric(f.name(r))) continue;
+            int64_t v = f.ints(r)[0];
+            if (v < 0 || (size_t)v >= k || k - (size_t)v > 64 || !port[v].empty() || nodes[v].ns != nodes[k].ns) continue;
+            bool owned = true;
+            for (size_t q = (size_t)v; q < k && owned; ++q) owned = subTypes.count(nodes[q].type) > 0;
+            if (owned) { port[v] = f.name(r); if (T.portRefs) portRefs[k].insert(port[v]); }
+        }
+
     // the class's pin records: from its first instance listing any (1.0 writes the table once per file). Every plain
     // int field that is not a parameter 3.0 reads counts: the table names a pin only if a 3.0 graph listed it, which
     // misses classes no 3.0 graph uses (AbsoluteValueInt: 5 link ends) and names the table cannot hold (MissionMonitor
     // 'Now Available': 22 link ends unbound on the instances that list no pins). Copies only add names an instance
     // lacks, and 1.0 writes parameters on every instance, so only the pin table is ever copied.
     std::map<std::string, std::vector<oct::Rec>> pinTables;
-    for (auto& n : nodes) {
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        const Node& n = nodes[k];
         if (pinTables.count(n.type) || n.type == "NameSpaceBegin" || n.type == "NameSpaceEnd") continue;
         auto c = T.classes.find(n.type);
         std::vector<oct::Rec> pins;
         for (size_t j = n.at + 1; j < n.end; ++j) {
             const std::string& nm = f.name(f.recs[j]);
             if (f.recs[j].level != fl || !isInt(f.recs[j]) || isGeneric(nm) || nm.find("__") != std::string::npos ||
-                (nm.size() > 6 && !nm.compare(nm.size() - 6, 6, "_value")))
+                (nm.size() > 6 && !nm.compare(nm.size() - 6, 6, "_value")) || portRefs[k].count(nm))
                 continue;
             if (c == T.classes.end() || c->second.pins.count(nm) || !c->second.params.count(nm)) pins.push_back(f.recs[j]);
         }
@@ -272,30 +304,6 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         }
     }
 
-    // port names: a sub-node's LeafName, else the owner field naming it (1.0 camera/LuaNode/EventSurge ports carry no
-    // LeafName; their owner lists '<port> = <sub-node index>' and the sub-nodes sit right before it). 3.0 needs it as
-    // LeafNameHash (FUN_006c8be0 -> node+0x18) and names a DataFetch's constant after it: over 400 3.0 graphs every
-    // owned sub-node's LeafNameHash = lookup2(owner field) (9,629/9,629) and every DataFetch parameter hash = its
-    // LeafNameHash (2,638/2,638), while 1.0 stores that constant as 'Value' (808 DataFetch nodes) -- read raw, camera
-    // priorities and transition times, AI attack counts and the like fell back to defaults.
-    static const std::set<std::string> subTypes = {"Event", "DataFetch", "DataSource", "DataListSource", "DataListFetch",
-                                                   "Handler", "EventSurge", "DataWritable", "DataWrite"};
-    std::vector<std::string> port(nodes.size());
-    for (size_t k = 0; k < nodes.size(); ++k) {
-        long leaf = field(nodes[k], "LeafName");
-        if (leaf >= 0) port[k] = f.nameValues(f.recs[leaf])[0];
-    }
-    for (size_t k = 0; k < nodes.size(); ++k)
-        for (size_t j = nodes[k].at + 1; j < nodes[k].end; ++j) {
-            const oct::Rec& r = f.recs[j];
-            if (r.level != fl || !isInt(r) || isGeneric(f.name(r))) continue;
-            int64_t v = f.ints(r)[0];
-            if (v < 0 || (size_t)v >= k || k - (size_t)v > 64 || !port[v].empty() || nodes[v].ns != nodes[k].ns) continue;
-            bool owned = true;
-            for (size_t q = (size_t)v; q < k && owned; ++q) owned = subTypes.count(nodes[q].type) > 0;
-            if (owned) port[v] = f.name(r);
-        }
-
     // rebuild the node pool
     std::vector<oct::Rec> outRecs(f.recs.begin(), f.recs.begin() + pool + 1);
     std::vector<std::string> values(nss.size()), strs(nss.size());
@@ -345,7 +353,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
                 // a second Type: the parameter 'Type'
             } else if (isGeneric(nm)) continue;
             bool pin = isInt(r) && ((c && c->pins.count(nm)) || valued.count(nm));
-            if (pin) continue;
+            if (pin || portRefs[k].count(nm)) continue;
             std::string pn = nm;
             if (pn.size() > 6 && !pn.compare(pn.size() - 6, 6, "_value")) pn = pn.substr(0, pn.size() - 6);
             if (n.type == "DataFetch" && pn == "Value" && !port[k].empty()) { pn = port[k]; ++s.fetches; }
