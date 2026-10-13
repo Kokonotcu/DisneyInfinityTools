@@ -1374,16 +1374,20 @@ inline void* __cdecl hkLoadFile(const char* path, uint32_t* size)
     return oLoadFile(path, size);
 }
 
-// FUN_0073bf50 (thiscall on the DialogueManager, ret 8): a dialog request for {name, ...}. 3.0 looks named entries up by
-// the lower-cased h131 (FUN_0073daf0: FUN_0040bb80), 1.0 by the name as written (FUN_0040bac0); a 1.0 script only has
-// the latter, so the first request of a name with capitals adds the lower-cased key to that script (FUN_006eaa00).
-typedef void*(__fastcall* DlgReqFn)(void* dm, void* edx, const char** nameRec, uint32_t a2);
+// FUN_0073bf50 (thiscall on the DialogueManager's request pool, its +0xa4; ret 8): a dialog request for {name, ...}.
+// 3.0 looks named entries up by the lower-cased h131 (FUN_0073daf0: FUN_0040bb80), 1.0 by the name as written
+// (FUN_0040bac0); a 1.0 script only has the latter, so the first request of a name with capitals adds the lower-cased
+// key to that script (FUN_006eaa00). The scripts hang off the DialogueManager 0x02204128 (+0x48, FUN_0073f990 ->
+// FUN_0073f550 -> FUN_0073daf0 walk them there).
+typedef void*(__fastcall* DlgReqFn)(void* pool, void* edx, const char** nameRec, uint32_t a2);
 typedef void(__fastcall* MapPutFn)(void* map, void* edx, uint32_t key, void* const* value);
 inline DlgReqFn oDlgReq;
 inline MapPutFn mapPut;
-inline void* __fastcall hkDlgReq(void* dm, void*, const char** nameRec, uint32_t a2)
+inline uint8_t* dialogMgr;
+inline void* __fastcall hkDlgReq(void* pool, void*, const char** nameRec, uint32_t a2)
 {
     const char* name = nameRec ? *nameRec : nullptr;
+    uint8_t* dm = dialogMgr;
     if (name && dm) {
         uint32_t cs = h131(name, false), lo = h131(name, true);
         if (cs != lo) {
@@ -1398,7 +1402,7 @@ inline void* __fastcall hkDlgReq(void* dm, void*, const char** nameRec, uint32_t
             }
         }
     }
-    return oDlgReq(dm, nullptr, nameRec, a2);
+    return oDlgReq(pool, nullptr, nameRec, a2);
 }
 
 // one tick plus the end-of-event callbacks of what finished, outside every lock
@@ -1460,6 +1464,7 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
         *(void**)&vo.mapFind = (void*)rt(0x013CC1F0);
         *(void**)&vo.mapAdd = (void*)rt(0x018308E0);
         mapPut = (MapPutFn)rt(0x006EAA00);
+        dialogMgr = (uint8_t*)rt(0x02204128);
         engineAlloc = (AllocFn)rt(0x00409E90);
         hook("dialog line post (vo10)", 0x01948D80, "558BEC83EC105356578B7D1C", (void*)&hkPostExt, (void**)&oPostExt);
         hook("sound file read (vo10)", 0x0182F570, "8B44240485C0741F803800741A", (void*)&hkLoadFile, (void**)&oLoadFile);

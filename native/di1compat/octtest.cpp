@@ -192,8 +192,15 @@ static int fmodTest(int argc, char** argv)
             size_t u = name.find('_');
             std::string x = u == std::string::npos ? "" : name.substr(0, u);
             unsigned id = 0;
-            if (x.empty() || !audio::music.ensure(x)) verdict = "MISS (no Music_" + x + ".fev)";
-            else verdict = audio::Music::cue(name.c_str(), &id) ? "OK " + audio::music.file : "MISS (not a cue of " + audio::music.file + ")";
+            if (!x.empty() && audio::music.ensure(x))
+                verdict = audio::Music::cue(name.c_str(), &id) ? "OK " + audio::music.file : "MISS (not a cue of " + audio::music.file + ")";
+            else if (!audio::music.file.empty() && audio::Music::cue(name.c_str(), &id)) {   // 1.0: the playset's loaded project
+                struct Entity { const char* name; unsigned id; };
+                struct Iter { const Entity* value; const char* filter; } ci{};
+                audio::g.f.MusicSystem_GetCues(audio::g.ms, &ci, name.c_str());
+                verdict = "OK " + audio::music.file + " as " + (ci.value ? ci.value->name : "?");
+            } else
+                verdict = "MISS (no Music_" + x + ".fev)";
         } else {
             auto it = audio::g.byId.find(audio::fnv1(name));
             if (it != audio::g.byId.end()) verdict = "OK " + projName[it->second.proj] + " flags " + std::to_string(it->second.flags);
