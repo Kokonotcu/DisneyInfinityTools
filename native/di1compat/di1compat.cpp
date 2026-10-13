@@ -135,6 +135,7 @@ static struct {
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
+    bool assetBufs10 = true;         // gp: read10 finds <stem>_<n>.vbuf/.ibuf in a per-asset archive <dir>/<stem>.zip
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -164,6 +165,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
         else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
+        else if (!strcmp(key, "assetbufs10")) g_cfg.assetBufs10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -211,9 +213,16 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
         std::string asset = last == std::string::npos ? stem : dir.substr(last + 1);
         if (asset.size() > 2 && asset.compare(asset.size() - 2, 2, "_0") == 0 && last == std::string::npos) asset.resize(asset.size() - 2);
         std::string shard = asset.size() >= 2 ? p.substr(0, top) + "/" + asset.substr(0, 2) + "/" + asset + ".zip" : dir + ".zip";
-        std::string zips[4] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard};
+        // a per-asset archive's buffers: characters/kiosk/kiosk_in_0.vbuf is in characters/kiosk/kiosk_in.zip (in-game
+        // 2026-10-13: all 14 MISSING buffers had this form; 5,234 such buffers in the 1.0 install, bufpaths.py)
+        size_t us = stem.rfind('_');
+        std::string ext = member.substr(stem.size());
+        bool buf = us != std::string::npos && us + 1 < stem.size() && stem.find_first_not_of("0123456789", us + 1) == std::string::npos &&
+                   (ext == ".vbuf" || ext == ".ibuf");
+        std::string zips[5] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard,
+                               buf && g_cfg.assetBufs10 ? dir + "/" + stem.substr(0, us) + ".zip" : std::string()};
         for (auto& zr : zips) {
-            mz_zip_archive* z = zipFor(zr);
+            mz_zip_archive* z = zr.empty() ? nullptr : zipFor(zr);
             if (!z) continue;
             int i = mz_zip_reader_locate_file(z, member.c_str(), nullptr, 0);   // case-insensitive
             if (i < 0) continue;
