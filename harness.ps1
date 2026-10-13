@@ -15,7 +15,7 @@
 #   UI_LaunchLevel(..., characterSelected = true) loads the world with that avatar (FUN_00b81350 arg 6).
 #   Without the title-screen press there is no profile: the world loads with no avatar (camera at the origin).
 param([string]$Zone = 'OUT_Intro2', [int]$Sku = 1000206, [string[]]$Probe = @(), [string[]]$MenuProbe = @(), [switch]$MenuOnly,
-      [switch]$Keep, [switch]$Attach, [int]$BootTimeout = 300, [int]$LoadTimeout = 180,
+      [switch]$Keep, [switch]$Attach, [int]$BootTimeout = 300, [int]$LoadTimeout = 180, [int]$Settle = 3,
       [string]$Game = 'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition',
       [string]$Out = "$env:TEMP\di3harness")
 $ErrorActionPreference = 'Stop'
@@ -120,7 +120,7 @@ $tl = Get-Date
 "launch: " + (Lua $LAUNCH)
 $state = Until $POS '^= avatar' $LoadTimeout
 "world: $state ($([int]((Get-Date) - $tl).TotalSeconds)s after launch)"
-Start-Sleep 3
+Start-Sleep $Settle   # the avatar handle exists from the proxy on; the real avatar's creation runs after it
 foreach ($p in $Probe) { "probe $p : " + (Lua (Get-Content -Raw $p) 60) }
 "screenshot: " + (Shot "$Zone-$(Get-Date -Format HHmmss)")
 

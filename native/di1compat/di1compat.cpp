@@ -170,7 +170,14 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
         // shaders/shaders.zip: the engine path leaves the archive's own name out), or a per-asset archive inside
         // <dir> named after the member (characters/inc_bob/inc_bob_ps.zip holds inc_bob_ps.oct)
         std::string stem = member.substr(0, member.find('.'));
-        std::string zips[3] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip"};
+        // 1.0 shards choreographies and exploders by the name's first two letters, one flat archive per asset:
+        // choreographies\bhs_beam1\bhs_beam1.oct is choreographies/bh/bhs_beam1.zip, exploders\inc_rubble_0.vbuf
+        // is exploders/in/inc_rubble.zip (in-game 2026-10-13: the avatar's DNA pulls 1.0 choreographies)
+        size_t top = p.find('/'), last = dir.rfind('/');
+        std::string asset = last == std::string::npos ? stem : dir.substr(last + 1);
+        if (asset.size() > 2 && asset.compare(asset.size() - 2, 2, "_0") == 0 && last == std::string::npos) asset.resize(asset.size() - 2);
+        std::string shard = asset.size() >= 2 ? p.substr(0, top) + "/" + asset.substr(0, 2) + "/" + asset + ".zip" : dir + ".zip";
+        std::string zips[4] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard};
         for (auto& zr : zips) {
             mz_zip_archive* z = zipFor(zr);
             if (!z) continue;
@@ -562,6 +569,7 @@ static void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max
         uint32_t v;
         __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
         bool ok = false;
+        if ((v & 0xff00ff00) == 0) continue;   // two UTF-16 characters of a path buffer, not a return address
         __try { ok = afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
         if (ok) { len += sprintf_s(line + len, cap - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
     }
@@ -752,6 +760,174 @@ static uint8_t __fastcall hkStartQuery(uint8_t* self, void*, uint32_t a1, int pl
     return r;
 }
 
+// Trace: the avatar spawn path. Event posts FUN_0068bbb0(name, a2, a3) (thiscall on the event manager, ret 0xc),
+// first 3 of each spawn/zone name; the level loader FUN_00d00530 state (+0x2c) changes; its load-done check
+// FUN_00ccc450 result changes; AvatarSpawning finalize FUN_00aa36f0 and avatar removal FUN_00a9ec70.
+typedef void(__fastcall* PostFn)(void* self, void* edx, const char* name, uint32_t a2, uint32_t a3);
+static PostFn g_post;
+static std::mutex g_postMx;
+static std::map<std::string, int> g_postSeen;
+static void __fastcall hkPost(void* self, void*, const char* name, uint32_t a2, uint32_t a3)
+{
+    char n[64] = "";
+    safeCopy(n, sizeof(n), name);
+    if (strstr(n, "Zone") || strstr(n, "Avatar") || strstr(n, "Creation") || strstr(n, "Toy") || strstr(n, "Spawn") || strstr(n, "Level")) {
+        std::lock_guard<std::mutex> l(g_postMx);
+        if (++g_postSeen[n] <= 3) logf("event %s (%08X %08X)", n, a2, a3);
+    }
+    g_post(self, nullptr, name, a2, a3);
+}
+typedef void(__fastcall* ThisFn)(void* self, void* edx);
+static ThisFn g_levelTick;
+static int g_levelState = -1;
+static void __fastcall hkLevelTick(void* self, void*)
+{
+    int st = *(int*)((char*)self + 0x2c);
+    if (st != g_levelState) { logf("level loader %p state %d -> %d", self, g_levelState, st); g_levelState = st; }
+    g_levelTick(self, nullptr);
+    st = *(int*)((char*)self + 0x2c);
+    if (st != g_levelState) { logf("level loader %p state -> %d", self, st); g_levelState = st; }
+}
+typedef uint8_t(__fastcall* BoolThisFn)(void* self, void* edx);
+static BoolThisFn g_loadDone;
+static int g_loadDoneLast = -1;
+static uint8_t __fastcall hkLoadDone(void* self, void*)
+{
+    uint8_t r = g_loadDone(self, nullptr);
+    if (r != g_loadDoneLast) {
+        uint8_t* o = (uint8_t*)self;
+        logf("level load-done check %p -> %u (+0x21 %u, +0xc %08X)", self, r, o[0x21], *(uint32_t*)(o + 0xc));
+        g_loadDoneLast = r;
+    }
+    return r;
+}
+typedef void(__fastcall* OneArgFn)(void* self, void* edx, uint32_t a1);
+static OneArgFn g_avFinal, g_avRemove;
+static void __fastcall hkAvFinal(void* self, void*, uint32_t a1) { logf("AvatarSpawning finalize %p rec %08X", self, a1); g_avFinal(self, nullptr, a1); }
+static void __fastcall hkAvRemove(void* self, void*, uint32_t a1)
+{
+    char line[400];
+    int len = sprintf_s(line, "AvatarSpawning remove avatar of player %u, stack:", a1);
+    stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 12);
+    logf("%s", line);
+    g_avRemove(self, nullptr, a1);
+}
+
+// Trace: the spawn choreography. FUN_00a9f080 asks the creation cho for 'Cho Controls' (FUN_014835c0, thiscall 2 args)
+// and only then registers FUN_00a8b670 on its 'ToyCreation_PlaceToy' event; that callback sets the per-player ready
+// flag (+0xd9) the finalize step waits for.
+typedef uint8_t(__fastcall* ChoHasFn)(void* self, void* edx, uint32_t a1, const char* name);
+static ChoHasFn g_choHas;
+static volatile LONG g_choHasLogged;
+static uint8_t __fastcall hkChoHas(void* self, void*, uint32_t a1, const char* name)
+{
+    uint8_t r = g_choHas(self, nullptr, a1, name);
+    char n[64] = "";
+    safeCopy(n, sizeof(n), name);
+    if (!strcmp(n, "Cho Controls") && InterlockedIncrement(&g_choHasLogged) <= 6) logf("cho %p has '%s' (a1 %08X) -> %u", self, n, a1, r);
+    return r;
+}
+typedef void(__fastcall* AvCreateFn)(void* self, void* edx, uint32_t player, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5);
+static AvCreateFn g_avCreate;
+static void __fastcall hkAvCreate(void* self, void*, uint32_t player, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
+{
+    logf("AvatarSpawning create player %u (%08X %08X %08X %08X) ->", player, a2, a3, a4, a5);
+    g_avCreate(self, nullptr, player, a2, a3, a4, a5);
+    logf("AvatarSpawning create player %u returned", player);
+}
+// AsyncActorCreator (the queued spawn FUN_00752a90 makes when the actor's data is not resident): Execute (vtable 1,
+// FUN_0075a290) builds it through FUN_00759ca0 (cdecl, 11 args, returns the out handle pointer) and calls the
+// completion callback; log Execute (actor name at +0x6c).
+static ThisFn g_aacExec;
+static void __fastcall hkAacExec(void* self, void*)
+{
+    bool avatar = *(uintptr_t*)((char*)self + 0x78) == rt(0x00A9B3E0);   // its callback is the avatar spawn's
+    if (avatar) logf("AsyncActorCreator %p execute (avatar spawn, mode %u)", self, *(uint32_t*)((char*)self + 0x18));
+    g_aacExec(self, nullptr);
+    if (avatar) logf("AsyncActorCreator %p execute returned", self);
+}
+// The avatar spawn's completion callback FUN_00a9b3e0(actor, record) (cdecl): sets record+0x28 = actor and the ready
+// flag unless AvatarSpawning+0x88 is 0.
+typedef void(__cdecl* AvSpawnedFn)(uint32_t actor, uint8_t* rec);
+static AvSpawnedFn g_avSpawned;
+static void __cdecl hkAvSpawned(uint32_t actor, uint8_t* rec)
+{
+    uint8_t* as = *(uint8_t**)rt(0x02212BC4);
+    logf("avatar spawn callback actor %08X rec %p (AvatarSpawning %p +0x88 %08X, rec+0x31 %02X)", actor, rec, as,
+         as ? *(uint32_t*)(as + 0x88) : 0, rec ? rec[0x31] : 0);
+    g_avSpawned(actor, rec);
+}
+// Asset defs lookup FUN_00703340(key) (thiscall on the AssetDefsManager, ret 4): DefID -> FileName of a Cho, "" when
+// no loaded assetdefs has it. A 3.0 playset's gamedb package carries assetdefs.lua (30 engine entries every playset
+// ships identically, GamePlayers_ToyCreation_Fast among them, plus character entries) and the GameDB loader parses it
+// when the playset loads; the Incredibles package is loaded by the older fixed-list path that never opens it, so
+// AvatarSpawning got no creation cho, skipped its ToyCreation_PlaceToy setup and never finalized the avatar
+// (in-game 2026-10-13). On a miss the lookup answers from gamedb/incredibles/assetdefs.lua (3.0 entries, added to that
+// package), read once through the engine's own open.
+typedef const char*(__fastcall* AssetDefFn)(void* self, void* edx, const char* key);
+static AssetDefFn g_assetDef;
+static std::map<std::string, std::string>* g_defs;   // lowercase DefID -> FileName (Cho entries)
+static std::mutex g_defsMx;
+static bool read30(const std::string& path, std::string& out);
+static const char* fallbackDef(const char* key)
+{
+    std::lock_guard<std::mutex> l(g_defsMx);
+    if (!g_defs) {
+        g_defs = new std::map<std::string, std::string>;
+        std::string t;
+        if (read30("gamedb/incredibles/assetdefs.lua", t)) {
+            for (size_t a = t.find('{', t.find("AssetDefs")); a != std::string::npos; a = t.find('{', a + 1)) {
+                size_t b = t.find('}', a);
+                if (b == std::string::npos) break;
+                std::string blk = t.substr(a, b - a);
+                auto field = [&](const char* n) {
+                    size_t i = blk.find(n);
+                    if (i == std::string::npos) return std::string();
+                    size_t q = blk.find('"', i), e = q == std::string::npos ? q : blk.find('"', q + 1);
+                    return e == std::string::npos ? std::string() : blk.substr(q + 1, e - q - 1);
+                };
+                std::string id = field("DefID"), file = field("FileName");
+                if (field("AssetType") != "Cho" || id.empty()) continue;
+                for (char& c : id) c = (char)tolower((unsigned char)c);
+                (*g_defs)[id] = file;
+            }
+        }
+        logf("asset defs fallback: %u Cho entries from gamedb/incredibles/assetdefs.lua", (unsigned)g_defs->size());
+    }
+    std::string k = key ? key : "";
+    for (char& c : k) c = (char)tolower((unsigned char)c);
+    auto it = g_defs->find(k);
+    return it == g_defs->end() ? nullptr : it->second.c_str();
+}
+static volatile LONG g_assetDefLogged;
+static const char* __fastcall hkAssetDef(void* self, void*, const char* key)
+{
+    const char* r = g_assetDef(self, nullptr, key);
+    if (r && !*r) {
+        const char* f = nullptr;
+        __try { f = fallbackDef(key); } __except (EXCEPTION_EXECUTE_HANDLER) { f = nullptr; }
+        if (f) {
+            if (InterlockedIncrement(&g_assetDefLogged) <= 20) { char k[64] = ""; safeCopy(k, sizeof(k), key); logf("assetdef '%s' -> '%s' (fallback)", k, f); }
+            return f;
+        }
+    }
+    return r;
+}
+typedef uint32_t*(__fastcall* ChoMakeFn)(void* self, void* edx, uint32_t* out, const char* name, uint32_t a3, uint32_t a4, uint32_t a5);
+static ChoMakeFn g_choMake;
+static volatile LONG g_choMakeLogged;
+static uint32_t* __fastcall hkChoMake(void* self, void*, uint32_t* out, const char* name, uint32_t a3, uint32_t a4, uint32_t a5)
+{
+    uint32_t* r = g_choMake(self, nullptr, out, name, a3, a4, a5);
+    char n[64] = "";
+    safeCopy(n, sizeof(n), name);
+    if ((strstr(n, "oy") || strstr(n, "pawn") || !n[0]) && InterlockedIncrement(&g_choMakeLogged) <= 20)
+        logf("cho make '%s' -> %08X", n, r == out && out ? *out : 0xffffffff);
+    return r;
+}
+typedef void(__cdecl* PlaceToyFn)(void* msg);
+static PlaceToyFn g_placeToy;
+static void __cdecl hkPlaceToy(void* msg) { logf("ToyCreation_PlaceToy callback (msg %p)", msg); g_placeToy(msg); }
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -886,6 +1062,12 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     int* r = g_open(path, flags, a3, a4, a5);
     char p[300];
     safeCopy(p, sizeof(p), path);
+    if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
+        char line[600];
+        int len = sprintf_s(line, "gamedb package open %s, stack:", p);
+        stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 24);
+        logf("%s", line);
+    }
     if (!(flags & 1) && endsWith(p, ".lua") && takeChdPath(p)) return chdForLua(p, r);
     if (r && g_cfg.memtest[0] && !(flags & 1) && memtestMatch(p)) {
         size_t n = 0;
@@ -1010,12 +1192,24 @@ extern "C" void __stdcall Pentane_Main()
         hook("SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst, (void**)&g_inst);
         hook("header clone (trace)", 0x004F5900, "5153555657", (void*)&hkHdrClone, (void**)&g_hdrClone);
         hook("start lookup (trace)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup, (void**)&g_startLookup);
+        hook("AsyncActorCreator execute (trace)", 0x0075A290, "6AFF68????????64A100000000", (void*)&hkAacExec, (void**)&g_aacExec);
+        hook("avatar spawn callback (trace)", 0x00A9B3E0, "8B0D????????83B988000000", (void*)&hkAvSpawned, (void**)&g_avSpawned);
+        hook("cho make (trace)", 0x014523B0, "83EC1C33C0", (void*)&hkChoMake, (void**)&g_choMake);
+        hook("AvatarSpawning create (trace)", 0x00A9F080, "6AFF68????????64A100000000", (void*)&hkAvCreate, (void**)&g_avCreate);
+        hook("cho has (trace)", 0x014835C0, "53568B74240C", (void*)&hkChoHas, (void**)&g_choHas);
+        hook("PlaceToy callback (trace)", 0x00A8B670, "8B4424048B4004", (void*)&hkPlaceToy, (void**)&g_placeToy);
+        hook("event post (trace)", 0x0068BBB0, "56578BF98B07", (void*)&hkPost, (void**)&g_post);
+        hook("level loader tick (trace)", 0x00D00530, "6AFF64A100000000", (void*)&hkLevelTick, (void**)&g_levelTick);
+        hook("level load-done check (trace)", 0x00CCC450, "568BF1807E2100", (void*)&hkLoadDone, (void**)&g_loadDone);
+        hook("AvatarSpawning finalize (trace)", 0x00AA36F0, "64A1000000006AFF68", (void*)&hkAvFinal, (void**)&g_avFinal);
+        hook("AvatarSpawning remove (trace)", 0x00A9EC70, "6AFF68????????64A100000000", (void*)&hkAvRemove, (void**)&g_avRemove);
         hook("start query (trace)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery);
         hook("MNode PlayerStartPosNode (trace)", 0x0148A790, "518B442410", (void*)&hkMkStart, (void**)&g_mkStart);
         hook("MNode LocatorNode (trace)", 0x01480090, "518B442410", (void*)&hkMkLocator, (void**)&g_mkLocator);
         hook("MNode SpawnExpendable (trace)", 0x017BF020, "518B442410", (void*)&hkMkSpawnExp, (void**)&g_mkSpawnExp);
         hook("header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake);
     }
+    hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
 }
