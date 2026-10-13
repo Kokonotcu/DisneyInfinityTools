@@ -6,6 +6,7 @@
 // Config: <plugin dir>\di1compat.cfg  install10 = <1.0 install> | serve10 = 0|1 | trace = 0|1 |
 //         memtest = <path substring>[,...]  (serve those 3.0 files from a memory copy: proves the MemFile path)
 #include <windows.h>
+#include <tlhelp32.h>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -471,6 +472,24 @@ static uint8_t __fastcall hkLoadChdCallback(void* self, void*, const char* path,
     return r;
 }
 
+// The PC virtual reader's remembered character per playset (FUN_00b7f910(key "IGP_PLAYSET_<playset>", sku), thiscall,
+// ret 8) has slots for 3.0's four playsets only (Empire, InsideOut, TheCloneWars, PlaysetX) and is false for any other;
+// FUN_00b83b90 then resets the current character to none every frame on such a playset world (watchpoint on the
+// reader tag's toy id, 2026-10-12: written to -1 from there during the IN_City load), the playset flow finds no figure,
+// keeps the proxy avatar and shows "Missing Disney Infinity Figure". A playset without a slot keeps the selected
+// character; whether that figure may play here stays the playset flow's own check (Gateway[sku].playset, FUN_00ddae30).
+typedef uint8_t(__fastcall* PlaysetCharFn)(void* self, void* edx, const char* key, int sku);
+static PlaysetCharFn g_playsetChar;
+static uint8_t __fastcall hkPlaysetChar(void* self, void*, const char* key, int sku)
+{
+    static const char* const slots[] = {"IGP_PLAYSET_Empire", "IGP_PLAYSET_InsideOut", "IGP_PLAYSET_TheCloneWars", "IGP_PLAYSET_PlaysetX"};
+    char k[100];
+    safeCopy(k, sizeof(k), key);
+    for (auto s : slots)
+        if (!_stricmp(k, s)) return g_playsetChar(self, nullptr, key, sku);
+    return 1;
+}
+
 // Trace only: the actor registry's "does <name> exist" (FUN_00751750, thiscall, ret 4), which the playset avatar
 // choice FUN_013a4250 asks for <avatar> + avatarSuffix, then <avatar>, before taking FallbackAvatar.
 typedef uint8_t(__fastcall* ActorExistsFn)(void* self, void* edx, const char** name);
@@ -481,6 +500,109 @@ static uint8_t __fastcall hkActorExists(void* self, void*, const char** name)
     char n[200];
     safeCopy(n, sizeof(n), name && *name ? *name : "(null)");
     logf("actor exists? %s -> %u", n, r);
+    return r;
+}
+
+// Trace only: the playset flow's figure check FUN_00ddae30(player, sku, int* failCode, a4, a5) (thiscall, ret 0x14)
+// and the figure's playset string Gateway[sku].playset, FUN_00435080(out, sku) (ret 8).
+typedef uint8_t(__fastcall* FigureOkFn)(void* self, void* edx, uint32_t player, int sku, int* code, uint32_t a4, uint32_t a5);
+static FigureOkFn g_figureOk;
+static uint8_t __fastcall hkFigureOk(void* self, void*, uint32_t player, int sku, int* code, uint32_t a4, uint32_t a5)
+{
+    int mine = -1;
+    uint8_t r = g_figureOk(self, nullptr, player, sku, code ? code : &mine, a4, a5);
+    logf("figure check player %u sku %d (a4 %u a5 %u) -> %u code %d", player, sku, a4 & 0xff, a5 & 0xff, r, code ? *code : mine);
+    return r;
+}
+// ... the reader item list the playset flow fills its figure slots from (FUN_00427330(out) -> count, ret 4; items
+// 0x50 B from out+4: +0 type, +4 sku) and its per-item gate FUN_00deb610(type, sku, a3, a4, a5) (ret 0x14); logged
+// on change
+// Trace only: a hardware write watchpoint (DR0, 4 bytes) on one address in every thread; the vectored handler logs
+// the writer's EIP and the exe return addresses on its stack (first 5 hits).
+static volatile uintptr_t g_watchAddr;
+static volatile LONG g_watchHits;
+static LONG CALLBACK watchHandler(EXCEPTION_POINTERS* e)
+{
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    e->ContextRecord->Dr6 = 0;
+    if (InterlockedIncrement(&g_watchHits) <= 5) {
+        char line[700];
+        uintptr_t eip = e->ContextRecord->Eip;
+        int len = sprintf_s(line, "watch hit: value now %d, eip %08X, stack:", *(int*)g_watchAddr,
+                            (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip));
+        const uint32_t* sp = (const uint32_t*)e->ContextRecord->Esp;
+        for (int i = 0, found = 0; i < 400 && found < 14; ++i) {
+            uint32_t v = sp[i];
+            if (v >= g_base && v < g_base + 0x2100000) { len += sprintf_s(line + len, sizeof(line) - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
+        }
+        logf("%s", line);
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+static DWORD WINAPI armWatch(void*)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te{sizeof(te)};
+    int n = 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+        HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+        if (!t) continue;
+        SuspendThread(t);
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(t, &c)) {
+            c.Dr0 = g_watchAddr;
+            c.Dr7 = (c.Dr7 & ~0xF0003ul) | 1 | (1ul << 16) | (3ul << 18);   // L0, write, 4 bytes
+            if (SetThreadContext(t, &c)) ++n;
+        }
+        ResumeThread(t);
+        CloseHandle(t);
+    }
+    CloseHandle(snap);
+    logf("watch armed on %08X in %d threads", (unsigned)g_watchAddr, n);
+    return 0;
+}
+static void watch(uintptr_t addr)
+{
+    if (g_watchAddr) return;
+    g_watchAddr = addr;
+    AddVectoredExceptionHandler(1, watchHandler);
+    HANDLE h = CreateThread(nullptr, 0, armWatch, nullptr, 0, nullptr);   // a thread cannot set its own context
+    if (h) { WaitForSingleObject(h, 5000); CloseHandle(h); }
+}
+
+typedef int(__fastcall* ReaderListFn)(void* self, void* edx, int* out);
+static ReaderListFn g_readerList;
+static int __fastcall hkReaderList(void* self, void*, int* out)
+{
+    static std::string last;
+    int n = g_readerList(self, nullptr, out);
+    for (int i = 0; i < n && i < 12; ++i)   // reader slot = this + 0x6c + index * 0x260, its toy id at +0x168
+        if (out[2 + i * 20] > 0) watch((uintptr_t)self + 0x6c + (uint8_t)out[i * 20] * 0x260 + 0x168);
+    std::string s = std::to_string(n) + ":";
+    for (int i = 0; i < n && i < 12; ++i) s += " " + std::to_string(out[1 + i * 20]) + "/" + std::to_string(out[2 + i * 20]);
+    if (s != last) { last = s; logf("reader list %s", s.c_str()); }
+    return n;
+}
+typedef uint8_t(__fastcall* ReaderItemOkFn)(void* self, void* edx, uint32_t type, int sku, uint32_t a3, uint32_t a4, uint32_t a5);
+static ReaderItemOkFn g_readerItemOk;
+static uint8_t __fastcall hkReaderItemOk(void* self, void*, uint32_t type, int sku, uint32_t a3, uint32_t a4, uint32_t a5)
+{
+    static std::string last;
+    uint8_t r = g_readerItemOk(self, nullptr, type, sku, a3, a4, a5);
+    std::string s = std::to_string(type) + "/" + std::to_string(sku) + " -> " + std::to_string(r);
+    if (s != last) { last = s; logf("reader item %s", s.c_str()); }
+    return r;
+}
+typedef const char** (__fastcall* FigurePlaysetFn)(void* self, void* edx, const char** out, int sku);
+static FigurePlaysetFn g_figurePlayset;
+static const char** __fastcall hkFigurePlayset(void* self, void*, const char** out, int sku)
+{
+    const char** r = g_figurePlayset(self, nullptr, out, sku);
+    char s[200];
+    safeCopy(s, sizeof(s), out && *out ? *out : "(null)");
+    logf("Gateway[%d].playset = '%s'", sku, s);
     return r;
 }
 
@@ -666,7 +788,14 @@ extern "C" void __stdcall Pentane_Main()
     hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
     hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
     hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
-    if (g_cfg.trace) hook("actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists);
+    hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar, (void**)&g_playsetChar);
+    if (g_cfg.trace) {
+        hook("actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists);
+        hook("figure check (trace)", 0x00DDAE30, "64A1000000006AFF68", (void*)&hkFigureOk, (void**)&g_figureOk);
+        hook("figure playset (trace)", 0x00435080, "6AFF68????????64A100000000", (void*)&hkFigurePlayset, (void**)&g_figurePlayset);
+        hook("reader list (trace)", 0x00427330, "83EC08535556", (void*)&hkReaderList, (void**)&g_readerList);
+        hook("reader item gate (trace)", 0x00DEB610, "538B5C2408", (void*)&hkReaderItemOk, (void**)&g_readerItemOk);
+    }
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
 }
