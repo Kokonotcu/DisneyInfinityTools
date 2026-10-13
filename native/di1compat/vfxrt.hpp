@@ -78,6 +78,13 @@ static void trace(const char* what, uint32_t key, const char* name, const float*
          name, site, x, y, z, w, pl[4], pl[5], pl[6], 2 * (x * y + w * z), w * w - x * x + y * y - z * z, 2 * (y * z - w * x));
 }
 
+// effect names hash lower-cased (3.0 FUN_0040bb80 = 1.0 FUN_0040baf0), so a traced name matches the package entry
+inline uint32_t nameHash(char* n)
+{
+    for (char* p = n; *p; ++p) *p = (char)tolower((unsigned char)*p);
+    return vfx::h131(n, strlen(n));
+}
+
 // FUN_0065e3a0(hash, placement, info, 0): every effect (FUN_0065e5a0 / FUN_0065e6d0, the name hashed by FUN_0040bb80)
 typedef void*(__cdecl* EffectFn)(uint32_t hash, const float* pl, void* info, uint32_t a4);
 static EffectFn g_effect;
@@ -94,7 +101,7 @@ static void* __cdecl hkEmitter(const char* name, const float* pl, void* a3, void
 {
     char n[64];
     safeCopy(n, sizeof(n), name);
-    trace("emitter", vfx::h131(n, sizeof(n)), n, pl, retVa(_ReturnAddress()));
+    trace("emitter", nameHash(n), n, pl, retVa(_ReturnAddress()));
     return g_emitter(name, pl, a3, a4, a5);
 }
 
@@ -106,7 +113,7 @@ static void* __cdecl hkAttached(const char* name, uint8_t* xf, uint8_t* xf2, voi
 {
     char n[64];
     safeCopy(n, sizeof(n), name);
-    trace("attached", vfx::h131(n, sizeof(n)), n, xf ? (const float*)(xf + 0x34) : nullptr, retVa(_ReturnAddress()));
+    trace("attached", nameHash(n), n, xf ? (const float*)(xf + 0x34) : nullptr, retVa(_ReturnAddress()));
     return g_attached(name, xf, xf2, a4, a5, a6);
 }
 
