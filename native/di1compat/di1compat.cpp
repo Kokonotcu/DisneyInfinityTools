@@ -30,6 +30,7 @@
 #include "dct.hpp"
 #include "luachunk.hpp"
 #include "sx.hpp"
+#include "sys.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -134,7 +135,7 @@ static struct {
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
-    bool events10 = true;           // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
+    bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
     bool lockTrace10 = true;         // log control locks, controller contexts, choreography play/end, messages
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
@@ -148,6 +149,14 @@ static struct {
     bool sxBeh10 = true;             // sxPorts10 + 1.0 behavior-type numbers into 1.0 scripts' SetInitialParams
     bool bmx10 = true;               // 1.0 behavior maps in 3.0's form (sx.hpp BMX-1; 0: raw, 3.0 drops them)
     bool btx10 = true;               // 1.0 behavior trees in 3.0's form (sx.hpp BTX-1; 0: raw, 3.0 drops them)
+    bool root10 = true;              // sys: read10 also searches the 1.0 root archives (startup*.zip)
+    bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
+    bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)
+    bool chest10 = true;             // sys: 1.0 ChestInfo.bin through 3.0's chestInfo loader (GLB-1)
+    bool bits10 = true;              // sys: the 1.0 core bitmasks after the playset's (PS-5)
+    bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
+    bool perc10 = true;              // sys: the 1.0 perceptions 3.0 lacks through 3.0's perceptions loader (GLB-1)
+    bool deliv10 = true;             // sys: 1.0 RewardType Delivery registered with 3.0's Multi reward (SYS-12)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -189,6 +198,14 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "sxbeh10")) g_cfg.sxBeh10 = atoi(val) != 0;
         else if (!strcmp(key, "bmx10")) g_cfg.bmx10 = atoi(val) != 0;
         else if (!strcmp(key, "btx10")) g_cfg.btx10 = atoi(val) != 0;
+        else if (!strcmp(key, "root10")) g_cfg.root10 = atoi(val) != 0;
+        else if (!strcmp(key, "locks10")) g_cfg.locks10 = atoi(val) != 0;
+        else if (!strcmp(key, "popin10")) g_cfg.popin10 = atoi(val) != 0;
+        else if (!strcmp(key, "chest10")) g_cfg.chest10 = atoi(val) != 0;
+        else if (!strcmp(key, "bits10")) g_cfg.bits10 = atoi(val) != 0;
+        else if (!strcmp(key, "econ10")) g_cfg.econ10 = atoi(val) != 0;
+        else if (!strcmp(key, "perc10")) g_cfg.perc10 = atoi(val) != 0;
+        else if (!strcmp(key, "deliv10")) g_cfg.deliv10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -246,6 +263,16 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
             if (data) { *where = zr + ":" + member; return data; }
         }
     }
+    // 1.0 mounts its root archives at assets\ (members under full paths): startup3.zip holds
+    // expendables_data/terrainbuildingsexpendables.lua (in-game 2026-10-13: MISSING), startup2.zip the core GameDB
+    // tables, startup5.zip var/*.bin
+    if (g_cfg.root10)
+        for (const char* zr : {"startup.zip", "startup2.zip", "startup3.zip", "startup4.zip", "startup5.zip"}) {
+            mz_zip_archive* z = zipFor(zr);
+            int i = z ? mz_zip_reader_locate_file(z, p.c_str(), nullptr, 0) : -1;
+            void* data = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
+            if (data) { *where = std::string(zr) + ":" + p; return data; }
+        }
     return nullptr;
 }
 
@@ -1401,9 +1428,173 @@ static uint32_t gameDbLoad(GameDbLoadFn orig, const char* tag, void* self, const
     }
     return orig(self, nullptr, path, a2, a3);
 }
+// DBFileLoader_Callback::load FUN_018db270 is vtable[1] (as the router FUN_018da710 calls it) and takes an engine
+// CString: it add-refs the header at path-0xc (FUN_00caa0d0 unless the count is 0x7fffffff), so a plain char* path
+// would be written through. The path goes in as a CString (ctor FUN_00418310, release FUN_00418230).
+static uint8_t cbLoad(void* loader, const char* path, uint32_t a2, uint32_t a3)
+{
+    char* cs = nullptr;
+    ((void*(__fastcall*)(void*, void*, const char*))rt(0x00418310))(&cs, nullptr, path);
+    uint8_t ok = ((uint8_t(__fastcall*)(void*, void*, char*, uint32_t, uint32_t))(*(void***)loader)[1])(loader, nullptr, cs, a2, a3);
+    ((void(__fastcall*)(void*, void*))rt(0x00418230))(&cs, nullptr);
+    return ok;
+}
+// a 3.0 singleton's DBFileLoader_Callback (+4: ChestInfo DAT_022896fc, PerceptionInfo DAT_02289700), null if unreadable
+static void* singletonLoader(uint32_t global)
+{
+    uint8_t* o = *(uint8_t**)rt(global);
+    void* loader = o && sys::readable(o + 4, 4) ? *(void**)(o + 4) : nullptr;
+    return loader && sys::readable(loader, 4) ? loader : nullptr;
+}
 static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
 {
-    return gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
+    uint32_t r = gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    if (g_cfg.locks10 && _stricmp(p, sys::kLocksTrigger) == 0)   // PS-5: the 1.0 tables' records the Locks DB lacks
+        for (const char* s : sys::kLocks10) {
+            sys::setLockUids(sys::loaderUids(self));
+            gameDbLoad(g_loadLocks, "locks", self, s, a2, a3);
+        }
+    // GLB-1: 1.0 ChestInfo.bin through 3.0's chestInfo loader
+    void* loader = g_cfg.chest10 && _stricmp(p, sys::kLocksTrigger) == 0 ? singletonLoader(0x022896FC) : nullptr;
+    if (loader) {
+        uint8_t ok = cbLoad(loader, sys::kChest10, a2, a3);
+        uint8_t *ci = *(uint8_t**)rt(0x022896FC), *chests = ci + 0x1c;
+        logf("chestInfo loader given %s -> %u; ChestInfo holds %d chests, %d resources, %d choreographies", sys::kChest10, ok,
+             *(int*)(chests + 4), *(int*)(ci + 0x10), *(int*)(ci + 0x30));
+    }
+    return r;
+}
+
+// PS-8 (sys.hpp): the expendables package loader FUN_0160aa30(path, ?) (ret 8) and the definition ctor FUN_016022c0
+// (thiscall, ret 4) -- entries of a package 3.0 lacks get the 1.0 pop-in
+typedef void(__fastcall* ExpPkgFn)(void* ecx, void* edx, const char* path, uint32_t a2);
+static ExpPkgFn g_expPkg;
+// deliv10: 1.0 RewardType "Delivery" (1.0 registry FUN_00cc2580 -> FUN_00b757c0, DeliveryExpendableReward) is the one
+// 1.0 type 3.0's registry (FUN_01232de0: FUN_0160a9c0(name, factory), thiscall on the expendables manager DAT_0228aa40)
+// lacks, so the 15 DELIVERY entries of inc_expendables.lua (INC_Spawn_GlidePack, _HoverBoard, _ZPE, cars ...) get no
+// object (entry reader FUN_01603930 drops a type without factory). On PC its grant 0xbae4d0 runs the Multi grant's
+// EXPENDABLE / UNLOCK / SPAWNACTOR / STAT handlers (FUN_00f99940, FUN_00f75bf0, FUN_00f75c30, FUN_00facb90, as Multi
+// FUN_00facc50) plus DeliveryNode bookkeeping (FUN_00b59940/80, FUN_00b599e0; the network branch is dead, FUN_00493940
+// returns 0). 3.0 kept Multi (factory FUN_016049f0, grant FUN_0160fbd0, same command table), so Delivery is registered
+// with it; the bookkeeping comes with a DeliveryNode port (impl-sys 6.3). Registered before the first package load.
+static void registerDelivery10()
+{
+    static std::mutex m;   // packages may load on several threads; one registry insert
+    static bool done = false;
+    std::lock_guard<std::mutex> l(m);
+    if (done) return;
+    void* mgr = *(void**)rt(0x0228AA40);
+    if (!mgr || !sys::readable(mgr, 0x70)) return;
+    ((void(__fastcall*)(void*, void*, const char*, void*))rt(0x0160A9C0))(mgr, nullptr, "Delivery", (void*)rt(0x016049F0));
+    done = true;
+    logf("deliv10: RewardType Delivery registered with 3.0's MultiExpendableReward factory (FUN_016049f0)");
+}
+static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
+{
+    if (g_cfg.deliv10) registerDelivery10();
+    if (!g_cfg.popin10) return g_expPkg(ecx, nullptr, path, a2);
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    int* s = g_open(p, 0, 0, 0, nullptr);   // the engine's own open, unhooked: does 3.0 ship this package?
+    if (s) ((void(__fastcall*)(void*, void*, uint32_t))(*(void***)s)[11])(s, nullptr, 1);
+    sys::g_pkg10 = s ? -1 : 0;
+    g_expPkg(ecx, nullptr, path, a2);
+    if (sys::g_pkg10 >= 0) logf("expendables %s (a 1.0 package): %d entries without PopinDistance pop in as in 1.0", p, sys::g_pkg10);
+    sys::g_pkg10 = -1;
+}
+// PS-5 (sys.hpp): DBFileLoader_Callback::load FUN_018db270 (thiscall CString path, a2, a3; ret 0xc) -- every Lua
+// callback loader (bitMask, stats, chestInfo ...); after the playset's bitmasks, the 1.0 core masks as one more package,
+// then (GLB-1) the 1.0 perceptions 3.0 lacks, whose actor types those masks register
+typedef uint8_t(__fastcall* CbLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
+static CbLoadFn g_cbLoad;
+static uint8_t __fastcall hkCbLoad(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
+{
+    uint8_t r = g_cbLoad(self, nullptr, path, a2, a3);
+    char p[300];
+    safeCopy(p, sizeof(p), path);
+    if (_stricmp(p, sys::kBitsTrigger) != 0) return r;
+    if (g_cfg.bits10) logf("bitMask loader given %s after %s -> %u", sys::kBits10, p, cbLoad(self, sys::kBits10, a2, a3));
+    void* pl = g_cfg.perc10 ? singletonLoader(0x02289700) : nullptr;
+    const uint8_t* pi = pl ? *(uint8_t**)rt(0x02289700) : nullptr;
+    if (pi && sys::snapshotPerc30(pi)) {
+        int before = *(const int*)(pi + 0x104);
+        uint8_t ok = cbLoad(pl, sys::kPerc10, a2, a3);
+        logf("perceptions loader given %s -> %u; PerceptionInfo holds %d perceptions (%d before)", sys::kPerc10, ok,
+             *(const int*)(pi + 0x104), before);
+    }
+    return r;
+}
+
+// NPC-8: the .ap key SpawnEconomyOnDeath. 1.0's combat getter FUN_00aa1520 decides once per actor: default 1, then
+// the key from the actor's params (component DAT_016a6a80, +8; 271 uses in the 195 Metroville .ap files: 268 say 1,
+// 3 in in_city_story__missiongraph.ap say 0). 3.0's getter FUN_00ff69c0 (thiscall, decided-bit 0x20 of +0x90c) sets 1 unread; the 1.0
+// read goes in front of it: params component DAT_0220353c (FUN_0069ecd0, +8, as 3.0 reads ChestName in FUN_00b9ebb0),
+// has-key FUN_006f9640, bool FUN_006f9610, setter FUN_00fee6b0 (the one Combat_SetOnDeathSpawnEconomy calls).
+typedef uint32_t(__fastcall* CombatGetFn)(uint8_t* self, void* edx);
+static CombatGetFn g_econOnDeath;
+static uint32_t __fastcall hkEconOnDeath(uint8_t* self, void*)
+{
+    if (!(self[0x90c] & 0x20)) {
+        void* comp = ((void*(__cdecl*)(void*, uint32_t))rt(0x0069ECD0))(*(void**)self, *(uint16_t*)rt(0x0220353C));
+        void* params = comp ? (uint8_t*)comp + 8 : nullptr;
+        if (params && ((uint8_t(__fastcall*)(void*, void*, const char*, uint32_t))rt(0x006F9640))(params, nullptr, "SpawnEconomyOnDeath", 0)) {
+            uint8_t v = ((uint8_t(__fastcall*)(void*, void*, const char*, uint32_t, uint32_t))rt(0x006F9610))(params, nullptr, "SpawnEconomyOnDeath", 0, 0);
+            ((void(__fastcall*)(void*, void*, uint32_t))rt(0x00FEE6B0))(self, nullptr, v);
+            if (!v) logf("SpawnEconomyOnDeath = 0 read for actor %p", *(void**)self);
+        }
+    }
+    return g_econOnDeath(self, nullptr);
+}
+
+// the ctor returns this, and the entry reader uses it (FUN_01603930 at 0x01603a20: mov esi, eax for an entry without
+// RewardType), so the detour must hand it back
+typedef void*(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
+static ExpDefFn g_expDef;
+static void* __fastcall hkExpDef(void* self, void*, void* entry)
+{
+    void* r = g_expDef(self, nullptr, entry);
+    if (sys::g_pkg10 >= 0 && sys::applyPopin10(self)) ++sys::g_pkg10;
+    return r;
+}
+
+// sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
+static int* sysServe(const char* p)
+{
+    std::string np = norm(p), src, out;
+    size_t rpre = strlen(sys::kRaw10Prefix);
+    if (!np.compare(0, rpre, sys::kRaw10Prefix)) {   // the 1.0 file at a path 3.0 also has
+        bool ok = read10s(np.substr(rpre), src);
+        logf("served %s %u B from 1.0 %s%s", p, (unsigned)src.size(), np.substr(rpre).c_str(), ok ? "" : " -- MISSING");
+        return ok ? memFile(src.data(), src.size()) : nullptr;
+    }
+    size_t cpre = strlen(sys::kChest10Prefix);
+    if (!np.compare(0, cpre, sys::kChest10Prefix) && endsWith(p, ".lua")) {   // GLB-1 ChestInfo.bin -> Lua
+        std::string bin = np.substr(cpre, np.size() - cpre - 4) + ".bin", why;
+        bool ok = read10s(bin, src) && sys::chestInfoLua(src, out, &why);
+        logf("served %s from 1.0 %s (%u B) -> chestInfo Lua %u B%s%s", p, bin.c_str(), (unsigned)src.size(), (unsigned)out.size(),
+             ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
+        return ok ? memFile(out.data(), out.size()) : nullptr;
+    }
+    size_t ppre = strlen(sys::kPerc10Prefix);
+    if (!np.compare(0, ppre, sys::kPerc10Prefix) && endsWith(p, ".lua")) {   // GLB-1 PerceptionInfo.bin -> Lua
+        std::string bin = np.substr(ppre, np.size() - ppre - 4) + ".bin", why;
+        int added = 0;
+        bool ok = read10s(bin, src) && sys::perceptionInfoLua(src, sys::perc30(), out, added, &why);
+        logf("served %s from 1.0 %s (%u B) -> perceptions Lua %u B, %d perceptions 3.0 lacks%s%s", p, bin.c_str(),
+             (unsigned)src.size(), (unsigned)out.size(), added, ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
+        return ok ? memFile(out.data(), out.size()) : nullptr;
+    }
+    size_t pre = strlen(sys::kLocks10Prefix);
+    if (np.compare(0, pre, sys::kLocks10Prefix)) return nullptr;
+    if (!read10s(np.substr(pre), src)) { logf("supplement %s: no 1.0 table", p); return nullptr; }
+    std::set<uint32_t> have = sys::lockUids();
+    int kept = 0, total = 0;
+    bool ok = sys::keepRecords(src, [&](uint32_t u) { return !have.count(u); }, out, kept, total);
+    logf("supplement %s: %d of %d 1.0 lock records (UIDs the Locks DB lacked; it held %u)%s", p, kept, total,
+         (unsigned)have.size(), ok ? "" : " -- layout not found, not served");
+    return ok ? memFile(out.data(), out.size()) : nullptr;
 }
 static uint32_t __fastcall hkLoadInventory(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
 {
@@ -1475,6 +1666,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         logf("%s", line);
     }
     if (!(flags & 1) && endsWith(p, ".lua") && takeChdPath(p)) return chdForLua(p, r);
+    if (!r && !(flags & 1) && g_cfg.serve10 && !_strnicmp(p, "di1sys/", 7)) return sysServe(p);
     if (r && g_cfg.memtest[0] && !(flags & 1) && memtestMatch(p)) {
         size_t n = 0;
         r = copyToMemFile(r, &n);
@@ -1955,6 +2147,14 @@ extern "C" void __stdcall Pentane_Main()
     hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
     hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
     hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
+    if (g_cfg.bits10 || g_cfg.perc10)
+        hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad, (void**)&g_cbLoad);
+    if (g_cfg.econ10)
+        hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath, (void**)&g_econOnDeath);
+    if (g_cfg.popin10 || g_cfg.deliv10)
+        hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
+    if (g_cfg.popin10)
+        hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);
     hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar, (void**)&g_playsetChar);
     if (g_cfg.trace) {
         hook("actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists);

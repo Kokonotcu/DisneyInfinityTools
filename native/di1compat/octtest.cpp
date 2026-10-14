@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -17,6 +18,7 @@
 #include "dct.hpp"
 #include "luachunk.hpp"
 #include "sx.hpp"
+#include "sys.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -150,6 +152,57 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
     }
 }
 
+// chd::V trees equal (the chd parser is independent of sys::keepRecords' scanner)
+static bool sameTree(const chd::V& a, const chd::V& b)
+{
+    if (a.t != b.t || a.i != b.i || a.s != b.s || memcmp(&a.f, &b.f, 4) || a.named.size() != b.named.size() || a.items.size() != b.items.size())
+        return false;
+    for (size_t k = 0; k < a.named.size(); ++k)
+        if (a.named[k].first != b.named[k].first || !sameTree(a.named[k].second, b.named[k].second)) return false;
+    for (size_t k = 0; k < a.items.size(); ++k)
+        if (!sameTree(a.items[k], b.items[k])) return false;
+    return true;
+}
+static const chd::V* field(const chd::V& t, const char* k)
+{
+    for (auto& e : t.named) if (e.first == k) return &e.second;
+    return nullptr;
+}
+
+// octtest --keep <1.0 table.lua> <3.0 table.lua>...: PS-5 supplement = the 1.0 records whose UID no 3.0 table has
+static int keepTest(int argc, char** argv)
+{
+    std::set<uint32_t> excl;
+    for (int a = 3; a < argc; ++a) {
+        chd::V t = chd::lua(slurp(argv[a]));
+        const chd::V* r = field(t, "Data") ? field(*field(t, "Data"), "Records") : nullptr;
+        if (!r) { printf("no Records in %s\n", argv[a]); return 2; }
+        for (auto& x : r->items) if (auto u = field(x, "UID")) excl.insert((uint32_t)u->i);
+    }
+    std::string src = slurp(argv[2]), out;
+    int kept = 0, total = 0;
+    if (!sys::keepRecords(src, [&](uint32_t u) { return !excl.count(u); }, out, kept, total)) { printf("layout not found\n"); return 1; }
+    chd::V in = chd::lua(src), got = chd::lua(out);
+    const chd::V *ri = field(*field(in, "Data"), "Records"), *ro = field(got, "Data") ? field(*field(got, "Data"), "Records") : nullptr;
+    int bad = 0, want = 0;
+    if (!ro) { printf("output has no Records\n"); return 1; }
+    size_t o = 0;
+    for (auto& x : ri->items) {
+        const chd::V* u = field(x, "UID");
+        if (!u || excl.count((uint32_t)u->i)) continue;
+        ++want;
+        if (o >= ro->items.size() || !sameTree(x, ro->items[o++])) ++bad;
+    }
+    for (const char* k : {"DBName", "Type", "Version", "ID", "TableName"}) {
+        const chd::V *a = field(*field(in, "Data"), k), *b = field(*field(got, "Data"), k);
+        if (!a != !b || (a && !sameTree(*a, *b))) { ++bad; printf("header %s differs\n", k); }
+    }
+    printf("%s: %d records (chd parse %zu), kept %d (expected %d, output parse %zu), 3.0 UIDs %zu, mismatches %d\n", argv[2], total,
+           ri->items.size(), kept, want, ro->items.size(), excl.size(), bad + (int)(ro->items.size() != (size_t)want) + (total != (int)ri->items.size()));
+    if (getenv("KEEP_OUT")) { std::ofstream(getenv("KEEP_OUT"), std::ios::binary) << out; }
+    return bad || kept != want || ro->items.size() != (size_t)want || total != (int)ri->items.size();
+}
+
 int main(int argc, char** argv)
 {
     namespace fs = std::filesystem;
@@ -214,6 +267,38 @@ int main(int argc, char** argv)
         printf("sx transcoded %zu (%zu imports), refused %zu; %zu natives, %zu ports, %zu keys\n", ok, imports, bad,
                std::size(sx::g_natives), std::size(sx::g_ports), std::size(sx::KEYS30));
         return bad ? 1 : 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--keep") return keepTest(argc, argv);
+    if (argc > 3 && std::string(argv[1]) == "--chest") {   // --chest <1.0 chestinfo.bin> <out.lua>: GLB-1 transcode
+        std::string out, why;
+        if (!sys::chestInfoLua(slurp(argv[2]), out, &why)) { printf("FAILED: %s\n", why.c_str()); return 1; }
+        std::ofstream(argv[3], std::ios::binary) << out;
+        chd::V t = chd::lua(out);   // independent parse: the three tables and their entry counts
+        const chd::V* c = field(t, "ChestInfo");
+        for (const char* k : {"Resource", "Choreography", "Chests"})
+            printf("%s %zu  ", k, c && field(*c, k) ? field(*c, k)->named.size() : 0);
+        printf("(%zu B)\n", out.size());
+        return 0;
+    }
+    if (argc > 5 && std::string(argv[1]) == "--perc") {   // --perc <1.0 perceptioninfo.bin> <3.0 names> <3.0 groups tsv> <out.lua>
+        std::set<std::string> names;
+        std::map<std::string, std::string> groups;
+        std::istringstream nl(slurp(argv[3])), gl(slurp(argv[4]));
+        for (std::string l; std::getline(nl, l);) if (!l.empty()) names.insert(l);
+        for (std::string l; std::getline(gl, l);) if (l.find('\t') != std::string::npos) groups.emplace(l.substr(0, l.find('\t')), l.substr(l.find('\t') + 1));
+        sys::Perc30 p30{[&](const std::string& s) { return names.count(s) != 0; },
+                        [&](const std::string& s) { auto it = groups.find(s); return it == groups.end() ? std::string() : it->second; }};
+        std::string out, why;
+        int added = 0;
+        if (!sys::perceptionInfoLua(slurp(argv[2]), p30, out, added, &why)) { printf("FAILED: %s\n", why.c_str()); return 1; }
+        std::ofstream(argv[5], std::ios::binary) << out;
+        chd::V t = chd::lua(out);   // independent parse: the sections and their entry counts
+        const chd::V* c = field(t, "PerceptionInfo");
+        for (const char* k : {"StatePriority", "TypePriority", "Detect", "TargetMode", "Reticule", "Ricochet", "PartnerCheck",
+                              "InteractionCheck", "Groups", "UIText", "Perceptions"})
+            printf("%s %zu  ", k, c && field(*c, k) ? field(*c, k)->named.size() : 0);
+        printf("(added %d, %zu B)\n", added, out.size());
+        return 0;
     }
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
