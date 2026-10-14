@@ -1291,7 +1291,9 @@ static ExpPkgFn g_expPkg;
 // with it; the bookkeeping comes with a DeliveryNode port (impl-sys 6.3). Registered before the first package load.
 static void registerDelivery10()
 {
+    static std::mutex m;   // packages may load on several threads; one registry insert
     static bool done = false;
+    std::lock_guard<std::mutex> l(m);
     if (done) return;
     void* mgr = *(void**)rt(0x0228AA40);
     if (!mgr || !sys::readable(mgr, 0x70)) return;
@@ -1356,12 +1358,15 @@ static uint32_t __fastcall hkEconOnDeath(uint8_t* self, void*)
     return g_econOnDeath(self, nullptr);
 }
 
-typedef void(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
+// the ctor returns this, and the entry reader uses it (FUN_01603930 at 0x01603a20: mov esi, eax for an entry without
+// RewardType), so the detour must hand it back
+typedef void*(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
 static ExpDefFn g_expDef;
-static void __fastcall hkExpDef(void* self, void*, void* entry)
+static void* __fastcall hkExpDef(void* self, void*, void* entry)
 {
-    g_expDef(self, nullptr, entry);
+    void* r = g_expDef(self, nullptr, entry);
     if (sys::g_pkg10 >= 0 && sys::applyPopin10(self)) ++sys::g_pkg10;
+    return r;
 }
 
 // sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)

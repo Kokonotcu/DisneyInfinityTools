@@ -201,13 +201,15 @@ inline std::string luaQuote(const std::string& s)
 inline bool chestInfoLua(const std::string& b, std::string& out, std::string* why = nullptr)
 {
     auto fail = [&](const char* w) { if (why) *why = w; return false; };
-    auto u32 = [&](size_t o, uint32_t& v) { if (o + 4 > b.size()) return false; memcpy(&v, b.data() + o, 4); return true; };
+    auto u32 = [&](size_t o, uint32_t& v) { if (o >= b.size() || b.size() - o < 4) return false; memcpy(&v, b.data() + o, 4); return true; };
     uint32_t s1, s2, s3, s4, nc, nr, nk;
     if (!u32(0, s1) || !u32(s1, s2) || !u32(s1 + s2, s3) || !u32(s1 + s2 + 4, nc) || !u32(s1 + s2 + s3, s4) ||
         !u32(s1 + s2 + s3 + 4, nr) || !u32(s1 + s2 + s3 + s4 + 4, nk))
         return fail("block headers");
+    // sizes in 64 bits: a corrupt count must not wrap past the file size (the record loops run to these counts)
+    if (s3 != 8 + (uint64_t)nc * 0x20 || s4 != 8 + (uint64_t)nr * 0xc || (uint64_t)s1 + s2 + s3 + s4 + 8 + (uint64_t)nk * 0x48 > b.size())
+        return fail("record blocks");
     size_t strings = 4, lists = s1 + 4, cho = s1 + s2 + 8, res = s1 + s2 + s3 + 8, ch = s1 + s2 + s3 + s4 + 8;
-    if (s3 != 8 + nc * 0x20 || s4 != 8 + nr * 0xc || ch + (size_t)nk * 0x48 > b.size()) return fail("record blocks");
     bool ok = true;
     auto field = [&](size_t rec, int k) { uint32_t v = 0xffffffff; ok &= u32(rec + 4 * k, v); return (int32_t)v; };
     auto str = [&](int32_t off, std::string& s) {
@@ -311,15 +313,15 @@ inline bool perceptionInfoLua(const std::string& b, const Perc30& p30, std::stri
     const uint32_t NONE = 0xffffffff;
     added = 0;
     auto fail = [&](const char* w) { if (why) *why = w; return false; };
-    auto u32 = [&](size_t o, uint32_t& v) { if (o + 4 > b.size()) return false; memcpy(&v, b.data() + o, 4); return true; };
+    auto u32 = [&](size_t o, uint32_t& v) { if (o >= b.size() || b.size() - o < 4) return false; memcpy(&v, b.data() + o, 4); return true; };
     uint32_t s1, s2;
-    if (!u32(0, s1) || s1 < 4 || !u32(s1, s2) || s2 < 4 || (size_t)s1 + s2 > b.size()) return fail("pool headers");
+    if (!u32(0, s1) || s1 < 4 || !u32(s1, s2) || s2 < 4 || (uint64_t)s1 + s2 > b.size()) return fail("pool headers");
     const size_t lw = s1 + 4, lwEnd = (size_t)s1 + s2;
     size_t base[NB], o = lwEnd;
     uint32_t n[NB];
     for (int k = 0; k < NB; ++k) {
         uint32_t size;
-        if (!u32(o, size) || !u32(o + 4, n[k]) || size != 8 + (uint64_t)n[k] * rs[k] || o + size > b.size()) return fail("record blocks");
+        if (!u32(o, size) || !u32(o + 4, n[k]) || size != 8 + (uint64_t)n[k] * rs[k] || (uint64_t)o + size > b.size()) return fail("record blocks");
         base[k] = o + 8;
         o += size;
     }
