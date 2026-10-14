@@ -55,6 +55,21 @@
 //   as it was: the string also names another header, the SubNetwork already has an 'AnimState' string, or the node
 //   drives no clip or event (no range).
 //
+// scene30 (choscene10): SceneTreeNodeRef on PlacementNode Associations. The 3.0 reader (FUN_00781510) fills a Layout
+//   placement (0x18 bytes, PlacementNodePool read by FUN_00781320: +0 Name, +0x10 Flags) with +8 NodeName, +0xc the
+//   SubNetwork node of that name (FUN_004ae9b0) and +4 the scene tree node of SceneTreeNodeRef (FUN_00452940; absent
+//   or -1: none). The Layout dtor (FUN_00787bc0 -> FUN_0077e9a0 -> FUN_0077c6d0) releases +0xc, then +4. In-game
+//   2026-10-13, once anim30 let TS_WaterSplashdown end, unloading it faulted in that +0xc release: the DataNode's dtor
+//   wrote to its own page after the page stopped being writable (AV write at 004EDDBB, after the dtor's vftable
+//   writes to the same page), i.e. the Layout's reference was the last one keeping that node's memory alive. Every 3.0
+//   PlacementNode Association carries SceneTreeNodeRef (choreographies + exploders 14,782/14,782, worlds
+//   29,850/29,850; every 3.0 file with placements has one with a scene node, 7,536/7,536); no 1.0 one does (4,031, + 9
+//   in worlds), so a 1.0 Layout held the network node with no scene node released after it (the scene node is bound to
+//   the same network by the 'Transform' Association, FUN_0049c770 -> FUN_00492fa0). That this ref is what keeps the
+//   node alive is inferred, not traced. Rule (assoc3.py): the SceneTreeNodeRef of the 'Transform' Association named
+//   <NodeName minus its last '|' part>, else -1: 14,779/14,782 3.0 placements (3 name nested scene nodes without a
+//   Transform Association); twins: the same scene node (by name) in 879/881. Written after Type, where 3.0 has it.
+//
 // layout30 (cholayout10): 3.0's layout reader (FUN_00789e80) has no ContextNodePool; actors and clips of a
 //   choreography are InstanceNodes (FUN_00787e30: Flags, Name, PlacementNodeRef, if 8 FilePath, if 0x20
 //   BoundingSceneNodeName) bound by Attachments with Base/LayerInstanceRef (FUN_00781410, applied in FUN_00788280).
@@ -402,6 +417,40 @@ inline int anim30(oct::File& f, int* subnets = nullptr)
         ++touched;
     }
     if (subnets) *subnets = touched;
+    return n;
+}
+
+// ---- placement scene nodes ----
+// Returns the PlacementNode Associations given a SceneTreeNodeRef.
+inline int scene30(oct::File& f)
+{
+    long pool = f.pool("AssociationPool");
+    if (pool < 0) return 0;
+    struct A { std::string name, type; long typeAt = -1; int scene = -2; };   // -2: no SceneTreeNodeRef record
+    std::vector<A> as;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i) {
+        const oct::Rec& r = f.recs[i];
+        if (r.level == 2) { as.push_back({}); continue; }
+        if (r.level != 3 || as.empty()) continue;
+        const std::string& k = f.name(r);
+        if (k == "NodeName" || k == "Type") {
+            auto v = f.nameValues(r);
+            if (v.empty()) continue;
+            if (k == "NodeName") as.back().name = v[0];
+            else { as.back().type = v[0]; as.back().typeAt = (long)i; }
+        } else if (k == "SceneTreeNodeRef") as.back().scene = first(f, r, -1);
+    }
+    std::map<std::string, int> tr;   // 'Transform' Association NodeName -> its scene node (first wins)
+    for (auto& a : as)
+        if (a.type == "Transform" && a.scene != -2) tr.emplace(a.name, a.scene);
+    int n = 0;
+    for (auto it = as.rbegin(); it != as.rend(); ++it) {   // last first: insertions keep earlier indices
+        if (it->type != "PlacementNode" || it->scene != -2) continue;
+        size_t bar = it->name.rfind('|');
+        auto t = bar == std::string::npos ? tr.end() : tr.find(it->name.substr(0, bar));
+        f.recs.insert(f.recs.begin() + it->typeAt + 1, f.intScalar(3, "SceneTreeNodeRef", t == tr.end() ? -1 : t->second));
+        ++n;
+    }
     return n;
 }
 

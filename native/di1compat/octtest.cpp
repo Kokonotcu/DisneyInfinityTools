@@ -728,6 +728,118 @@ static int choAnimTest(char** a)
     return bad ? 1 : 0;
 }
 
+// --cho-scene <1.0 assets> <3.0 assets>: scene30 checked three ways: (1) every shipped 3.0 choreography / exploder /
+// world .oct with the PlacementNode Associations' SceneTreeNodeRef stripped and regenerated must come back
+// byte-identical; (2) twins (choreographies + exploders): the scene node scene30 names for a 1.0 placement has the
+// same SceneTreeNodePool NodeName as the one the 3.0 twin names for the placement of that NodeName; (3) the 1.0
+// corpus (+ worlds): every placement gets one, the result re-parses identically.
+namespace scene {
+struct Pl { std::string name; int scene; };
+static std::vector<Pl> placements(const oct::File& f)
+{
+    std::vector<Pl> v;
+    long pool = f.pool("AssociationPool");
+    if (pool < 0) return v;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i) {
+        if (f.recs[i].level != 2 || anim::str1(f, i, "Type") != "PlacementNode") continue;
+        long s = anim::kid(f, i, "SceneTreeNodeRef");
+        v.push_back({anim::str1(f, i, "NodeName"), s < 0 ? -2 : cho::first(f, f.recs[s], -2)});
+    }
+    return v;
+}
+static std::vector<std::string> sceneNames(const oct::File& f)
+{
+    std::vector<std::string> v;
+    long pool = f.pool("SceneTreeNodePool");
+    if (pool >= 0)
+        for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
+            if (f.recs[i].level == 2) v.push_back(anim::str1(f, i, "NodeName"));
+    return v;
+}
+static std::vector<std::filesystem::path> files(const std::filesystem::path& assets, bool worlds)
+{
+    std::vector<std::filesystem::path> v;
+    for (const char* sub : {"choreographies", "exploders"})
+        for (auto& [n, p] : choIndex(assets, sub)) v.push_back(p);
+    if (worlds)
+        for (auto& w : std::filesystem::directory_iterator(assets / "worlds")) {
+            auto p = w.path() / (w.path().filename().string() + ".oct");
+            if (w.is_directory() && std::filesystem::exists(p)) v.push_back(p);
+        }
+    return v;
+}
+static bool tuple(const std::string& b) { return b.size() >= 4 && oct::u((const uint8_t*)b.data(), 4) == oct::MAGIC; }
+}  // namespace scene
+
+static int choSceneTest(char** a)
+{
+    using namespace scene;
+    std::map<std::string, size_t> c;
+    // (1) 3.0 regeneration
+    for (auto& p : files(a[3], true)) {
+        std::string b = slurp(p);
+        if (!tuple(b) || b.find(std::string("PlacementNode\0", 14)) == std::string::npos) continue;
+        oct::File f = oct::File::parse(b.data(), b.size());
+        long pool = f.pool("AssociationPool");
+        if (pool < 0) continue;
+        size_t stripped = 0;
+        for (size_t i = f.blockEnd(pool); i-- > (size_t)pool + 1;)
+            if (f.recs[i].level == 2 && anim::str1(f, i, "Type") == "PlacementNode") {
+                long s = anim::kid(f, i, "SceneTreeNodeRef");
+                if (s >= 0) { f.recs.erase(f.recs.begin() + s); ++stripped; }
+            }
+        if (!stripped) continue;
+        int got = cho::scene30(f);
+        bool same = got == (int)stripped && f.write() == b;
+        c["3.0: placements regenerated"] += stripped;
+        ++c[same ? "3.0: files byte-identical" : "3.0: files DIFFER"];
+        if (!same && c["3.0: files DIFFER"] <= 5) printf("3.0 differs %s\n", p.string().c_str());
+    }
+    // (2) twins
+    for (const char* sub : {"choreographies", "exploders"}) {
+        auto A = choIndex(a[2], sub), B = choIndex(a[3], sub);
+        for (auto& [n, p] : A) {
+            if (!B.count(n)) continue;
+            std::string b = slurp(p), b3 = slurp(B[n]);
+            if (!tuple(b) || !tuple(b3)) continue;
+            oct::File f = oct::File::parse(b.data(), b.size()), g = oct::File::parse(b3.data(), b3.size());
+            cho::scene30(f);
+            auto s10 = sceneNames(f), s30 = sceneNames(g);
+            std::map<std::string, int> by30;
+            for (auto& q : placements(g)) by30.emplace(q.name, q.scene);
+            auto nm = [](const std::vector<std::string>& s, int k) { return k >= 0 && (size_t)k < s.size() ? s[k] : std::string("(none)"); };
+            for (auto& q : placements(f)) {
+                auto it = by30.find(q.name);
+                if (it == by30.end()) { ++c["twin: placement NodeName not in the 3.0 twin"]; continue; }
+                bool same = nm(s10, q.scene) == nm(s30, it->second);
+                ++c[std::string("twin: same scene node ") + (same ? "yes" : "NO") + (q.scene >= 0 ? " (set)" : " (-1)")];
+                if (!same && c["twin: same scene node NO (set)"] + c["twin: same scene node NO (-1)"] <= 4)
+                    printf("twin %s %s: '%s' vs '%s'\n", n.c_str(), q.name.c_str(), nm(s10, q.scene).c_str(), nm(s30, it->second).c_str());
+            }
+        }
+    }
+    // (3) 1.0 corpus + worlds
+    for (auto& p : files(a[2], true)) {
+        std::string b = slurp(p);
+        if (!tuple(b)) continue;
+        oct::File f = oct::File::parse(b.data(), b.size());
+        int n = cho::scene30(f);
+        if (!n) continue;
+        std::string w = f.write();
+        oct::File g = oct::File::parse(w.data(), w.size());
+        if (g.write() != w) ++c["1.0: re-parse DIFFERS"];
+        ++c["1.0: files changed"];
+        bool any = false;
+        for (auto& q : placements(g)) {
+            any |= q.scene >= 0;
+            ++c[q.scene >= 0 ? "1.0: placements with a scene node" : q.scene == -1 ? "1.0: placements with -1" : "1.0: placements still WITHOUT the record"];
+        }
+        if (!any && ++c["1.0: files where no placement has a scene node"] <= 5) printf("no scene node: %s\n", p.string().c_str());
+    }
+    for (auto& [k, v] : c) printf("%7zu %s\n", v, k.c_str());
+    return c.count("3.0: files DIFFER") || c.count("1.0: re-parse DIFFERS") || c.count("1.0: placements still WITHOUT the record") ? 1 : 0;
+}
+
 // --cho-clips <pairs.txt>: lines '<1.0 .oct>|<3.0 .oct>' (clip twins); every 1.0 ClipDataBlock through clipBlock30
 // against the 3.0 twin's block in the same position
 static int choClipsTest(char** a)
@@ -850,7 +962,7 @@ static int choFileTest(int argc, char** a)
             }
     } else files.assign(a + 2, a + argc);
     int bad = 0;
-    size_t tc = 0, tl = 0, ti = 0, tt = 0, tb = 0, ta = 0;
+    size_t tc = 0, tl = 0, ti = 0, tt = 0, tb = 0, ta = 0, ts = 0;
     for (auto& path : files) {
         std::string b = slurp(path);
         if (b.size() < 4 || oct::u((const uint8_t*)b.data(), 4) != oct::MAGIC) continue;   // empty / other tuples
@@ -860,6 +972,7 @@ static int choFileTest(int argc, char** a)
         int nl = cho::layout30(f, &inst);
         int nt = cho::time30(f);
         int na = cho::anim30(f);
+        int ns = cho::scene30(f);
         std::string w = f.write();
         if (!corpus && getenv("CHO_OUT"))   // the result, for inspection: <CHO_OUT>/<file name>
             std::ofstream(std::filesystem::path(getenv("CHO_OUT")) / std::filesystem::path(path).filename(), std::ios::binary) << w;
@@ -870,14 +983,14 @@ static int choFileTest(int argc, char** a)
             if (g.name(r) == "ClipDataBlock") { ++blocks; ok30 += parses30(r.pay.substr(oct::spec(r.type).cw)); }
         bool good = round && ok30 == blocks && !failed;
         bad += !good;
-        tc += nc; tl += nl; ti += inst; tt += nt; tb += blocks; ta += na;
+        tc += nc; tl += nl; ti += inst; tt += nt; tb += blocks; ta += na; ts += ns;
         if (!corpus || !good)
-            printf("%s %s: clips %d (not parsed %d), layouts %d (%d instances), time ranges %d, anim inputs %d; re-parse %s, "
-                   "%zu/%zu blocks parse as 3.0\n", good ? "ok " : "BAD", path.c_str(), nc, failed, nl, inst, nt, na,
-                   round ? "same" : "DIFFERS", ok30, blocks);
+            printf("%s %s: clips %d (not parsed %d), layouts %d (%d instances), time ranges %d, anim inputs %d, scene refs %d; "
+                   "re-parse %s, %zu/%zu blocks parse as 3.0\n", good ? "ok " : "BAD", path.c_str(), nc, failed, nl, inst, nt, na,
+                   ns, round ? "same" : "DIFFERS", ok30, blocks);
     }
-    printf("%zu files, %d bad; %zu blocks re-packed of %zu, %zu layouts (%zu instances), %zu time ranges, %zu anim inputs\n",
-           files.size(), bad, tc, tb, tl, ti, tt, ta);
+    printf("%zu files, %d bad; %zu blocks re-packed of %zu, %zu layouts (%zu instances), %zu time ranges, %zu anim inputs, "
+           "%zu scene refs\n", files.size(), bad, tc, tb, tl, ti, tt, ta, ts);
     return bad ? 1 : 0;
 }
 
@@ -1517,6 +1630,7 @@ int main(int argc, char** argv)
     if (argc > 2 && std::string(argv[1]) == "--banm") return banmTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-time10") return choTime10Test(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-anim") return choAnimTest(argv);
+    if (argc > 3 && std::string(argv[1]) == "--cho-scene") return choSceneTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
         std::string in = slurp(argv[2]), out;
         cho::Aliases al;
