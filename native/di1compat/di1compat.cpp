@@ -23,6 +23,7 @@
 #include "btd.hpp"
 #include "chd.hpp"
 #include "mer.hpp"
+#include "mernode.hpp"
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
@@ -137,6 +138,7 @@ static struct {
     bool lockTrace10 = true;         // log control locks, controller contexts, choreography play/end, messages
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
     bool behav10 = true;             // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
+    bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -169,6 +171,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
         else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
         else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
+        else if (!strcmp(key, "native10")) g_cfg.native10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1155,17 +1158,29 @@ static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
 // Meridian class registry (FUN_0178e330, run once at boot by FUN_013aaba0): the 1.0 classes of mission.hpp kAliases
 // are registered after it with their 3.0 template. The transcoder treats them as registered only once that has run,
 // so a registry built before the hook (plugin loaded late) leaves them stand-ins, never slotless (verify-meridian 6).
+// native10: then the native classes of mernode.hpp. Only the SYS-1 probe is added here (no graph names it, so the
+// registration path runs at boot and nothing instantiates it); 1.0 classes are added with mernode::add before this.
 typedef void(__cdecl* VoidFn)();
 static VoidFn g_merRegistry;
+static int g_probeClass = -1;
+static void probeImpulse(uint8_t* node, int, void* payload) { mernode::fire(node, g_probeClass, 1, payload); }
 static void __cdecl hkMerRegistry()
 {
     g_merRegistry();
-    typedef void(__cdecl * RegFn)(const char* name);
-    for (auto& a : mission::kAliases) {
-        ((RegFn)rt(a.templateVa))(a.name);
-        logf("meridian: 1.0 class %s registered with the template of %s", a.name, a.twin);
+    if (g_cfg.aliases10) {
+        typedef void(__cdecl * RegFn)(const char* name);
+        for (auto& a : mission::kAliases) {
+            ((RegFn)rt(a.templateVa))(a.name);
+            logf("meridian: 1.0 class %s registered with the template of %s", a.name, a.twin);
+        }
+        mer::addAliases(g_mer);
     }
-    mer::addAliases(g_mer);
+    if (g_cfg.native10) {
+        if (g_probeClass < 0)
+            g_probeClass = mernode::add({"DI1NativeProbe", {{"Link_In", mernode::In}, {"Link_Out", mernode::Out}}, {}, 0, probeImpulse});
+        int n = mernode::registerAll(rt, static_cast<void (*)(const char*, ...)>(logf), g_mer);
+        logf("meridian native: %d of %d classes registered", n, mernode::count());
+    }
 }
 
 // locktrace10: who takes the player's controls and gives them back, and the mission chain around it (in-game
@@ -1939,7 +1954,7 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.missionTrace)
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
-    if (g_cfg.aliases10 && g_merOk)
+    if ((g_cfg.aliases10 || g_cfg.native10) && g_merOk)
         hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry, (void**)&g_merRegistry);
     if (g_cfg.lockTrace10) {
         hook("GamePlayers lock controls (locktrace10)", 0x0139B8D0, "833D????????00558BE9", (void*)&hkCtlLock, (void**)&g_ctlLock);
