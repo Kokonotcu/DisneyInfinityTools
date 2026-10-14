@@ -135,6 +135,7 @@ static struct {
     bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
+    bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 format's 'skin' layout, bones kept
     bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
     int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
     int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
@@ -227,6 +228,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "translate10")) g_cfg.translate10 = atoi(val) != 0;
         else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
         else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
+        else if (!strcmp(key, "skinlayout10")) g_cfg.skinLayout10 = atoi(val) != 0;
         else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
         else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
@@ -561,6 +563,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.translate = g_cfg.shaders10 && g_cfg.translate10;
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
     io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
+    io.skinLayout = g_cfg.skinLayout10;
     render::Result r;
     if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
         for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
@@ -575,8 +578,9 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
         if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
     }
     char buf[200];
-    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["translated"], r.tiers["real"],
-              r.tiers["same-sh"], r.tiers["generic"], (unsigned)r.textures10.size());
+    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s) ", r.tiers["translated"], r.tiers["real"],
+              r.tiers["same-sh"], r.tiers["generic"], (unsigned)r.textures10.size(),
+              r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "");
     note += buf;
     return true;
 }
