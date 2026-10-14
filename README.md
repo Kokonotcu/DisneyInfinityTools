@@ -80,8 +80,9 @@ time.
 
 - *Disney Infinity 3.0 Gold Edition* for PC (Steam).
 - *Disney Infinity 1.0 Gold Edition* for PC, installed.
-- The Pentane plugin loader for Disney Infinity 3.0. It only loads the plugin at startup, before the engine opens
-  its first file; di1compat installs its own hooks with MinHook.
+- The Pentane plugin loader for Disney Infinity 3.0, included in [`third_party/pentane`](third_party/pentane). It
+  only loads the plugin at startup, before the engine opens its first file; di1compat installs its own hooks with
+  MinHook.
 - To build: Visual Studio 2022 (MSVC, x86 toolset) and CMake 3.21 or newer.
 - For the toolkit: Python 3.10 or newer.
 
@@ -99,7 +100,9 @@ statically, so no Visual C++ runtime needs to be installed.
 
 ## Installing
 
-1. Copy `di1compat.dll` to `<3.0 install>\Pentane\Plugins\`.
+1. Install Pentane as described in [`third_party/pentane`](third_party/pentane/README.md). Its `config.toml`
+   already lists `di1compat.dll` under `enabled_plugins`. Then copy `di1compat.dll` to
+   `<3.0 install>\Pentane\Plugins\`.
 2. Create `di1compat.cfg` next to it, starting from
    [`di1compat.cfg.example`](native/di1compat/di1compat.cfg.example), and set `install10` to your 1.0 installation.
 3. Generate the 3.0-side tables next to the DLL:
@@ -248,11 +251,13 @@ native/di1compat/    Pentane plugin (C++17) and the octtest driver
 *.py, *.ps1          Python toolkit and test scripts
 FORMATS.md           Format reference
 crabe/               CrabeLoader mod and the patch the test harness uses
+third_party/pentane/ Pentane plugin loader (Disney Infinity 3.0 build)
 .github/workflows/   CI
 ```
 
 ## Third-party code
 
+- [Pentane](https://github.com/high-octane-dev/pentane), Disney Infinity 3.0 build, `third_party/pentane/`
 - [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause), `native/di1compat/minhook/`
 - [miniz](https://github.com/richgel999/miniz) (MIT), `native/di1compat/third_party/miniz/`
 - [RenderDoc](https://renderdoc.org/) in-application API header (MIT), `native/di1compat/renderdoc_app.h`
