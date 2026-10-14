@@ -2070,6 +2070,13 @@ int main(int argc, char** argv)
         printf("%d behaviours 2 -> story/side\n", n);
         return 0;
     }
+    if (argc > 3 && std::string(argv[1]) == "--beaconmap") {   // --beaconmap <zonelist.lua> <out.lua>: beacon10
+        std::string t = slurp(argv[2]);
+        int aliases = 0, n = mission::beaconMap30(t, &aliases);
+        std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
+        printf("%d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added\n", n, aliases);
+        return 0;
+    }
     if (argc > 4 && std::string(argv[1]) == "--dct") {   // --dct <1.0 table> <its stringids> <key name>
         std::string raw = slurp(argv[2]), ids = slurp(argv[3]);
         dct::Dict d;
