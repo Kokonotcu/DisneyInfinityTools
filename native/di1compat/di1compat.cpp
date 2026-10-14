@@ -1373,9 +1373,9 @@ static uint32_t __fastcall hkLayoutDtor(void* self, void*)
 }
 // Placement nodes seen bound (FUN_0077d9c0, thiscall on the Layout when an instance binds its placements): a node
 // destroyed outside its Layout's dtor was released once too often somewhere; its stack names the releaser.
-typedef uint32_t(__fastcall* PlBindFn)(void* self, void* edx, uint32_t a1, uint32_t a2);
+typedef uint32_t(__fastcall* PlBindFn)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3);   // ret 0xc
 static PlBindFn g_plBind;
-static uint32_t __fastcall hkPlBind(void* self, void*, uint32_t a1, uint32_t a2)
+static uint32_t __fastcall hkPlBind(void* self, void*, uint32_t a1, uint32_t a2, uint32_t a3)
 {
     uintptr_t L = (uintptr_t)self;
     uint32_t arr = tdRd(L + 0x40), n = tdRd(L + 0x44);
@@ -1389,7 +1389,7 @@ static uint32_t __fastcall hkPlBind(void* self, void*, uint32_t a1, uint32_t a2)
             logf("td bind layout %08X placement %u node %s", (uint32_t)L, k, o);
         }
     }
-    return g_plBind(self, nullptr, a1, a2);
+    return g_plBind(self, nullptr, a1, a2, a3);
 }
 static uint32_t __fastcall hkNodeDtor(void* self, void*)
 {
