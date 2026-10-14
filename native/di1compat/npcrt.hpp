@@ -336,8 +336,9 @@ static void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
 }
 
 // ---- spawner10: the 1.0 SpawnerQuarterback group (SYS-3) ----
-// The 1.0 spawners' AI scripts (inc_omnisky_spawner_ai.btl.sx, inc_omnibotspawner_ai.btl.sx: 18 + 13 spawners in
-// in_city.ap) run LevelQuarterback_Create("SpawnerQuarterback_GROUP", "SpawnerQuarterback") and then
+// The 1.0 spawners' AI scripts (inc_omnisky_spawner_ai.btl.sx, inc_omnibotspawner_ai.btl.sx: 32 spawners in 15
+// Incredibles mission .ap, story Defeat_Omnidroids01/02 and Escort_Hoarder among them; also the omnidroid fly-in ball)
+// run LevelQuarterback_Create("SpawnerQuarterback_GROUP", "SpawnerQuarterback") and then
 // AIQuarterback_SetActive / AIQuarterback_AddActor on the handle (sxdis.py: pc 26, 36, 62). 3.0 still names the type --
 // its QB type table 0x2088228 maps "SpawnerQuarterback" to 10 (14 entries, _stricmp lookup FUN_010a8d30) -- but its factory
 // FUN_010c2f70 has no case 10 (byte table 0x10c3410[10] = the default, returns 0), and SetActive / AddActor (natives
