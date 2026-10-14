@@ -19,6 +19,7 @@ toolkit for the games' file formats.
 - [Python toolkit](#python-toolkit)
 - [Repository layout](#repository-layout)
 - [Third-party code](#third-party-code)
+- [License](#license)
 
 ## Overview
 
@@ -261,3 +262,7 @@ third_party/pentane/ Pentane plugin loader (Disney Infinity 3.0 build)
 - [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause), `native/di1compat/minhook/`
 - [miniz](https://github.com/richgel999/miniz) (MIT), `native/di1compat/third_party/miniz/`
 - [RenderDoc](https://renderdoc.org/) in-application API header (MIT), `native/di1compat/renderdoc_app.h`
+
+## License
+
+This project is released under the [MIT License](LICENSE). The third-party components above keep their own licenses.
