@@ -729,6 +729,18 @@ struct Host {
         return true;
     }
 
+    // the played time of one of our ids (FMOD_EVENT_INFO.positionms, info + 4), for Wwise's GetSourcePlayPosition
+    bool position(uint32_t id, int* ms)
+    {
+        std::lock_guard<std::recursive_mutex> l(mx);
+        auto it = plays.find(id);
+        if (it == plays.end() || !it->second.ev) return false;
+        uint8_t info[0x80] = {};
+        if (f.Event_GetInfo(it->second.ev, nullptr, nullptr, info)) return false;
+        *ms = *(int*)(info + 4);
+        return true;
+    }
+
     void stopObject(uint32_t obj)
     {
         std::lock_guard<std::recursive_mutex> l(mx);
@@ -1587,6 +1599,18 @@ inline int __cdecl hkListener(const float* p, uint32_t index)
     return oListener(p, index);
 }
 
+// FUN_019475a0: GetSourcePlayPosition(id, AkTimeMs*, extrapolate) -> 1 AK_Success. 3.0's lipsync player
+// (FUN_014cb180 -> FUN_0073a810 -> FUN_0182c0a0) advances a line's .anno segments by this position and stays on the
+// first one when it fails, so a 1.0 line's mouth only moves if our id answers with the FMOD instance's played time.
+typedef int(__cdecl* SrcPosFn)(uint32_t pid, int* pos, uint8_t extrapolate);
+inline SrcPosFn oSrcPos;
+inline int __cdecl hkSrcPos(uint32_t pid, int* pos, uint8_t extrapolate)
+{
+    int ms = 0;
+    if (pos && g.position(pid, &ms)) { *pos = ms; return 1; }
+    return oSrcPos(pid, pos, extrapolate);
+}
+
 // FUN_019478d0: StopPlayingID(id, fade ms, curve)
 inline int __cdecl hkStop(uint32_t pid, uint32_t ms, uint32_t curve)
 {
@@ -1861,6 +1885,7 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
     hook("Wwise SetPosition (audio10)", 0x01947A50, "558BEC8B450885C07507", (void*)&hkSetPos, (void**)&oSetPos);
     hook("Wwise SetListenerPosition (audio10)", 0x01947150, "558BEC535657E8", (void*)&hkListener, (void**)&oListener);
     hook("Wwise StopPlayingID (audio10)", 0x019478D0, "558BEC568B750885F6", (void*)&hkStop, (void**)&oStop);
+    hook("Wwise GetSourcePlayPosition (audio10)", 0x019475A0, "558BEC8B450C85C07507", (void*)&hkSrcPos, (void**)&oSrcPos);
     hook("Wwise UnregisterGameObj (audio10)", 0x01947640, "558BEC568B750885F67506", (void*)&hkUnreg, (void**)&oUnreg);
     hook("Wwise ExecuteActionOnEvent (audio10)", 0x01948C20, "558BEC8B450850E8", (void*)&hkAction, (void**)&oAction);
     hook("volume fader (audio10)", 0x0182C460, "8B4424048B4C240883EC30", (void*)&hkFader, (void**)&oFader);

@@ -451,7 +451,25 @@ static int voTest(char** argv)
     };
     DWORD t0 = GetTickCount();
     uint32_t id = found ? audio::g.playLine(audio::fnv1("dialog_edna"), 7, 1 | 4 | 8, (void*)cb, nullptr, b->snd, sub) : 0;
-    for (int t = 0; t < 20000 && !ends; t += 16) { Sleep(16); audio::tickAndDeliver(); }
+    // GetSourcePlayPosition through the hook (the lipsync player's clock, FUN_014cb180): sampled each second it must
+    // grow with the wall clock while the line plays
+    std::vector<std::pair<DWORD, int>> posAt;
+    DWORD lastSample = 0;
+    for (int t = 0; t < 20000 && !ends; t += 16) {
+        Sleep(16);
+        audio::tickAndDeliver();
+        int pos = -1;
+        DWORD now = GetTickCount() - t0;
+        if (!ends && now >= lastSample + 1000 && audio::hkSrcPos(id, &pos, 1) == 1) { posAt.emplace_back(now, pos); lastSample = now; }
+    }
+    int posBad = 0, prev = -1;
+    for (auto& p : posAt) {
+        posBad += p.second < prev || p.second > (int)p.first + 50 || p.second + 250 < (int)p.first;
+        prev = p.second;
+        printf("POS ED019 at %lu ms wall: position %d ms\n", (unsigned long)p.first, p.second);
+    }
+    printf("POS %d samples, %d off the wall clock (more than 250 ms behind or 50 ms ahead, or going back)\n", (int)posAt.size(), posBad);
+    bad += posAt.size() < 5 || posBad;
     unsigned ms = 0;
     void* s = nullptr;
     if (b && b->snd && !audio::g.f.Sound_GetSubSound(b->snd, sub, &s) && s) audio::g.f.Sound_GetLength(s, &ms, 1);
