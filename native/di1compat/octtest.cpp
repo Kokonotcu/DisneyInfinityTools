@@ -322,6 +322,17 @@ int main(int argc, char** argv)
         }
         return 0;
     }
+    if (argc > 3 && std::string(argv[1]) == "--tools") {   // --tools <1.0 ToolSet.bin> <zone>: TL-1 level lists (toolgate.py)
+        std::string b = slurp(argv[2]);
+        auto t = gameplay::toolLevels10((const uint8_t*)b.data(), b.size());
+        int listed = 0;
+        for (auto& kv : t) listed += !kv.second.empty();
+        printf("%u tools, %d with a level list; with a list allowing %s:", (unsigned)t.size(), listed, argv[3]);
+        for (auto& kv : t)
+            if (!kv.second.empty() && gameplay::levelAllows(kv.second, argv[3])) printf(" %s", kv.first.c_str());
+        printf("\n");
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--datamap") {   // --datamap <1.0 *datamap.lua> [out]: PS-2 rewrite
         std::string in = slurp(argv[2]), out;
         std::map<std::string, int> kinds;

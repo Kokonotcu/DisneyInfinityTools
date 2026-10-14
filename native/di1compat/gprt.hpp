@@ -64,8 +64,62 @@ static void* __fastcall hkScreenReq(void* ui, void* edx, const char* name, int a
     return g_screenReq(ui, edx, name, a2, player);
 }
 
+// ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
+// 3.0 enables a tool only where its ToolSetTable LevelPrefix allows (gate FUN_0150f7d0, thiscall (tool, list) ret 4,
+// called by FUN_0151b960 with the Tools record + 4; result cached in tool +0x74): an empty list, a prefix the
+// lower-cased zone name starts with, or the zone key AllowAllToolsAndPacks. 3.0 dropped in_ from the lists, so in
+// IN_City the three Metroville packs were off. toolgate.py over 1.0 ToolSet.bin (177 tools) and 3.0
+// in2/in3_core_toolset.lua (153): 3 tools have a 1.0 list allowing in_city -- PROP_CAPE, PROP_HOVERBOARD,
+// ITEM_ZEROPOINTENERGY (rumpus, adv_, core, holo, in_) -- and 3.0 blocks all 3 there (e.g. PROP_CAPE rumpus, adv_, core,
+// holo, tbx_, emp_). The story needs them: IN_City_GP_Tutorial (CapeEquipped), the hoverboard missions,
+// IN_City_Syndrome_Fight (MissionTaskModifier_ForceActorTool ITEM_ZEROPOINTENERGY). In a 1.0 zone a tool 3.0 refuses
+// is judged by its 1.0 record instead, read from the 1.0 install (startup5.zip, mounted at assets\ in 1.0).
+typedef uint32_t(__fastcall* ToolGateFn)(uint8_t* tool, void* edx, const uint8_t* prefixes);
+typedef uint8_t*(__fastcall* ToolSetFindFn)(void* table, void* edx, const char* section, const char* name);
+typedef const char*(__fastcall* ZoneNameFn)(void* mgr, void* edx, uint32_t zone, int a2);
+static ToolGateFn g_toolGate;
+
+static const std::map<std::string, std::vector<std::string>>& toolLevels10()
+{
+    static std::map<std::string, std::vector<std::string>> t;
+    static bool read = false;
+    std::lock_guard<std::mutex> lock(g_zipLock);
+    if (read) return t;
+    read = true;
+    if (mz_zip_archive* z = zipFor("startup5.zip")) {
+        int i = mz_zip_reader_locate_file(z, "var/toolset/toolset.bin", nullptr, 0);
+        size_t n = 0;
+        if (void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) {
+            t = gameplay::toolLevels10((const uint8_t*)d, n);
+            mz_free(d);
+        }
+    }
+    logf("tools10: %u 1.0 tool records from startup5.zip:var/toolset/toolset.bin", (unsigned)t.size());
+    return t;
+}
+
+static uint32_t __fastcall hkToolGate(uint8_t* tool, void* edx, const uint8_t* prefixes)
+{
+    uint32_t r = g_toolGate(tool, edx, prefixes);
+    if (r || !zonePlayset10()) return r;
+    uint8_t* mgr = *(uint8_t**)rt(0x0225F548);
+    const char* zone = ((ZoneNameFn)rt(0x01391040))(mgr, nullptr, *(uint32_t*)(mgr + 0x19C), 1);
+    void* table = *(void**)rt(0x0228AA3C);
+    for (auto& kv : toolLevels10()) {
+        if (kv.second.empty() || !gameplay::levelAllows(kv.second, zone)) continue;
+        const uint8_t* rec = ((ToolSetFindFn)rt(0x015F6A60))(table, nullptr, "Tools", kv.first.c_str());
+        if (rec && rec + 4 == prefixes) {
+            *(uint32_t*)(tool + 0x74) = 1;
+            logf("tools10: %s allowed in %s by its 1.0 level list", kv.first.c_str(), zone ? zone : "?");
+            return 1;
+        }
+    }
+    return r;
+}
+
 static void install()
 {
+    if (g_cfg.tools10) hook("tool level gate (1.0 lists)", 0x0150F7D0, "538BD9837B74FF", (void*)&hkToolGate, (void**)&g_toolGate);
     if (g_cfg.selectMenu10) {
         hook("ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&hkRibbonName, (void**)&g_ribbonName);
         hook("ribbon open (1.0 SelectMenu)", 0x00B68F60, "6AFF68????????64A100000000", (void*)&hkShowRibbon, (void**)&g_showRibbon);

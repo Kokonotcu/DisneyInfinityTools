@@ -563,4 +563,49 @@ inline int dnaGadgets30(const std::string& in, std::string& out)
     });
 }
 
+// Tools and packs (plan TL-1): the level list of each 1.0 tool, from var/ToolSet/ToolSet.bin as 1.0's ToolSetInfo
+// (FUN_00f768f0) lays it out: [u32 size] sections; 0 = string pool, 1 = -1-terminated lists of string offsets (u32
+// words), 11 = the Tools records (u32 count, 76 B each: +0 name, +0x10 LevelPrefix list index, -1 = none).
+// toolgate.py reads the same: 177 records, 78 with a list; PROP_CAPE / PROP_HOVERBOARD / ITEM_ZEROPOINTENERGY list
+// rumpus, adv_, core, holo, in_.
+inline std::map<std::string, std::vector<std::string>> toolLevels10(const uint8_t* d, size_t n)
+{
+    std::map<std::string, std::vector<std::string>> out;
+    std::vector<std::pair<size_t, size_t>> secs;
+    for (size_t o = 0; o + 8 <= n;) {
+        uint32_t sz = oct::u(d + o, 4);
+        if (sz < 4 || o + sz > n) return out;
+        secs.push_back({o, sz});
+        o += sz;
+    }
+    if (secs.size() < 12) return out;
+    const char* pool = (const char*)d + 4;
+    size_t poolN = secs[0].second - 4, lists = secs[1].first + 4, listsEnd = secs[1].first + secs[1].second;
+    auto str = [&](int32_t off) { return off >= 0 && (size_t)off < poolN ? std::string(pool + off, strnlen(pool + off, poolN - off)) : std::string(); };
+    size_t so = secs[11].first, cnt = oct::u(d + so + 4, 4);
+    if (8 + cnt * 76 != secs[11].second) return out;
+    for (size_t r = 0; r < cnt; ++r) {
+        const uint8_t* rec = d + so + 8 + r * 76;
+        std::vector<std::string>& lv = out[str((int32_t)oct::u(rec, 4))];
+        for (int32_t i = (int32_t)oct::u(rec + 0x10, 4); i >= 0 && lists + 4 * (size_t)i + 4 <= listsEnd; ++i) {
+            int32_t w = (int32_t)oct::u(d + lists + 4 * i, 4);
+            if (w == -1) break;
+            lv.push_back(str(w));
+        }
+    }
+    return out;
+}
+
+// 3.0's test of a level list (FUN_0150f7d0): an empty list allows every level, else the lower-cased zone name must
+// start with one entry (CString Find == 0).
+inline bool levelAllows(const std::vector<std::string>& prefixes, const char* zone)
+{
+    if (prefixes.empty()) return true;
+    std::string z = zone ? zone : "";
+    for (char& c : z) c = (char)tolower((unsigned char)c);
+    for (const std::string& p : prefixes)
+        if (!p.empty() && z.compare(0, p.size(), p) == 0) return true;
+    return false;
+}
+
 }  // namespace gameplay

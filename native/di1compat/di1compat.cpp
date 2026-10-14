@@ -138,6 +138,7 @@ static struct {
     bool assetBufs10 = true;         // gp: read10 finds <stem>_<n>.vbuf/.ibuf in a per-asset archive <dir>/<stem>.zip
     bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
     bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
+    bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -170,6 +171,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "assetbufs10")) g_cfg.assetBufs10 = atoi(val) != 0;
         else if (!strcmp(key, "challenge10")) g_cfg.challenge10 = atoi(val) != 0;
         else if (!strcmp(key, "selectmenu10")) g_cfg.selectMenu10 = atoi(val) != 0;
+        else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
