@@ -24,7 +24,7 @@ toolkit for the games' file formats.
 
 The project has two parts:
 
-- **di1compat** (`native/di1compat`) is a plugin for the [Pentane](#requirements) loader. When Disney Infinity 3.0 asks
+- **di1compat** (`native/di1compat`) is a DLL loaded into the game by the [Pentane](#requirements) plugin loader. When Disney Infinity 3.0 asks
   for a file it does not have, the plugin reads it from your 1.0 installation and translates it at load time into the
   form the matching 3.0 system expects. Nothing on disk is modified. 1.0 data goes into the 3.0 system that replaced
   its 1.0 counterpart, and new systems are built only where 3.0 has none (for example the 1.0 FMOD audio host).
@@ -80,7 +80,8 @@ time.
 
 - *Disney Infinity 3.0 Gold Edition* for PC (Steam).
 - *Disney Infinity 1.0 Gold Edition* for PC, installed.
-- The Pentane plugin loader for Disney Infinity 3.0.
+- The Pentane plugin loader for Disney Infinity 3.0. It only loads the plugin at startup, before the engine opens
+  its first file; di1compat installs its own hooks with MinHook.
 - To build: Visual Studio 2022 (MSVC, x86 toolset) and CMake 3.21 or newer.
 - For the toolkit: Python 3.10 or newer.
 
