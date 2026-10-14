@@ -1337,6 +1337,8 @@ static void tdEntryLog(const char* what, uintptr_t e)
 static __declspec(thread) int t_tdDepth;
 static __declspec(thread) uintptr_t t_tdNode;
 static volatile LONG g_tdLayouts, g_tdLines;
+static std::mutex g_tdWatchLock;
+static std::map<uintptr_t, uintptr_t> g_tdWatch;   // placement +0xc node -> Layout (hkPlBind)
 typedef uint32_t(__fastcall* TdDtorFn)(void* self, void* edx);
 typedef void(__fastcall* EntryRelFn)(void* self, void* edx, uint32_t a1);
 static TdDtorFn g_layoutDtor, g_nodeDtor;
@@ -1354,8 +1356,11 @@ static uint32_t __fastcall hkLayoutDtor(void* self, void*)
             tdObj(s, sizeof(s), tdRd(el + 4));
             tdObj(d, sizeof(d), tdRd(el + 0xc));
             safeCopy(nm, sizeof(nm), (const char*)(uintptr_t)tdRd(el + 8));
-            logf("td  placement %u '%s' flags %X: scene %s; node %s handle %08X", k, nm, tdRd(el + 0x10), s, d, tdRd(tdRd(el + 0xc) + 0xc));
             uint32_t node = tdRd(el + 0xc);
+            bool watched;
+            { std::lock_guard<std::mutex> l(g_tdWatchLock); watched = g_tdWatch.count(node) != 0; }
+            logf("td  placement %u '%s' flags %X: scene %s; node %s handle %08X (bound and alive: %s)", k, nm, tdRd(el + 0x10), s, d,
+                 tdRd(node + 0xc), watched ? "yes" : "no/never bound");
             if (node && node != 0xDEADBEEF) tdEntryLog("node", tdEntry(tdRd(node + 0xc)));
         }
     }
@@ -1364,9 +1369,41 @@ static uint32_t __fastcall hkLayoutDtor(void* self, void*)
     if (on) { --t_tdDepth; logf("td layout %08X dtor done", (uint32_t)(uintptr_t)self); }
     return r;
 }
+// Placement nodes seen bound (FUN_0077d9c0, thiscall on the Layout when an instance binds its placements): a node
+// destroyed outside its Layout's dtor was released once too often somewhere; its stack names the releaser.
+typedef uint32_t(__fastcall* PlBindFn)(void* self, void* edx, uint32_t a1, uint32_t a2);
+static PlBindFn g_plBind;
+static uint32_t __fastcall hkPlBind(void* self, void*, uint32_t a1, uint32_t a2)
+{
+    uintptr_t L = (uintptr_t)self;
+    uint32_t arr = tdRd(L + 0x40), n = tdRd(L + 0x44);
+    for (uint32_t k = 0; k < n && k < 64 && arr != 0xDEADBEEF; ++k) {
+        uint32_t node = tdRd(arr + 0x18 * k + 0xc);
+        if (!node || node == 0xDEADBEEF) continue;
+        std::lock_guard<std::mutex> l(g_tdWatchLock);
+        if (g_tdWatch.emplace(node, L).second && InterlockedIncrement(&g_tdLines) <= 400) {
+            char o[200];
+            tdObj(o, sizeof(o), node);
+            logf("td bind layout %08X placement %u node %s", (uint32_t)L, k, o);
+        }
+    }
+    return g_plBind(self, nullptr, a1, a2);
+}
 static uint32_t __fastcall hkNodeDtor(void* self, void*)
 {
-    uintptr_t prev = t_tdNode;
+    uintptr_t prev = t_tdNode, layout = 0;
+    {
+        std::lock_guard<std::mutex> l(g_tdWatchLock);
+        auto it = g_tdWatch.find((uintptr_t)self);
+        if (it != g_tdWatch.end()) { layout = it->second; g_tdWatch.erase(it); }
+    }
+    if (layout && t_tdDepth <= 0 && InterlockedIncrement(&g_tdLines) <= 400) {
+        char o[200], line[600];
+        tdObj(o, sizeof(o), (uintptr_t)self);
+        int len = sprintf_s(line, "td PLACEMENT NODE DESTROYED OUTSIDE ITS LAYOUT DTOR (layout %08X): %s, stack:", (uint32_t)layout, o);
+        stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 24);
+        logf("%s", line);
+    }
     if (t_tdDepth > 0 && InterlockedIncrement(&g_tdLines) <= 400) {
         char o[200];
         tdObj(o, sizeof(o), (uintptr_t)self);
@@ -2739,6 +2776,7 @@ extern "C" void __stdcall Pentane_Main()
         hook("Samurai::Node dtor (teardowntrace)", 0x004EE5F0, "6AFF68????????64A100000000", (void*)&hkNodeDtor, (void**)&g_nodeDtor);
         hook("hierarchy entry release (teardowntrace)", 0x004B2780, "8B442404568D7110", (void*)&hkEntryRel, (void**)&g_entryRel);
         hook("hierarchy entry free (teardowntrace)", 0x004E1A40, "83EC0853578B7C2414", (void*)&hkEntryFree, (void**)&g_entryFree);
+        hook("Layout placement bind (teardowntrace)", 0x0077D9C0, "6AFF68????????64A100000000", (void*)&hkPlBind, (void**)&g_plBind);
     }
     if ((g_cfg.aliases10 || g_cfg.native10) && g_merOk)
         hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry, (void**)&g_merRegistry);
