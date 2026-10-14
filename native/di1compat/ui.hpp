@@ -178,7 +178,7 @@ inline std::string playsetMenu10(const std::string& chunk)
         if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') s += (char)c;
         else {
             char b[6];
-            snprintf(b, sizeof(b), "\\%03u", c);   // always 3 digits: a digit after it never joins the escape
+            snprintf(b, sizeof(b), "\\%03u", (unsigned)c);   // always 3 digits: a digit after it never joins the escape
             s += b;
         }
     }
