@@ -12,6 +12,8 @@ Lines (space-separated; the plugin parses them):
   N <material GUID>                                                                        autobundle.NOT_REAL
   T <1.0 vformatCRC> <3.0 vformatCRC...>                                                   vtxf.targets_1to3, best first
   P <1.0 crc> <3.0 crc> <n src strides> <s...> <n dst strides> <d...> <n ops> {op}       vtxf.plan
+  R (as P)                                                    vtxf.plan(.., 'skin'): a skinned node's primitives,
+      for a 1.0 format with bone indices + weights and a target with a 'skin' layout (bones copied, never padded)
       op = <dst stream> <dst off> <size> C <src stream> <src off>                 copy
          | <dst stream> <dst off> <size> X <src stream> <src off> <src type> <dst type> <n default> <v...>   convert
          | <dst stream> <dst off> <size> K <hex bytes>                            constant (padded element)
@@ -23,6 +25,12 @@ python rentable.py [--out <file>]   (default: the install's Pentane\\Plugins\\di
 import argparse
 from pathlib import Path
 import autobundle, matp, paths, shdfmt, vtxf
+
+
+# The 3.0 formats shipped skinned primitives use (their 'skin' layout; 3,396 primitives in 19,841 shipped exploders +
+# choreographies, skinlayout scan 2026-10-14) -- the six layouts the GPU skinning job knows (FUN_0047c300 spins on any
+# other). 12 more formats declare a 'skin' variant that nothing ships, so they are not targets for skinned nodes.
+SKINNED_SHIPPED = {0x1a9a10d9, 0x51573bee, 0x63ae710f, 0xc6028703, 0xf210d99f, 0xfdff3f8c}
 
 
 def engine_path(rel):
@@ -76,8 +84,12 @@ def main():
             print('skip vformat', '%08x' % crc, e)
             continue
         lines.append('T %08x %s' % (crc, ' '.join('%08x' % t for t, _, _ in targets)))
-        for t, _, _ in targets:
-            ss, ds, ops, _, _ = vtxf.plan(crc, t)
+        bones = {'BLENDINDICES', 'BLENDWEIGHT'} <= {e[1] for e in vtxf.elements(vtxf.formats(1)[g])}
+        for t, kind in [(t, 'P') for t, _, _ in targets] + \
+                       [(t, 'R') for t, _, _ in targets if bones and t in SKINNED_SHIPPED]:
+            ss, ds, ops, _, padded = vtxf.plan(crc, t, 'skin' if kind == 'R' else 'main')
+            if kind == 'R' and {'BLENDINDICES', 'BLENDWEIGHT'} & set(padded):
+                continue
             enc = []
             for dsi, doff, ssi, soff, size, conv in ops:
                 if ssi is None:
@@ -88,8 +100,8 @@ def main():
                     st, dt, dflt = conv
                     enc.append('%d %d %d X %d %d %s %s %d %s' % (dsi, doff, size, ssi, soff, st, dt, len(dflt),
                                                                ' '.join(repr(float(x)) for x in dflt)))
-            lines.append('P %08x %08x %d %s %d %s %d %s' % (crc, t, len(ss), ' '.join(map(str, ss)), len(ds),
-                                                          ' '.join(map(str, ds)), len(enc), ' '.join(enc)))
+            lines.append('%s %08x %08x %d %s %d %s %d %s' % (kind, crc, t, len(ss), ' '.join(map(str, ss)), len(ds),
+                                                           ' '.join(map(str, ds)), len(enc), ' '.join(enc)))
     out.write_text('\n'.join(lines) + '\n')
     kinds = {}
     for l in lines:

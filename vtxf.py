@@ -135,10 +135,12 @@ def encode(ty, vals):
     return struct.pack('<%d%s' % (n, c), *vals)
 
 
-def layout(fmt):
-    """-> ([stride per stream], {(semantic, type): (stream, offset)}, {(semantic, type): default})"""
+def layout(fmt, variant='main'):
+    """-> ([stride per stream], {(semantic, type): (stream, offset)}, {(semantic, type): default})
+    variant 'skin': the layout 3.0 stores a skinned node's primitives in (2,585 of 2,585 shipped skinned primitives;
+    4,094 of 4,094 rigid ones are 'main'): the GPU skinning pass reads it."""
     strides, where, dflt = [], {}, {}
-    for si, s in enumerate(fmt['main']['streams']):
+    for si, s in enumerate(fmt[variant]['streams']):
         off = 0
         for e in s:
             where[e['semantic'], e['type']] = (si, off)
@@ -151,12 +153,12 @@ def layout(fmt):
     return strides, where, dflt
 
 
-def plan(src_crc, dst_crc):
-    """How to build a dst (3.0) vertex from a src (1.0) one.
+def plan(src_crc, dst_crc, variant='main'):
+    """How to build a dst (3.0) vertex from a src (1.0) one (1.0 formats have one layout; variant picks the 3.0 one).
     -> (src strides, dst strides, [(dst stream, dst off, src stream | None, src off | bytes, size, conv)],
         dropped src elements, padded dst elements); conv = None (copy) or (src type, dst type, default)"""
     ss, sw, _ = layout(fmt_of(src_crc, 1))
-    ds, dw, dd = layout(fmt_of(dst_crc, 3))
+    ds, dw, dd = layout(fmt_of(dst_crc, 3), variant)
     ops, padded = [], []
     for (sem, ty), (dsi, doff) in dw.items():
         if (sem, ty) in sw:

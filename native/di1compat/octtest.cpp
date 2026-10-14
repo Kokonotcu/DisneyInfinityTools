@@ -186,6 +186,7 @@ static int renderTest(char** a)
     };
     io.verbose = getenv("RENDER_VERBOSE") != nullptr;
     io.translate = getenv("RENDER_TRANSLATE") != nullptr;   // real 1.0 shaders (read10 finds shaders/shaders/<x>.shd)
+    io.skinLayout = getenv("RENDER_SKIN") != nullptr;       // cfg skinlayout10 (the Python oracle keeps 'main')
     gen30::VFormats vf10 = gen30::vformats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
     io.skinned = [&](uint32_t vf) { auto f = vf10.find(vf); return f != vf10.end() && f->second.count("BLENDINDICES0"); };
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
@@ -205,6 +206,7 @@ static int renderTest(char** a)
     put(".oct", f.write()); put(".mtb", r.mtb); put("_0.vbuf", r.vbuf); put("_0.ibuf", r.ibuf);
     if (!r.ibuf2.empty()) put("_2.ibuf", r.ibuf2);
     for (auto& [t, n] : r.tiers) printf("tier %s %d\n", t.c_str(), n);
+    if (r.skinned) printf("skinned in skin layout %d\n", r.skinned);
     printf("wrote %s: oct %zu, mtb %zu, vbuf %zu, ibuf %zu, ibuf2 %zu, 1.0 textures %zu\n", out.string().c_str(),
            f.write().size(), r.mtb.size(), r.vbuf.size(), r.ibuf.size(), r.ibuf2.size(), r.textures10.size());
     return 0;

@@ -48,6 +48,7 @@ struct Table {
     std::map<std::string, std::vector<int>> genericSlots;
     std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
     std::map<std::pair<uint32_t, uint32_t>, Plan> plans;
+    std::map<std::pair<uint32_t, uint32_t>, Plan> skinPlans;   // R lines: into the target's 'skin' layout (bones kept)
     gen30::Tables shaders10;                           // real 1.0 shaders: V / W / Q lines (gen30)
 
     bool load(const std::string& text)
@@ -86,7 +87,7 @@ struct Table {
                 std::string a, b; t >> a;
                 auto& v = targets[(uint32_t)std::stoul(a, nullptr, 16)];
                 while (t >> b) v.push_back((uint32_t)std::stoul(b, nullptr, 16));
-            } else if (k == "P") {
+            } else if (k == "P" || k == "R") {
                 std::string a, b; Plan p; int n;
                 t >> a >> b >> n; p.ss.resize(n); for (auto& x : p.ss) t >> x;
                 t >> n; p.ds.resize(n); for (auto& x : p.ds) t >> x;
@@ -101,7 +102,7 @@ struct Table {
                     else { std::string hex; t >> hex; if (hex != "-") for (size_t j = 0; j + 1 < hex.size(); j += 2) o.bytes.push_back((char)std::stoi(hex.substr(j, 2), nullptr, 16)); }
                     p.ops.push_back(o);
                 }
-                plans[{(uint32_t)std::stoul(a, nullptr, 16), (uint32_t)std::stoul(b, nullptr, 16)}] = p;
+                (k == "R" ? skinPlans : plans)[{(uint32_t)std::stoul(a, nullptr, 16), (uint32_t)std::stoul(b, nullptr, 16)}] = p;
             }
         }
         return !shaders.empty() && !plans.empty();
@@ -314,6 +315,10 @@ struct IO {
     std::function<bool(uint32_t vformat)> skinned;
     // the shader translates (and is registered): only then may a material take it
     std::function<bool(const std::string& shader)> translatable;
+    // a skinned node's converted primitives go into their target's 'skin' layout with the 1.0 bone indices/weights
+    // (R plans), as every shipped skinned primitive is stored (3,396 of 3,396; rigid ones 'main', 75,895 of 75,895).
+    // Off: the 'main' layout, bones dropped, which the GPU skinning pass then reads as bones (cfg skinlayout10)
+    bool skinLayout = false;
 };
 
 struct Result {
@@ -322,6 +327,7 @@ struct Result {
     std::map<std::string, int> tiers;
     std::set<std::string> textures10;   // 1.0 texture hashes (hex) the bundle uses
     std::set<int> translated;           // materials on their real (translated) 1.0 shader
+    int skinned = 0;                    // primitives written in their target's 'skin' layout (io.skinLayout)
 };
 
 struct Src { Bundle b; int i; };   // one material of a source bundle (merge input)
@@ -610,6 +616,16 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
         }
     }
     if (!r.problems.empty()) return false;
+    // (material, 1.0 vformat) -> for a skinned node's primitives: the first target with an R plan the shader takes
+    std::map<std::pair<int, uint32_t>, uint32_t> smap;
+    for (auto& [crc, refs] : users)
+        for (int ref : refs) {
+            auto t = T.targets.find(crc);
+            if (!io.skinLayout || r.translated.count(ref) || t == T.targets.end()) continue;
+            auto sv = shaderVf.find(ref);
+            for (uint32_t c : t->second)
+                if (T.skinPlans.count({crc, c}) && (sv == shaderVf.end() || sv->second->count(c))) { smap[{ref, crc}] = c; break; }
+        }
 
     // ---- geometry (conv.convert_geometry + build_buffers); assets without buffers (most mission graphs) skip it ----
     const bool geometry = !vbuf10.empty() && !ibuf10.empty();
@@ -623,11 +639,12 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     for (size_t n = stp + 1; stp >= 0 && n < stpEnd; n = f.blockEnd(n)) {
         if (f.recs[n].level != 2 || f.name(f.recs[n]) != "Node") continue;
         size_t end = f.blockEnd(n);
-        bool geo = false;
+        bool geo = false, skinned = false;
         std::vector<size_t> prims;
         for (size_t j = n + 1; j < end; ++j) {
             const std::string& nm = f.name(f.recs[j]);
             if (f.recs[j].level == 3 && nm == "Type") { auto v = f.nameValues(f.recs[j]); geo = !v.empty() && v[0] == "Geometry"; }
+            if (f.recs[j].level == 3 && nm == "NumInfluences") skinned = true;
             if (nm == "Primitive") prims.push_back(j);
         }
         if (!geo || prims.empty()) continue;
@@ -657,6 +674,12 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
             int ref = f.ints(f.recs[p.matref])[0];
             auto vm = vmap.find({ref, src});
             uint32_t dst = vm != vmap.end() ? vm->second : T.targets.at(src)[0];
+            const Plan* skinPlan = nullptr;
+            if (auto s = smap.find({ref, src}); skinned && dst != src && s != smap.end()) {
+                dst = s->second;
+                skinPlan = &T.skinPlans.at({src, dst});
+                ++r.skinned;
+            }
             Plan same;                       // a translated material's primitive: every stream copied as it is
             if (dst == src) {
                 for (int s = 0; s < vda[0]; ++s) {
@@ -667,7 +690,7 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
                 }
                 same.ds = same.ss;
             }
-            const Plan& plan = dst == src ? same : T.plans.at({src, dst});
+            const Plan& plan = dst == src ? same : skinPlan ? *skinPlan : T.plans.at({src, dst});
             std::vector<uint32_t> order, sub;
             std::unordered_map<uint32_t, uint32_t> remap;
             for (int32_t q = 0; q < ida[3]; ++q) {
