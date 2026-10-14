@@ -791,6 +791,72 @@ static int choConstTest(char** a)
         long r = kid(f, snRec, k);
         return r < 0 ? -1 : cho::first(f, f.recs[r], -1);
     };
+    // Static shapes as 3.0 ships them, measured here from the 3.0 corpus (not from cho.hpp's table): processor inputs
+    // fed by a Static node ('Type.Attr'), Static node shapes ('Type External?'), BasisConversion refs to Static nodes
+    std::set<std::string> inputs30, shapes30;
+    size_t conv30 = 0;
+    auto shapesOf = [&](const oct::File& f, std::set<std::string>* inputs, std::set<std::string>* shapes, size_t* convs,
+                        std::map<std::string, size_t>* bad) {
+        auto S = subnets(f);
+        size_t k = 0;
+        for (size_t i = 0; i < f.recs.size(); ++i) {
+            if (f.recs[i].level != 2 || f.name(f.recs[i]) != "SubNetwork") continue;
+            auto& s = S[k++];
+            if (s.pns.empty()) continue;
+            std::set<size_t> st;
+            for (size_t d : statics(f, s)) st.insert(d);
+            std::vector<std::string> varPaths;
+            for (size_t d : s.dns) if (!st.count(d)) varPaths.push_back(path(f, s, d));
+            for (size_t q : s.pns) varPaths.push_back(path(f, s, q));
+            for (size_t d : st) {
+                long ex = kid(f, d, "External");
+                std::string sh = str1(f, d, "Type") + (ex >= 0 && cho::first(f, f.recs[ex], 0) ? " External" : "");
+                if (shapes) shapes->insert(sh);
+                if (bad && !shapes30.count(sh)) ++(*bad)["Static node shape never shipped: " + sh];
+                std::string pre = path(f, s, d) + "/";
+                bool below = std::any_of(varPaths.begin(), varPaths.end(), [&](const std::string& v) { return v.compare(0, pre.size(), pre) == 0; });
+                if (below && shapes) shapes->insert("(Static with variable descendants)");
+                if (below && bad) ++(*bad)["Static node with a variable node / processor below it"];
+            }
+            for (size_t q : s.pns) {
+                long ar = kid(f, q, "DataNodeAttributes"), rr = kid(f, q, "DataNodeRefs");
+                if (ar < 0 || rr < 0) continue;
+                auto at = f.nameValues(f.recs[ar]);
+                auto rf = f.ints(f.recs[rr]);
+                for (size_t z = 0; z < at.size() && z < rf.size(); ++z)
+                    if (rf[z] >= 0 && (size_t)rf[z] < s.dns.size() && st.count(s.dns[rf[z]])) {
+                        std::string in = str1(f, q, "Type") + "." + at[z].substr(0, at[z].find('['));
+                        if (inputs) inputs->insert(in);
+                        if (bad && !inputs30.count(in)) ++(*bad)["Static processor input never shipped: " + in];
+                    }
+            }
+            long cm = kid(f, i, "ConnectionMapUsedDataNodes");
+            if (cm >= 0)
+                for (int32_t d : f.ints(f.recs[cm]))
+                    if (d >= 0 && (size_t)d < s.dns.size() && st.count(s.dns[d])) {
+                        if (shapes) shapes->insert("(ConnectionMapUsedDataNodes lists a Static node)");
+                        if (bad) ++(*bad)["ConnectionMapUsedDataNodes lists a Static node"];
+                    }
+            for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
+                if (f.recs[j].level == 5 && f.name(f.recs[j]) == "DataNodeRef") {
+                    int d = cho::first(f, f.recs[j], -1);
+                    if (d >= 0 && (size_t)d < s.dns.size() && st.count(s.dns[d])) {
+                        if (convs) ++*convs;
+                        if (bad) ++(*bad)["BasisConversion DataNodeRef to a Static node"];
+                    }
+                }
+        }
+    };
+    for (const char* sub : {"choreographies", "exploders"})
+        for (auto& [n, p] : choIndex(a[3], sub)) {
+            std::string b = slurp(p);
+            if (!scene::tuple(b) || b.find(std::string("ProcessorNodePool\0", 18)) == std::string::npos) continue;
+            oct::File t = oct::File::parse(b.data(), b.size());
+            shapesOf(t, &inputs30, &shapes30, &conv30, nullptr);
+        }
+    c["3.0: Static processor input kinds"] = inputs30.size();
+    c["3.0: Static node shapes"] = shapes30.size();
+    c["3.0: BasisConversion refs to Static nodes"] = conv30;
     for (const char* sub : {"choreographies", "exploders"}) {
         auto A = choIndex(a[2], sub), B = choIndex(a[3], sub);
         for (auto& [n, p] : A) {
@@ -841,6 +907,11 @@ static int choConstTest(char** a)
             std::string w = f.write();
             oct::File g = oct::File::parse(w.data(), w.size());
             if (g.write() != w) ++c["1.0: re-parse DIFFERS"];
+            {
+                std::map<std::string, size_t> bad;
+                shapesOf(g, nullptr, nullptr, nullptr, &bad);
+                for (auto& [k, v] : bad) c["1.0 output: " + k] += v;
+            }
             auto S = subnets(g);
             std::vector<size_t> snRecs;
             for (size_t i = 0; i < g.recs.size(); ++i) if (g.recs[i].level == 2 && g.name(g.recs[i]) == "SubNetwork") snRecs.push_back(i);

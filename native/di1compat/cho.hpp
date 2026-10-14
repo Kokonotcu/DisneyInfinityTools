@@ -469,9 +469,12 @@ inline int const30(oct::File& f)
         int ordinal = (int)(sns.rend() - it) - 1;
         long hs = -1, hsi = -1, hl = -1, after = -1;
         bool counted = false;
-        struct D { long hd = -1, st = -1; bool stat = false; std::string type; };
+        struct D { long hd = -1, st = -1; bool stat = false, ext = false; std::string type; };
         std::vector<D> dns;                      // DataNode Header / Static records, Static, Type
         std::vector<long> pn;                    // ProcessorNode Header records
+        struct P { std::string type; std::vector<std::string> attrs; std::vector<int32_t> refs; };
+        std::vector<P> procs;
+        std::set<int> convRefs;                  // BasisConversion DataNodeRefs
         std::string pool3;
         for (size_t i = sn + 1; i < end; ++i) {
             const oct::Rec& r = f.recs[i];
@@ -484,12 +487,20 @@ inline int const30(oct::File& f)
                 else if (k == "VariableHeaderCount" || k == "ConstantHeaderCount") counted = true;
                 else if (k == "Type" || k == "Name") after = (std::max)(after, (long)i);
             } else if (r.level == 4 && pool3 == "DataNodePool") dns.emplace_back();
-            else if (r.level == 4 && pool3 == "ProcessorNodePool") pn.push_back(-1);
+            else if (r.level == 4 && pool3 == "ProcessorNodePool") { pn.push_back(-1); procs.emplace_back(); }
             else if (r.level == 5 && pool3 == "DataNodePool" && !dns.empty()) {
                 if (k == "Header") dns.back().hd = (long)i;
                 else if (k == "Static") { dns.back().st = (long)i; dns.back().stat = first(f, r, 0) != 0; }
+                else if (k == "External") dns.back().ext = first(f, r, 0) != 0;
                 else if (k == "Type") { auto v = f.nameValues(r); if (!v.empty()) dns.back().type = v[0]; }
-            } else if (r.level == 5 && pool3 == "ProcessorNodePool" && !pn.empty() && k == "Header") pn.back() = (long)i;
+            } else if (r.level == 5 && pool3 == "ProcessorNodePool" && !pn.empty()) {
+                if (k == "Header") pn.back() = (long)i;
+                else if (k == "Type") { auto v = f.nameValues(r); if (!v.empty()) procs.back().type = v[0]; }
+                else if (k == "DataNodeAttributes") procs.back().attrs = f.nameValues(r);
+                else if (k == "DataNodeRefs") procs.back().refs = f.ints(r);
+            } else if (r.level == 5 && pool3 == "BasisConversionPool" && k == "DataNodeRef") convRefs.insert(first(f, r, -1));
+            if (r.level == 3 && k == "ConnectionMapUsedDataNodes")
+                for (int32_t d : f.ints(r)) convRefs.insert(d);   // same treatment: must stay variable
         }
         if (counted || hs < 0 || hsi < 0 || hl < 0 || after < 0 || pn.empty()) continue;
         if (oct::spec(f.recs[hs].type).kind != oct::NAME || oct::spec(f.recs[hs].type).keyed) continue;
@@ -515,18 +526,71 @@ inline int const30(oct::File& f)
             for (int x = h; x > 0; x = parent[x]) s = s.empty() ? name[x] : name[x] + "/" + s;
             return s;
         };
-        // Static nodes that stay variable, as 3.0 has them: types 3.0 never keeps Static in a processor graph (Bool
-        // 3,743, Visibility 37,917, Int 4: all variable; statictypes.py) and nodes an Association binds (it writes
-        // them: the Surge ticker's 'InputSurge' Bool, 1.0 Static, 3.0 variable + Peeked)
+        // Only shapes 3.0 ships stay Static (staticflags.py, processor graphs); the other Static nodes become variable:
+        //  - types 3.0 never keeps Static: Bool (3,743), Visibility (37,917), Int (4) all variable;
+        //  - External ones: 3.0 has no Static External node but ClipData (1.0: 1,451 Static External Floats);
+        //  - nodes listed in ConnectionMapUsedDataNodes (3.0: 0 Static; 1.0: 439, all Static External Floats). The
+        //    reader puts those nodes in a NodeHandleArray in the variable arena (FUN_00500ac0 reads the list, hash
+        //    0x2cb3247b at 00500ecb, -> FUN_004e25d0), which an instance clones and relocates by the instance offset
+        //    (FUN_004ff0e0 -> NodeHandleArray vtable+0xc = FUN_004cf950 -> FUN_0049c5e0): a constant node there
+        //    becomes a wild pointer (in-game 2026-10-14 02:03, inc_dock_explode instanced at IN_City load: AV writing
+        //    00240028 under FUN_004cf950; its list holds the Static External Floats ScaleMultiplier / GrowShrink);
+        //  - nodes an Association binds (it writes them: the Surge ticker's 'InputSurge' Bool, 1.0 Static, 3.0
+        //    variable + Peeked);
+        //  - BasisConversion DataNodeRefs (3.0: never Static; 1.0: 11; same container relocation risk);
+        //  - nodes a processor takes through an input 3.0 never feeds from a Static node (FloatConnection / FloatNegate
+        //    / FloatMultiply Input, RelationshipProcessor Input, ClipProcessor Input, RadialBasisOrientation ...;
+        //    staticrefs.py: the 3.0 list below is every processor attribute it ships with a Static node);
+        //  - nodes whose header has a variable node / processor on or below it (3.0: 0 of 17,981 Static nodes;
+        //    1.0: 11), repeated until none is left.
+        static const std::set<std::string> staticInputs30 = {
+            "AimConstraintProcessorNode.AlignReference", "AimConstraintProcessorNode.Offset", "AimConstraintProcessorNode.UpReference",
+            "ClipProcessor.ClipData", "DilationOrientationConnection.RotateOffset", "DilationTranslationConnection.TranslateOffset",
+            "DilationTranslationOrientationConnection.RotateOffset", "DilationTranslationOrientationConnection.TranslateOffset",
+            "EventList.EventListData", "EventList.ReverseEventListData",
+            "IK2BRPLengthSquashZConstraint.InputDistanceThreshold", "IK2BRPLengthSquashZConstraint.InputEndInitialPosition",
+            "IK2BRPLengthSquashZConstraint.InputMidInitialPosition", "IK2BRPLengthSquashZConstraint.InputMidLocalToParentInitialOrientation",
+            "IK2BRPLengthSquashZConstraint.InputMidLocalToStartParentInitialOrientation",
+            "IK2BRPLengthSquashZConstraint.InputStartInitialPosition", "IK2BRPLengthSquashZConstraint.InputStartLocalToParentInitialOrientation",
+            "IK2BRPLengthSquashZConstraint.InputStartLocalToStartParentInitialOrientation", "IkLean2LinkProcessor.Axis",
+            "MotionPathOrientationProcessor.Spline", "MotionPathPositionProcessor.Spline", "SplineInputProcessor.Spline",
+            "Position3dOffsetProcessor.Offset", "Position3dWeightedAverageProcessor.TargetWeight", "RadialBasisApplyFloat.Neutral",
+            "RadialBasisApplyFloat.Weights", "RadialBasisPosition.ControllerKeys", "RadialBasisPosition.StandardDeviationValues",
+            "RelationshipProcessor.RelationshipData", "TransformTranslationOrientationConnection.RotateOffset",
+            "TransformTranslationOrientationScaleConnection.TranslateOffset", "UnitRotor3dOffsetProcessor.Offset",
+            "UnitRotor3dWeightedAverageProcessor.TargetWeight"};
+        std::vector<bool> offList(dns.size(), false);
+        for (auto& pr : procs)
+            for (size_t q = 0; q < pr.attrs.size() && q < pr.refs.size(); ++q) {
+                std::string a = pr.attrs[q].substr(0, pr.attrs[q].find('['));
+                if (pr.refs[q] >= 0 && (size_t)pr.refs[q] < dns.size() && !staticInputs30.count(pr.type + "." + a)) offList[pr.refs[q]] = true;
+            }
         bool keepAny = false;
-        for (auto& d : dns) {
+        for (size_t di = 0; di < dns.size(); ++di) {
+            auto& d = dns[di];
             if (!d.stat) continue;
             int h = hdr(d.hd);
-            if (d.type == "Bool" || d.type == "Int" || d.type == "Visibility" || (h > 0 && named[ordinal].count(pathOf(h)))) {
+            if (d.type == "Bool" || d.type == "Int" || d.type == "Visibility" || (d.ext && d.type != "ClipData") ||
+                (h > 0 && named[ordinal].count(pathOf(h))) || convRefs.count((int)di) || offList[di]) {
                 f.setInt(f.recs[d.st], 0);
                 d.stat = false;
-            } else keepAny = true;
+            }
         }
+        for (bool again = true; again;) {
+            again = false;
+            std::vector<std::string> var;
+            for (auto& d : dns) if (!d.stat && hdr(d.hd) > 0) var.push_back(pathOf(hdr(d.hd)));
+            for (long r : pn) if (hdr(r) > 0) var.push_back(pathOf(hdr(r)));
+            for (auto& d : dns) {
+                if (!d.stat || hdr(d.hd) <= 0) continue;
+                std::string p = pathOf(hdr(d.hd));
+                bool clash = std::any_of(var.begin(), var.end(), [&](const std::string& v) {
+                    return v == p || (v.size() > p.size() && v.compare(0, p.size(), p) == 0 && v[p.size()] == '/');
+                });
+                if (clash) { f.setInt(f.recs[d.st], 0); d.stat = false; again = true; }
+            }
+        }
+        for (auto& d : dns) keepAny |= d.stat;
         if (!keepAny) continue;   // addCounts' variable form is then the 3.0 one
         std::set<int> moving, used;
         for (auto& d : dns) (d.stat ? moving : used).insert(hdr(d.hd));
