@@ -139,6 +139,7 @@ static struct {
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
+    bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory has no case for type 10 (npcrt.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -172,6 +173,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
         else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
         else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
+        else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,

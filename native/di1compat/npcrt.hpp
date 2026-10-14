@@ -335,6 +335,25 @@ static void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
     logf("gamedb30 Playset %s unloaded: %u 3.0 tables it loaded released", name, (unsigned)done.size());
 }
 
+// ---- spawner10: the 1.0 SpawnerQuarterback group (SYS-3) ----
+// The 1.0 spawners' AI scripts (inc_omnisky_spawner_ai.btl.sx, inc_omnibotspawner_ai.btl.sx: 18 + 13 spawners in
+// in_city.ap) run LevelQuarterback_Create("SpawnerQuarterback_GROUP", "SpawnerQuarterback") and then
+// AIQuarterback_SetActive / AIQuarterback_AddActor on the handle (sxdis.py: pc 26, 36, 62). 3.0 still names the type --
+// its QB type table 0x2088228 maps "SpawnerQuarterback" to 10 (14 entries, _stricmp lookup FUN_010a8d30) -- but its factory
+// FUN_010c2f70 has no case 10 (byte table 0x10c3410[10] = the default, returns 0), and SetActive / AddActor (natives
+// 0x1376880 / 0x13767f0) call through the handle without a null check: once sx runs these 1.0 scripts, the first
+// spawner faults on a NULL vtable. The 1.0 SpawnerQuarterback is an AIQuarterback subclass (1.0 vtable 0x146f3e4); its
+// base part is made natively: type 10 is built as type 0, 3.0's AIQuarterback (0xc0 B, ctor FUN_0153e1b0).
+typedef void*(__cdecl* QbFactoryFn)(int type, int param);
+static QbFactoryFn g_qbFactory;
+static void* __cdecl hkQbFactory(int type, int param)
+{
+    if (type != 10) return g_qbFactory(type, param);
+    void* qb = g_qbFactory(0, param);
+    logf("spawner10: SpawnerQuarterback (QB type 10, no 3.0 factory case) made as its AIQuarterback base -> %p", qb);
+    return qb;
+}
+
 // ---- skin10: a 1.0 asset's InfluenceRemap palettes applied to its vertex buffer before the render transcode ----
 // (npc::skinRemap; octtest --skin + skincheck2.py: 1,425 primitives in 419 models equal the independent expectation;
 // against the 243 models 3.0 also ships, 830,242 weighted bone slots equal 3.0's, raw 1.0 indices 139,739)
@@ -355,6 +374,8 @@ static std::string skin10(oct::File& f, std::string& vbuf, const std::string& ib
 
 inline void install()
 {
+    if (g_cfg.spawner10)
+        hook("quarterback factory (spawner10)", 0x010C2F70, "64A1000000006AFF68????????50", (void*)&hkQbFactory, (void**)&g_qbFactory);
     if (g_cfg.gamedb30) {
         hook("DataMap record include (gamedb30)", 0x0070D730, "6AFF68????????64A100000000", (void*)&hkInclude, (void**)&g_include);
         hook("DataMap playset unload (gamedb30)", 0x0070DF70, "566A0068????????8BF1", (void*)&hkPlaysetUnload, (void**)&g_playsetUnload);
