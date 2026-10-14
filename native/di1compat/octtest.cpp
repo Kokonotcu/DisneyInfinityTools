@@ -1396,7 +1396,7 @@ static int choFileTest(int argc, char** a)
             }
     } else files.assign(a + 2, a + argc);
     int bad = 0;
-    size_t tc = 0, tl = 0, ti = 0, tt = 0, tb = 0, ta = 0, ts = 0, tr = 0, tk = 0, changedIds = 0, changedElse = 0;
+    size_t tc = 0, tl = 0, ti = 0, tt = 0, tb = 0, ta = 0, ts = 0, tr = 0, tk = 0, changedIds = 0, changedElse = 0, tsc = 0, sceneMiss = 0;
     for (auto& path : files) {
         std::string b = slurp(path);
         if (b.size() < 4 || oct::u((const uint8_t*)b.data(), 4) != oct::MAGIC) continue;   // empty / other tuples
@@ -1410,6 +1410,22 @@ static int choFileTest(int argc, char** a)
         if (f.write() != g0.write()) ++(ren || nk ? changedIds : changedElse);
         tr += ren;
         tk += nk;
+        // scene clips are re-packed even when motion() says 3.0 owns every template (the plugin's has30 for
+        // characters/omnidroid etc.): blocks outside Type 'Clip' SubNetworks, all of them
+        {
+            oct::File g1 = oct::File::parse(b.data(), b.size());
+            int scene = 0;
+            bool clipSn = false;
+            for (size_t i = 0; i < g1.recs.size(); ++i) {
+                const oct::Rec& r = g1.recs[i];
+                if (r.level == 2) clipSn = false;
+                if (r.level == 3 && g1.name(r) == "Type") clipSn = g1.nameValues(r) == std::vector<std::string>{"Clip"};
+                if (g1.name(r) == "ClipDataBlock" && !clipSn) ++scene;
+            }
+            int n1 = cho::clips30(g1, [](const std::string&) { return false; });
+            tsc += scene;
+            if (n1 < scene) { ++sceneMiss; printf("BAD %s: %d of %d scene blocks re-packed when 3.0 owns the templates\n", path.c_str(), n1, scene); }
+        }
         int nl = cho::layout30(f, &inst);
         int nt = cho::time30(f);
         int na = cho::anim30(f);
@@ -1432,9 +1448,10 @@ static int choFileTest(int argc, char** a)
     }
     printf("clip10ids: %zu blocks with 3.0 port ids, %zu model links renumbered; files changed by it %zu, changed without "
            "a renumbered clip or link %zu\n", tr, tk, changedIds, changedElse);
+    printf("scene clips with every template 3.0's: %zu blocks, %zu files with one left in the 1.0 layout\n", tsc, sceneMiss);
     printf("%zu files, %d bad; %zu blocks re-packed of %zu, %zu layouts (%zu instances), %zu time ranges, %zu anim inputs, "
            "%zu scene refs\n", files.size(), bad, tc, tb, tl, ti, tt, ta, ts);
-    return bad || changedElse ? 1 : 0;
+    return bad || changedElse || sceneMiss ? 1 : 0;
 }
 
 // --banm <pairs.txt>: lines '<1.0 .banm>|<3.0 .banm (text)>|<engine path>'; cho::banm30 on the 1.0 binary tuple must
