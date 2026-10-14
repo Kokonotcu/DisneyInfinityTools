@@ -43,8 +43,13 @@ inline oct::Rec blobRec(oct::File& f, uint16_t level, const std::string& n, cons
 // Base DataNode links (characters, props: 767 1.0 files; 15 shipped 3.0 exploders, one of them a 1.0 twin,
 // inc_phonebooth). 1.0 stores per link 'DataNodeLinks' = local DataNode index per port (-1 = none) and names the link
 // '<node>-<link>'; 3.0 stores the same map as three u16 blobs and the bare link name (3.0 names: no prefix, 6/6):
-//   PortToLocalIndices = DataNodeLinks; LocalUsedDataNodeIndices = the locals used, in port order;
-//   LocalToPortIndices = the port of each of those. (inc_phonebooth [-1,0,1,-1,-1] -> used [0,1], ports [1,2].)
+//   LocalUsedDataNodeIndices = the locals used, in port order; LocalToPortIndices = the port of each of those;
+//   PortToLocalIndices = per port, the position of its local in LocalUsedDataNodeIndices (0xffff = none).
+//   Rule on every shipped 3.0 choreography link (3,706/3,706 in 571 files, linkrule.py): PortToLocalIndices[p] = k
+//   -> k < used count and LocalToPortIndices[k] == p. It was written as the raw locals, which coincides with the
+//   positions only when the locals are 0..n-1 (37 of the 3,706; inc_phonebooth [-1,0,1,-1,-1] -> used [0,1]); for
+//   every other 1.0 link 3.0 looked past the used list and the attachment wrote nothing (in-game 2026-10-14: all 96
+//   external Visibility nodes of the IN_City choreographies at 0, INC_CIN_OpeningA's actors never shown).
 // Returns the link's additional size: its three blobs' data + 4 (fits 284 / 22 / 140 on the 15 shipped).
 inline int convertLink(oct::File& f, size_t link)
 {
@@ -67,20 +72,21 @@ inline int convertLink(oct::File& f, size_t link)
         }
     }
     if (dnl < 0) return extra;
-    std::vector<int32_t> ports = f.ints(f.recs[dnl]), used, toPort;
+    std::vector<int32_t> ports = f.ints(f.recs[dnl]), used, toPort, toUsed;
     for (size_t p = 0; p < ports.size(); ++p) {
-        bool seen = false;
-        for (int32_t u : used) seen |= u == ports[p];
-        if (ports[p] >= 0 && !seen) { used.push_back(ports[p]); toPort.push_back((int32_t)p); }
+        int32_t at = -1;
+        for (size_t k = 0; k < used.size() && at < 0; ++k) if (used[k] == ports[p]) at = (int32_t)k;
+        if (ports[p] >= 0 && at < 0) { at = (int32_t)used.size(); used.push_back(ports[p]); toPort.push_back((int32_t)p); }
+        toUsed.push_back(ports[p] >= 0 ? at : -1);
     }
     auto u16s = [](const std::vector<int32_t>& v) { std::string s; for (int32_t x : v) { uint16_t u = (uint16_t)x; s.append((const char*)&u, 2); } return s; };
     uint16_t lvl = f.recs[dnl].level;
     std::vector<oct::Rec> blobs = {blobRec(f, lvl, "LocalUsedDataNodeIndices", u16s(used)),
                                    blobRec(f, lvl, "LocalToPortIndices", u16s(toPort)),
-                                   blobRec(f, lvl, "PortToLocalIndices", u16s(ports))};
+                                   blobRec(f, lvl, "PortToLocalIndices", u16s(toUsed))};
     f.recs.erase(f.recs.begin() + dnl);
     f.recs.insert(f.recs.begin() + dnl, blobs.begin(), blobs.end());
-    return 4 + 2 * (int)(used.size() + toPort.size() + ports.size());
+    return 4 + 2 * (int)(used.size() + toPort.size() + toUsed.size());
 }
 
 // Adds the count records to the SubNetwork whose level-2 record is at index sn. Returns false (file unchanged)

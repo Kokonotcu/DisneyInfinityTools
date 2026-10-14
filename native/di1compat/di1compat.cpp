@@ -188,7 +188,6 @@ static struct {
     bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
     bool choConst10 = true;          // cho.hpp: Static nodes of choreography graphs stay Static under constant headers
     bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
-    bool camFold10 = true;           // cho.hpp: a 1.0 camera's motion-clip attachments as an in-network ClipProcessor
     bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
@@ -288,7 +287,6 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "variant10")) g_cfg.variant10 = atoi(val) != 0;
         else if (!strcmp(key, "choconst10")) g_cfg.choConst10 = atoi(val) != 0;
         else if (!strcmp(key, "camworld10")) g_cfg.camWorld10 = atoi(val) != 0;
-        else if (!strcmp(key, "camfold10")) g_cfg.camFold10 = atoi(val) != 0;
         else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
@@ -322,9 +320,9 @@ static void loadConfig(const char* dir)
     logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
          g_cfg.memtest, g_cfg.fpsLog10, g_cfg.loadProf10);
     logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d "
-         "banm10=%d variant10=%d camworld10=%d camfold10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
+         "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
          g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10,
-         g_cfg.variant10, g_cfg.camWorld10, g_cfg.camFold10, g_cfg.teardownTrace, g_cfg.breakTrace);
+         g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
     logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
     logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
          g_cfg.lockTrace10);
@@ -644,14 +642,6 @@ static bool transcodeCho(oct::File& f, std::string& note)
         int failed = 0;
         if (int n = cho::clips30(f, motion, &failed)) { note += "+clips(" + std::to_string(n) + ") "; changed = true; }
         if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
-    }
-    if (g_cfg.camFold10) {   // after clips30 (writes its block in the 3.0 layout), before layout30 (1.0 ContextRefs)
-        std::string why;
-        if (int n = cho::camfold30(f, [](const std::string& p, std::string& out) { return read10s(p, out); }, &why)) {
-            note += "+camfold(" + std::to_string(n) + ") ";
-            changed = true;
-        }
-        if (!why.empty()) note += why;
     }
     if (g_cfg.choLayout10) {
         int inst = 0;
@@ -1483,6 +1473,79 @@ static void __fastcall hkChoStart(uint8_t* self, void*)
     safeCopy(name, sizeof(name), *(const char**)(self + 0x38));
     logf("breaktrace cho start %p '%s' flags %08X", self, name, *(uint32_t*)(self + 0x1b4));
     g_choStart(self, nullptr);
+}
+// - choreography layout attachments FUN_00788280 (thiscall on the layout, 4 args, ret 0x10): after its gate
+//   FUN_00785b40(a1, a2) (ret 8; 0 = nothing applied) it walks the attachments (+0x30, count +0x34; 0xc each, base
+//   instance u16 +8, layer instance u16 +10) and binds one only when both instance objects (a3 +4: 0xc each, object
+//   first) exist; the base's vtable +0x14 accepts the layer and FUN_00787830 (4 args, ret 0x10) attaches the clip.
+//   Logged: each attachment's instances and objects as the applier sees them, the gate's result, every bind.
+typedef int(__fastcall* BtApplyFn)(uint8_t* self, void* edx, uint32_t a1, uint32_t a2, uint8_t* inst, uint32_t a4);
+static BtApplyFn g_layApply;
+static volatile LONG g_btApplies;
+static int __fastcall hkLayApply(uint8_t* self, void*, uint32_t a1, uint32_t a2, uint8_t* inst, uint32_t a4)
+{
+    if (InterlockedIncrement(&g_btApplies) <= 80 && tdReadable((uintptr_t)self, 0x38)) {
+        uint32_t n = *(uint32_t*)(self + 0x34);
+        uint8_t* att = *(uint8_t**)(self + 0x30);
+        uint8_t* objs = inst && tdReadable((uintptr_t)inst, 8) ? *(uint8_t**)(inst + 4) : nullptr;
+        char line[900] = "";
+        size_t at = 0;
+        for (uint32_t k = 0; k < n && k < 24 && att && tdReadable((uintptr_t)(att + 0xc * k), 0xc); ++k) {
+            uint16_t b = *(uint16_t*)(att + 0xc * k + 8), l = *(uint16_t*)(att + 0xc * k + 10);
+            const char* ob = objs && tdReadable((uintptr_t)(objs + 0xc * b), 4) ? (*(uint32_t*)(objs + 0xc * b) ? "" : "(null)") : "(?)";
+            const char* ol = objs && tdReadable((uintptr_t)(objs + 0xc * l), 4) ? (*(uint32_t*)(objs + 0xc * l) ? "" : "(null)") : "(?)";
+            char m0[40] = "", m1[40] = "";
+            safeCopy(m0, sizeof(m0), *(const char**)(att + 0xc * k));
+            safeCopy(m1, sizeof(m1), *(const char**)(att + 0xc * k + 4));
+            at += sprintf_s(line + at, sizeof(line) - at, " %u:%u%s'%s'/%u%s'%s'", k, b, ob, m0, l, ol, m1);
+            if (at > sizeof(line) - 80) break;
+        }
+        logf("breaktrace layout apply %p: %u attachments, %u instances, args %08X %08X %p %08X:%s", self, n,
+             *(uint32_t*)(self + 0x24), a1, a2, inst, a4, line);
+    }
+    return g_layApply(self, nullptr, a1, a2, inst, a4);
+}
+typedef int(__fastcall* BtGateFn)(void* self, void* edx, uint32_t a1, uint32_t a2);
+static BtGateFn g_layGate;
+static volatile LONG g_btGates;
+static int __fastcall hkLayGate(void* self, void*, uint32_t a1, uint32_t a2)
+{
+    int r = g_layGate(self, nullptr, a1, a2);
+    if (InterlockedIncrement(&g_btGates) <= 80) logf("breaktrace layout gate (%08X, %08X) -> %08X", a1, a2, r);
+    return r;
+}
+// - clip setup FUN_00552fc0 (thiscall on a clip evaluator, 3 args, ret 0xc): takes a clip (a1) and its block's
+//   descriptor (a2, u16 [1] = outputs); with a connection table at +0x44 (motion clips) FUN_005329b0 reads the outputs
+//   through it, else FUN_00532050 (scene clips). Logged: evaluator, clip, outputs, table.
+typedef void(__fastcall* BtClipSetFn)(uint8_t* self, void* edx, uint32_t clip, uint16_t* desc, uint32_t a3);
+static BtClipSetFn g_clipSet;
+static volatile LONG g_btClipSets;
+static void __fastcall hkClipSet(uint8_t* self, void*, uint32_t clip, uint16_t* desc, uint32_t a3)
+{
+    if (InterlockedIncrement(&g_btClipSets) <= 400)
+        logf("breaktrace clip set %p: clip %08X desc %p outputs %d table %08X a3 %08X", self, clip, desc,
+             desc && tdReadable((uintptr_t)desc, 4) ? desc[1] : -1, tdReadable((uintptr_t)self, 0x48) ? *(uint32_t*)(self + 0x44) : 0, a3);
+    g_clipSet(self, nullptr, clip, desc, a3);
+}
+// - music cue push FUN_0073c5c0 (thiscall on the music stack, 4 args, ret 0x10; name, priority, float, string)
+typedef uint32_t(__fastcall* BtMusicFn)(void* self, void* edx, const char* name, int prio, float f, const char* s);
+static BtMusicFn g_musicPush;
+static uint32_t __fastcall hkMusicPush(void* self, void*, const char* name, int prio, float f, const char* s)
+{
+    char n[80] = "", t[80] = "";
+    safeCopy(n, sizeof(n), name);
+    safeCopy(t, sizeof(t), s);
+    uint32_t r = g_musicPush(self, nullptr, name, prio, f, s);
+    logf("breaktrace music push '%s' priority %d %.2f '%s' -> %08X", n, prio, f, t, r);
+    return r;
+}
+typedef int(__fastcall* BtBindFn)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4);
+static BtBindFn g_layBind;
+static volatile LONG g_btBinds;
+static int __fastcall hkLayBind(void* self, void*, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4)
+{
+    if (InterlockedIncrement(&g_btBinds) <= 300) logf("breaktrace layout bind %p (%08X %08X %08X %08X)", self, a1, a2, a3, a4);
+    return g_layBind(self, nullptr, a1, a2, a3, a4);
 }
 typedef void(__cdecl* BtHitFn)(uint32_t actor, uint32_t a2, uint8_t* mun);
 static BtHitFn g_munHit;
@@ -3488,6 +3551,11 @@ extern "C" void __stdcall Pentane_Main()
         hook("choreography audio-sync wait (breaktrace)", 0x01442EE0, "568BF185F6744D8B06", (void*)&hkChoReady, (void**)&g_choReady);
         hook("choreography start (breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart, (void**)&g_choStart);
         hook("choreography play (breaktrace)", 0x01445E70, "5183790C00753B8B01", (void*)&hkBtPlay, (void**)&g_btPlay);
+        hook("layout attachments apply (breaktrace)", 0x00788280, "6AFF68????????64A100000000", (void*)&hkLayApply, (void**)&g_layApply);
+        hook("layout attachments gate (breaktrace)", 0x00785B40, "8B4C240885C97407", (void*)&hkLayGate, (void**)&g_layGate);
+        hook("layout attachment bind (breaktrace)", 0x00787830, "6AFF68????????64A100000000", (void*)&hkLayBind, (void**)&g_layBind);
+        hook("clip setup (breaktrace)", 0x00552FC0, "8B44240456578BF1", (void*)&hkClipSet, (void**)&g_clipSet);
+        hook("music cue push (breaktrace)", 0x0073C5C0, "81EC1C010000538BD9807B1000", (void*)&hkMusicPush, (void**)&g_musicPush);
     }
     if (g_cfg.teardownTrace) {
         hook("Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor, (void**)&g_layoutDtor);

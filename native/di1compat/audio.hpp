@@ -96,6 +96,7 @@ struct Api {
     FR(__stdcall* MusicSystem_GetCues)(void* ms, void* it, const char* filter);
     FR(__stdcall* MusicSystem_GetNextCue)(void* ms, void* it);
     FR(__stdcall* MusicSystem_PrepareCue)(void* ms, unsigned id, void** prompt);
+    FR(__stdcall* MusicSystem_PromptCue)(void* ms, unsigned id);
     FR(__stdcall* MusicSystem_Reset)(void* ms);
     FR(__stdcall* MusicSystem_SetPaused)(void* ms, int paused);
     FR(__stdcall* MusicPrompt_Begin)(void* p);
@@ -141,7 +142,7 @@ struct Api {
         AUD_E(Event_Start); AUD_E(Event_Stop); AUD_E(Event_SetPaused); AUD_E(Event_Set3DAttributes); AUD_E(Event_SetVolume);
         AUD_E(Event_SetCallback);
         AUD_E(EventSystem_GetCategory); AUD_E(EventSystem_GetMusicCategory); AUD_E(EventCategory_SetVolume);
-        AUD_E(EventCategory_GetVolume); AUD_E(MusicSystem_GetCues); AUD_E(MusicSystem_GetNextCue); AUD_E(MusicSystem_PrepareCue); AUD_E(MusicSystem_Reset);
+        AUD_E(EventCategory_GetVolume); AUD_E(MusicSystem_GetCues); AUD_E(MusicSystem_GetNextCue); AUD_E(MusicSystem_PrepareCue); AUD_E(MusicSystem_PromptCue); AUD_E(MusicSystem_Reset);
         AUD_E(MusicSystem_SetPaused); AUD_E(MusicPrompt_Begin); AUD_E(MusicPrompt_End); AUD_E(MusicPrompt_IsActive);
         AUD_E(MusicPrompt_Release);
         AUD_X(System_Set3DSettings); AUD_X(System_GetNumDrivers); AUD_X(System_GetDriverCaps); AUD_X(System_SetSpeakerMode);
@@ -1668,8 +1669,11 @@ inline int __cdecl hkAction(const char* name, int action, uint32_t obj, uint32_t
 inline uint32_t __fastcall hkMusicState(void* self, void*, const char* group, const char* state)
 {
     uint32_t r = oMusicState(self, nullptr, group, state);
-    if (r || !group || !state || _strnicmp(group, "Music_", 6) || !ready()) return r;
+    if (!group || !state || _strnicmp(group, "Music_", 6) || !ready()) return r;
     std::string x = group + 6;
+    // A 1.0-hosted playset has no MusicStates.bin, and with no table loaded FUN_007397b0 accepts every cue (+0x14 null
+    // -> 1, 0x00739837), so its 1 is no answer for such a group: the music is 1.0's either way (in-game 2026-10-14:
+    // Inc_mx_in_city / Inc_mx_opening_cinematic pushed, Music_Inc.fev never loaded, silence).
     if (!hostedMusic(x) || !music.ensure(x)) return r;
     std::lock_guard<std::recursive_mutex> l(g.mx);
     unsigned id = 0;
@@ -1689,6 +1693,30 @@ inline int __cdecl hkSetState(const char* group, const char* state)
         }
     }
     return oSetState(group, state);
+}
+
+// FUN_0073ed10 (thiscall on the music manager, 3 args (name, priority, string), ret 0xc): 3.0's 'play once' (the
+// SoundMusicCue node's Once input) pushes the cue for a fixed 3 s (FUN_0073c5c0 arg 0x40400000), which a Wwise state
+// change only needs to start a stinger. 1.0's counterpart FUN_00716ac0 -> FUN_01133610 -> FUN_01132b60 pushes nothing:
+// it finds the cue (MusicSystem vtable +0x38 getCues) and calls +0x28, MusicSystem::promptCue -- FMOD plays it once
+// and returns to the music under it. For a 1.0-hosted playset the cue goes the 1.0 way (in-game 2026-10-14:
+// Inc_mx_opening_cinematic, a looping cue still active after 100 s offline, was cut back to Inc_mx_in_city at 3 s).
+typedef uint32_t(__fastcall* MusicOnceFn)(void* self, void* edx, const char* name, int prio, const char* s);
+inline MusicOnceFn oMusicOnce;
+inline uint32_t __fastcall hkMusicOnce(void* self, void*, const char* name, int prio, const char* s)
+{
+    const char* u = name ? strchr(name, '_') : nullptr;
+    if (u && ready()) {
+        std::string x(name, u - name);
+        if (hostedMusic(x) && music.ensure(x)) {
+            std::lock_guard<std::recursive_mutex> l(g.mx);
+            unsigned id = 0;
+            bool ok = Music::cue(name, &id) && !g.f.MusicSystem_PromptCue(g.ms, id);
+            AUDLOG("audio10: music cue %s %s", name, ok ? "prompted once (1.0 promptCue)" : "not in the 1.0 project");
+            if (ok) return 0;
+        }
+    }
+    return oMusicOnce(self, nullptr, name, prio, s);
 }
 
 // FUN_0073ede0 (thiscall, MusicStack tick). 1.0 FUN_00717bd0 also pops the top entry once its prompt stops being
@@ -1943,6 +1971,7 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
         hook("MusicStates cue check (music10)", 0x007397B0, "578BF9837F1400", (void*)&hkMusicState, (void**)&oMusicState);
         hook("Wwise SetState (music10)", 0x01947BD0, "558BEC8B450856", (void*)&hkSetState, (void**)&oSetState);
         hook("MusicStack tick (music10)", 0x0073EDE0, "A1????????DB05????????81EC04010000", (void*)&hkStackTick, (void**)&oStackTick);
+        hook("music cue once (music10)", 0x0073ED10, "8B44240883EC08535657", (void*)&hkMusicOnce, (void**)&oMusicOnce);
     }
     if (cfg.vo) {
         vo.root10 = install10 + "\\assets\\sound\\dialog";

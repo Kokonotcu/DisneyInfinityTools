@@ -1560,6 +1560,26 @@ static int fmodTest(int argc, char** argv)
         if (p) { audio::g.f.MusicPrompt_IsActive(p, &activeAfter); audio::g.f.MusicPrompt_Release(p); }
     }
     printf("LIFE music Inc_mx_Metroville: active %d after 1 s, fresh prompt active %d after end+reset\n", active, activeAfter);
+    // CUE_RUN=<cue>[:seconds]: prompt that cue and report when its prompt stops being active (does it end by itself?)
+    if (const char* cr = getenv("CUE_RUN")) {
+        std::string c = cr;
+        int secs = 120;
+        size_t colon = c.find(':');
+        if (colon != std::string::npos) { secs = atoi(c.c_str() + colon + 1); c.resize(colon); }
+        audio::music.endPrompt();
+        audio::g.f.MusicSystem_Reset(audio::g.ms);
+        if (audio::music.ensure("Inc") && audio::music.begin(c.c_str())) {
+            int was = -1;
+            for (int t = 0; t <= secs * 1000; t += 250) {
+                run(250);
+                int a = -1;
+                audio::g.f.MusicPrompt_IsActive(audio::music.prompt, &a);
+                if (a != was) { printf("CUERUN %s at %.2f s: active %d\n", c.c_str(), t / 1000.0, a); was = a; }
+            }
+            printf("CUERUN %s done after %d s, active %d\n", c.c_str(), secs, was);
+        } else
+            printf("CUERUN %s: no prompt\n", c.c_str());
+    }
 
     // a 'virtual' event at its playback limit (fire_loop: MAX_PLAYBACKS_BEHAVIOR 5, 'just fail if quietest'): with the
     // listener at the origin and the limit filled at 10 m, a post at 30 m fails and one at 2 m gets a voice by stealing
@@ -2253,23 +2273,6 @@ int main(int argc, char** argv)
         lap("curve associations bound", gameplay::curves30(f));
         if (argc > 4 && std::string(argv[4]) == "cho") {   // the plugin's choreography steps too (transcodeCho, const30)
             lap("clip blocks re-packed", cho::clips30(f, nullptr));
-            // camfold30 reads motion clips: 'choreographies/<name>/rest' from the extract's '<shard>/<name>/rest'
-            std::string in = argv[2];
-            for (char& c : in) if (c == '\\') c = '/';
-            size_t at = in.find("/choreographies/");
-            std::string assets = at == std::string::npos ? "" : in.substr(0, at + 1);
-            auto readExtract = [&](const std::string& p, std::string& out) {
-                size_t a = p.find('/'), b = a == std::string::npos ? a : p.find('/', a + 1);
-                if (assets.empty() || b == std::string::npos) return false;
-                std::string name = p.substr(a + 1, b - a - 1);
-                std::ifstream s(assets + p.substr(0, a + 1) + name.substr(0, 2) + "/" + p.substr(a + 1), std::ios::binary);
-                if (!s) return false;
-                out.assign(std::istreambuf_iterator<char>(s), {});
-                return true;
-            };
-            std::string why;
-            lap("camera attachments folded", cho::camfold30(f, readExtract, &why));
-            if (!why.empty()) printf("  %s\n", why.c_str());
             lap("layouts converted", cho::layout30(f));
             lap("time ranges", cho::time30(f));
             lap("anim inputs", cho::anim30(f));
