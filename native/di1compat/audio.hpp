@@ -382,6 +382,8 @@ struct Host {
     std::unordered_map<uint32_t, V3> pos;             // game object -> engine-space position (SetPosition)
     float lpos[3] = {}, lfwd[3] = {0, 0, 1}, lup[3] = {0, 1, 0};
     bool lset = false;
+    std::mutex posMx;                                 // pos and the listener: the game thread's SetPosition calls never
+                                                      // wait for FMOD's update, which runs under mx
     volatile LONG* idCounter = nullptr;               // Wwise's own playing-id counter (FUN_01948a10), so ids never clash
     volatile LONG ownCounter = 0x40000000;            // octtest: no engine
     std::mutex doneMx;
@@ -640,9 +642,13 @@ struct Host {
 
     void place(void* ev, uint32_t obj)
     {
-        auto it = pos.find(obj);
-        const float* p = it != pos.end() ? it->second.v : lpos;   // no position known: at the listener
-        f.Event_Set3DAttributes(ev, p, nullptr, nullptr);
+        V3 p;
+        {
+            std::lock_guard<std::mutex> l(posMx);
+            auto it = pos.find(obj);
+            memcpy(p.v, it != pos.end() ? it->second.v : lpos, sizeof p.v);   // no position known: at the listener
+        }
+        f.Event_Set3DAttributes(ev, p.v, nullptr, nullptr);
     }
 
     // 1.0 FUN_01136520 without the per-call volume / min-max overrides (3.0's post carries none, so 1.0's defaults:
@@ -746,6 +752,7 @@ struct Host {
         std::lock_guard<std::recursive_mutex> l(mx);
         for (auto& pl : plays)
             if (pl.second.obj == obj && pl.second.ev) f.Event_Stop(pl.second.ev, 1);
+        std::lock_guard<std::mutex> p(posMx);
         pos.erase(obj);
     }
 
@@ -762,7 +769,14 @@ struct Host {
     {
         std::lock_guard<std::recursive_mutex> l(mx);
         ++tickNo;
-        if (lset) f.EventSystem_Set3DListenerAttributes(es, 0, lpos, nullptr, lfwd, lup);
+        float lp[3], lf[3], lu[3];
+        bool ls;
+        {
+            std::lock_guard<std::mutex> p(posMx);
+            memcpy(lp, lpos, sizeof lp); memcpy(lf, lfwd, sizeof lf); memcpy(lu, lup, sizeof lu);
+            ls = lset;
+        }
+        if (ls) f.EventSystem_Set3DListenerAttributes(es, 0, lp, nullptr, lf, lu);
         for (auto& pl : plays)
             if (pl.second.ev) place(pl.second.ev, pl.second.obj);
         f.EventSystem_Update(es);
@@ -1578,7 +1592,7 @@ inline uint32_t __cdecl hkPost(uint32_t ev, uint32_t obj, uint32_t flags, void* 
 inline int __cdecl hkSetPos(uint32_t obj, const float* p)
 {
     if (p) {
-        std::lock_guard<std::recursive_mutex> l(g.mx);
+        std::lock_guard<std::mutex> l(g.posMx);
         V3& v = g.pos[obj];
         v.v[0] = p[0]; v.v[1] = p[1]; v.v[2] = -p[2];
     }
@@ -1589,7 +1603,7 @@ inline int __cdecl hkSetPos(uint32_t obj, const float* p)
 inline int __cdecl hkListener(const float* p, uint32_t index)
 {
     if (p && index == 0) {
-        std::lock_guard<std::recursive_mutex> l(g.mx);
+        std::lock_guard<std::mutex> l(g.posMx);
         for (int i = 0; i < 3; ++i) {
             float s = i == 2 ? -1.0f : 1.0f;
             g.lfwd[i] = p[i] * s; g.lup[i] = p[3 + i] * s; g.lpos[i] = p[6 + i] * s;

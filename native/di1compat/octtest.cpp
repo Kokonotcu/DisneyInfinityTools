@@ -263,10 +263,15 @@ static int fmodTest(int argc, char** argv)
         }
         float dFill = dmin + 0.5f * (dmax - dmin), dFar = dmin + 0.9f * (dmax - dmin), dNear = dmin * 0.5f;
         printf("VIRT fire_loop 3D min %.1f max %.1f: limit filled at %.1f, posts at %.1f and %.1f\n", dmin, dmax, dFill, dFar, dNear);
-        {
-            std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-            audio::g.lset = true;
-            for (int i = 0; i < 40; ++i) audio::g.pos[100 + i] = audio::V3{{0, 0, i < 32 ? dFill : i == 32 ? dFar : dNear}};
+        {   // through the hooks, as the engine sets them (listener at the origin); no Wwise behind them here
+            audio::oListener = [](const float*, uint32_t) { return 1; };
+            audio::oSetPos = [](uint32_t, const float*) { return 1; };
+            const float lis[9] = {0, 0, 1, 0, 1, 0, 0, 0, 0};
+            audio::hkListener(lis, 0);
+            for (int i = 0; i < 40; ++i) {
+                const float p[6] = {0, 0, -(i < 32 ? dFill : i == 32 ? dFar : dNear), 0, 0, 1};   // Wwise z = -engine z
+                audio::hkSetPos(100 + i, p);
+            }
         }
         calls = 0;
         std::vector<uint32_t> ids;
