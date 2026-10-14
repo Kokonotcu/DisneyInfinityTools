@@ -203,6 +203,7 @@ static struct {
     bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
     bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
     bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
+    bool playsetMenu10 = true;       // menu: an Incredibles entry on the Play Sets list opens IN_City (ui::playsetMenu10)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -292,6 +293,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "challenge10")) g_cfg.challenge10 = atoi(val) != 0;
         else if (!strcmp(key, "selectmenu10")) g_cfg.selectMenu10 = atoi(val) != 0;
         else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
+        else if (!strcmp(key, "playsetmenu10")) g_cfg.playsetMenu10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -300,6 +302,7 @@ static void loadConfig(const char* dir)
          "banm10=%d variant10=%d teardowntrace=%d", g_cfg.choTime10, g_cfg.choAnim10, g_cfg.choScene10, g_cfg.choConst10,
          g_cfg.choLayout10, g_cfg.clip10,
          g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10, g_cfg.variant10, g_cfg.teardownTrace);
+    logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
 }
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
@@ -2264,6 +2267,17 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     // the file named Tips.lua only (FUN_00b70da0's literal), not every *tips.lua: the stream is consumed and re-served
     if (r && g_cfg.serve10 && g_cfg.tips10 && !(flags & 1) && (!_stricmp(p, "tips.lua") || endsWith(p, "/tips.lua") || endsWith(p, "\\tips.lua")))
         return tips30(path, flags, a3, a4, a5, r);
+    // menu: the Play Sets list (screen PlaysetListWin32) gets an Incredibles entry; its 3.0 chunk runs as shipped
+    if (r && g_cfg.playsetMenu10 && !(flags & 1) && endsWith(p, "playsetlistwin32.lua") && norm(p) == "presentation/playsetlistwin32.lua") {
+        std::string t;
+        if (readStream(r, t) && !t.empty() && t[0] == 0x1b) {
+            std::string s = ui::playsetMenu10(t);
+            logf("%s: Incredibles entry added (%u B 3.0 chunk -> %u B Lua)", p, (unsigned)t.size(), (unsigned)s.size());
+            return memFile(s.data(), s.size());
+        }
+        logf("%s: not the 3.0 chunk (%u B): unchanged", p, (unsigned)t.size());
+        return g_open(path, flags, a3, a4, a5);
+    }
     // gp: 3.0 files the activity -> challenge redirect extends (gameplay.hpp): the zone list (ChallengeTypeDataFile
     // beside the 1.0 ActivityTypeDataFile) and ChallengeData.lua (+ the 1.0 beacons)
     bool zl = endsWith(p, "zonelist.lua"), cd = endsWith(p, "challengedata/challengedata.lua") || endsWith(p, "challengedata\\challengedata.lua");
