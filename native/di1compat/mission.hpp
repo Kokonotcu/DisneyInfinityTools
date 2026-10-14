@@ -62,6 +62,11 @@ inline int luaEvents30(std::string& t)
 // MissionGivers_*_Story/_Side (FUN_015d22b0) and isStoryMission/isSideMission of MissionTaskNotify (FUN_015bfd10).
 // Corpus: every 1.0 Incredibles record is 0, 1 or 2; 3.0 ships its story/side missions as 3 (125) / 4 (143).
 // So 2 -> 3 on a story line, 4 on any other. Returns the records changed.
+// Not the records 1.0's log never listed as 'Mission' (its builder FUN_01028180): GoldStarContext 1 (+0x160 = 2,
+// Type 'GoldStar'; 1.0 FUN_01030a80, 3.0 FUN_016748d0 ctx[0x7f] = 2 -> FUN_01678ef0 'GoldStar') and MissionType
+// EvalTrigger (skipped by 1.0 FUN_01028180 and 3.0 FUN_0167df10). 3.0 data has 0 records of either kind, so as 3/4
+// they would only reach the story/side paths (guidance FUN_015cc820, celebration FUN_015bd040, beacon FUN_015c30a0).
+// IN: 13 GoldStar + 4 EvalTrigger records stay 2.
 inline int behaviour30(std::string& t)
 {
     static const std::string key = "\t\t\t\tMissionBehavior = 2,\n", line = "\t\t\tline = \"";
@@ -69,6 +74,9 @@ inline int behaviour30(std::string& t)
     for (size_t p = t.find(key); p != std::string::npos; p = t.find(key, p + 1)) {
         size_t next = t.find("\n\t\t{\n", p), l = t.find(line, p);   // this record's line = "...", before the next record
         if (l == std::string::npos || (next != std::string::npos && l > next)) continue;
+        size_t rs = t.rfind("\n\t\t{\n", p), end = next == std::string::npos ? t.size() : next;
+        auto has = [&](const char* s) { size_t h = t.find(s, rs == std::string::npos ? 0 : rs); return h < end; };
+        if (has("\t\t\t\tGoldStarContext = 1,\n") || has("\t\t\t\tMissionType = \"EvalTrigger\",\n")) continue;
         size_t q = l + line.size(), e = t.find('"', q);
         if (e == std::string::npos) break;
         std::string ln = t.substr(q, e - q);

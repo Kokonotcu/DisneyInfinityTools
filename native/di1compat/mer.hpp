@@ -54,6 +54,8 @@ struct Class { std::set<std::string> pins; std::map<std::string, int> params; };
 struct Table {
     bool events10 = true;   // presentation Event ints 1.0 -> 3.0 enum (cfg events10)
     bool portRefs = true;   // owner fields naming port sub-nodes: not described, not copied as pins (cfg portrefs10)
+    bool ports10 = true;    // port names from owner fields (LeafNameHash), DataFetch 'Value' under its port (cfg ports10)
+    bool pins10 = true;     // pin table = every plain non-parameter int; copies add the names an instance lacks (cfg pins10)
     std::set<std::string> registered;
     std::map<std::string, Class> classes;
     bool load(const std::string& text)
@@ -206,7 +208,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         long leaf = field(nodes[k], "LeafName");
         if (leaf >= 0) port[k] = f.nameValues(f.recs[leaf])[0];
     }
-    for (size_t k = 0; k < nodes.size(); ++k)
+    for (size_t k = 0; T.ports10 && k < nodes.size(); ++k)
         for (size_t j = nodes[k].at + 1; j < nodes[k].end; ++j) {
             const oct::Rec& r = f.recs[j];
             if (r.level != fl || !isInt(r) || isGeneric(f.name(r))) continue;
@@ -227,9 +229,14 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         const Node& n = nodes[k];
         if (pinTables.count(n.type) || n.type == "NameSpaceBegin" || n.type == "NameSpaceEnd") continue;
         auto c = T.classes.find(n.type);
+        if (!T.pins10 && c == T.classes.end()) continue;
         std::vector<oct::Rec> pins;
         for (size_t j = n.at + 1; j < n.end; ++j) {
             const std::string& nm = f.name(f.recs[j]);
+            if (!T.pins10) {   // the previous rule: only the pins the table names
+                if (f.recs[j].level == fl && isInt(f.recs[j]) && c->second.pins.count(nm)) pins.push_back(f.recs[j]);
+                continue;
+            }
             if (f.recs[j].level != fl || !isInt(f.recs[j]) || isGeneric(nm) || nm.find("__") != std::string::npos ||
                 (nm.size() > 6 && !nm.compare(nm.size() - 6, 6, "_value")) || portRefs[k].count(nm))
                 continue;
@@ -356,7 +363,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             if (pin || portRefs[k].count(nm)) continue;
             std::string pn = nm;
             if (pn.size() > 6 && !pn.compare(pn.size() - 6, 6, "_value")) pn = pn.substr(0, pn.size() - 6);
-            if (n.type == "DataFetch" && pn == "Value" && !port[k].empty()) { pn = port[k]; ++s.fetches; }
+            if (T.ports10 && n.type == "DataFetch" && pn == "Value" && !port[k].empty()) { pn = port[k]; ++s.fetches; }
             if (done.count(pn)) continue;
             int type = -1;
             if (c) { auto t = c->params.find(pn); if (t != c->params.end()) type = t->second; }
@@ -380,8 +387,12 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         }
         if (!n.stub) {   // the class's pin table on this instance too (the names it lacks)
             auto pt = pinTables.find(n.type);
-            bool copied = false;
-            if (pt != pinTables.end())
+            bool copied = false, has = false;
+            if (pt != pinTables.end() && !T.pins10) {   // the previous rule: the whole table, on instances listing no pin
+                for (size_t j = n.at + 1; j < n.end; ++j)
+                    if (f.recs[j].level == fl && c && c->pins.count(f.name(f.recs[j]))) has = true;
+                if (!has) { outRecs.insert(outRecs.end(), pt->second.begin(), pt->second.end()); copied = true; }
+            } else if (pt != pinTables.end())
                 for (auto& pr : pt->second)
                     if (!names.count(f.name(pr))) { outRecs.push_back(pr); copied = true; }
             s.pinsCopied += copied;

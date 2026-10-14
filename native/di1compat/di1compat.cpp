@@ -137,6 +137,8 @@ static struct {
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
     bool lockTrace10 = true;         // log control locks, controller contexts, choreography play/end, messages
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
+    bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them (Table::ports10)
+    bool pins10 = true;              // .mer: complete pin tables on every instance (Table::pins10)
     bool behav10 = true;             // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
     bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
 } g_cfg;
@@ -170,6 +172,8 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
         else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
         else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
+        else if (!strcmp(key, "ports10")) g_cfg.ports10 = atoi(val) != 0;
+        else if (!strcmp(key, "pins10")) g_cfg.pins10 = atoi(val) != 0;
         else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
         else if (!strcmp(key, "native10")) g_cfg.native10 = atoi(val) != 0;
     }
@@ -1205,20 +1209,22 @@ static const char* cstr(const void* at, char* buf, size_t cap)   // the char* a 
     return buf;
 }
 static uint32_t callerVa(void* ret) { return (uint32_t)((uintptr_t)ret - g_base + 0x400000u); }
-static volatile LONG g_lockTraceLines;
-static bool lockTraceRoom() { return InterlockedIncrement(&g_lockTraceLines) <= 4000; }
+// lock/unlock/context lines (rare, they name the holder) have their own budget: choreography and message lines
+// cannot use it up before the control loss
+static volatile LONG g_lockLines, g_traceLines;
+static bool lockTraceRoom(volatile LONG& n = g_traceLines) { return InterlockedIncrement(&n) <= 4000; }
 typedef void(__fastcall* CtlLockFn)(void* self, void* edx, int player, const void* reason);
 static CtlLockFn g_ctlLock, g_ctlUnlock;
 static void __fastcall hkCtlLock(void* self, void*, int player, const void* reason)
 {
     char r[128];
-    if (lockTraceRoom()) logf("control LOCK player %d reason '%s' (from %08X)", player, cstr(reason, r, sizeof(r)), callerVa(_ReturnAddress()));
+    if (lockTraceRoom(g_lockLines)) logf("control LOCK player %d reason '%s' (from %08X)", player, cstr(reason, r, sizeof(r)), callerVa(_ReturnAddress()));
     g_ctlLock(self, nullptr, player, reason);
 }
 static void __fastcall hkCtlUnlock(void* self, void*, int player, const void* reason)
 {
     char r[128];
-    if (lockTraceRoom()) logf("control unlock player %d reason '%s' (from %08X)", player, cstr(reason, r, sizeof(r)), callerVa(_ReturnAddress()));
+    if (lockTraceRoom(g_lockLines)) logf("control unlock player %d reason '%s' (from %08X)", player, cstr(reason, r, sizeof(r)), callerVa(_ReturnAddress()));
     g_ctlUnlock(self, nullptr, player, reason);
 }
 typedef void(__fastcall* CtxFn)(uint8_t* node, void* edx, uint32_t agent);
@@ -1226,13 +1232,13 @@ static CtxFn g_ctxOn, g_ctxOff;
 static void __fastcall hkCtxOn(uint8_t* node, void*, uint32_t agent)
 {
     char n[200];
-    if (lockTraceRoom()) logf("controller context ON (inputs disabled) '%s' agent %08X (from %08X)", cstr(node + 0xa8, n, sizeof(n)), agent, callerVa(_ReturnAddress()));
+    if (lockTraceRoom(g_lockLines)) logf("controller context ON (inputs disabled) '%s' agent %08X (from %08X)", cstr(node + 0xa8, n, sizeof(n)), agent, callerVa(_ReturnAddress()));
     g_ctxOn(node, nullptr, agent);
 }
 static void __fastcall hkCtxOff(uint8_t* node, void*, uint32_t agent)
 {
     char n[200];
-    if (lockTraceRoom()) logf("controller context off '%s' agent %08X (from %08X)", cstr(node + 0xa8, n, sizeof(n)), agent, callerVa(_ReturnAddress()));
+    if (lockTraceRoom(g_lockLines)) logf("controller context off '%s' agent %08X (from %08X)", cstr(node + 0xa8, n, sizeof(n)), agent, callerVa(_ReturnAddress()));
     g_ctxOff(node, nullptr, agent);
 }
 typedef void(__fastcall* ChoPlayFn)(uint8_t* node, void* edx);
@@ -1894,6 +1900,8 @@ extern "C" void __stdcall Pentane_Main()
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
     g_mer.events10 = g_cfg.events10;
     g_mer.portRefs = g_cfg.portRefs10;
+    g_mer.ports10 = g_cfg.ports10;
+    g_mer.pins10 = g_cfg.pins10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
     if (g_cfg.shaders10) {

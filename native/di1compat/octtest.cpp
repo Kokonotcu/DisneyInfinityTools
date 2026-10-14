@@ -169,11 +169,16 @@ int main(int argc, char** argv)
         printf("chd compiled exact: %zu, mismatch %zu\n", ok, bad);
         return 0;
     }
-    if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc] [--aliases] [--noportrefs]
+    if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc] [flags]
         mer::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
-        if (std::string(argv[argc - 1]) == "--noportrefs") { T.portRefs = false; --argc; }   // cfg portrefs10=0
-        if (std::string(argv[argc - 1]) == "--aliases") { mer::addAliases(T); --argc; }   // as after hkMerRegistry
+        for (std::string a; argc > 5 && (a = argv[argc - 1]).rfind("--", 0) == 0; --argc) {   // trailing flags, any order
+            if (a == "--noportrefs") T.portRefs = false;     // cfg portrefs10=0
+            else if (a == "--noports") T.ports10 = false;    // cfg ports10=0
+            else if (a == "--nopins") T.pins10 = false;      // cfg pins10=0
+            else if (a == "--noevents") T.events10 = false;  // cfg events10=0
+            else if (a == "--aliases") mer::addAliases(T);   // as after hkMerRegistry
+        }
         std::string b = slurp(argv[3]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
         mer::Stats st;
