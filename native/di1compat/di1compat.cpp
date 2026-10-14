@@ -1835,9 +1835,9 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
+    sx::g_log = logf;   // also names the key ids BMX-1/BTX-1 give unpaired 1.0 key names
     if (g_cfg.sx10 && g_cfg.sxNatives10) {
         sx::g_exe = g_base;
-        sx::g_log = logf;
         sx::init(g_cfg.sxPorts10);
         hook("Slang linker (1.0 natives)", 0x00736DA0, "51538B5C240C568BF18BCBE8", (void*)&sx::hkLink, (void**)&sx::g_link);
         if (g_cfg.sxPorts10 && g_cfg.sxBeh10)
