@@ -14,16 +14,20 @@
 //               instance gets the pins; a name with a '<name>_value' sibling is a data pin
 //   types       a parameter's type is the one 3.0 reads it as (the table), else the record's own
 //   second Type the parameter 'Type' (2,127 1.0 mission nodes; 3.0 data stores it so)
-//   LeafName    + LeafNameHash = lookup2(LeafName) (3.0 port sub-nodes carry the hash)
+//   LeafName    + LeafNameHash = lookup2(port name: LeafName, else the owner field naming the sub-node); a DataFetch's
+//               'Value' becomes the parameter of that port name (3.0 form); the owner field stays an int record only
+//               (no parameter, no pin-table copy: Table::portRefs)
 //   links       u32 n, u8 0, u16 3, n x (u16 code, u16 from, u16 to), from/to = node index - Begin - 1
 //   classes 3.0 does not register (DeliveryNode, Activate/SpawnDecorationSockets + 8 mission classes) would leave
 //               no node slot and shift every later index (verify-meridian claim 6: out-of-bounds link writes), so
 //               until they are ported (MER-3/6) such a node becomes a pinless NodeGroup and its links are dropped.
+//   Event       MissionPresentationList* 'Event' in the 3.0 mission event enum (mission.hpp; Table::events10)
 #pragma once
 #include <map>
 #include <set>
 #include <sstream>
 #include "oct.hpp"
+#include "mission.hpp"
 
 namespace mer {
 
@@ -48,6 +52,10 @@ inline uint32_t lookup2(const std::string& s, uint32_t seed = 0)
 enum { T_BOOL = 0, T_INT = 1, T_FLOAT = 2, T_STRING = 3, T_VEC3 = 4 };
 struct Class { std::set<std::string> pins; std::map<std::string, int> params; };
 struct Table {
+    bool events10 = true;   // presentation Event ints 1.0 -> 3.0 enum (cfg events10)
+    bool portRefs = true;   // owner fields naming port sub-nodes: not described, not copied as pins (cfg portrefs10)
+    bool ports10 = true;    // port names from owner fields (LeafNameHash), DataFetch 'Value' under its port (cfg ports10)
+    bool pins10 = true;     // pin table = every plain non-parameter int; copies add the names an instance lacks (cfg pins10)
     std::set<std::string> registered;
     std::map<std::string, Class> classes;
     bool load(const std::string& text)
@@ -71,6 +79,17 @@ struct Table {
         return !registered.empty();
     }
 };
+
+// mission.hpp kAliases as registered classes, each with its 3.0 twin's pins and parameter types added
+inline void addAliases(Table& T)
+{
+    for (auto& a : mission::kAliases) {
+        T.registered.insert(a.name);
+        Class &c = T.classes[a.name], &t = T.classes[a.twin];
+        c.pins.insert(t.pins.begin(), t.pins.end());
+        c.params.insert(t.params.begin(), t.params.end());
+    }
+}
 
 inline bool isGeneric(const std::string& n)
 {
@@ -131,7 +150,7 @@ inline int typeOf(const oct::File& f, const oct::Rec& r)
     return -1;
 }
 
-struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0; };
+struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0, fetches = 0; };
 
 // False (f unchanged) if the file is not a 1.0 graph (already has descriptions, or no node pool).
 inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::string* why = nullptr)
@@ -171,14 +190,59 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         return -1;
     };
     auto isInt = [&](const oct::Rec& r) { oct::Spec sp = oct::spec(r.type); return sp.shape == oct::SCALAR && sp.kind == oct::INT && !sp.keyed; };
-    // the class's pin records: from its first instance listing any (1.0 writes the table once per file)
+
+    // port names: a sub-node's LeafName, else the owner field naming it (1.0 camera/LuaNode/EventSurge ports carry no
+    // LeafName; their owner lists '<port> = <sub-node index>' and the sub-nodes sit right before it). 3.0 needs it as
+    // LeafNameHash (FUN_006c8be0 -> node+0x18) and names a DataFetch's constant after it: over 400 3.0 graphs every
+    // owned sub-node's LeafNameHash = lookup2(owner field) (9,629/9,629) and every DataFetch parameter hash = its
+    // LeafNameHash (2,638/2,638), while 1.0 stores that constant as 'Value' (808 DataFetch nodes) -- read raw, camera
+    // priorities and transition times, AI attack counts and the like fell back to defaults.
+    // The owner's field itself is a port reference: 3.0 owners keep it as an int record and never describe it as a
+    // parameter (2,937 3.0 mission/choreography graphs: 3,984 DataFetch ports, 0 owners with a same-named parameter),
+    // and it is no pin either, so it is neither described nor copied between instances (portRefs).
+    static const std::set<std::string> subTypes = {"Event", "DataFetch", "DataSource", "DataListSource", "DataListFetch",
+                                                   "Handler", "EventSurge", "DataWritable", "DataWrite"};
+    std::vector<std::string> port(nodes.size());
+    std::vector<std::set<std::string>> portRefs(nodes.size());
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        long leaf = field(nodes[k], "LeafName");
+        std::vector<std::string> v = leaf >= 0 ? f.nameValues(f.recs[leaf]) : std::vector<std::string>();
+        if (!v.empty()) port[k] = v[0];
+    }
+    for (size_t k = 0; T.ports10 && k < nodes.size(); ++k)
+        for (size_t j = nodes[k].at + 1; j < nodes[k].end; ++j) {
+            const oct::Rec& r = f.recs[j];
+            if (r.level != fl || !isInt(r) || isGeneric(f.name(r))) continue;
+            int64_t v = f.ints(r)[0];
+            if (v < 0 || (size_t)v >= k || k - (size_t)v > 64 || !port[v].empty() || nodes[v].ns != nodes[k].ns) continue;
+            bool owned = true;
+            for (size_t q = (size_t)v; q < k && owned; ++q) owned = subTypes.count(nodes[q].type) > 0;
+            if (owned) { port[v] = f.name(r); if (T.portRefs) portRefs[k].insert(port[v]); }
+        }
+
+    // the class's pin records: from its first instance listing any (1.0 writes the table once per file). Every plain
+    // int field that is not a parameter 3.0 reads counts: the table names a pin only if a 3.0 graph listed it, which
+    // misses classes no 3.0 graph uses (AbsoluteValueInt: 5 link ends) and names the table cannot hold (MissionMonitor
+    // 'Now Available': 22 link ends unbound on the instances that list no pins). Copies only add names an instance
+    // lacks, and 1.0 writes parameters on every instance, so only the pin table is ever copied.
     std::map<std::string, std::vector<oct::Rec>> pinTables;
-    for (auto& n : nodes) {
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        const Node& n = nodes[k];
+        if (pinTables.count(n.type) || n.type == "NameSpaceBegin" || n.type == "NameSpaceEnd") continue;
         auto c = T.classes.find(n.type);
-        if (c == T.classes.end() || pinTables.count(n.type)) continue;
+        if (!T.pins10 && c == T.classes.end()) continue;
         std::vector<oct::Rec> pins;
-        for (size_t j = n.at + 1; j < n.end; ++j)
-            if (f.recs[j].level == fl && isInt(f.recs[j]) && c->second.pins.count(f.name(f.recs[j]))) pins.push_back(f.recs[j]);
+        for (size_t j = n.at + 1; j < n.end; ++j) {
+            const std::string& nm = f.name(f.recs[j]);
+            if (!T.pins10) {   // the previous rule: only the pins the table names
+                if (f.recs[j].level == fl && isInt(f.recs[j]) && c->second.pins.count(nm)) pins.push_back(f.recs[j]);
+                continue;
+            }
+            if (f.recs[j].level != fl || !isInt(f.recs[j]) || isGeneric(nm) || nm.find("__") != std::string::npos ||
+                (nm.size() > 6 && !nm.compare(nm.size() - 6, 6, "_value")) || portRefs[k].count(nm))
+                continue;
+            if (c == T.classes.end() || c->second.pins.count(nm) || !c->second.params.count(nm)) pins.push_back(f.recs[j]);
+        }
         if (!pins.empty()) pinTables[n.type] = pins;
     }
 
@@ -275,10 +339,6 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             names.insert(nm);
             if (nm.size() > 6 && !nm.compare(nm.size() - 6, 6, "_value")) valued.insert(nm.substr(0, nm.size() - 6));
         }
-        bool hasPins = false;
-        for (size_t j = n.at + 1; j < n.end; ++j)
-            if (f.recs[j].level == fl && c && c->pins.count(f.name(f.recs[j]))) hasPins = true;
-
         std::string desc, val;
         uint32_t count = 0;
         std::set<std::string> done;
@@ -301,9 +361,10 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
                 // a second Type: the parameter 'Type'
             } else if (isGeneric(nm)) continue;
             bool pin = isInt(r) && ((c && c->pins.count(nm)) || valued.count(nm));
-            if (pin) continue;
+            if (pin || portRefs[k].count(nm)) continue;
             std::string pn = nm;
             if (pn.size() > 6 && !pn.compare(pn.size() - 6, 6, "_value")) pn = pn.substr(0, pn.size() - 6);
+            if (T.ports10 && n.type == "DataFetch" && pn == "Value" && !port[k].empty()) { pn = port[k]; ++s.fetches; }
             if (done.count(pn)) continue;
             int type = -1;
             if (c) { auto t = c->params.find(pn); if (t != c->params.end()) type = t->second; }
@@ -311,6 +372,11 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             if (type < 0) continue;
             size_t off = val.size();
             if (!encode(f, r, type, val, strs[ns])) continue;
+            if (T.events10 && type == T_INT && pn == "Event" && !n.type.compare(0, 23, "MissionPresentationList")) {
+                int32_t e = mission::presentEvent30((int32_t)oct::u((const uint8_t*)val.data() + off, 4));
+                memcpy(&val[off], &e, 4);
+                ++s.events;
+            }
             done.insert(pn);
             uint8_t tb = (uint8_t)type;
             uint32_t h = lookup2(pn);
@@ -320,13 +386,20 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             desc.append((const char*)&o, 4);
             ++count;
         }
-        if (!n.stub && !hasPins && c) {   // the class's pin table on this instance too
+        if (!n.stub) {   // the class's pin table on this instance too (the names it lacks)
             auto pt = pinTables.find(n.type);
-            if (pt != pinTables.end()) { outRecs.insert(outRecs.end(), pt->second.begin(), pt->second.end()); ++s.pinsCopied; }
+            bool copied = false, has = false;
+            if (pt != pinTables.end() && !T.pins10) {   // the previous rule: the whole table, on instances listing no pin
+                for (size_t j = n.at + 1; j < n.end; ++j)
+                    if (f.recs[j].level == fl && c && c->pins.count(f.name(f.recs[j]))) has = true;
+                if (!has) { outRecs.insert(outRecs.end(), pt->second.begin(), pt->second.end()); copied = true; }
+            } else if (pt != pinTables.end())
+                for (auto& pr : pt->second)
+                    if (!names.count(f.name(pr))) { outRecs.push_back(pr); copied = true; }
+            s.pinsCopied += copied;
         }
-        long leaf = field(n, "LeafName");
-        if (leaf >= 0 && !names.count("LeafNameHash"))
-            outRecs.push_back(f.intScalar(fl, "LeafNameHash", (int32_t)lookup2(f.nameValues(f.recs[leaf])[0])));
+        if (!port[k].empty() && !names.count("LeafNameHash"))
+            outRecs.push_back(f.intScalar(fl, "LeafNameHash", (int32_t)lookup2(port[k])));
         outRecs.push_back(f.intScalar(fl, "Mer_ParametersOffset", (int32_t)values[ns].size()));
         std::string d((const char*)&count, 4);
         outRecs.push_back(blob(f, fl, "Mer_ParameterDescription", d + desc));

@@ -169,9 +169,16 @@ int main(int argc, char** argv)
         printf("chd compiled exact: %zu, mismatch %zu\n", ok, bad);
         return 0;
     }
-    if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc]
+    if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc] [flags]
         mer::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
+        for (std::string a; argc > 5 && (a = argv[argc - 1]).rfind("--", 0) == 0; --argc) {   // trailing flags, any order
+            if (a == "--noportrefs") T.portRefs = false;     // cfg portrefs10=0
+            else if (a == "--noports") T.ports10 = false;    // cfg ports10=0
+            else if (a == "--nopins") T.pins10 = false;      // cfg pins10=0
+            else if (a == "--noevents") T.events10 = false;  // cfg events10=0
+            else if (a == "--aliases") mer::addAliases(T);   // as after hkMerRegistry
+        }
         std::string b = slurp(argv[3]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
         mer::Stats st;
@@ -179,8 +186,22 @@ int main(int argc, char** argv)
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         if (argc > 5) { std::string m = mer::mtc(f); std::ofstream(argv[5], std::ios::binary).write(m.data(), m.size()); }
-        printf("%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped; %zu B\n",
-               st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, o.size());
+        printf("%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches; %zu B\n",
+               st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches, o.size());
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--mission") {   // --mission <1.0 mission .lua> <out.lua>: events -> 3.0
+        std::string t = slurp(argv[2]);
+        int n = mission::luaEvents30(t);
+        std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
+        printf("%d presentation events remapped\n", n);
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--missiongraph") {   // --missiongraph <1.0 __missiongraph.lua> <out.lua>
+        std::string t = slurp(argv[2]);
+        int n = mission::behaviour30(t);
+        std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
+        printf("%d behaviours 2 -> story/side\n", n);
         return 0;
     }
     if (argc > 4 && std::string(argv[1]) == "--dct") {   // --dct <1.0 table> <its stringids> <key name>
