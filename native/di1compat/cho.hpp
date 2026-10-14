@@ -420,6 +420,223 @@ inline int anim30(oct::File& f, int* subnets = nullptr)
     return n;
 }
 
+// ---- constant section ----
+// const30 (choconst10): the Static DataNodes of a processor SubNetwork under constant headers, as 3.0 ships them.
+//   3.0 never has a variable ClipData or EventList node (processor graphs: 8,389 + 7,811 Static, 0 not; statics.py),
+//   and its reader keeps them in the constant arena (FUN_0050d8d0: Static -> +0x84) under constant headers 1..CHC
+//   (FUN_004fe4d0 builds them from the first ConstantLayoutCount layout ints), which instances share. octx::addCounts
+//   instead made 1.0 Static nodes variable (constant nodes under variable headers were relocated into wild pointers
+//   when instanced). A variable ClipData breaks instancing another way: its block buffer is a separate counted
+//   allocation in the arena (FUN_00516c00 -> FUN_00412150, pointer at node+0x3c), the instance clone relocates nodes
+//   only through vtable+0x28 = FUN_004cf8d0, which re-registers the node and leaves +0x3c on the template's buffer,
+//   and the clone's dtor (FUN_005080f0) then deletes the template's buffer against the template arena: one count too
+//   few per destroyed instance, and the arena (tracker at *(0x021B73A0), FUN_00416840) is freed while its last object
+//   is still in its dtor (in-game 2026-10-14, TS_WaterSplashdown: placement node at arena+0x324, arena count 2 = its
+//   two header entries; the second entry's delete freed the arena under the node -> AV 004EDDBB).
+//   Rule, on every 3.0 processor SubNetwork with Static nodes (6,798/6,798, construle.py): Static nodes' headers are
+//   1..CHC and no other node's / processor's; the constant headers are exactly the prefixes of the Static nodes' paths;
+//   ConstantLayoutCount = the layout ints of headers 1..CHC; a Static node's path is the variable path with its root
+//   prefixed 'Constant' ('ConstantANC_X/ClipData'; a root-level node keeps its name, 111 SubNetworks), and the
+//   variable tree no longer has it. Pool order is not part of it (111 shipped SubNetworks interleave). Written so:
+//   constant headers first (breadth first), the remaining headers after, Header fields renumbered, and a
+//   ConstantHeaderCount record that octx::addCounts turns into the constant counts (it then keeps Static). A Static
+//   node's variable header is dropped unless another node / processor uses it or a kept header lies below it. A
+//   Transform Association whose 'Constant'+NodeName header now exists gets AltNodeName = that name, as 3.0 writes.
+inline int const30(oct::File& f)
+{
+    long pool = f.pool("SubNetworkPool");
+    if (pool < 0) return 0;
+    std::vector<size_t> sns;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
+        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
+    int done = 0;
+    std::map<int, std::set<std::string>> constPaths;   // SubNetwork ordinal -> its constant header paths
+    std::map<int, std::set<std::string>> named;        // SubNetwork ordinal -> paths Associations bind ('a/b')
+    long ap0 = f.pool("AssociationPool");
+    for (size_t i = ap0 < 0 ? 0 : ap0 + 1, e = ap0 < 0 ? 0 : f.blockEnd(ap0); i < e; i = f.blockEnd(i)) {
+        std::string node;
+        int snRef = -1;
+        for (size_t j = i + 1, je = f.blockEnd(i); j < je; ++j) {
+            const std::string& k = f.name(f.recs[j]);
+            if (k == "NodeName") { auto v = f.nameValues(f.recs[j]); if (!v.empty()) node = v[0]; }
+            else if (k == "SubNetworkRef") snRef = first(f, f.recs[j], -1);
+        }
+        std::replace(node.begin(), node.end(), '|', '/');
+        if (snRef >= 0 && !node.empty()) named[snRef].insert(node);
+    }
+    for (auto it = sns.rbegin(); it != sns.rend(); ++it) {   // last first: the one inserted record keeps earlier indices
+        size_t sn = *it, end = f.blockEnd(sn);
+        int ordinal = (int)(sns.rend() - it) - 1;
+        long hs = -1, hsi = -1, hl = -1, after = -1;
+        bool counted = false;
+        struct D { long hd = -1, st = -1; bool stat = false; std::string type; };
+        std::vector<D> dns;                      // DataNode Header / Static records, Static, Type
+        std::vector<long> pn;                    // ProcessorNode Header records
+        std::string pool3;
+        for (size_t i = sn + 1; i < end; ++i) {
+            const oct::Rec& r = f.recs[i];
+            const std::string& k = f.name(r);
+            if (r.level == 3) {
+                pool3 = k;
+                if (k == "HeaderStrings") hs = (long)i;
+                else if (k == "HeaderStringIndices") hsi = (long)i;
+                else if (k == "HeaderLayout") hl = (long)i;
+                else if (k == "VariableHeaderCount" || k == "ConstantHeaderCount") counted = true;
+                else if (k == "Type" || k == "Name") after = (std::max)(after, (long)i);
+            } else if (r.level == 4 && pool3 == "DataNodePool") dns.emplace_back();
+            else if (r.level == 4 && pool3 == "ProcessorNodePool") pn.push_back(-1);
+            else if (r.level == 5 && pool3 == "DataNodePool" && !dns.empty()) {
+                if (k == "Header") dns.back().hd = (long)i;
+                else if (k == "Static") { dns.back().st = (long)i; dns.back().stat = first(f, r, 0) != 0; }
+                else if (k == "Type") { auto v = f.nameValues(r); if (!v.empty()) dns.back().type = v[0]; }
+            } else if (r.level == 5 && pool3 == "ProcessorNodePool" && !pn.empty() && k == "Header") pn.back() = (long)i;
+        }
+        if (counted || hs < 0 || hsi < 0 || hl < 0 || after < 0 || pn.empty()) continue;
+        if (oct::spec(f.recs[hs].type).kind != oct::NAME || oct::spec(f.recs[hs].type).keyed) continue;
+        std::vector<std::string> strs = f.nameValues(f.recs[hs]);
+        std::vector<int32_t> idx = f.ints(f.recs[hsi]), lay = f.ints(f.recs[hl]);
+        size_t H = idx.size();
+        std::vector<int> parent(H + 1, -1);
+        std::vector<std::string> name(H + 1);
+        std::vector<std::vector<int>> kids(H + 1);
+        size_t k = 0;
+        bool ok = true;
+        for (size_t p = 0; p + 1 < lay.size() && ok; p += 2)
+            for (int32_t c = 0; c < lay[p + 1]; ++c) {
+                if (++k > H || lay[p] < 0 || lay[p] >= (int)k || idx[k - 1] < 0 || idx[k - 1] >= (int)strs.size()) { ok = false; break; }
+                parent[k] = lay[p];
+                name[k] = strs[idx[k - 1]];
+                kids[lay[p]].push_back((int)k);
+            }
+        if (!ok || k != H) continue;
+        auto hdr = [&](long rec) { int h = rec < 0 ? -1 : first(f, f.recs[rec], -1); return h >= 1 && h <= (int)H ? h : -1; };
+        auto pathOf = [&](int h) {
+            std::string s;
+            for (int x = h; x > 0; x = parent[x]) s = s.empty() ? name[x] : name[x] + "/" + s;
+            return s;
+        };
+        // Static nodes that stay variable, as 3.0 has them: types 3.0 never keeps Static in a processor graph (Bool
+        // 3,743, Visibility 37,917, Int 4: all variable; statictypes.py) and nodes an Association binds (it writes
+        // them: the Surge ticker's 'InputSurge' Bool, 1.0 Static, 3.0 variable + Peeked)
+        bool keepAny = false;
+        for (auto& d : dns) {
+            if (!d.stat) continue;
+            int h = hdr(d.hd);
+            if (d.type == "Bool" || d.type == "Int" || d.type == "Visibility" || (h > 0 && named[ordinal].count(pathOf(h)))) {
+                f.setInt(f.recs[d.st], 0);
+                d.stat = false;
+            } else keepAny = true;
+        }
+        if (!keepAny) continue;   // addCounts' variable form is then the 3.0 one
+        std::set<int> moving, used;
+        for (auto& d : dns) (d.stat ? moving : used).insert(hdr(d.hd));
+        for (long r : pn) used.insert(hdr(r));
+        moving.erase(-1);
+        if (moving.empty()) continue;
+        // a Static node's variable header goes when nothing else uses it and all its children went (headers are
+        // numbered parents first, so children are decided first); otherwise it stays as a plain variable header
+        std::vector<bool> dropped(H + 1, false);
+        for (int h = (int)H; h >= 1; --h) {
+            bool d = moving.count(h) && !used.count(h);
+            for (int c : kids[h]) d = d && dropped[c];
+            dropped[h] = d;
+        }
+        // constant trie: (parent, name) -> id, ids 1.. in creation order; cpar/cname per id
+        std::vector<int> cpar{-1};
+        std::vector<std::string> cname{""};
+        std::vector<std::vector<int>> ckids(1);
+        std::map<std::pair<int, std::string>, int> trie;
+        std::map<int, int> constOf;   // old header of a Static node -> constant id
+        for (int h : moving) {
+            std::vector<std::string> comps;
+            for (int x = h; x > 0; x = parent[x]) comps.insert(comps.begin(), name[x]);
+            if (comps.size() > 1) comps[0] = "Constant" + comps[0];
+            int at = 0;
+            for (auto& c : comps) {
+                auto t = trie.find({at, c});
+                if (t == trie.end()) {
+                    int id = (int)cpar.size();
+                    cpar.push_back(at);
+                    cname.push_back(c);
+                    ckids.push_back({});
+                    ckids[at].push_back(id);
+                    t = trie.emplace(std::make_pair(at, c), id).first;
+                }
+                at = t->second;
+            }
+            constOf[h] = at;
+        }
+        // numbering, breadth first: a parent's children take consecutive numbers, one (parent, count) pair each
+        std::vector<std::string> newName{""};
+        std::vector<int32_t> newLay;
+        std::vector<int> cnum(cpar.size(), 0), vnum(H + 1, 0);
+        for (size_t q = 0; q < cpar.size(); ++q) {   // ids are created parents-first, so q's number exists
+            int me = q == 0 ? 0 : cnum[q];
+            if (ckids[q].empty()) continue;
+            newLay.insert(newLay.end(), {me, (int32_t)ckids[q].size()});
+            for (int c : ckids[q]) { cnum[c] = (int)newName.size(); newName.push_back(cname[c]); }
+        }
+        int chc = (int)newName.size() - 1;
+        std::vector<int> order{0};   // variable headers breadth first from the root, kept ones only
+        for (size_t q = 0; q < order.size(); ++q) {
+            std::vector<int> keep;
+            for (int c : kids[order[q]]) if (!dropped[c]) keep.push_back(c);
+            if (keep.empty()) continue;
+            newLay.insert(newLay.end(), {order[q] == 0 ? 0 : vnum[order[q]], (int32_t)keep.size()});
+            for (int c : keep) { vnum[c] = (int)newName.size(); newName.push_back(name[c]); order.push_back(c); }
+        }
+        std::vector<int32_t> newIdx;
+        for (size_t h = 1; h < newName.size(); ++h) {
+            auto s = std::find(strs.begin(), strs.end(), newName[h]);
+            if (s == strs.end()) { strs.push_back(newName[h]); s = strs.end() - 1; }
+            newIdx.push_back((int32_t)(s - strs.begin()));
+        }
+        f.setInts(f.recs[hsi], newIdx);
+        f.setInts(f.recs[hl], newLay);
+        octx::setNames(f, f.recs[hs], strs);
+        for (auto& d : dns) {
+            int h = hdr(d.hd);
+            if (h < 0) continue;
+            f.setInt(f.recs[d.hd], d.stat ? cnum[constOf[h]] : vnum[h]);
+        }
+        for (long r : pn) { int h = hdr(r); if (h >= 0) f.setInt(f.recs[r], vnum[h]); }
+        f.recs.insert(f.recs.begin() + after + 1, f.intScalar(3, "ConstantHeaderCount", chc));
+        for (size_t q = 1; q < cpar.size(); ++q) {
+            std::string pth = cname[q];
+            for (int x = cpar[q]; x > 0; x = cpar[x]) pth = cname[x] + "/" + pth;
+            constPaths[ordinal].insert(pth);
+        }
+        ++done;
+    }
+    // 3.0's Transform Association names the constant twin of its node as AltNodeName exactly when the SubNetwork has a
+    // 'Constant'+NodeName header (9,203 of 9,204 Transform Associations with one, 0 of 24,496 without; altname.py)
+    long ap = done ? f.pool("AssociationPool") : -1;
+    if (ap >= 0) {
+        std::vector<std::pair<size_t, std::string>> adds;   // insert position, AltNodeName
+        for (size_t i = ap + 1, e = f.blockEnd(ap); i < e; i = f.blockEnd(i)) {
+            if (f.recs[i].level != 2) continue;
+            std::string type, node;
+            int snRef = -1;
+            bool alt = false;
+            for (size_t j = i + 1, je = f.blockEnd(i); j < je; ++j) {
+                const std::string& k = f.name(f.recs[j]);
+                auto v = f.nameValues(f.recs[j]);
+                if (k == "Type" && !v.empty()) type = v[0];
+                else if (k == "NodeName" && !v.empty()) node = v[0];
+                else if (k == "SubNetworkRef") snRef = first(f, f.recs[j], -1);
+                else if (k == "AltNodeName") alt = true;
+            }
+            std::string want = "Constant" + node;
+            std::replace(want.begin(), want.end(), '|', '/');
+            if (type == "Transform" && !alt && constPaths.count(snRef) && constPaths[snRef].count(want))
+                adds.push_back({f.blockEnd(i), "Constant" + node});
+        }
+        for (auto a = adds.rbegin(); a != adds.rend(); ++a)
+            f.recs.insert(f.recs.begin() + a->first, f.nameScalar(3, f.addName("AltNodeName"), a->second));
+    }
+    return done;
+}
+
 // ---- placement scene nodes ----
 // Returns the PlacementNode Associations given a SceneTreeNodeRef.
 inline int scene30(oct::File& f)

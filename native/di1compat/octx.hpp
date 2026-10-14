@@ -112,6 +112,15 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     size_t end = f.blockEnd(sn);
     for (size_t i = sn + 1; i < end; ++i)
         if (f.recs[i].level == 3 && f.name(f.recs[i]) == "VariableHeaderCount") { if (why) *why = "has counts"; return false; }
+    // a ConstantHeaderCount here comes from cho::const30, which put the Static nodes under constant headers 1..chc:
+    // keep them Static and write the constant counts (3.0 form) instead of making them variable
+    int chc = -1;
+    for (size_t i = sn + 1; i < end; ++i)
+        if (f.recs[i].level == 3 && f.name(f.recs[i]) == "ConstantHeaderCount") {
+            chc = (int)f.ints(f.recs[i])[0];
+            f.recs.erase(f.recs.begin() + i);
+            break;
+        }
     // links first: their additional size is measured on the 3.0 form
     int links = 0, linksExtra = 0;
     bool hasLinkPool = false;
@@ -176,10 +185,16 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     // header's node pointer by the instance offset (FUN_004b4470), a constant (or heap) node included -> wild pointer
     // (in-game 2026-10-12, once the 1.0 mission graphs' .mer loaded and instanced them). Static data is never written,
     // so a per-instance copy reads the same.
-    if (!allStatic && statics) {
+    bool constSection = chc > 0 && !allStatic && statics;
+    if (!allStatic && statics && !constSection) {
         for (size_t i = sn + 1, e = f.blockEnd(sn); i < e; ++i)
             if (f.recs[i].level == 5 && f.name(f.recs[i]) == "Static" && f.ints(f.recs[i])[0]) f.setInt(f.recs[i], 0);
         statics = 0;
+    }
+    int clc = 0;   // ConstantLayoutCount: the layout ints that number headers 1..chc
+    if (constSection) {
+        std::vector<int32_t> lay = f.ints(f.recs[layoutAt]);
+        for (int got = 0; clc + 1 < (int)lay.size() && got < chc; clc += 2) got += lay[clc + 1];
     }
     if (!exact) {   // ponytail: generous bounds (128 B/node + payload), fit per-type sizes if memory ever matters
         s32 = 128 * (dn - statics + pn) + dnBytes + 4096;
@@ -187,7 +202,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     }
 
     std::vector<oct::Rec> a;
-    int vals[] = {allStatic ? hsi : 0, allStatic ? 0 : hsi, statics, dn - statics, pn};
+    int vals[] = {allStatic ? hsi : constSection ? chc : 0, allStatic ? 0 : constSection ? hsi - chc : hsi, statics, dn - statics, pn};
     for (int k = 0; k < 5; ++k) a.push_back(f.intScalar(3, COUNTS_A[k], vals[k]));
     s32 += g_slack;
     s64 += 2 * g_slack;
@@ -213,7 +228,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     if (lbinds) a.push_back(f.intScalar(3, "LayerBindAdditionalSize", lbBytes));
     a.push_back(f.intScalar(3, COUNTS_B[7], links));                      // BaseDataNodeLinksCount
     if (hasLinkPool) a.push_back(f.intScalar(3, "BaseDataNodeLinksAdditionalSize", linksExtra + g_slack / 16));
-    oct::Rec cl = f.intScalar(3, "ConstantLayoutCount", allStatic ? hl : 0);
+    oct::Rec cl = f.intScalar(3, "ConstantLayoutCount", allStatic ? hl : constSection ? clc : 0);
 
     // later positions first so the earlier indices stay valid
     f.recs.insert(f.recs.begin() + layoutAt + 1, cl);

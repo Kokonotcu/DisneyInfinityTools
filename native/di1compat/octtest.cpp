@@ -771,6 +771,183 @@ static std::vector<std::filesystem::path> files(const std::filesystem::path& ass
 static bool tuple(const std::string& b) { return b.size() >= 4 && oct::u((const uint8_t*)b.data(), 4) == oct::MAGIC; }
 }  // namespace scene
 
+// --cho-const <1.0 assets> <3.0 assets>: cho::const30 + octx::addCounts' constant mode. Every 1.0 choreography and
+// exploder through the plugin's .oct steps (octx, cho, const30, counts); on each processor SubNetwork with Static
+// nodes: converted or why not; the 3.0 rule on the result (Static headers 1..CHC, nothing else there; constant headers
+// = the prefixes of the Static paths; ConstantLayoutCount = the layout ints of 1..CHC; the plain path gone from the
+// variable headers; counts CHC + VHC = #headers, CDC = #Static, Static flags kept); every other node / processor keeps
+// its header path, every Static node gets 'Constant'+path (root-level: same); the file re-parses identically. Twins:
+// each Static node's constant path is a Static node path of the 3.0 twin's same-index SubNetwork.
+static int choConstTest(char** a)
+{
+    using namespace anim;
+    std::map<std::string, size_t> c;
+    auto statics = [](const oct::File& f, const Sn& s) {
+        std::vector<size_t> v;
+        for (size_t d : s.dns) { long st = kid(f, d, "Static"); if (st >= 0 && cho::first(f, f.recs[st], 0)) v.push_back(d); }
+        return v;
+    };
+    auto count3 = [](const oct::File& f, size_t snRec, const char* k) {
+        long r = kid(f, snRec, k);
+        return r < 0 ? -1 : cho::first(f, f.recs[r], -1);
+    };
+    for (const char* sub : {"choreographies", "exploders"}) {
+        auto A = choIndex(a[2], sub), B = choIndex(a[3], sub);
+        for (auto& [n, p] : A) {
+            std::string b = slurp(p);
+            if (!scene::tuple(b) || b.find(std::string("ProcessorNodePool\0", 18)) == std::string::npos) continue;
+            oct::File f = oct::File::parse(b.data(), b.size());
+            octx::addAssetPool(f);
+            octx::skin30(f);
+            octx::locator30(f);
+            octx::collision30(f);
+            cho::clips30(f, nullptr);
+            cho::layout30(f);
+            cho::time30(f);
+            cho::anim30(f);
+            cho::scene30(f);
+            // paths before const30, per SubNetwork: node / processor record order -> header path
+            auto before = subnets(f);
+            std::vector<std::vector<std::string>> pathsBefore;
+            for (auto& s : before) {
+                std::vector<std::string> v;
+                for (size_t d : s.dns) v.push_back(path(f, s, d));
+                for (size_t q : s.pns) v.push_back(path(f, s, q));
+                pathsBefore.push_back(v);
+            }
+            std::vector<std::vector<bool>> wasStatic;
+            for (auto& s : before) {
+                std::vector<bool> v;
+                auto st = statics(f, s);
+                for (size_t d : s.dns) v.push_back(std::find(st.begin(), st.end(), d) != st.end());
+                wasStatic.push_back(v);
+            }
+            // associations that name a Static node by its (pre-const30) path would lose it
+            {
+                long ap0 = f.pool("AssociationPool");
+                for (size_t i = ap0 < 0 ? 0 : ap0 + 1, e = ap0 < 0 ? 0 : f.blockEnd(ap0); i < e; i = f.blockEnd(i)) {
+                    long sr = kid(f, i, "SubNetworkRef");
+                    int k = sr < 0 ? -1 : cho::first(f, f.recs[sr], -1);
+                    if (k < 0 || k >= (int)before.size()) continue;
+                    std::string nn = str1(f, i, "NodeName");
+                    std::replace(nn.begin(), nn.end(), '|', '/');
+                    for (size_t d = 0; d < before[k].dns.size(); ++d)
+                        if (wasStatic[k][d] && pathsBefore[k][d] == nn && ++c["association binds a 1.0 Static node (must stay variable)"] <= 5)
+                            printf("assoc %s names Static '%s'\n", n.c_str(), nn.c_str());
+                }
+            }
+            int conv = cho::const30(f);
+            octx::addAllCounts(f);
+            std::string w = f.write();
+            oct::File g = oct::File::parse(w.data(), w.size());
+            if (g.write() != w) ++c["1.0: re-parse DIFFERS"];
+            auto S = subnets(g);
+            std::vector<size_t> snRecs;
+            for (size_t i = 0; i < g.recs.size(); ++i) if (g.recs[i].level == 2 && g.name(g.recs[i]) == "SubNetwork") snRecs.push_back(i);
+            (void)conv;
+            std::vector<std::set<std::string>> mine(S.size());
+            for (size_t k = 0; k < S.size() && k < before.size(); ++k) {
+                auto& s = S[k];
+                bool anyStatic = false;
+                for (bool x : wasStatic[k]) anyStatic |= x;
+                if (s.pns.empty() || !anyStatic) continue;
+                int chc = count3(g, snRecs[k], "ConstantHeaderCount"), vhc = count3(g, snRecs[k], "VariableHeaderCount");
+                int cdc = count3(g, snRecs[k], "ConstantDataNodeCount"), vdc = count3(g, snRecs[k], "VariableDataNodeCount");
+                int clc = count3(g, snRecs[k], "ConstantLayoutCount");
+                if (chc <= 0) {
+                    if (++c["1.0: Static processor subnetwork NOT converted"] <= 20) printf("not converted %s sn %zu\n", n.c_str(), k);
+                    continue;
+                }
+                ++c["1.0: Static processor subnetworks converted"];
+                auto st = statics(g, s);
+                size_t nst = st.size();
+                auto hnum = [&](size_t rec) { long h = kid(g, rec, "Header"); return h < 0 ? -1 : cho::first(g, g.recs[h], -1); };
+                bool ra = true;
+                for (size_t d = 0; d < s.dns.size(); ++d) {   // Static before, variable now: which kind
+                    bool now = std::find(st.begin(), st.end(), s.dns[d]) != st.end();
+                    if (wasStatic[k][d] && !now) ++c["Static node made variable (" + str1(g, s.dns[d], "Type") + ")"];
+                    if (!wasStatic[k][d] && now) ra = false;
+                }
+                for (size_t d : s.dns) {
+                    bool isSt = std::find(st.begin(), st.end(), d) != st.end();
+                    int h = hnum(d);
+                    if (h >= 0 && (isSt ? h > chc : h <= chc)) ra = false;
+                }
+                for (size_t q : s.pns) if (hnum(q) >= 0 && hnum(q) <= chc) ra = false;
+                std::set<std::string> want, have(s.paths.begin() + 1, s.paths.begin() + 1 + (std::min<size_t>)(chc, s.paths.size() - 1));
+                for (size_t d : st) {
+                    std::string pth = path(g, s, d);
+                    mine[k].insert(pth);
+                    for (size_t q = 0; q <= pth.size(); ++q) if (q == pth.size() || pth[q] == '/') want.insert(pth.substr(0, q));
+                }
+                long hlr = kid(g, snRecs[k], "HeaderLayout");
+                auto lay = g.ints(g.recs[hlr]);
+                int got = 0, ints = 0;
+                while (ints + 1 < (int)lay.size() && got < chc) { got += lay[ints + 1]; ints += 2; }
+                long hsir = kid(g, snRecs[k], "HeaderStringIndices");
+                size_t nh = g.ints(g.recs[hsir]).size();
+                bool counts = chc + vhc == (int)nh && cdc == (int)nst && vdc == (int)(s.dns.size() - nst) && clc == ints && got == chc;
+                std::set<std::string> var(s.paths.begin() + 1 + chc, s.paths.end());
+                bool rd = true;
+                for (auto& m : mine[k]) {
+                    std::string plain = m.rfind("Constant", 0) == 0 ? m.substr(8) : m;
+                    if (m.find('/') != std::string::npos && var.count(plain)) rd = false;
+                }
+                // paths kept / constant paths as expected
+                bool keep = true, cpath = true;
+                size_t i = 0;
+                for (size_t d = 0; d < s.dns.size(); ++d, ++i) {
+                    std::string now = path(g, s, s.dns[d]), was = pathsBefore[k][i];
+                    if (std::find(st.begin(), st.end(), s.dns[d]) != st.end()) {
+                        size_t sl = was.find('/');
+                        if (now != (sl == std::string::npos ? was : "Constant" + was)) cpath = false;
+                    } else if (now != was) keep = false;
+                }
+                for (size_t q = 0; q < s.pns.size(); ++q, ++i) if (path(g, s, s.pns[q]) != pathsBefore[k][i]) keep = false;
+                ++c[std::string("rule a) Static headers 1..CHC only: ") + (ra ? "yes" : "NO")];
+                ++c[std::string("rule b) constant headers = prefixes of Static paths: ") + (want == have ? "yes" : "NO")];
+                ++c[std::string("rule c+counts) CLC / CHC / VHC / CDC / VDC: ") + (counts ? "yes" : "NO")];
+                ++c[std::string("rule d) plain Static paths gone from the variable headers: ") + (rd ? "yes" : "NO")];
+                ++c[std::string("other nodes / processors keep their paths: ") + (keep ? "yes" : "NO")];
+                ++c[std::string("Static nodes get Constant+path: ") + (cpath ? "yes" : "NO")];
+                if ((!ra || want != have || !counts || !rd || !keep || !cpath) && c["printed"]++ < 4)
+                    printf("bad %s sn %zu: a=%d b=%d counts=%d d=%d keep=%d cpath=%d (chc %d vhc %d cdc %d vdc %d clc %d/%d nh %zu)\n", n.c_str(),
+                           k, ra, want == have, counts, rd, keep, cpath, chc, vhc, cdc, vdc, clc, ints, nh);
+            }
+            // Transform Associations: AltNodeName = 'Constant'+NodeName iff that header exists (the 3.0 rule)
+            long ap = g.pool("AssociationPool");
+            for (size_t i = ap < 0 ? 0 : ap + 1, e = ap < 0 ? 0 : g.blockEnd(ap); i < e; i = g.blockEnd(i)) {
+                if (str1(g, i, "Type") != "Transform") continue;
+                long sr = kid(g, i, "SubNetworkRef");
+                int k = sr < 0 ? -1 : cho::first(g, g.recs[sr], -1);
+                if (k < 0 || k >= (int)S.size()) continue;
+                std::string node = str1(g, i, "NodeName"), alt = str1(g, i, "AltNodeName"), wantH = "Constant" + node;
+                std::replace(wantH.begin(), wantH.end(), '|', '/');
+                bool exists = std::find(S[k].paths.begin(), S[k].paths.end(), wantH) != S[k].paths.end();
+                ++c[std::string("Transform association: ") + (exists ? (alt == "Constant" + node ? "AltNodeName as 3.0" : "AltNodeName MISSING")
+                                                                  : (alt.empty() ? "no Constant header, no AltNodeName" : "AltNodeName WITHOUT a header"))];
+            }
+            // twins
+            if (!B.count(n)) continue;
+            std::string b3 = slurp(B[n]);
+            if (!scene::tuple(b3)) continue;
+            oct::File t = oct::File::parse(b3.data(), b3.size());
+            auto T = subnets(t);
+            for (size_t k = 0; k < mine.size() && k < T.size(); ++k) {
+                if (mine[k].empty()) continue;
+                std::set<std::string> theirs;
+                for (size_t d : statics(t, T[k])) theirs.insert(path(t, T[k], d));
+                for (auto& m : mine[k]) ++c[std::string("twin: Static node constant path in the 3.0 twin: ") + (theirs.count(m) ? "yes" : "no")];
+            }
+        }
+    }
+    c.erase("printed");
+    for (auto& [k, v] : c) printf("%7zu %s\n", v, k.c_str());
+    bool bad = c.count("1.0: re-parse DIFFERS");
+    for (auto& [k, v] : c) bad |= k.size() > 3 && k.compare(k.size() - 2, 2, "NO") == 0;
+    return bad ? 1 : 0;
+}
+
 // --variants <1.0 assets> <3.0 assets>: octx::g_variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
 // the plugin's octx steps (addAssetPool, skin30, locator30, collision30, addAllCounts): every *VariantProcessor must sit
 // in a VariantGroup == [Input, Output], VariantGroupCount / VariantMemberCount must match the pool, the file must
@@ -1739,6 +1916,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-time10") return choTime10Test(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-anim") return choAnimTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-scene") return choSceneTest(argv);
+    if (argc > 3 && std::string(argv[1]) == "--cho-const") return choConstTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) octx::g_variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
     if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
         std::string in = slurp(argv[2]), out;
@@ -1982,6 +2160,14 @@ int main(int argc, char** argv)
         lap("collision aggregates added", octx::collision30(f));
         lap("lighting nodes converted", octx::realm30w(f));
         lap("curve associations bound", gameplay::curves30(f));
+        if (argc > 4 && std::string(argv[4]) == "cho") {   // the plugin's choreography steps too (transcodeCho, const30)
+            lap("clip blocks re-packed", cho::clips30(f, nullptr));
+            lap("layouts converted", cho::layout30(f));
+            lap("time ranges", cho::time30(f));
+            lap("anim inputs", cho::anim30(f));
+            lap("scene refs", cho::scene30(f));
+            lap("constant sections", cho::const30(f));
+        }
         lap("subnetworks with counts", octx::addAllCounts(f));
         std::string o = f.write();
         lap("write", (int)o.size());
