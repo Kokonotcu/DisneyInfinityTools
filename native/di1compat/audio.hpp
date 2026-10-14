@@ -12,6 +12,7 @@
 //     ExecuteActionOnEvent FUN_01948c20 (stop/pause/resume), the Pause_All/Resume_All posts (3.0 FUN_0073f900)
 //   - music: MusicStates check FUN_007397b0, SetState FUN_01947bd0 (3.0 music cues are Wwise states, FUN_0073ede0),
 //     stack tick FUN_0073ede0: 1.0 MusicSystem prompts as 1.0 FUN_00717bd0 drives them
+//   - mixer: 1.0's Mixer presets (a datamap kind 3.0 dropped) as the 'Mixer' source of the 1.0 category volumes
 #pragma once
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -19,6 +20,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -29,6 +31,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "third_party/miniz/miniz.h"
 
 namespace audio {
 
@@ -86,7 +89,9 @@ struct Api {
     FR(__stdcall* Event_Set3DAttributes)(void* ev, const float* pos, const float* vel, const float* orient);
     FR(__stdcall* Event_SetCallback)(void* ev, EventCb cb, void* ud);
     FR(__stdcall* EventSystem_GetCategory)(void* es, const char* name, void** cat);
+    FR(__stdcall* EventSystem_GetMusicCategory)(void* es, void** cat);
     FR(__stdcall* EventCategory_SetVolume)(void* cat, float v);
+    FR(__stdcall* EventCategory_GetVolume)(void* cat, float* v);
     FR(__stdcall* MusicSystem_GetCues)(void* ms, void* it, const char* filter);
     FR(__stdcall* MusicSystem_GetNextCue)(void* ms, void* it);
     FR(__stdcall* MusicSystem_PrepareCue)(void* ms, unsigned id, void** prompt);
@@ -133,7 +138,8 @@ struct Api {
         AUD_E(EventGroup_GetNumEvents); AUD_E(EventGroup_GetEventByIndex); AUD_E(EventGroup_GetProperty); AUD_E(Event_GetInfo);
         AUD_E(Event_GetPropertyByIndex); AUD_E(Event_GetCategory); AUD_E(EventCategory_GetInfo); AUD_E(EventCategory_GetParentCategory);
         AUD_E(Event_Start); AUD_E(Event_Stop); AUD_E(Event_SetPaused); AUD_E(Event_Set3DAttributes); AUD_E(Event_SetCallback);
-        AUD_E(EventSystem_GetCategory); AUD_E(EventCategory_SetVolume); AUD_E(MusicSystem_GetCues); AUD_E(MusicSystem_GetNextCue); AUD_E(MusicSystem_PrepareCue); AUD_E(MusicSystem_Reset);
+        AUD_E(EventSystem_GetCategory); AUD_E(EventSystem_GetMusicCategory); AUD_E(EventCategory_SetVolume);
+        AUD_E(EventCategory_GetVolume); AUD_E(MusicSystem_GetCues); AUD_E(MusicSystem_GetNextCue); AUD_E(MusicSystem_PrepareCue); AUD_E(MusicSystem_Reset);
         AUD_E(MusicSystem_SetPaused); AUD_E(MusicPrompt_Begin); AUD_E(MusicPrompt_End); AUD_E(MusicPrompt_IsActive);
         AUD_E(MusicPrompt_Release);
         AUD_X(System_Set3DSettings); AUD_X(System_GetNumDrivers); AUD_X(System_GetDriverCaps); AUD_X(System_SetSpeakerMode);
@@ -181,6 +187,172 @@ inline void splitLoad(const char* v, std::vector<std::string>& out)
     }
 }
 
+// ---- 1.0 Mixer: the datamap kind 'Mixer' (1.0 FUN_006efd10 case 7 -> FUN_00714f50) that 3.0 dropped (3.0's kind
+// list has none, FUN_0070c090); 1.0's core datamap names it 'Mixer|GameDB/Core/Mixer.lua', a plain Lua table ----
+
+// A Lua table constructor as data: numbers, strings, booleans, nested tables, 'name = value' and positional fields
+struct LuaV {
+    int t = 0;   // 0 nil, 1 number, 2 string, 3 boolean, 4 table
+    double n = 0;
+    std::string s;
+    std::map<std::string, LuaV> kv;
+    std::vector<LuaV> arr;
+    const LuaV* get(const char* k) const { auto it = kv.find(k); return it == kv.end() ? nullptr : &it->second; }
+    double num(const char* k, double d) const { const LuaV* v = get(k); return v && (v->t == 1 || v->t == 3) ? v->n : d; }
+    std::string str(const char* k) const { const LuaV* v = get(k); return v && v->t == 2 ? v->s : ""; }
+};
+struct LuaParse {
+    const char* p;
+    const char* e;
+    void ws()
+    {
+        for (;;) {
+            while (p < e && isspace((uint8_t)*p)) ++p;
+            if (e - p < 2 || p[0] != '-' || p[1] != '-') return;
+            while (p < e && *p != '\n') ++p;
+        }
+    }
+    bool word(const char* w)
+    {
+        size_t n = strlen(w);
+        if ((size_t)(e - p) < n || memcmp(p, w, n) || (p + n < e && (isalnum((uint8_t)p[n]) || p[n] == '_'))) return false;
+        p += n;
+        return true;
+    }
+    bool value(LuaV& v, int depth = 0)
+    {
+        ws();
+        if (p >= e || depth > 32) return false;
+        if (*p == '{') {
+            ++p;
+            v.t = 4;
+            for (;;) {
+                ws();
+                if (p >= e) return false;
+                if (*p == '}') { ++p; return true; }
+                const char* at = p;
+                std::string name;
+                while (p < e && (isalnum((uint8_t)*p) || *p == '_')) name += *p++;
+                ws();
+                if (!name.empty() && !isdigit((uint8_t)name[0]) && p < e && *p == '=' && (p + 1 >= e || p[1] != '=')) {
+                    ++p;
+                    if (!value(v.kv[name], depth + 1)) return false;
+                } else {
+                    p = at;
+                    v.arr.emplace_back();
+                    if (!value(v.arr.back(), depth + 1)) return false;
+                }
+                ws();
+                if (p < e && (*p == ',' || *p == ';')) ++p;
+            }
+        }
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            v.t = 2;
+            while (p < e && *p != q) {
+                if (*p == '\\' && p + 1 < e) ++p;
+                v.s += *p++;
+            }
+            if (p >= e) return false;
+            ++p;
+            return true;
+        }
+        if (word("true")) { v.t = 3; v.n = 1; return true; }
+        if (word("false")) { v.t = 3; v.n = 0; return true; }
+        if (word("nil")) return true;
+        std::string num;
+        while (p < e && (isalnum((uint8_t)*p) || *p == '.' || *p == '-' || *p == '+')) num += *p++;
+        char* end = nullptr;
+        v.n = strtod(num.c_str(), &end);
+        v.t = 1;
+        return !num.empty() && end && !*end;
+    }
+};
+
+// A file of the 1.0 install's root archives (assets\*.zip: data.zip, startup*.zip, mounted at the root by 1.0, so the
+// member path is the engine path; startup2.zip holds gamedb/core/coredatamap.lua, startup3.zip gamedb/core/mixer.lua)
+inline bool readRoot10(const std::string& install10, const std::string& path, std::string& out)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((install10 + "\\assets\\*.zip").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        mz_zip_archive z{};
+        if (!mz_zip_reader_init_file(&z, (install10 + "\\assets\\" + fd.cFileName).c_str(), 0)) continue;
+        int i = mz_zip_reader_locate_file(&z, path.c_str(), nullptr, 0);   // case-insensitive
+        size_t n = 0;
+        void* d = i >= 0 ? mz_zip_reader_extract_to_heap(&z, (mz_uint)i, &n, 0) : nullptr;
+        if (d) { out.assign((const char*)d, n); mz_free(d); found = true; }
+        mz_zip_reader_end(&z);
+    } while (!found && FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+// The 'Mixer' entries of 1.0's core datamap (GameDB/Core/CoreDataMap.lua, 1.0 string 0x01350a24; Lua bytecode: the
+// entry is the string constant 'Mixer|<path>')
+inline std::vector<std::string> mixerPaths(const std::string& coreDataMap)
+{
+    std::vector<std::string> out;
+    for (size_t at = coreDataMap.find("Mixer|"); at != std::string::npos; at = coreDataMap.find("Mixer|", at + 6)) {
+        size_t b = at + 6, e = b;
+        while (e < coreDataMap.size() && isprint((uint8_t)coreDataMap[e]) && coreDataMap[e] != '|') ++e;
+        if (e > b) out.push_back(coreDataMap.substr(b, e - b));
+    }
+    return out;
+}
+
+// 1.0's mixer at rest, per group (= FMOD category name): the 'Mixer' fader source (1.0 FUN_00713360: fader(group,
+// 'Mixer', base * v), base 1). Presets active from the start (ActivateOnStart, FUN_00714a00 -> FUN_00713f50) with their
+// Gain; tick FUN_007141d0: v = clamp(10^(clamp(sum, -60, 60) / 20) * MasterVolume, 0, 1), MasterVolume = 10^(dB / 20)
+// (FUN_00713290); a Volume entry contributes (FUN_00713490, gain clamped to 0..1)
+// 20 * log10(clamp(1 - (1 - 10^(clamp(Value, -60, 60) / 20)) * gain, 1e-5, 1e4)), clamped to -60..60.
+// ponytail: the fade to that value (FadeInTime, curve) is not run -- the 1.0 presets only switch at start (no
+// SoundMixerPreset node in the Metroville graphs); run FUN_00713490's fade if a node or the world edge drives them.
+struct MixerRest { std::map<std::string, float> vol; std::vector<std::string> active; double pitchSum = 0; };
+inline bool mixerRest(const std::string& lua, MixerRest& out, std::string* err = nullptr)
+{
+    auto fail = [&](const char* why) { if (err) *err = why; return false; };
+    size_t b = lua.find('{');
+    if (b == std::string::npos) return fail("no table");
+    LuaV m;
+    LuaParse ps{lua.data() + b, lua.data() + lua.size()};
+    if (!ps.value(m) || m.t != 4) return fail("not a Lua table");
+    const LuaV* gs = m.get("GlobalSettings");
+    const LuaV* groups = m.get("Groups");
+    const LuaV* presets = m.get("Presets");
+    if (!groups || groups->t != 4 || !presets || presets->t != 4) return fail("no Groups or Presets");
+    auto clampd = [](double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; };
+    double master = pow(10.0, clampd(gs ? gs->num("MasterVolume", 0) : 0, -60, 60) / 20);
+    for (auto& p : presets->arr)
+        if (p.num("ActivateOnStart", 0)) out.active.push_back(p.str("Name"));
+    for (auto& g : groups->arr) {
+        std::string name = g.str("Name");
+        if (name.empty()) continue;
+        double sum = 0;
+        for (auto& p : presets->arr) {
+            if (!p.num("ActivateOnStart", 0)) continue;
+            double gain = clampd(p.num("Gain", 1), 0, 1);
+            for (auto& entry : p.arr) {
+                if (entry.str("Name") != name) continue;
+                for (auto& par : entry.arr) {
+                    std::string kind = par.str("Parameter");
+                    double v = par.num("Value", 0);
+                    if (kind == "Volume") {
+                        double x = clampd(1 - (1 - pow(10.0, clampd(v, -60, 60) / 20)) * gain, 1e-5, 1e4);
+                        sum += clampd(20 * log10(x), -60, 60);
+                    } else if (kind == "Pitch")
+                        out.pitchSum += fabs(v * gain);
+                }
+            }
+        }
+        out.vol[name] = (float)clampd(pow(10.0, clampd(sum, -60, 60) / 20) * master, 0, 1);
+    }
+    if (gs) out.pitchSum += fabs(gs->num("MasterPitch", 0));
+    return true;
+}
+
 // One FMOD event standing in for a Wwise playing id
 struct Play {
     void* ev;          // nullptr: finished, or a stand-in with no FMOD event (StartMusic_X)
@@ -216,22 +388,26 @@ struct Host {
     void* progSound[4096] = {};                       // playing id & 4095 -> the programmer sound its event asks for
     uint32_t tickNo = 0;
     std::map<std::string, std::map<std::string, float>> faders;   // 3.0 volume faders: category -> source -> value
+    std::map<std::string, float> mixer;                           // 1.0 'Mixer' source per 1.0 category (mixer10)
     std::map<std::string, std::string>* dropped = nullptr;   // octtest: events the 1.0 rule leaves out, with the reason
 
-    // 3.0's faders ('<src>_Volume_Fader_<cat>' RTPCs, FUN_0182c460) onto the 1.0 categories of the same use
-    // (1.0's table at 0x0148d240: sfx, music, dialog, ui/sfx, ui/songs, ui/dialog)
+    // A 1.0 category's volume is the product of its fader sources (1.0 FUN_01136b10 drops a source that reaches 1.0:
+    // neutral). 3.0's faders ('<src>_Volume_Fader_<cat>' RTPCs, FUN_0182c460) go onto the 1.0 categories of the same
+    // use (1.0's table at 0x0148d240: sfx, music, dialog, ui/sfx, ui/songs, ui/dialog), times 1.0's own 'Mixer' source.
     void applyVolumes()
     {
         static const char* const map[][3] = {{"sfx", "sfx", "ui/sfx"}, {"music", "music", "ui/songs"}, {"dialog", "dialog", "ui/dialog"}};
+        std::map<std::string, float> vol = mixer;
         for (auto& m : map) {
             auto it = faders.find(m[0]);
             if (it == faders.end()) continue;
             float v = 1.0f;
             for (auto& s : it->second) v *= s.second;
-            for (int i = 1; i < 3; ++i) {
-                void* cat = nullptr;
-                if (!f.EventSystem_GetCategory(es, m[i], &cat) && cat) f.EventCategory_SetVolume(cat, v);
-            }
+            for (int i = 1; i < 3; ++i) vol[m[i]] = (vol.count(m[i]) ? vol[m[i]] : 1.0f) * v;
+        }
+        for (auto& c : vol) {
+            void* cat = nullptr;
+            if (!f.EventSystem_GetCategory(es, c.first.c_str(), &cat) && cat) f.EventCategory_SetVolume(cat, c.second);
         }
     }
 
@@ -1240,6 +1416,7 @@ struct Cfg {
     bool music = true;    // music10: 1.0 music through the MusicStack
     bool vo = true;       // vo10: 1.0 dialog banks and scripts in 3.0's dialog system
     bool trace = false;   // audiotrace10: log each posted name once with the backend that took it
+    bool mixer = true;    // mixer10: 1.0's Mixer presets (GameDB/Core/Mixer.lua) as the 'Mixer' source of the 1.0 categories
 };
 inline Cfg cfg;
 inline std::string sound30;   // <3.0 install>\assets\sound
@@ -1647,6 +1824,23 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
     CloseHandle(th);
     sound30 = game30 + "\\assets\\sound";
     g.idCounter = (volatile LONG*)rt(0x022AFBE8);
+    if (cfg.mixer) {   // 1.0 loads it through its core datamap at boot, before any zone
+        std::string core, lua, err;
+        std::vector<std::string> paths;
+        MixerRest rest;
+        if (readRoot10(install10, "GameDB/Core/CoreDataMap.lua", core) && !(paths = mixerPaths(core)).empty() &&
+            readRoot10(install10, paths[0], lua) && mixerRest(lua, rest, &err)) {
+            std::string a, v;
+            for (auto& s : rest.active) a += (a.empty() ? "" : ", ") + s;
+            char b[64];
+            for (auto& x : rest.vol) { sprintf_s(b, "%s%s %.3f", v.empty() ? "" : ", ", x.first.c_str(), x.second); v += b; }
+            AUDLOG("mixer10: %s: active %s; at rest %s%s", paths[0].c_str(), a.c_str(), v.c_str(),
+                   rest.pitchSum ? " (a pitch offset is set: not applied)" : "");
+            std::lock_guard<std::recursive_mutex> l(g.mx);
+            g.mixer = rest.vol;
+        } else
+            AUDLOG("mixer10: no 1.0 mixer (%s)", core.empty() ? "no core datamap" : paths.empty() ? "no Mixer entry" : lua.empty() ? "file missing" : err.c_str());
+    }
     g.loadTree("Initialize.fev", "Permanent");   // 1.0 FUN_01138210 at audio init: 'Initialize.fev:Permanent'
     idPauseAll = fnv1("Pause_All");
     idPauseExUi = fnv1("Pause_All_Except_UI");

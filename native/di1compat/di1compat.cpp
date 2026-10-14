@@ -137,6 +137,7 @@ static struct {
     bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
     bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
     bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
+    bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -168,6 +169,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "music10")) g_cfg.music10 = atoi(val) != 0;
         else if (!strcmp(key, "vo10")) g_cfg.vo10 = atoi(val) != 0;
         else if (!strcmp(key, "audiotrace10")) g_cfg.audioTrace10 = atoi(val) != 0;
+        else if (!strcmp(key, "mixer10")) g_cfg.mixer10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1825,6 +1827,7 @@ extern "C" void __stdcall Pentane_Main()
         audio::cfg.music = g_cfg.music10;
         audio::cfg.vo = g_cfg.vo10;
         audio::cfg.trace = g_cfg.audioTrace10;
+        audio::cfg.mixer = g_cfg.mixer10;
         if (!audio::install(hook, rt, g_cfg.install10, g_gameDir)) logf("audio10: off (FMOD host failed)");
     }
 }

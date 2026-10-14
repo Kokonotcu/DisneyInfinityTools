@@ -248,6 +248,63 @@ static int fmodTest(int argc, char** argv)
     return 0;
 }
 
+// octtest --mixer <1.0 install>  mixer10 offline acceptance (audio.hpp): the 'Mixer' entry of 1.0's core datamap, its
+// Lua table read from the install's root archives, the at-rest 'Mixer' source per group (mixercheck.py recomputes it
+// from the file on its own), then applied through the real FMOD DLLs (no output) with Initialize, IN_City and
+// Music_Inc loaded: every group's category volume read back, and where the music system's own category sits.
+static int mixerTest(char** argv)
+{
+    audio::logfn = stdoutLog;
+    std::string inst = argv[2], core, lua;
+    if (!audio::readRoot10(inst, "GameDB/Core/CoreDataMap.lua", core)) { printf("MIXER no core datamap\n"); return 1; }
+    std::vector<std::string> paths = audio::mixerPaths(core);
+    for (auto& p : paths) printf("MIXER datamap entry %s\n", p.c_str());
+    if (paths.empty() || !audio::readRoot10(inst, paths[0], lua)) { printf("MIXER no mixer file\n"); return 1; }
+    audio::MixerRest rest;
+    std::string err;
+    if (!audio::mixerRest(lua, rest, &err)) { printf("MIXER parse failed: %s\n", err.c_str()); return 1; }
+    for (auto& a : rest.active) printf("MIXER active %s\n", a.c_str());
+    for (auto& v : rest.vol) printf("MIXER group %s %.6f\n", v.first.c_str(), v.second);
+    printf("MIXER pitch sum %.6f\n", rest.pitchSum);
+    if (!audio::g.init(inst, true)) return 1;
+    audio::g.loadTree("Initialize.fev", "Permanent");
+    audio::g.loadTree("IN_City.fev", nullptr);
+    audio::music.ensure("Inc");
+    {
+        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+        audio::g.mixer = rest.vol;
+        audio::g.faders["music"]["Options"] = 0.5f;   // a 3.0 option fader on top: music categories at 0.5 x mixer
+        audio::g.applyVolumes();
+    }
+    for (const char* c : {"sfx", "music", "dialog", "ui/sfx", "ui/songs", "ui/dialog", "sfx_sfx2d", "sfx_sfx3d_ambience",
+                          "sfx_sfx3d_ship", "sfx_sfx3d_ambience_waterfall_virtual", "master"}) {
+        void* cat = nullptr;
+        float v = -1;
+        bool has = !audio::g.f.EventSystem_GetCategory(audio::g.es, c, &cat) && cat;
+        if (has) audio::g.f.EventCategory_GetVolume(cat, &v);
+        printf("CAT %s %s %.6f\n", c, has ? "exists" : "absent", v);
+    }
+    void* mc = nullptr;
+    if (!audio::g.f.EventSystem_GetMusicCategory(audio::g.es, &mc) && mc) {
+        std::string chain;
+        for (void* c = mc; c;) {
+            char* n = nullptr;
+            audio::g.f.EventCategory_GetInfo(c, nullptr, &n);
+            chain += std::string(chain.empty() ? "" : " < ") + (n ? n : "?");
+            void* parent = nullptr;
+            if (audio::g.f.EventCategory_GetParentCategory(c, &parent)) parent = nullptr;
+            c = parent;
+        }
+        void* music = nullptr;
+        audio::g.f.EventSystem_GetCategory(audio::g.es, "music", &music);
+        float v = -1;
+        audio::g.f.EventCategory_GetVolume(mc, &v);
+        printf("MUSICCAT %s (same object as 'music': %s) volume %.6f\n", chain.c_str(), mc == music ? "yes" : "no", v);
+    } else
+        printf("MUSICCAT none\n");
+    return 0;
+}
+
 // octtest --vo <1.0 install> <out dir> [<dir of decrypted 3.0 scripts>]  vo10 offline acceptance (audio.hpp), real
 // FMOD DLLs, no output:
 //  DLG   every 1.0 DLG v11 script through dlgTranscode -> <out>\<name>.dlg30, and with 3.0's script of the same name
@@ -398,6 +455,7 @@ int main(int argc, char** argv)
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 3 && std::string(argv[1]) == "--fmod") return fmodTest(argc, argv);
     if (argc > 2 && std::string(argv[1]) == "--fevdeps") return fevDeps(argv);
+    if (argc > 2 && std::string(argv[1]) == "--mixer") return mixerTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--vo") return voTest(argv);
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
