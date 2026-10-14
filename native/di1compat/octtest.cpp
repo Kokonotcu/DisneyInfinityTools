@@ -24,6 +24,7 @@
 #include "ui.hpp"
 #include "audio.hpp"
 #include <cstdarg>
+#include "vfx.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -1491,6 +1492,35 @@ int main(int argc, char** argv)
         printf("%d constants rewritten, %zu -> %zu B\n", n, in.size(), out.size());
         if (argc > 3) std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
         return 0;
+    }
+    // --pd <1.0 .particledata | .p3d> <out>: vfx.hpp's transcode (particles.py writes the oracle's bytes to compare)
+    if (argc > 3 && std::string(argv[1]) == "--pd") {
+        std::string in = slurp(argv[2]), out;
+        vfx::Stats st;
+        bool ok = vfx::isPd10(in) ? vfx::transcode(in, out, &st) : vfx::p3d30(in, out);
+        if (!ok) { printf("not a 1.0 particle package or mesh\n"); return 1; }
+        printf("%u -> %u B, %d emitters %d effects %d params %d keys %d mesh emitters\n", (unsigned)in.size(),
+               (unsigned)out.size(), st.emitters, st.effects, st.params, st.keys, st.meshes);
+        std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
+        return 0;
+    }
+    // --mtb <render table> <3.0 extract root> <1.0 extract root> <1.0 .mtb> <engine path>: the plugin's serve of a
+    // stand-alone bundle (di1compat.cpp transcode() .mtb case: donors from the engine path's 3.0 folder); a failure
+    // there serves the 1.0 bundle raw
+    if (argc > 6 && std::string(argv[1]) == "--mtb") {
+        render::Table T;
+        if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
+        std::string ext30 = argv[3], ext10 = argv[4], p = argv[6];
+        render::IO io;
+        io.read30 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / q.substr(2)); return !o.empty(); };
+        io.read10 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / q); return !o.empty(); };
+        render::Result r;
+        bool ok = render::transcodeBundle(T, io, slurp(argv[5]), "3:" + p.substr(0, p.find('/') + 1), r);
+        for (auto& pr : r.problems) printf("problem: %s\n", pr.c_str());
+        int n = 0;
+        for (auto& [t, c] : r.tiers) { printf("tier %s %d\n", t.c_str(), c); n += c; }
+        printf("%s: %d materials, %zu 1.0 textures, %zu B\n", ok ? "ok" : "FAILED", n, r.textures10.size(), r.mtb.size());
+        return ok ? 0 : 1;
     }
     if (argc > 3 && std::string(argv[1]) == "--zip") {   // --zip <1.0 zip> <member>: the plugin's read10 calls
         mz_zip_archive z{};
