@@ -114,6 +114,7 @@ inline uint8_t* callingEntry(uint8_t* ctx)
 inline void __cdecl stub(uint8_t* ctx)
 {
     Native* n = *(Native**)(callingEntry(ctx) + 12);
+    if (n->fn) return n->fn(ctx);   // provided after this script was linked (provide())
     Vm v{ctx};
     v.top() -= n->args;
     for (int i = 0; i < n->results; ++i) v.pushInt(0);
@@ -590,6 +591,17 @@ inline void init(bool ports)
     for (Native& n : g_natives) t[n.name] = &n;
     if (ports)
         for (Native& n : g_ports) t[n.name] = &n;
+}
+// Other tracks' ports of 1.0 systems (SpawnerQuarterback, BlockheadQuarterback, ...) hand in their natives from their
+// own files: provide("SpawnerQuarterback_GetSpawnDelay", &fn). fn must pop and push what the 1.0 body did (g_natives
+// lists (args, results)). It replaces the stub, also in scripts linked before (the stub forwards). false: not a native
+// the DLL binds for 1.0 scripts (the engine's own stays).
+inline bool provide(const char* name, NativeFn fn)
+{
+    bool hit = false;
+    for (Native& n : g_natives) if (!strcmp(n.name, name)) n.fn = fn, hit = true;
+    for (Native& n : g_ports) if (!strcmp(n.name, name)) n.fn = fn, hit = true;
+    return hit;
 }
 
 // ---- SX-3: after the engine linked a script (FUN_00736da0), a served 1.0 script's imports go to the DLL's natives
