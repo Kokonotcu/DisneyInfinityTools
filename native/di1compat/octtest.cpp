@@ -245,6 +245,62 @@ static int fmodTest(int argc, char** argv)
         if (p) { audio::g.f.MusicPrompt_IsActive(p, &activeAfter); audio::g.f.MusicPrompt_Release(p); }
     }
     printf("LIFE music Inc_mx_Metroville: active %d after 1 s, fresh prompt active %d after end+reset\n", active, activeAfter);
+
+    // a 'virtual' event at its playback limit (fire_loop: MAX_PLAYBACKS_BEHAVIOR 5, 'just fail if quietest'): with the
+    // listener at the origin and the limit filled at 10 m, a post at 30 m fails and one at 2 m gets a voice by stealing
+    // one of the 10 m sounds -- judged where each sound plays only if the info-only instance is placed first (1.0
+    // FUN_01136520); the info-only instance otherwise stays where the last post left it
+    auto fire = audio::g.byId.find(audio::fnv1("fire_loop"));
+    if (fire != audio::g.byId.end() && (fire->second.flags & 1)) {
+        void* info = nullptr;
+        int maxPb = 0;
+        float dmin = 0, dmax = 0;
+        audio::g.f.EventSystem_GetEventBySystemID(audio::g.es, fire->second.sysId, 4, &info);
+        if (info) {
+            audio::g.f.Event_GetPropertyByIndex(info, 12, &maxPb, 0);   // FMOD_EVENTPROPERTY_MAX_PLAYBACKS
+            audio::g.f.Event_GetPropertyByIndex(info, 17, &dmin, 0);    // 3D_MINDISTANCE (1.0 FUN_01136520 sets 0x11)
+            audio::g.f.Event_GetPropertyByIndex(info, 18, &dmax, 0);    // 3D_MAXDISTANCE (0x12)
+        }
+        float dFill = dmin + 0.5f * (dmax - dmin), dFar = dmin + 0.9f * (dmax - dmin), dNear = dmin * 0.5f;
+        printf("VIRT fire_loop 3D min %.1f max %.1f: limit filled at %.1f, posts at %.1f and %.1f\n", dmin, dmax, dFill, dFar, dNear);
+        {
+            std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+            audio::g.lset = true;
+            for (int i = 0; i < 40; ++i) audio::g.pos[100 + i] = audio::V3{{0, 0, i < 32 ? dFill : i == 32 ? dFar : dNear}};
+        }
+        calls = 0;
+        std::vector<uint32_t> ids;
+        int got = 0;
+        for (int i = 0; i < maxPb && i < 32; ++i) {
+            uint32_t id = audio::g.play(fire->first, 100 + i, 1, (void*)cb, nullptr);
+            got += id != 0;
+            ids.push_back(id);
+            run(32);
+        }
+        run(200);
+        uint32_t farId = audio::g.play(fire->first, 132, 1, (void*)cb, nullptr);
+        run(200);
+        // control: without the placement (the info-only instance still where the far post put it), FMOD judges the
+        // near sound as if it were far
+        void* raw = nullptr;
+        audio::FR rr;
+        {
+            std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+            rr = audio::g.f.EventSystem_GetEventBySystemID(audio::g.es, fire->second.sysId, 0, &raw);
+            if (!rr && raw) audio::g.f.Event_Stop(raw, 1);
+        }
+        printf("VIRT control: near request with the info-only instance left at the far position -> %s (FMOD %d)\n",
+               !rr && raw ? "granted" : "refused", (int)rr);
+        run(200);
+        uint32_t nearId = audio::g.play(fire->first, 133, 1, (void*)cb, nullptr);
+        run(500);
+        printf("VIRT fire_loop max playbacks %d: %d of %d started at the fill distance; far post %s; near post %s, %d stolen end(s)\n",
+               maxPb, got, (int)ids.size(), farId ? "STARTED (wrong)" : "failed", nearId ? "started" : "FAILED (wrong)", calls);
+        for (uint32_t id : ids) audio::g.act(id, 0);
+        if (nearId) audio::g.act(nearId, 0);
+        if (farId) audio::g.act(farId, 0);
+        run(500);
+    }
     return 0;
 }
 

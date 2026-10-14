@@ -87,6 +87,7 @@ struct Api {
     FR(__stdcall* Event_Stop)(void* ev, int immediate);
     FR(__stdcall* Event_SetPaused)(void* ev, int paused);
     FR(__stdcall* Event_Set3DAttributes)(void* ev, const float* pos, const float* vel, const float* orient);
+    FR(__stdcall* Event_SetVolume)(void* ev, float v);
     FR(__stdcall* Event_SetCallback)(void* ev, EventCb cb, void* ud);
     FR(__stdcall* EventSystem_GetCategory)(void* es, const char* name, void** cat);
     FR(__stdcall* EventSystem_GetMusicCategory)(void* es, void** cat);
@@ -137,7 +138,8 @@ struct Api {
         AUD_E(EventProject_LoadSampleData); AUD_E(EventGroup_GetNumGroups); AUD_E(EventGroup_GetGroupByIndex);
         AUD_E(EventGroup_GetNumEvents); AUD_E(EventGroup_GetEventByIndex); AUD_E(EventGroup_GetProperty); AUD_E(Event_GetInfo);
         AUD_E(Event_GetPropertyByIndex); AUD_E(Event_GetCategory); AUD_E(EventCategory_GetInfo); AUD_E(EventCategory_GetParentCategory);
-        AUD_E(Event_Start); AUD_E(Event_Stop); AUD_E(Event_SetPaused); AUD_E(Event_Set3DAttributes); AUD_E(Event_SetCallback);
+        AUD_E(Event_Start); AUD_E(Event_Stop); AUD_E(Event_SetPaused); AUD_E(Event_Set3DAttributes); AUD_E(Event_SetVolume);
+        AUD_E(Event_SetCallback);
         AUD_E(EventSystem_GetCategory); AUD_E(EventSystem_GetMusicCategory); AUD_E(EventCategory_SetVolume);
         AUD_E(EventCategory_GetVolume); AUD_E(MusicSystem_GetCues); AUD_E(MusicSystem_GetNextCue); AUD_E(MusicSystem_PrepareCue); AUD_E(MusicSystem_Reset);
         AUD_E(MusicSystem_SetPaused); AUD_E(MusicPrompt_Begin); AUD_E(MusicPrompt_End); AUD_E(MusicPrompt_IsActive);
@@ -643,13 +645,22 @@ struct Host {
         f.Event_Set3DAttributes(ev, p, nullptr, nullptr);
     }
 
-    // 1.0 FUN_01136520 without the per-call volume / min-max overrides (3.0's post carries none): getEventBySystemID
-    // (FMOD_EVENT_DEFAULT), callback, 3D attributes, start.
+    // 1.0 FUN_01136520 without the per-call volume / min-max overrides (3.0's post carries none, so 1.0's defaults:
+    // volume 1, distances left as authored): a 'virtual' event (entry flag 1) first gets its info-only instance
+    // (FMOD_EVENT_INFOONLY) set to volume 1 and the sound's position, so FMOD's playback limit (MAX_PLAYBACKS_BEHAVIOR 5,
+    // 'just fail if quietest', 0x011384a0's condition for these) judges the new sound where it will play (fire_loop,
+    // fire_small_loop and 7 more of the 1,565 Metroville events); then getEventBySystemID (FMOD_EVENT_DEFAULT),
+    // callback, 3D attributes, start.
     uint32_t play(uint32_t eventId, uint32_t obj, uint32_t flags, void* cb, void* cookie)
     {
         std::lock_guard<std::recursive_mutex> l(mx);
         auto it = byId.find(eventId);
         if (it == byId.end()) return 0;
+        void* info = nullptr;
+        if ((it->second.flags & 1) && !f.EventSystem_GetEventBySystemID(es, it->second.sysId, 4, &info) && info) {
+            f.Event_SetVolume(info, 1.0f);
+            place(info, obj);
+        }
         void* ev = nullptr;
         FR r = f.EventSystem_GetEventBySystemID(es, it->second.sysId, 0, &ev);
         if (r || !ev) return 0;
