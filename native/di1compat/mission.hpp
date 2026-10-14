@@ -12,8 +12,11 @@
 // 646 'Event' keys sits in Mission.Presentations[].Data, one per 'Event = N,' line. Read raw, 3.0 took them as
 // Intro/Generic/Interact: a mission's Activate list (DockFire's spawns, triggers, set-piece caches) never fired.
 #pragma once
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace mission {
 
@@ -84,6 +87,102 @@ inline int behaviour30(std::string& t)
         t[p + key.size() - 3] = ln.find("story") != std::string::npos ? '3' : '4';
         ++n;
     }
+    return n;
+}
+
+// beacon10: PlaysetProperties.<playset>.MissionParams.BeaconMap rows (zonelist.lua; the Incredibles record is 1.0's,
+// verbatim through zonereg). Both exes keep one 16-byte entry per row {name, cho, placement, float} and spawn mission
+// / focus-point beacons from it (3.0 lookup FUN_01591570 -> FUN_015cce20 givers, FUN_015c30a0 focus points), but the
+// row layout changed:
+//   1.0 FUN_00fa1b10: [1] name, [2] cho, [3] placement, [4] float only if a number (entry ctor FUN_00fa11a0: 0)
+//   3.0 FUN_015e2b40: [1] name, Chos[1] cho, [2] placement, [3] float (default -1)
+// Read raw, every IN entry had no cho (3.0 reads no Chos table) and the cho name as its placement: no focus-point or
+// giver beacon spawned. A row without Chos whose array is 3 strings (+ a number) becomes
+// { name, placement, float (0 when 1.0 gave none), Chos = { cho } }. 3.0 also resolves '<default>' on a side
+// mission (behaviour 4) to 'Beacon_Arrow_Blue' (FUN_015c30a0 0x015C33DB); 1.0 resolved it to FocusPointDefault for every
+// mission, so a converted map without that name gets it with FocusPointDefault's beacon. Rows already in 3.0 form
+// (every 3.0 playset's) are untouched. Returns the rows converted; *aliases = rows added.
+inline int beaconMap30(std::string& t, int* aliases = nullptr)
+{
+    auto skipQuoted = [&](size_t i) {   // i at a quote -> index after the closing one
+        char q = t[i];
+        for (++i; i < t.size() && t[i] != q; ++i) if (t[i] == '\\') ++i;
+        return i < t.size() ? i + 1 : t.size();
+    };
+    auto closeOf = [&](size_t open) -> size_t {   // matching '}' of the '{' at open, strings and comments skipped
+        int d = 0;
+        for (size_t i = open; i < t.size();) {
+            char c = t[i];
+            if (c == '"' || c == '\'') { i = skipQuoted(i); continue; }
+            if (c == '-' && i + 1 < t.size() && t[i + 1] == '-') { size_t e = t.find('\n', i); i = e == std::string::npos ? t.size() : e; continue; }
+            if (c == '{') ++d;
+            else if (c == '}' && --d == 0) return i;
+            ++i;
+        }
+        return std::string::npos;
+    };
+    auto trim = [](std::string s) {
+        size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+        return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+    };
+    auto isStr = [](const std::string& e) { return e.size() >= 2 && (e[0] == '"' || e[0] == '\'') && e.back() == e[0]; };
+    auto isNum = [](const std::string& e) { char* end = nullptr; strtod(e.c_str(), &end); return !e.empty() && end && !*end; };
+    struct Edit { size_t at, len; std::string text; };
+    std::vector<Edit> edits;
+    int n = 0, na = 0;
+    static const std::string key = "BeaconMap";
+    for (size_t p = t.find(key); p != std::string::npos; p = t.find(key, p + key.size())) {
+        if (p && (isalnum((unsigned char)t[p - 1]) || t[p - 1] == '_')) continue;
+        size_t q = p + key.size();
+        if (q < t.size() && (isalnum((unsigned char)t[q]) || t[q] == '_')) continue;
+        q = t.find_first_not_of(" \t\r\n", q);
+        if (q == std::string::npos || t[q] != '=' || (q + 1 < t.size() && t[q + 1] == '=')) continue;
+        size_t open = t.find_first_not_of(" \t\r\n", q + 1), close = open == std::string::npos || t[open] != '{' ? std::string::npos : closeOf(open);
+        if (close == std::string::npos) continue;
+        int converted = 0;
+        bool hasBlue = false;
+        std::string fpd;   // FocusPointDefault's converted tail: , placement, float, Chos = { cho, }
+        for (size_t i = open + 1; i < close;) {
+            char c = t[i];
+            if (c == '-' && i + 1 < t.size() && t[i + 1] == '-') { size_t e = t.find('\n', i); i = e == std::string::npos ? close : e; continue; }
+            if (c != '{') { ++i; continue; }
+            size_t re = closeOf(i);
+            if (re == std::string::npos || re > close) break;
+            std::string body = t.substr(i + 1, re - i - 1);
+            std::vector<std::string> el;
+            bool plain = true;
+            size_t s = 0;
+            for (size_t k = 0; k <= body.size(); ++k) {
+                if (k < body.size() && (body[k] == '"' || body[k] == '\'')) {
+                    char qc = body[k];
+                    for (++k; k < body.size() && body[k] != qc; ++k) if (body[k] == '\\') ++k;
+                    continue;
+                }
+                if (k < body.size() && (body[k] == '{' || body[k] == '=')) { plain = false; break; }
+                if (k == body.size() || body[k] == ',') { el.push_back(trim(body.substr(s, k - s))); s = k + 1; }
+            }
+            if (!el.empty() && el.back().empty()) el.pop_back();
+            std::string name = !el.empty() && isStr(el[0]) ? el[0].substr(1, el[0].size() - 2) : "";
+            if (name == "Beacon_Arrow_Blue") hasBlue = true;
+            if (plain && (el.size() == 3 || el.size() == 4) && isStr(el[0]) && isStr(el[1]) && isStr(el[2]) && (el.size() == 3 || isNum(el[3]))) {
+                std::string tail = ", " + el[2] + ", " + (el.size() == 4 ? el[3] : std::string("0")) + ", Chos = { " + el[1] + ", }, ";
+                edits.push_back({i, re + 1 - i, "{ " + el[0] + tail + "}"});
+                if (name == "FocusPointDefault") fpd = tail;
+                ++converted;
+            }
+            i = re + 1;
+        }
+        if (converted && !hasBlue && !fpd.empty()) {
+            size_t last = t.find_last_not_of(" \t\r\n", close - 1);
+            std::string sep = last != std::string::npos && t[last] != ',' && t[last] != '{' ? ", " : " ";
+            edits.push_back({close, 0, sep + "{ \"Beacon_Arrow_Blue\"" + fpd + "}, "});
+            ++na;
+        }
+        n += converted;
+    }
+    std::sort(edits.begin(), edits.end(), [](const Edit& a, const Edit& b) { return a.at > b.at; });
+    for (auto& e : edits) t.replace(e.at, e.len, e.text);
+    if (aliases) *aliases = na;
     return n;
 }
 

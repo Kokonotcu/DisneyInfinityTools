@@ -154,6 +154,7 @@ static struct {
     bool pins10 = true;              // .mer: complete pin tables on every instance (Table::pins10)
     bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (Table::gate10)
     bool toggleType10 = true;        // .mer: Collision/VisibilityToggle keep their 1.0 mode in 3.0 (Table::toggleType10)
+    bool beacon10 = true;            // zonelist.lua: 1.0 MissionParams.BeaconMap rows in 3.0's row form (mission::beaconMap30)
     bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
     bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
     bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
@@ -251,6 +252,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "pins10")) g_cfg.pins10 = atoi(val) != 0;
         else if (!strcmp(key, "gate10")) g_cfg.gate10 = atoi(val) != 0;
         else if (!strcmp(key, "toggletype10")) g_cfg.toggleType10 = atoi(val) != 0;
+        else if (!strcmp(key, "beacon10")) g_cfg.beacon10 = atoi(val) != 0;
         else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
         else if (!strcmp(key, "native10")) g_cfg.native10 = atoi(val) != 0;
         else if (!strcmp(key, "sx10")) g_cfg.sx10 = atoi(val) != 0;
@@ -317,7 +319,8 @@ static void loadConfig(const char* dir)
          g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10,
          g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10, g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
     logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
-    logf("config mis: gate10=%d toggletype10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.lockTrace10);
+    logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
+         g_cfg.lockTrace10);
 }
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
@@ -2052,6 +2055,54 @@ static void __fastcall hkColVisApply(uint8_t* node, void*, void* list)
     g_colVisApply(node, nullptr, list);
 }
 
+// beacon10 check: MissionParams BeaconMap lookup FUN_01591570 (thiscall on the mission manager, CString name,
+// CString fallback by value -- the callee releases both, ret 8) -> entry {name, cho, placement, float} or 0. Callers:
+// focus points FUN_015c30a0 / FUN_015b86e0, givers FUN_015cce20 / FUN_015b9aa0, mission target FUN_015cdb70.
+// One line per name: a beacon spawns only from an entry with a cho.
+typedef uint8_t*(__fastcall* BeaconLookupFn)(void* self, void* edx, const char* name, const char* fallback);
+static BeaconLookupFn g_beaconLookup;
+static uint8_t* __fastcall hkBeaconLookup(void* self, void*, const char* name, const char* fallback)
+{
+    char n[96], fb[96];
+    safeCopy(n, sizeof(n), name);   // copies first: the callee releases its by-value CStrings
+    safeCopy(fb, sizeof(fb), fallback);
+    uint8_t* e = g_beaconLookup(self, nullptr, name, fallback);
+    static std::mutex m;
+    static std::set<std::string> seen;
+    bool first;
+    { std::lock_guard<std::mutex> lock(m); first = seen.size() < 300 && seen.insert(n).second; }
+    static volatile LONG lines;
+    if (first && lockTraceRoom(lines)) {
+        char c[96], pl[96];
+        if (e) logf("beacon map '%s' -> cho '%s' placement '%s' offset %.2f", n, cstr(e + 4, c, sizeof(c)), cstr(e + 8, pl, sizeof(pl)), *(float*)(e + 0xc));
+        else logf("beacon map '%s' (fallback '%s') -> no entry", n, fb);
+    }
+    return e;
+}
+
+// The compass follows the mission each local player tracks: FUN_015ba4d0 (thiscall on the mission manager, mission,
+// player, flag, ret 0xc) sets slot mgr+0x10+4*n and posts "CheckCompass"; mission+0x140 = its context, name at +0x10.
+typedef void(__fastcall* TrackFn)(uint8_t* mgr, void* edx, uint8_t* mission, int player, int flag);
+static TrackFn g_track;
+static void __fastcall hkTrack(uint8_t* mgr, void*, uint8_t* mission, int player, int flag)
+{
+    uint8_t* before[4];
+    memcpy(before, mgr + 0x10, sizeof(before));
+    g_track(mgr, nullptr, mission, player, flag);
+    auto name = [](uint8_t* m, char* buf) {
+        uint8_t* ctx = m ? *(uint8_t**)(m + 0x140) : nullptr;
+        safeCopy(buf, 96, ctx ? *(const char**)(ctx + 0x10) : "nothing");
+        return buf;
+    };
+    static volatile LONG lines;
+    for (int s = 0; s < 4; ++s) {
+        uint8_t* now = *(uint8_t**)(mgr + 0x10 + 4 * s);
+        char a[96], b[96];
+        if (now != before[s] && lockTraceRoom(lines))
+            logf("compass: player slot %d tracks '%s' (asked for '%s', player %d)", s, name(now, a), name(mission, b), player);
+    }
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -2488,7 +2539,8 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     // gp: 3.0 files the activity -> challenge redirect extends (gameplay.hpp): the zone list (ChallengeTypeDataFile
     // beside the 1.0 ActivityTypeDataFile) and ChallengeData.lua (+ the 1.0 beacons)
     bool zl = endsWith(p, "zonelist.lua"), cd = endsWith(p, "challengedata/challengedata.lua") || endsWith(p, "challengedata\\challengedata.lua");
-    if (r && g_cfg.challenge10 && !(flags & 1) && (zl || cd)) {
+    // mis (beacon10): the zone list's 1.0 MissionParams.BeaconMap rows in 3.0's row form (mission::beaconMap30)
+    if (r && !(flags & 1) && ((g_cfg.challenge10 && (zl || cd)) || (g_cfg.beacon10 && zl))) {
         typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
         typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
         typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
@@ -2497,13 +2549,15 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         t.resize(((SizeFn)vt[4])(r, nullptr));
         uint32_t got = t.empty() ? 0 : ((ReadFn)vt[5])(r, nullptr, &t[0], (uint32_t)t.size());
         ((DtorFn)vt[11])(r, nullptr, 1);
-        int k = 0;
+        int k = 0, kb = 0, ka = 0;
         if (got == t.size() && !t.empty() && t[0] != 0x1b) {
-            if (zl) k = gameplay::zonelist30(t);
-            else if (read10s("activitydata/defaultactivitybeacons.lua", t10)) k = gameplay::beacons30(t, t10);
+            if (zl && g_cfg.challenge10) k = gameplay::zonelist30(t);
+            else if (cd && read10s("activitydata/defaultactivitybeacons.lua", t10)) k = gameplay::beacons30(t, t10);
+            if (zl && g_cfg.beacon10) kb = mission::beaconMap30(t, &ka);
         }
-        logf("%s: %d %s", p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
-        return k ? memFile(t.data(), t.size()) : g_open(path, flags, a3, a4, a5);
+        if (g_cfg.challenge10) logf("%s: %d %s", p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
+        if (zl && g_cfg.beacon10) logf("%s: %d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added (beacon10)", p, kb, ka);
+        return k || kb ? memFile(t.data(), t.size()) : g_open(path, flags, a3, a4, a5);
     }
     if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
         char line[600];
@@ -3102,6 +3156,8 @@ extern "C" void __stdcall Pentane_Main()
         hook("colvis toggle parameters (locktrace10)", 0x01808FE0, "6AFF68????????64A1000000005064892500000000518B442414535657508BF1",
              (void*)&hkColVisLoad, (void**)&g_colVisLoad);
         hook("colvis toggle apply (locktrace10)", 0x01803550, "558B6C2408565733FF8BF1", (void*)&hkColVisApply, (void**)&g_colVisApply);
+        hook("beacon map lookup (locktrace10)", 0x01591570, "83EC088B81740100005355", (void*)&hkBeaconLookup, (void**)&g_beaconLookup);
+        hook("compass mission track (locktrace10)", 0x015BA4D0, "83EC0C538B5C2414568BF1", (void*)&hkTrack, (void**)&g_track);
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
