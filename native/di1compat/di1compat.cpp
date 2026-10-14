@@ -137,10 +137,12 @@ static struct {
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
     bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 format's 'skin' layout, bones kept
+    bool sceneSettings10 = true;     // a 1.0 bundle's scene settings (SSET: fog, bloom, exposure, grading) re-laid into 3.0's
     bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
     int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
     int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
     bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
+    bool fpsLog10 = false;           // test: once a second, frame time and how much of it the main thread waits on rendering
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
@@ -233,9 +235,11 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
         else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
         else if (!strcmp(key, "skinlayout10")) g_cfg.skinLayout10 = atoi(val) != 0;
+        else if (!strcmp(key, "scenesettings10")) g_cfg.sceneSettings10 = atoi(val) != 0;
         else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
         else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
+        else if (!strcmp(key, "fpslog10")) g_cfg.fpsLog10 = atoi(val) != 0;
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
@@ -513,6 +517,23 @@ static render::Table g_render;
 static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
 static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
+
+// Both games' scenesettingsformat.ssf (render.hpp ssfBlock30), parsed on first use; both or neither (cfg scenesettings10)
+static void sceneSettingsIO(render::IO& io)
+{
+    static std::mutex mx;
+    static bool done, ok;
+    static render::Ssf f10, f30;
+    std::lock_guard<std::mutex> lock(mx);
+    if (!done) {
+        done = true;
+        std::string a, b;
+        ok = read10s("shaders/shaders/scenesettingsformat.ssf", a) && read30x("3:shaders/shaders/scenesettingsformat.ssf", b) &&
+             render::parseSsf(a, false, f10) && render::parseSsf(b, true, f30);
+        logf("scene settings formats: %s (1.0 block %d B, 3.0 block %d B)", ok ? "ok" : "MISSING", f10.size, f30.size);
+    }
+    if (ok && g_cfg.sceneSettings10) { io.ssf10 = &f10; io.ssf30 = &f30; }
+}
 static mer::Table g_mer;
 static bool g_merOk;
 
@@ -570,6 +591,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
     io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
     io.skinLayout = g_cfg.skinLayout10;
+    sceneSettingsIO(io);
     render::Result r;
     if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
         for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
@@ -584,9 +606,10 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
         if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
     }
     char buf[200];
-    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s) ", r.tiers["translated"], r.tiers["real"],
+    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s%s) ", r.tiers["translated"], r.tiers["real"],
               r.tiers["same-sh"], r.tiers["generic"], (unsigned)r.textures10.size(),
-              r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "");
+              r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "",
+              r.sceneSettings ? (", " + std::to_string(r.sceneSettings) + " scene settings").c_str() : "");
     note += buf;
     return true;
 }
@@ -1713,6 +1736,34 @@ static void __cdecl hkPlaceToy(void* msg) { logf("ToyCreation_PlaceToy callback 
 // Offsets from the context parser FUN_016748d0 and the update itself; +0x10 is the context's name string.
 typedef void(__fastcall* MissionTickFn)(uint8_t* self, void* edx, float dt);
 static MissionTickFn g_missionTick;
+// test (fpslog10): FUN_0047aab0 runs once per frame on the main thread (FUN_0047f0a0, the frame's render submit) and
+// spins while the render thread still holds the previous frame (+0x71f0 == 2). Call-to-call time = frame time; time
+// inside = the main thread waiting on rendering. Mostly waiting -> render thread / GPU / present bound; hardly
+// waiting at 33 ms -> the main thread's own work (simulation, graphs, AI) is the limit.
+typedef void(__cdecl* FrameSyncFn)();
+static FrameSyncFn g_frameSync;
+static void __cdecl hkFrameSync()
+{
+    static LARGE_INTEGER freq, last, second;
+    static double sumFrame, maxFrame, sumWait;
+    static int frames;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    g_frameSync();
+    QueryPerformanceCounter(&b);
+    if (last.QuadPart) {
+        double frame = 1000.0 * (a.QuadPart - last.QuadPart) / freq.QuadPart;
+        sumFrame += frame; maxFrame = (std::max)(maxFrame, frame); ++frames;
+        sumWait += 1000.0 * (b.QuadPart - a.QuadPart) / freq.QuadPart;
+    } else second = a;
+    last = a;
+    if (frames && a.QuadPart - second.QuadPart >= freq.QuadPart) {
+        logf("fps %.1f: frame %.2f ms avg, %.2f max; main thread waits on rendering %.2f ms of it", 1000.0 * frames / sumFrame,
+             sumFrame / frames, maxFrame, sumWait / frames);
+        sumFrame = maxFrame = sumWait = 0; frames = 0; second = a;
+    }
+}
 // test (opacitylog10): FUN_0044ad80 -> bit i set = primitive i is "faded" (opacity param * object fade < 1) and the
 // opaque G-buffer list skips it (FUN_00461020); logs our skipped primitives with the values that decided it
 typedef uint32_t(__cdecl* OpacityMaskFn)(uint32_t n, float fade, uint32_t prims, uint32_t insts);
@@ -3054,6 +3105,7 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
+    if (g_cfg.fpsLog10) hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync, (void**)&g_frameSync);
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
