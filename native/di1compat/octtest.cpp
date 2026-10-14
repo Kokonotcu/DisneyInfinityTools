@@ -528,10 +528,52 @@ static int fevDeps(char** argv)
     return 0;
 }
 
+// octtest --host <1.0 install>: audio::install as Pentane_Main runs it, i.e. inside Pentane.dll's DllMain, with the
+// loader lock held (taken here through ntdll's LdrLockLoaderLock). install must return at once (no hook is patched:
+// the hook and address functions are stand-ins); the host thread cannot start while the lock is held; after the
+// release, ready() sees FMOD up with Initialize.fev and the 1.0 mixer loaded on the host thread.
+static int hostTest(char** argv)
+{
+    audio::logfn = stdoutLog;
+    typedef LONG(NTAPI * LockFn)(ULONG, ULONG*, ULONG_PTR*);
+    typedef LONG(NTAPI * UnlockFn)(ULONG, ULONG_PTR);
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    LockFn lock = (LockFn)GetProcAddress(nt, "LdrLockLoaderLock");
+    UnlockFn unlock = (UnlockFn)GetProcAddress(nt, "LdrUnlockLoaderLock");
+    if (!lock || !unlock) { printf("HOST no LdrLockLoaderLock\n"); return 1; }
+    static uint8_t dummy[64];
+    static int hooks = 0;
+    auto hook = [](const char*, uint32_t, const char*, void*, void**) { ++hooks; return true; };
+    auto rt = [](uint32_t) { return (uintptr_t)dummy; };
+    audio::hostStart.nosound = true;
+    ULONG state = 0;
+    ULONG_PTR cookie = 0;
+    if (lock(0, &state, &cookie) < 0) { printf("HOST lock failed\n"); return 1; }
+    DWORD t0 = GetTickCount();
+    bool ok = audio::install(hook, rt, argv[2], ".");
+    DWORD tInstall = GetTickCount() - t0;
+    DWORD w = WaitForSingleObject(audio::hostStart.done, 2000);   // the old install waited here (20 s)
+    unlock(0, cookie);
+    bool up = audio::ready();
+    DWORD tUp = GetTickCount() - t0;
+    bool init = false, mixer = false;
+    {
+        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+        init = audio::g.projects.count("initialize.fev") != 0;
+        mixer = audio::g.mixer.count("sfx") && fabs(audio::g.mixer["sfx"] - 0.707946f) < 1e-5f;
+    }
+    printf("HOST install under the loader lock: %s in %lu ms, %d hooks; host init while locked: %s; ready %d after %lu ms; "
+           "Initialize.fev %s; mixer sfx %s\n", ok ? "returned" : "FAILED", (unsigned long)tInstall, hooks,
+           w == WAIT_TIMEOUT ? "blocked (as expected)" : "RAN", (int)up, (unsigned long)tUp, init ? "loaded" : "MISSING",
+           mixer ? "0.708" : "WRONG");
+    return !(ok && tInstall < 1000 && w == WAIT_TIMEOUT && up && init && mixer);
+}
+
 int main(int argc, char** argv)
 {
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
+    if (argc > 2 && std::string(argv[1]) == "--host") return hostTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--fmod") return fmodTest(argc, argv);
     if (argc > 2 && std::string(argv[1]) == "--fevdeps") return fevDeps(argv);
     if (argc > 2 && std::string(argv[1]) == "--mixer") return mixerTest(argv);

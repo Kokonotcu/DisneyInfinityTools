@@ -671,6 +671,7 @@ struct Host {
         FR r = f.EventSystem_GetEventBySystemID(es, it->second.sysId, 0, &ev);
         if (r || !ev) return 0;
         uint32_t id = newId();
+        progSound[id & 4095] = nullptr;   // not a dialog line: no stale subsound for a SOUNDDEF_CREATE
         f.Event_SetCallback(ev, &Host::onEvent, (void*)(uintptr_t)id);
         place(ev, obj);
         if (f.Event_Start(ev)) { f.Event_SetCallback(ev, nullptr, nullptr); return 0; }
@@ -928,8 +929,10 @@ struct Name10 {
         if (n < 0x10 || u16(0) != 4) return false;
         uint16_t len = u16(4), lo = u16(6), hi = u16(8), subs = u16(0xa);
         if (hi < lo || hi - lo + 1 > len || 0x10 + (size_t)(len + subs) * 2 > n) return false;
-        for (uint16_t i = 0; i < subs; ++i)
-            if (u16(0x10 + (size_t)(len + i) * 2) >= n) return false;
+        for (uint16_t i = 0; i < subs; ++i) {   // every name ends inside the file (all 916 1.0 .name files, every language)
+            uint16_t o = u16(0x10 + (size_t)(len + i) * 2);
+            if (o >= n || !memchr(b + o, 0, n - o)) return false;
+        }
         for (uint32_t l = lo; l <= hi; ++l) {
             uint16_t v = u16(0x10 + (size_t)(l - lo) * 2);
             if (v != 0xffff && (v & 0xfff) + (v >> 12 > 1 ? (v >> 12) : 1) > subs) return false;
@@ -1457,6 +1460,7 @@ struct Cfg {
 };
 inline Cfg cfg;
 inline std::string sound30;   // <3.0 install>\assets\sound
+inline bool ready();
 
 // a playset X whose music only 1.0 has: 3.0 ships no '<x>_music.bnk', 1.0 has 'Music_<X>.fev'
 inline bool hostedMusic(const std::string& x)
@@ -1485,7 +1489,7 @@ inline FaderFn oFader;
 // from 'Options'
 inline void __stdcall hkFader(const char* cat, const char* src, float v, uint32_t a4)
 {
-    if (cat && src) {
+    if (cat && src && ready()) {
         std::lock_guard<std::recursive_mutex> l(g.mx);
         g.faders[cat][src] = v;
         g.applyVolumes();
@@ -1521,7 +1525,7 @@ inline uint32_t __fastcall hkBankReq(void* mgr, void*, uint32_t* req)
 {
     uint32_t r = oBankReq(mgr, nullptr, req);
     const char* file = req ? (const char*)req[2] : nullptr;
-    if (!file || !*file) return r;
+    if (!file || !*file || !ready()) return r;
     std::string f = file;
     size_t dot = f.rfind('.');
     if (dot == std::string::npos) return r;
@@ -1567,18 +1571,19 @@ inline uint32_t __fastcall hkBankReq(void* mgr, void*, uint32_t* req)
 inline uint32_t __cdecl hkPost(uint32_t ev, uint32_t obj, uint32_t flags, void* cb, void* cookie, void* ext, uint32_t pid)
 {
     uint32_t r = oPost(ev, obj, flags, cb, cookie, ext, pid);
+    if (!ready()) return r;
     if (ev == idPauseAll || ev == idPauseExUi || ev == idResumeAll) {   // 3.0 FUN_0073f900
         g.pause(ev != idResumeAll, ev == idPauseExUi);
         if (ev != idPauseExUi) { std::lock_guard<std::recursive_mutex> l(g.mx); g.f.MusicSystem_SetPaused(g.ms, ev == idPauseAll); }
     }
     if (r || ext) return r;   // a dialog line with external sources is 3.0's own (VO: see vo10)
+    std::lock_guard<std::recursive_mutex> l(g.mx);   // music.playset changes on the bank dispatcher's thread
     if (cfg.music && !music.playset.empty()) {
         if (ev == fnv1("StartMusic_" + music.playset)) {   // 3.0 FUN_0073eb30 starts its playset's music
             if (!music.startId) music.startId = g.standIn(ev, obj, flags, cb, cookie);
             return music.startId;
         }
         if (ev == fnv1("StopMusic_" + music.playset)) {   // 1.0 resets the MusicSystem before switching (FUN_00715650)
-            std::lock_guard<std::recursive_mutex> l(g.mx);
             music.endPrompt();
             g.f.MusicSystem_Reset(g.ms);
             if (music.startId) { g.act(music.startId, 0); music.startId = 0; }
@@ -1663,7 +1668,7 @@ inline int __cdecl hkAction(const char* name, int action, uint32_t obj, uint32_t
 inline uint32_t __fastcall hkMusicState(void* self, void*, const char* group, const char* state)
 {
     uint32_t r = oMusicState(self, nullptr, group, state);
-    if (r || !group || !state || _strnicmp(group, "Music_", 6)) return r;
+    if (r || !group || !state || _strnicmp(group, "Music_", 6) || !ready()) return r;
     std::string x = group + 6;
     if (!hostedMusic(x) || !music.ensure(x)) return r;
     std::lock_guard<std::recursive_mutex> l(g.mx);
@@ -1676,10 +1681,12 @@ inline uint32_t __fastcall hkMusicState(void* self, void*, const char* group, co
 // FUN_01947bd0: SetState(group, state); 3.0 FUN_0073ede0 sets 'Music_<X>' to the top cue ('None' for '<X>_None')
 inline int __cdecl hkSetState(const char* group, const char* state)
 {
-    if (group && state && !_strnicmp(group, "Music_", 6) && !music.playset.empty() && !_stricmp(group + 6, music.playset.c_str())) {
-        std::lock_guard<std::recursive_mutex> l(g.mx);
-        if (!_stricmp(state, "None")) music.endPrompt();
-        else AUDLOG("audio10: music cue %s %s", state, music.begin(state) ? "prompted" : "failed");
+    if (group && state && !_strnicmp(group, "Music_", 6)) {
+        std::lock_guard<std::recursive_mutex> l(g.mx);   // music.playset changes on the bank dispatcher's thread
+        if (!music.playset.empty() && !_stricmp(group + 6, music.playset.c_str())) {
+            if (!_stricmp(state, "None")) music.endPrompt();
+            else AUDLOG("audio10: music cue %s %s", state, music.begin(state) ? "prompted" : "failed");
+        }
     }
     return oSetState(group, state);
 }
@@ -1694,8 +1701,8 @@ inline void __fastcall hkStackTick(void* self, void*)
     if (!music.prompt) return;
     void* entry = nullptr;
     {
-        std::lock_guard<std::recursive_mutex> l(g.mx);
-        if (!music.prompt) return;
+        std::unique_lock<std::recursive_mutex> l(g.mx, std::try_to_lock);   // per frame: never wait out FMOD's update
+        if (!l || !music.prompt) return;
         int active = 0;
         g.f.MusicPrompt_IsActive(music.prompt, &active);
         if (active) { music.seenActive = true; return; }
@@ -1740,6 +1747,7 @@ inline uint32_t __cdecl hkPostExt(uint32_t ev, uint32_t obj, uint32_t flags, voi
 {
     DlgBank* b = nullptr;
     int sub = 0;
+    std::lock_guard<std::recursive_mutex> l(vo.mx);   // the bank's FSB stays open through playLine (Vo::unload: vo.mx, g.mx)
     if (n == 1 && ext && ext[3] && vo.media((const void*)(uintptr_t)ext[3], &b, &sub)) {
         uint32_t id = g.playLine(ev, obj, flags, cb, cookie, b->snd, sub);
         Name10 x = b->idx();
@@ -1762,7 +1770,7 @@ inline void* __cdecl hkLoadFile(const char* path, uint32_t* size)
 {
     size_t n = path ? strlen(path) : 0;
     std::vector<uint8_t> in;
-    if (n <= 11 || _strnicmp(path, "dialog/", 7) || _stricmp(path + n - 4, ".dlg") ||
+    if (n <= 11 || _strnicmp(path, "dialog/", 7) || _stricmp(path + n - 4, ".dlg") || !ready() ||
         !slurp(vo.root10 + "\\" + (path + 7), in) || in.size() < 4 || *(uint32_t*)in.data() != 11)
         return oLoadFile(path, size);
     uint32_t n30 = 0;
@@ -1809,15 +1817,21 @@ inline void* __fastcall hkDlgReq(void* pool, void*, const char** nameRec, uint32
     if (name && dm) {
         uint32_t cs = h131(name, false), lo = h131(name, true);
         if (cs != lo) {
-            std::lock_guard<std::recursive_mutex> l(vo.mx);
-            for (uint8_t* s = *(uint8_t**)((uint8_t*)dm + 0x48); s; s = *(uint8_t**)(s + 4)) {
-                if (!vo.scripts.count(*(uint8_t**)(s + 0x7c)) || vo.mapFind(s + 8, nullptr, lo)) continue;
-                uint8_t* node = (uint8_t*)vo.mapFind(s + 8, nullptr, cs);
-                if (!node) continue;
-                void* entry = *(void**)(node + 0xc);
-                mapPut(s + 8, nullptr, lo, &entry);
-                AUDLOG("vo10: '%s' found in a 1.0 script by its 1.0 key", name);
+            // the DialogueManager's own lock, which FUN_0073daf0 holds while it looks names up in these maps
+            CRITICAL_SECTION* dmLock = (CRITICAL_SECTION*)(dm + 0x58);
+            EnterCriticalSection(dmLock);
+            {
+                std::lock_guard<std::recursive_mutex> l(vo.mx);
+                for (uint8_t* s = *(uint8_t**)((uint8_t*)dm + 0x48); s; s = *(uint8_t**)(s + 4)) {
+                    if (!vo.scripts.count(*(uint8_t**)(s + 0x7c)) || vo.mapFind(s + 8, nullptr, lo)) continue;
+                    uint8_t* node = (uint8_t*)vo.mapFind(s + 8, nullptr, cs);
+                    if (!node) continue;
+                    void* entry = *(void**)(node + 0xc);
+                    mapPut(s + 8, nullptr, lo, &entry);
+                    AUDLOG("vo10: '%s' found in a 1.0 script by its 1.0 key", name);
+                }
             }
+            LeaveCriticalSection(dmLock);
         }
     }
     return oDlgReq(pool, nullptr, nameRec, a2);
@@ -1846,51 +1860,72 @@ inline int tickAndDeliver()
 // The FMOD host's own thread: FMOD's init runs here, then the tick. fmodex.dll imports CoInitialize (STA) while 3.0
 // initialises COM itself (CoInitializeEx MTA at 0x0132e41b / 0x0197106a, STA at 0x0198261f / 0x004403d6), so FMOD
 // never touches the apartment of the thread that runs Pentane_Main.
-struct HostStart { std::string install10; bool ok = false; HANDLE done = nullptr; };
+// Pentane_Main runs inside Pentane.dll's DllMain (DLL_PROCESS_ATTACH at Pentane 0x101c2c8e -> 0x101df000, which calls
+// each plugin record's +0x60 entry), i.e. under the loader lock, where a new thread cannot start until DllMain returns:
+// install never waits for this thread; the first hook that needs FMOD does (ready()), on a game thread.
+struct HostStart { std::string install10; bool nosound = false, ok = false; HANDLE done = nullptr; };   // nosound: octtest
+inline HostStart hostStart;
+inline volatile LONG hostState = 0;   // 0 starting, 1 up, -1 failed
+
+inline void loadMixer(const std::string& install10)
+{
+    std::string core, lua, err;
+    std::vector<std::string> paths;
+    MixerRest rest;
+    if (readRoot10(install10, "GameDB/Core/CoreDataMap.lua", core) && !(paths = mixerPaths(core)).empty() &&
+        readRoot10(install10, paths[0], lua) && mixerRest(lua, rest, &err)) {
+        std::string a, v;
+        for (auto& s : rest.active) a += (a.empty() ? "" : ", ") + s;
+        char b[64];
+        for (auto& x : rest.vol) { sprintf_s(b, "%s%s %.3f", v.empty() ? "" : ", ", x.first.c_str(), x.second); v += b; }
+        AUDLOG("mixer10: %s: active %s; at rest %s%s", paths[0].c_str(), a.c_str(), v.c_str(),
+               rest.pitchSum ? " (a pitch offset is set: not applied)" : "");
+        std::lock_guard<std::recursive_mutex> l(g.mx);
+        g.mixer = rest.vol;
+    } else
+        AUDLOG("mixer10: no 1.0 mixer (%s)", core.empty() ? "no core datamap" : paths.empty() ? "no Mixer entry" : lua.empty() ? "file missing" : err.c_str());
+}
+
 inline DWORD WINAPI hostThread(void* p)
 {
     HostStart* s = (HostStart*)p;
-    s->ok = g.init(s->install10, false);
+    bool ok = g.init(s->install10, s->nosound);
+    if (ok) {
+        if (cfg.mixer) loadMixer(s->install10);   // 1.0 loads it through its core datamap at boot, before any zone
+        g.loadTree("Initialize.fev", "Permanent");   // 1.0 FUN_01138210 at audio init: 'Initialize.fev:Permanent'
+    }
+    s->ok = ok;
     SetEvent(s->done);
-    if (!s->ok) return 0;
+    if (!ok) return 0;
     for (;;) {
         Sleep(16);
         tickAndDeliver();
     }
 }
 
+// true once the FMOD host is up; the first caller waits for its init (never called under the loader lock)
+inline bool ready()
+{
+    LONG st = hostState;
+    if (st) return st > 0;
+    DWORD w = WaitForSingleObject(hostStart.done, 20000);
+    bool up = w == WAIT_OBJECT_0 && hostStart.ok;
+    if (InterlockedCompareExchange(&hostState, up ? 1 : -1, 0) == 0 && !up)
+        AUDLOG("audio10: FMOD host %s: 1.0 audio off", w != WAIT_OBJECT_0 ? "did not finish its init in 20 s" : "failed");
+    return hostState > 0;
+}
+
 typedef bool (*HookFn)(const char* name, uint32_t staticVa, const char* prologue, void* detour, void** original);
 
 inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& install10, const std::string& game30)
 {
-    static HostStart start;
-    start.install10 = install10;
-    start.done = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-    HANDLE th = start.done ? CreateThread(nullptr, 0, hostThread, &start, 0, nullptr) : nullptr;
-    DWORD w = th ? WaitForSingleObject(start.done, 20000) : WAIT_FAILED;
-    if (w != WAIT_OBJECT_0) AUDLOG("audio10: FMOD host thread %s", th ? "did not finish its init in 20 s" : "not started");
-    if (w != WAIT_OBJECT_0 || !start.ok) return false;
-    CloseHandle(th);
     sound30 = game30 + "\\assets\\sound";
     g.idCounter = (volatile LONG*)rt(0x022AFBE8);
-    if (cfg.mixer) {   // 1.0 loads it through its core datamap at boot, before any zone
-        std::string core, lua, err;
-        std::vector<std::string> paths;
-        MixerRest rest;
-        if (readRoot10(install10, "GameDB/Core/CoreDataMap.lua", core) && !(paths = mixerPaths(core)).empty() &&
-            readRoot10(install10, paths[0], lua) && mixerRest(lua, rest, &err)) {
-            std::string a, v;
-            for (auto& s : rest.active) a += (a.empty() ? "" : ", ") + s;
-            char b[64];
-            for (auto& x : rest.vol) { sprintf_s(b, "%s%s %.3f", v.empty() ? "" : ", ", x.first.c_str(), x.second); v += b; }
-            AUDLOG("mixer10: %s: active %s; at rest %s%s", paths[0].c_str(), a.c_str(), v.c_str(),
-                   rest.pitchSum ? " (a pitch offset is set: not applied)" : "");
-            std::lock_guard<std::recursive_mutex> l(g.mx);
-            g.mixer = rest.vol;
-        } else
-            AUDLOG("mixer10: no 1.0 mixer (%s)", core.empty() ? "no core datamap" : paths.empty() ? "no Mixer entry" : lua.empty() ? "file missing" : err.c_str());
-    }
-    g.loadTree("Initialize.fev", "Permanent");   // 1.0 FUN_01138210 at audio init: 'Initialize.fev:Permanent'
+    hostStart.install10 = install10;
+    hostStart.done = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    HANDLE th = hostStart.done ? CreateThread(nullptr, 0, hostThread, &hostStart, 0, nullptr) : nullptr;
+    if (!th) { AUDLOG("audio10: FMOD host thread not started (%lu)", GetLastError()); return false; }
+    CloseHandle(th);
     idPauseAll = fnv1("Pause_All");
     idPauseExUi = fnv1("Pause_All_Except_UI");
     idResumeAll = fnv1("Resume_All");
