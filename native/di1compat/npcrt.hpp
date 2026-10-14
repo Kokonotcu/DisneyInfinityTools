@@ -226,7 +226,9 @@ static uint32_t __fastcall hkPercRemove(uint8_t* self, void*, int a1, int a2, vo
 static void prepare(void* self, const char* name)
 {
     std::string n = npc::lower(name);
-    if (g_db && g_dbPlayset == n) return;
+    // "Core" is 3.0's own boot-time GameDB include, not a 1.0 playset: 1.0's CoreDataMap.lua matched it, and the
+    // DataMap route then ran before FUN_00693630's DAT_0228db60 exists -> AV at boot (in-game 2026-10-13)
+    if (n == "core" || (g_db && g_dbPlayset == n)) return;
     LookupFn lookup = (LookupFn)rt(0x00705860);
     std::string b10, b30, why;
     if (lookup(self, nullptr, name, 0) || !read10s("GameDB/Core/" + std::string(name) + "DataMap.lua", b10)) return;
