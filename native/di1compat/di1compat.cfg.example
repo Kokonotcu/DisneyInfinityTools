@@ -1,4 +1,4 @@
-install10 = D:\SteamLibrary\steamapps\common\Disney Infinity Gold Edition
+install10 = C:\Program Files (x86)\Steam\steamapps\common\Disney Infinity Gold Edition
 serve10 = 1
-trace = 1
-memtest =
+shaders10 = 1
+trace = 0
