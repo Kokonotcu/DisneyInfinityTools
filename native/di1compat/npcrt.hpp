@@ -34,6 +34,18 @@ static std::string g_psPath;                                // playset30: the se
 static const char* const KINDS[] = {"playset", "gamemode", "zone", "actor", "toy", "activity", "zonebackgroundload",
                                     "realm", "munition", "surfaceimpact", "costume", "powerdisc", "include"};
 
+// The router takes engine CStrings, not char*: FUN_018da710 / FUN_018da820 compare the type's length at type-0xc with
+// each loader's name, and the loader (FUN_018db270) add-refs the path's header (FUN_00caa0d0 on path-0xc). A plain
+// char* matched no loader (garbage length) and could have been written through. Ctor FUN_00418310, release FUN_00418230
+// (as sys's cbLoad).
+struct ECStr {
+    char* p = nullptr;
+    explicit ECStr(const std::string& s) { ((void*(__fastcall*)(void*, void*, const char*))rt(0x00418310))(&p, nullptr, s.c_str()); }
+    ~ECStr() { ((void(__fastcall*)(void*, void*))rt(0x00418230))(&p, nullptr); }
+    ECStr(const ECStr&) = delete;
+    ECStr& operator=(const ECStr&) = delete;
+};
+
 // Already loaded by a GameDB loader named 'type'? The router keeps no count (a second load is skipped, one unload
 // removes the file), so a table the core loaded at boot (CoreDataMap _core_ / avatarprogression) must not be
 // released here. DBFileRouter: loaders [router+8] x [router+0xc] (FUN_018da710); a loader's name is the string at +4,
@@ -61,7 +73,8 @@ static std::vector<std::pair<std::string, std::string>> route(const std::vector<
     std::string line;
     for (auto& [t, p] : tps) {
         bool had = loaded(router, t, p);
-        uint8_t r = fn(router, nullptr, t.c_str(), p.c_str(), 0, 1);
+        ECStr ct(t), cp(p);
+        uint8_t r = fn(router, nullptr, ct.p, cp.p, 0, 1);
         line += " " + t + "=" + p + (had ? "(resident)" : r ? "" : "(0)");
         if (!had) mine.push_back({t, p});
     }
@@ -240,8 +253,9 @@ static void dataMapRoute(bool load, const std::string& path)
 {
     void* router = *(void**)rt(0x022A6E68);
     if (!router || path.empty()) return;
-    uint8_t r = load ? ((RouteFn)(*(void***)router)[1])(router, nullptr, "DataMap", path.c_str(), 0, 0)
-                     : ((UnrouteFn)(*(void***)router)[2])(router, nullptr, "DataMap", path.c_str());
+    ECStr ct("DataMap"), cp(path);
+    uint8_t r = load ? ((RouteFn)(*(void***)router)[1])(router, nullptr, ct.p, cp.p, 0, 0)
+                     : ((UnrouteFn)(*(void***)router)[2])(router, nullptr, ct.p, cp.p);
     logf("playset30: DataMap %s %s -> %u", path.c_str(), load ? "loaded" : "released", r);
 }
 
@@ -314,7 +328,10 @@ static void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
     void* router = *(void**)rt(0x022A6E68);
     if (!router) return;
     UnrouteFn fn = (UnrouteFn)(*(void***)router)[2];
-    for (auto& [t, p] : done) fn(router, nullptr, t.c_str(), p.c_str());   // a table already gone is skipped (FUN_018da6c0)
+    for (auto& [t, p] : done) {   // a table already gone is skipped (FUN_018da6c0)
+        ECStr ct(t), cp(p);
+        fn(router, nullptr, ct.p, cp.p);
+    }
     logf("gamedb30 Playset %s unloaded: %u 3.0 tables it loaded released", name, (unsigned)done.size());
 }
 
