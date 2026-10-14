@@ -434,7 +434,11 @@ struct SnEdit {
     std::map<int, std::vector<int>> kids;
     std::map<int, int> dnAt;
     bool ok() const { return hsAt >= 0 && hsiAt >= 0 && hlAt >= 0 && dnPool >= 0; }
-    std::string name(int h) const { return h >= 1 && h <= (int)hsi.size() && hsi[h - 1] < (int)hs.size() ? hs[hsi[h - 1]] : ""; }
+    const std::string& name(int h) const   // a reference: child() compares it for every sibling
+    {
+        static const std::string none;
+        return h >= 1 && h <= (int)hsi.size() && hsi[h - 1] >= 0 && hsi[h - 1] < (int)hs.size() ? hs[hsi[h - 1]] : none;
+    }
     int child(int h, const std::string& n) const
     {
         auto it = kids.find(h);
@@ -453,11 +457,15 @@ struct SnEdit {
         }
     }
     int dnOf(int h) const { auto it = dnAt.find(h); return it == dnAt.end() ? -1 : it->second; }
+    std::unordered_map<std::string, int> hsIndex;   // header string -> its first index (a linear scan per new header
+                                                    // cost ~0.1 s on in_city's 1,251 locators)
     int header(const std::string& n, int par)
     {
-        int s = -1;
-        for (size_t i = 0; i < hs.size() && s < 0; ++i) if (hs[i] == n) s = (int)i;
-        if (s < 0) { hs.push_back(n); s = (int)hs.size() - 1; }
+        if (hsIndex.empty())
+            for (size_t i = 0; i < hs.size(); ++i) hsIndex.emplace(hs[i], (int)i);
+        auto it = hsIndex.find(n);
+        int s = it != hsIndex.end() ? it->second : -1;
+        if (s < 0) { hs.push_back(n); s = (int)hs.size() - 1; hsIndex.emplace(n, s); }
         hsi.push_back(s);
         hl.insert(hl.end(), {par, 1});
         parent.push_back(par);
@@ -548,6 +556,53 @@ struct SnEdit {
     }
 };
 
+// Edits children of a top-level pool (SubNetworks) one at a time, each in a File of its own -- the child's block at
+// record 0, f's name table swapped in (not copied, so names are added in the same order) -- and writes the pool back
+// once. Editing in place shifted every record after each insert: in_city has 283 SubNetworks among ~200k records, and
+// each pass that inserted per SubNetwork (counts, locators, collision) cost ~0.25 s at load. kids = the children's
+// record indices in file order; edit(g, k) runs for k in `order`.
+template <class Edit> inline void editPoolChildren(oct::File& f, long pool, const std::vector<size_t>& kids, const std::vector<size_t>& order, Edit edit)
+{
+    if (order.empty()) return;
+    std::vector<size_t> ends(kids.size());
+    for (size_t k = 0; k < kids.size(); ++k) ends[k] = f.blockEnd(kids[k]);
+    size_t poolEnd = f.blockEnd(pool);
+    std::vector<std::vector<oct::Rec>> edited(kids.size());
+    std::vector<char> done(kids.size(), 0);
+    struct Names {   // f's name table lives in g while the edits run, and goes back even on an exception
+        oct::File &f, &g;
+        Names(oct::File& a, oct::File& b) : f(a), g(b) { swap(); }
+        ~Names() { swap(); }
+        void swap() { f.names.swap(g.names); f.nameIndex.swap(g.nameIndex); std::swap(f.nameIndexed, g.nameIndexed); }
+    };
+    oct::File g;
+    {
+        Names shared(f, g);
+        for (size_t k : order) {
+            g.recs.assign(std::make_move_iterator(f.recs.begin() + kids[k]), std::make_move_iterator(f.recs.begin() + ends[k]));
+            edit(g, k);
+            edited[k].swap(g.recs);
+            done[k] = 1;
+        }
+    }
+    std::vector<oct::Rec> out;
+    size_t grown = 0;
+    for (size_t k = 0; k < kids.size(); ++k) if (done[k]) grown += edited[k].size();
+    out.reserve(f.recs.size() + grown);
+    auto take = [&](size_t a, size_t b) { out.insert(out.end(), std::make_move_iterator(f.recs.begin() + a), std::make_move_iterator(f.recs.begin() + b)); };
+    take(0, pool + 1);
+    size_t at = pool + 1;
+    for (size_t k = 0; k < kids.size(); ++k) {
+        take(at, kids[k]);
+        if (done[k]) out.insert(out.end(), std::make_move_iterator(edited[k].begin()), std::make_move_iterator(edited[k].end()));
+        else take(kids[k], ends[k]);
+        at = ends[k];
+    }
+    take(at, poolEnd);
+    take(poolEnd, f.recs.size());
+    f.recs.swap(out);
+}
+
 // Calls fn(NodeName record, SubNetworkRef) for every association of this Type.
 template <class Fn> inline void eachAssociation(oct::File& f, const std::string& type, Fn fn)
 {
@@ -579,17 +634,19 @@ template <class Edit> inline int redirectAssociations(oct::File& f, const std::s
     std::map<int, std::vector<std::string>> want;
     eachAssociation(f, type, [&](oct::Rec& r, int sn) { if (sn < (int)sns.size()) want[sn].push_back(f.nameValues(r)[0]); });
     std::map<std::pair<int, std::string>, std::string> renamed;
-    for (auto it = want.rbegin(); it != want.rend(); ++it) {
-        SnEdit e(f, sns[it->first]);
-        if (!e.ok()) continue;
+    std::vector<size_t> order;   // last to first, the order the names were always added in
+    for (auto it = want.rbegin(); it != want.rend(); ++it) order.push_back((size_t)it->first);
+    editPoolChildren(f, sp, sns, order, [&](oct::File& g, size_t k) {
+        SnEdit e(g, 0);
+        if (!e.ok()) return;
         std::map<std::string, std::string> mine;
-        for (const std::string& path : it->second) {
+        for (const std::string& path : want[(int)k]) {
             if (mine.count(path)) continue;
             mine[path] = edit(e, path);
-            if (!mine[path].empty()) renamed[{it->first, path}] = mine[path];
+            if (!mine[path].empty()) renamed[{(int)k, path}] = mine[path];
         }
         e.apply();
-    }
+    });
     int n = 0;
     eachAssociation(f, type, [&](oct::Rec& r, int sn) {
         auto k = renamed.find({sn, f.nameValues(r)[0]});
@@ -972,11 +1029,19 @@ inline int realm30w(oct::File& f)
         ++done;
     }
     if (!done) return 0;
-    // replace the node blocks, last first (no node is added or removed, so every index stays)
-    for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
-        size_t a = nodes[it->first], b = f.blockEnd(a);
-        f.recs.erase(f.recs.begin() + a, f.recs.begin() + b);
-        f.recs.insert(f.recs.begin() + a, it->second.begin(), it->second.end());
+    // replace the node blocks in one pass over the records (an erase + insert per node shifted the whole file each time)
+    {
+        std::vector<oct::Rec> out;
+        out.reserve(f.recs.size() + 16 * blocks.size());
+        size_t at = 0;
+        for (auto& [n, b] : blocks) {
+            size_t a = nodes[n], e = f.blockEnd(a);
+            out.insert(out.end(), std::make_move_iterator(f.recs.begin() + at), std::make_move_iterator(f.recs.begin() + a));
+            out.insert(out.end(), std::make_move_iterator(b.begin()), std::make_move_iterator(b.end()));
+            at = e;
+        }
+        out.insert(out.end(), std::make_move_iterator(f.recs.begin() + at), std::make_move_iterator(f.recs.end()));
+        f.recs.swap(out);
     }
     // rigs gain a Uuid after LightRefs (FNV-1a of the rig's ordinal: unique within the file, stable)
     if (long rp = f.pool("LightRigPool"); rp >= 0) {
@@ -1008,15 +1073,15 @@ inline int addAllCounts(oct::File& f)
     long pool = f.pool("SubNetworkPool");
     if (pool < 0) return 0;
     int done = 0;
-    for (size_t i = pool + 1, end = f.blockEnd(pool); i < end;) {
-        size_t n = f.recs.size();
-        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") {
-            clip30(f, i);
-            if (addCounts(f, i)) ++done;
-        }
-        end += f.recs.size() - n;
-        i = f.blockEnd(i);   // the next sibling (recomputed after the insert)
+    std::vector<size_t> kids, order;
+    for (size_t i = pool + 1, end = f.blockEnd(pool); i < end; i = f.blockEnd(i)) {
+        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") order.push_back(kids.size());
+        kids.push_back(i);
     }
+    editPoolChildren(f, pool, kids, order, [&](oct::File& g, size_t) {
+        clip30(g, 0);
+        if (addCounts(g, 0)) ++done;
+    });
     return done;
 }
 

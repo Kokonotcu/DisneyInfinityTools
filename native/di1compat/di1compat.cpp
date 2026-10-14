@@ -741,7 +741,9 @@ static int missionGraph30(std::string& t)
     return n;
 }
 
-static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note)
+// mtc: for a .mer, also the .mtc built from the same transcoded graph (the engine asks for the .mtc right after,
+// 48/48 pairs in a load: serving it from the session saves reading and transcoding the .mer a second time)
+static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note, std::string* mtc = nullptr)
 {
     // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp): type data, giver sections, giver DNA
     std::string np = norm(path);
@@ -831,6 +833,7 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
                   st.events, st.fetches, st.netSync, st.typed);
         note += buf;
         out = isMtc ? mer::mtc(f) : f.write();
+        if (!isMtc && mtc) *mtc = mer::mtc(f);
         return isMtc ? "mtc" : "mer";
     }
     // a localisation table: keys re-hashed under 3.0's one seed (dct.hpp), names from the stringids table beside it
@@ -1751,9 +1754,11 @@ static MissionTickFn g_missionTick;
 typedef void(__cdecl* FrameSyncFn)();
 static FrameSyncFn g_frameSync;
 static volatile DWORD g_frameTid;   // loadprof10: the thread that runs the frame sync
+static volatile LONG g_frameNo;     // loadprof10: frames so far (served lines carry it)
 static void __cdecl hkFrameSync()
 {
     g_frameTid = GetCurrentThreadId();
+    InterlockedIncrement(&g_frameNo);
     static LARGE_INTEGER freq, last, second;
     static double sumFrame, maxFrame, sumWait;
     static int frames;
@@ -1816,7 +1821,19 @@ static bool afterCallSafe(uint32_t v)
 {
     __try { return afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-// 'module!export+0xoff' for a code address outside the exe (nearest named export at or below it)
+static uintptr_t g_selfLo, g_selfHi;   // di1compat.dll's image
+// a return address into di1compat.dll (right after a call instruction)
+static bool ourRetSafe(uint32_t v)
+{
+    if (v < g_selfLo + 6 || v >= g_selfHi) return false;
+    __try {
+        const uint8_t* p = (const uint8_t*)(uintptr_t)v;
+        return p[-5] == 0xE8 || (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) || (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) ||
+               (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// 'module!export+0xoff' for a code address outside the exe (nearest named export at or below it); in di1compat.dll
+// 'di1compat.dll+0x<rva>' (resolve with the build's .map)
 static std::string symbolAt(uintptr_t a)
 {
     HMODULE m = nullptr;
@@ -1825,6 +1842,11 @@ static std::string symbolAt(uintptr_t a)
         !GetModuleFileNameA(m, full, MAX_PATH))
         return "?";
     std::string s = strrchr(full, '\\') ? strrchr(full, '\\') + 1 : full;
+    if ((uintptr_t)m == g_selfLo) {
+        char off[24];
+        sprintf_s(off, "+0x%X", (unsigned)(a - g_selfLo));
+        return s + off;
+    }
     const uint8_t* b = (const uint8_t*)m;
     const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew);
     const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
@@ -1848,9 +1870,19 @@ static DWORD WINAPI profThread(void*)
     HANDLE tm = CreateWaitableTimerExW(nullptr, nullptr, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
     logf("loadprof10: sampler up (%s timer)", tm ? "high-resolution" : "Sleep(1)");
     const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    {
+        HMODULE me = nullptr;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&profThread, &me);
+        const uint8_t* b = (const uint8_t*)me;
+        g_selfLo = (uintptr_t)me;
+        g_selfHi = me ? g_selfLo + ((const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew))->OptionalHeader.SizeOfImage : 0;
+    }
     std::map<DWORD, HANDLE> handles;
     std::map<DWORD, uint64_t> cpuLast;
-    std::map<std::array<uint32_t, 5>, uint32_t> counts;   // {tid, outside the exe?, EIP, caller, caller's caller}
+    // {tid, outside the exe?, EIP, caller, caller's caller, ours}: ours = for a sample outside the exe, the outermost
+    // di1compat.dll code on the stack below the first exe frame (the detour or plugin thread it runs for) as an RVA + 1
+    // (0: none) -- time the plugin itself costs, its system calls included; inside the engine's own functions it is not
+    std::map<std::array<uint32_t, 6>, uint32_t> counts;
     std::map<uint32_t, std::string> syms;
     std::map<DWORD, uint32_t> samples;
     std::vector<DWORD> busy;
@@ -1868,7 +1900,7 @@ static DWORD WINAPI profThread(void*)
             if (g_openTids[i] == tid) r += r.empty() ? "open" : "+open";
         return r.empty() ? std::string("busy") : r;
     };
-    auto leafName = [&](const std::array<uint32_t, 5>& k) {
+    auto leafName = [&](const std::array<uint32_t, 6>& k) {
         char b[16];
         if (!k[1]) { sprintf_s(b, "%08X", k[2]); return std::string(b); }
         auto it = syms.find(k[2]);
@@ -1902,9 +1934,12 @@ static DWORD WINAPI profThread(void*)
             if (!ok) continue;
             uintptr_t eip = c.Eip;
             bool inExe = eip >= g_base && eip < g_base + 0x2100000;
-            std::array<uint32_t, 5> k{tid, inExe ? 0u : 1u, (uint32_t)(inExe ? eip - g_base + 0x400000 : eip), 0, 0};
-            for (int i = 0, f = 3; i < n && f < 5; ++i)
+            std::array<uint32_t, 6> k{tid, inExe ? 0u : 1u, (uint32_t)(inExe ? eip - g_base + 0x400000 : eip), 0, 0, 0};
+            if (!inExe && eip >= g_selfLo && eip < g_selfHi) k[5] = (uint32_t)(eip - g_selfLo) + 1;
+            for (int i = 0, f = 3; i < n && f < 5; ++i) {
                 if ((stk[i] & 0xff00ff00) && afterCallSafe(stk[i])) k[f++] = (uint32_t)(stk[i] - g_base + 0x400000);
+                else if (!inExe && f == 3 && ourRetSafe(stk[i])) k[5] = (uint32_t)(stk[i] - g_selfLo) + 1;   // outermost wins
+            }
             ++counts[k];
             ++samples[tid];
         }
@@ -1944,17 +1979,20 @@ static DWORD WINAPI profThread(void*)
             ++window;
             FILE* f = nullptr;
             if (!fopen_s(&f, g_profPath.c_str(), window == 1 ? "w" : "a") && f) {
-                if (window == 1) fprintf(f, "window\ttid\trole\tleaf\tcaller\tcaller2\tcount\n");
+                if (window == 1) fprintf(f, "window\ttid\trole\tleaf\tcaller\tcaller2\tours\tcount\n");
                 for (auto& [k, v] : counts)
-                    fprintf(f, "%d\t%u\t%s\t%s\t%08X\t%08X\t%u\n", window, k[0], role(k[0]).c_str(), leafName(k).c_str(), k[3], k[4], v);
+                    fprintf(f, "%d\t%u\t%s\t%s\t%08X\t%08X\t%X\t%u\n", window, k[0], role(k[0]).c_str(), leafName(k).c_str(), k[3], k[4],
+                            k[5] ? k[5] - 1 : 0xffffffffu, v);
                 fclose(f);
             }
             for (auto& [tid, n] : samples) {   // per thread: share in the exe and in each module
                 std::map<std::string, uint32_t> mods;
+                uint32_t ours = 0;
                 for (auto& [k, v] : counts)
                     if (k[0] == tid) {
                         std::string s = k[1] ? leafName(k).substr(1) : "exe";
-                        mods[s.substr(0, s.find('!'))] += v;
+                        mods[s.substr(0, s.find_first_of("!+"))] += v;
+                        if (k[5]) ours += v;
                     }
                 std::string line;
                 for (auto& [m, v] : mods) {
@@ -1962,7 +2000,8 @@ static DWORD WINAPI profThread(void*)
                     sprintf_s(b, " %s %.0f%%", m.c_str(), 100.0 * v / n);
                     line += b;
                 }
-                logf("prof window %d %s %u: %u samples:%s", window, role(tid).c_str(), (unsigned)tid, n, line.c_str());
+                logf("prof window %d %s %u: %u samples, %.1f%% in di1compat code (its calls included):%s", window, role(tid).c_str(),
+                     (unsigned)tid, n, 100.0 * ours / n, line.c_str());
             }
             counts.clear();
             samples.clear();
@@ -2804,7 +2843,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         if (!hit.empty()) {
             r = memFile(hit.data(), hit.size());
             char pf[100] = "";
-            if (prof) sprintf_s(pf, " [prof tid %u: 3.0 open %.2f, total %.2f ms]", GetCurrentThreadId(), t30, qpcMs() - tIn);
+            if (prof) sprintf_s(pf, " [prof tid %u frame %ld: 3.0 open %.2f, total %.2f ms]", GetCurrentThreadId(), g_frameNo, t30, qpcMs() - tIn);
             logf("served %s %u B from asset session -> %s%s", p, (unsigned)hit.size(), r ? "ok" : "FAILED", pf);
             return r;
         }
@@ -2838,14 +2877,19 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         if (data) {
             indexZip10(where.substr(0, where.find(':')));
             double tT = prof ? qpcMs() : 0;
-            std::string out, note;
+            std::string out, note, mtc;
             const char* codec = nullptr;
             try {
                 if (endsWith(p, ".tbody")) {             // D3D11 refuses sub-4x4 block textures (padSmallDxt)
                     out.assign((const char*)data, n);
                     padSmallDxt(out);
                     codec = out.size() == n && memcmp(out.data(), data, n) ? "tbody" : nullptr;
-                } else codec = transcode(p, data, n, out, note);
+                } else codec = transcode(p, data, n, out, note, &mtc);
+                // the .mtc request transcodes read10s(<same path>.mer): these bytes when nothing redirected the read
+                if (codec && !strcmp(codec, "mer") && !mtc.empty() && over.empty() && chal.empty()) {
+                    std::lock_guard<std::mutex> lock(g_sessLock);
+                    g_served[np.substr(0, np.size() - 4) + ".mtc"] = mtc;
+                }
             } catch (std::exception& e) {   // never unwind into engine code (that ends in a silent fail-fast)
                 note += std::string("TRANSCODE EXCEPTION: ") + e.what() + " ";
                 codec = nullptr;
@@ -2858,10 +2902,19 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             if (prof) tTc = qpcMs() - tT;
             double tM = prof ? qpcMs() : 0;
             r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
-            char pf[160] = "";
-            if (prof)
-                sprintf_s(pf, " [prof tid %u: 3.0 open %.2f, 1.0 read %.2f, transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(),
-                          t30, tRead, tTc, qpcMs() - tM, qpcMs() - tIn);
+            char pf[600] = "";
+            if (prof) {
+                int len = sprintf_s(pf, " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 read %.2f, transcode %.2f, memfile %.2f, total %.2f ms]",
+                                    GetCurrentThreadId(), g_frameNo, t30, tRead, tTc, qpcMs() - tM, qpcMs() - tIn);
+                static volatile LONG stacks;   // who asks: the engine call stack of the first served files of each kind
+                static const char* const kinds[] = {".oct", ".bent", ".banm", ".mer", ".tbody"};
+                static volatile LONG perKind[5];
+                for (int k = 0; k < 5; ++k)
+                    if (endsWith(p, kinds[k]) && InterlockedIncrement(&perKind[k]) <= 3 && InterlockedIncrement(&stacks) <= 15) {
+                        len += sprintf_s(pf + len, sizeof(pf) - len, " stack:");
+                        stackOf((const uint32_t*)_AddressOfReturnAddress(), pf, sizeof(pf), len, 16);
+                    }
+            }
             logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s%s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
                  codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED", pf);
             mz_free(data);
@@ -2870,7 +2923,9 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     }
     // misses always (rare and cheap; what an unexplained fallback asks for), hits only when tracing
     char pf[120] = "";
-    if (prof) sprintf_s(pf, " [prof tid %u: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]", GetCurrentThreadId(), t30, tRead, qpcMs() - tIn);
+    if (prof)
+        sprintf_s(pf, " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]", GetCurrentThreadId(), g_frameNo, t30, tRead,
+                  qpcMs() - tIn);
     if (g_cfg.trace || !r) logf("open %s flags=%X -> %s%s%s", p, flags & 0xff, r ? "ok" : "MISSING", r ? "" : missWhy.c_str(), pf);
     return r;
 }

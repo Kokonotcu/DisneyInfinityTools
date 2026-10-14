@@ -774,6 +774,8 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     std::string& ni2 = r.ibuf2;
     long stp = geometry ? f.pool("SceneTreeNodePool") : -1;
     const size_t stpEnd = stp >= 0 ? f.blockEnd(stp) : 0;   // the loop edits records in place, never adds
+    std::vector<uint32_t> remapStamp(geometry ? 0x10000 : 0, 0), remapTo(geometry ? 0x10000 : 0);
+    uint32_t remapGen = 0;
     for (size_t n = stp + 1; stp >= 0 && n < stpEnd; n = f.blockEnd(n)) {
         if (f.recs[n].level != 2 || f.name(f.recs[n]) != "Node") continue;
         size_t end = f.blockEnd(n);
@@ -830,16 +832,17 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
             }
             const Plan& plan = dst == src ? same : skinPlan ? *skinPlan : T.plans.at({src, dst});
             std::vector<uint32_t> order, sub;
-            std::unordered_map<uint32_t, uint32_t> remap;
+            sub.reserve(ida[3] > 0 ? (size_t)ida[3] : 0);
+            ++remapGen;   // 16-bit indices: a flat stamped table instead of a hash map per index (in_city: ~4M indices)
             for (int32_t q = 0; q < ida[3]; ++q) {
                 uint32_t v = (uint32_t)(ib[2 * (ida[1] + q)] | ib[2 * (ida[1] + q) + 1] << 8);
-                auto it = remap.find(v);
-                if (it == remap.end()) { it = remap.emplace(v, (uint32_t)order.size()).first; order.push_back(v); }
-                sub.push_back(it->second);
+                if (remapStamp[v] != remapGen) { remapStamp[v] = remapGen; remapTo[v] = (uint32_t)order.size(); order.push_back(v); }
+                sub.push_back(remapTo[v]);
             }
             for (int s = 0; s < vda[0]; ++s)
                 if (s >= (int)plan.ss.size() || vda[4 + 3 * s] != plan.ss[s]) { r.problems.push_back("stride mismatch"); return false; }
             std::vector<std::string> per(plan.ds.size());
+            for (size_t s = 0; s < plan.ds.size(); ++s) per[s].reserve(order.size() * (size_t)plan.ds[s]);
             std::vector<const uint8_t*> srcp(plan.ss.size());
             for (uint32_t v : order) {
                 for (size_t s = 0; s < plan.ss.size(); ++s) {
