@@ -2561,6 +2561,14 @@ int main(int argc, char** argv)
         printf("%s %zu B\n", r ? "ok" : "FAILED", got.size());
         return r ? 0 : 1;
     }
+    if (argc > 3 && std::string(argv[1]) == "--menu") {   // --menu <out.lua> <chunk file | archive member>: playsetmenu10
+        std::string in;
+        if (argc > 4 ? !arc30::readMember(argv[3], argv[4], in) : (in = slurp(argv[3])).empty()) return 1;
+        std::string s = ui::playsetMenu10(in);
+        std::ofstream(argv[2], std::ios::binary).write(s.data(), (std::streamsize)s.size());
+        printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), s.size());
+        return 0;
+    }
     if (argc > 4 && std::string(argv[1]) == "--arc") {   // --arc <render table> <game dir> <3.0 extract root>
         // every table bundle read from the install's archive (arc30) must equal the extract's file
         render::Table T;

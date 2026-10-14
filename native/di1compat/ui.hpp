@@ -158,4 +158,56 @@ inline int mergeTips(std::string& t30, const std::string& t10, IsZone zone)
     return added;
 }
 
+// The Play Sets menu (cfg playsetmenu10). On PC (globals build "TOYBOX_TOGO", platform "TARGET_WIN32", set by
+// FUN_01567120) the main menu's "Play" opens screen PlaysetListWin32 (presentation/playsetlistwin32.lua), whose
+// PopulateWorldCatagoryList hard-codes its six entries (TheCloneWars, Empire, InsideOut, PlaysetX, Takeover,
+// Speedway); no zone list or lock data feeds it. A button's text is "@" .. id, and 3.0's own lang/main has the key
+// "Incredibles" ("Incredibles", german "Die Unglaublichen"). The entries carry no icon. playsetMenu10 returns the
+// screen's file as Lua text: the unchanged 3.0 chunk (embedded, run through loadstring: base lib entry at
+// 0x01da07d8) plus an "Incredibles" entry after PlaysetX that opens IN_City as harness.ps1 does --
+// UI_LaunchLevel(level, "world", true, true, false) opens the Virtual Reader (FUN_00b81350 -> VirtualReaderPC_Loadout
+// + SetLaunchLevelInfo), and its Continue relaunches with characterSelected. The VR stores saveTarget as the number 2,
+// which its relaunch would read back as the string "2" (save target 0), so "world" is put back. The housekeeping
+// around the launch is PlaysetSelectMenu.HandleWorldSelect's, 3.0's own path from a menu into the VR.
+inline std::string playsetMenu10(const std::string& chunk)
+{
+    std::string s = "-- di1compat playsetmenu10: 3.0's PlaysetListWin32 (embedded unchanged) + an Incredibles entry\n"
+                    "local C = assert(loadstring(\"";
+    s.reserve(chunk.size() * 3 + 1500);
+    for (unsigned char c : chunk) {
+        if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') s += (char)c;
+        else {
+            char b[6];
+            snprintf(b, sizeof(b), "\\%03u", (unsigned)c);   // always 3 digits: a digit after it never joins the escape
+            s += b;
+        }
+    }
+    s += R"LUA(", "=PlaysetListWin32"))()
+local populate, selectItem = C.PopulateWorldCatagoryList, C.SelectItem
+C.PopulateWorldCatagoryList = function(self, ...)
+  populate(self, ...)
+  if self.worldFilter ~= "Play" or UI_IsOnboardTutorialActive() then return end
+  local at = #self.listData + 1
+  for i, t in ipairs(self.listData) do if t.id == "PlaysetX" then at = i + 1 end end
+  self:AddListButton("Incredibles")
+  table.insert(self.listData, at, table.remove(self.listData))
+end
+C.SelectItem = function(self, ...)
+  local t = self.listData[self.selectedIndex]
+  if not t or t.id ~= "Incredibles" then return selectItem(self, ...) end
+  if self.cloudLoadStarted then return end
+  self:CallFlashFunction("_root.CloseScreen")
+  ClearNewsPaper()
+  Network_SetJoinSession(false)
+  UI_LaunchLevel("IN_City", "world", true, true, false)
+  local h = UI.GetHandleFromName("VirtualReaderPC_Loadout", 0)
+  local vr = h ~= UI.INVALID_UI_HANDLE and UI.GetScreenFromScreenHandle(h)
+  if vr and vr.launchLevelInfo then vr.launchLevelInfo.saveTarget = "world" end
+  self:SetFocus(false)
+end
+return C
+)LUA";
+    return s;
+}
+
 }  // namespace ui
