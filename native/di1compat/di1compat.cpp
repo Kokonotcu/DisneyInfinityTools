@@ -191,6 +191,7 @@ static struct {
     bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
+    bool clip10Ids = true;           // cho.hpp: motion clips on templates 3.0 owns (ports10.hpp) with 3.0 port ids; 1.0 model links too
     bool choAlias10 = true;          // cho.hpp: Cho DataMap paths outside choreographies/<n>/<n> (vault bolts, door)
     bool banm10 = true;              // cho.hpp: .banm 1.0f -> 1.0g (version gate, full track paths)
     bool loadScreen10 = true;        // ui: 1.0's loading-screen choice for zones with 1.0's LoadingScreen key
@@ -290,6 +291,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
+        else if (!strcmp(key, "clip10ids")) g_cfg.clip10Ids = atoi(val) != 0;
         else if (!strcmp(key, "choalias10")) g_cfg.choAlias10 = atoi(val) != 0;
         else if (!strcmp(key, "banm10")) g_cfg.banm10 = atoi(val) != 0;
         else if (!strcmp(key, "loadscreen10")) g_cfg.loadScreen10 = atoi(val) != 0;
@@ -319,9 +321,9 @@ static void loadConfig(const char* dir)
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
          g_cfg.memtest, g_cfg.fpsLog10, g_cfg.loadProf10);
-    logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d "
+    logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d clip10ids=%d choalias10=%d "
          "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
-         g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10,
+         g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.clip10Ids, g_cfg.choAlias10, g_cfg.banm10,
          g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
     logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
     logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
@@ -639,10 +641,15 @@ static bool transcodeCho(oct::File& f, std::string& note)
         std::function<bool(const std::string&)> motion;
         if (g_cfg.clip10Motions)
             motion = [](const std::string& t) { size_t s = t.find_last_of("/\\"); return s != std::string::npos && !has30(t.substr(0, s)); };
-        int failed = 0;
-        if (int n = cho::clips30(f, motion, &failed)) { note += "+clips(" + std::to_string(n) + ") "; changed = true; }
+        int failed = 0, ren = 0;
+        if (int n = cho::clips30(f, motion, &failed, g_cfg.clip10Ids, &ren)) {
+            note += "+clips(" + std::to_string(n) + (ren ? ", " + std::to_string(ren) + " with 3.0 port ids" : std::string()) + ") ";
+            changed = true;
+        }
         if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
     }
+    if (g_cfg.clip10Ids)
+        if (int n = cho::links30(f)) { note += "+ports(" + std::to_string(n) + " model links in 3.0 port order) "; changed = true; }
     if (g_cfg.choLayout10) {
         int inst = 0;
         if (int n = cho::layout30(f, &inst)) { note += "+layout(" + std::to_string(n) + ", " + std::to_string(inst) + " instances) "; changed = true; }
@@ -1520,12 +1527,43 @@ static int __fastcall hkLayGate(void* self, void*, uint32_t a1, uint32_t a2)
 typedef void(__fastcall* BtClipSetFn)(uint8_t* self, void* edx, uint32_t clip, uint16_t* desc, uint32_t a3);
 static BtClipSetFn g_clipSet;
 static volatile LONG g_btClipSets;
+// After the set-up ran: how many output ids of the descriptor's sampled / constant tables reach a node. FUN_00532050
+// maps an id through the port table at +0x1c (+0x10 u16 per port, +0x14 port count, +0x18 mask; 0xffff = none; no
+// table: the id itself) to a local, applied if < the local count at +0x34 (nodes at +0x30).
+static void btClipBound(uint8_t* self, const uint16_t* desc, char* out, size_t cap)
+{
+    out[0] = 0;
+    if (!tdReadable((uintptr_t)self, 0x4c) || !desc || !tdReadable((uintptr_t)desc, 8)) return;
+    uint32_t map = *(uint32_t*)(self + 0x1c), nLoc = *(uint32_t*)(self + 0x34), arr = 0, ports = 0, mask = 0xffff;
+    if (map && tdReadable(map, 0x1c)) { arr = *(uint32_t*)(map + 0x10); ports = *(uint32_t*)(map + 0x14); mask = *(uint16_t*)(map + 0x18); }
+    uint16_t n = desc[1];
+    if (!tdReadable((uintptr_t)(desc + 3 + n), 2)) return;
+    const uint16_t* tabs[2] = {desc + 3 + n, (const uint16_t*)((const uint8_t*)desc + desc[2 + n])};
+    uint32_t tot[2] = {}, hit[2] = {};
+    for (int t = 0; t < 2; ++t) {
+        if (!tdReadable((uintptr_t)tabs[t], 2) || !tdReadable((uintptr_t)tabs[t], 2 + 2 * (size_t)tabs[t][0])) continue;
+        tot[t] = tabs[t][0];
+        for (uint32_t k = 0; k < tot[t]; ++k) {
+            uint32_t id = tabs[t][1 + k] & 0x1fff, loc = id;
+            if (map)
+                loc = id < ports && tdReadable(arr + 2 * id, 2) && *(uint16_t*)(uintptr_t)(arr + 2 * id) != 0xffff
+                          ? *(uint16_t*)(uintptr_t)(arr + 2 * id) & mask : 0xffffffffu;
+            hit[t] += loc < nLoc;
+        }
+    }
+    sprintf_s(out, cap, "; ids reaching a node: sampled %u/%u, constant %u/%u (port table %08X: %u ports, %u locals)", hit[0], tot[0],
+              hit[1], tot[1], map, ports, nLoc);
+}
 static void __fastcall hkClipSet(uint8_t* self, void*, uint32_t clip, uint16_t* desc, uint32_t a3)
 {
-    if (InterlockedIncrement(&g_btClipSets) <= 400)
-        logf("breaktrace clip set %p: clip %08X desc %p outputs %d table %08X a3 %08X", self, clip, desc,
-             desc && tdReadable((uintptr_t)desc, 4) ? desc[1] : -1, tdReadable((uintptr_t)self, 0x48) ? *(uint32_t*)(self + 0x44) : 0, a3);
+    uint32_t table = tdReadable((uintptr_t)self, 0x48) ? *(uint32_t*)(self + 0x44) : 0;
     g_clipSet(self, nullptr, clip, desc, a3);
+    if (InterlockedIncrement(&g_btClipSets) <= 400) {
+        char bound[160];
+        btClipBound(self, desc, bound, sizeof(bound));
+        logf("breaktrace clip set %p: clip %08X desc %p outputs %d table %08X a3 %08X%s", self, clip, desc,
+             desc && tdReadable((uintptr_t)desc, 4) ? desc[1] : -1, table, a3, bound);
+    }
 }
 // - music cue push FUN_0073c5c0 (thiscall on the music stack, 4 args, ret 0x10; name, priority, float, string)
 typedef uint32_t(__fastcall* BtMusicFn)(void* self, void* edx, const char* name, int prio, float f, const char* s);

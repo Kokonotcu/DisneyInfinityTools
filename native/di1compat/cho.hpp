@@ -20,8 +20,21 @@
 //   34->63), and never requested such a template's .bct (in-game 2026-10-13: 23 1.0 biped clips served, no
 //   biped.bct); for templates whose owner 3.0 lacks it loads the 1.0 .bct (7/7 requested: kiosk, delivery_boxes,
 //   inc_omnisky_spawner, 4 choreography placement.bct). So a motion clip is re-packed with its ids kept only when the
-//   template's owner folder is absent from the 3.0 install (di1compat.cpp); the others stay raw until an id map
-//   exists (NPC-6). A 1.0 output with more than 7 comps (3.0 has 3 bits; 4 such in the
+//   template's owner folder is absent from the 3.0 install (di1compat.cpp), or renumbered (clip10ids, below).
+//   clip10ids: an id is a port of the template, and a port is a connection name. 3.0 FUN_00552fc0 / FUN_00543f40 ->
+//   FUN_00532050 take id -> the model's port table at evaluator +0x1c (the base link's PortToLocalIndices; 0xffff or
+//   past its end = skipped) -> local -> node; 1.0 DataNodeLinks is the same map. The template files name nothing
+//   (.bct: Filters / Mirrors), but every model link does: port -> local -> ConnectionMapUsedDataNodes -> DataNode,
+//   whose header path without the model root is the connection ('cntrl_elbow_right/transform': 1.0 port 131, 3.0
+//   port 276). Ports are that name list sorted case-folded (3.0 biped: then a 2nd sorted block from 935).
+//   ports10.hpp (DI3Tools portmap.py over the model links of both extracts) maps each 1.0 port to the 3.0 port of
+//   its name; a 1.0-only name gets its own 3.0 port no 3.0 model links, ports no 1.0 model links share one. Prediction on the motion-clip twins, the ids never used to build the table (octtest --clip-ids; rule.py):
+//   same-size tables 105,708 ids at the twin's position, 1,131 not (41 blocks whose outputs 3.0 re-ordered, 10
+//   re-authored); order-free 279,734 of 285,331 ids among the twin block's (ids kept: 1 and 33,553); 403 blocks
+//   byte-identical to the twin (ids kept: 0). Only Type 'Clip' SubNetworks whose LayerBinds all name one mapped
+//   template: Scene SubNetworks with a LayerBind (inc_helen_swoosh_*) carry ClipProcessor output indices (0..n).
+//   links30 renumbers a served 1.0 model's DataNodeLinks with the same table, so 1.0 models and clips agree.
+//   A 1.0 output with more than 7 comps (3.0 has 3 bits; 4 such in the
 //   motion corpus, none in choreographies) is split into outputs with the same id: FUN_005329b0 reads, applies and
 //   writes back per output, so the split applies the same comps.
 //
@@ -97,6 +110,7 @@
 #include <set>
 #include "octx.hpp"
 #include "bent.hpp"
+#include "ports10.hpp"
 
 namespace cho {
 
@@ -157,9 +171,17 @@ inline bool table30(const std::vector<ClipOut>& outs, std::string& t)
     return true;
 }
 
-// One 1.0 ClipDataBlock (payload without its count) -> 3.0 layout. False (out untouched) if it does not parse.
-inline bool clipBlock30(const std::string& d, std::string& out)
+// One 1.0 ClipDataBlock (payload without its count) -> 3.0 layout, ids through pm when given (a 1.0 port past the
+// table fails the block). False (out untouched) if it does not parse.
+inline bool clipBlock30(const std::string& d, std::string& out, const PortMap* pm = nullptr)
 {
+    auto renumber = [pm](std::vector<ClipOut>& v) {
+        for (auto& c : v) {
+            if (c.id >= pm->n10) return false;
+            c.id = pm->to30[c.id];
+        }
+        return true;
+    };
     if (d.size() < 0x14) return false;
     uint32_t nDesc = rd(d, 8, 2), nSec = rd(d, 10, 2), constOff = rd(d, 12, 4);
     size_t hdrEnd = 0x10 + 4 * (size_t)(nDesc + nSec);
@@ -186,6 +208,7 @@ inline bool clipBlock30(const std::string& d, std::string& out)
         if (!table10(d, s + 6 + 2 * (size_t)n, e, samp, &o1) || o1 != s + x) return false;
         if (!table10(d, s + x, e, cnst, &o2)) return false;
         for (size_t p = o2; p < e; ++p) if ((uint8_t)d[p] != 0xee) return false;   // only padding may follow
+        if (pm && (!renumber(samp) || !renumber(cnst))) return false;
         std::string st, ct;
         if (!table30(samp, st) || !table30(cnst, ct)) return false;
         std::string t = d.substr(s, 4 + 2 * (size_t)n);
@@ -205,18 +228,42 @@ inline bool clipBlock30(const std::string& d, std::string& out)
     return true;
 }
 
+// The port renumbering of a motion clip (SubNetwork Type 'Clip') whose LayerBinds all name one template in ports10.hpp,
+// else nullptr. Scene SubNetworks are left out: their ids are ClipProcessor outputs even beside a LayerBind.
+inline const PortMap* clipPorts(const oct::File& f, size_t sn)
+{
+    const PortMap* pm = nullptr;
+    bool clip = false, other = false;
+    for (size_t j = sn + 1, e = f.blockEnd(sn), lvl4 = 0; j < e; ++j) {
+        const oct::Rec& r = f.recs[j];
+        if (r.level == 3 && f.name(r) == "Type") clip = f.nameValues(r) == std::vector<std::string>{"Clip"};
+        if (r.level == 4) lvl4 = j;
+        if (r.level == 5 && f.name(r) == "ConnectionTemplate" && lvl4 && f.name(f.recs[lvl4]) == "LayerBind") {
+            auto v = f.nameValues(r);
+            const PortMap* m = v.empty() ? nullptr : portMap(v[0].c_str());
+            other |= !m || (pm && m != pm);
+            pm = m;
+        }
+    }
+    return clip && !other ? pm : nullptr;
+}
+
 // Every ClipDataBlock of the file. A SubNetwork with a LayerBind (a motion clip) is re-packed only if
-// motion(ConnectionTemplate) says its ids index a template with 1.0 numbering (null: never). Returns the blocks
-// re-packed; *failed counts blocks left as they are.
-inline int clips30(oct::File& f, const std::function<bool(const std::string&)>& motion, int* failed = nullptr)
+// motion(ConnectionTemplate) says its ids index a template with 1.0 numbering (null: never), or, with ids, if
+// clipPorts gives its renumbering (then its ids go through it). Returns the blocks re-packed; *failed counts blocks
+// left as they are, *renumbered the re-packed ones with renumbered ids.
+inline int clips30(oct::File& f, const std::function<bool(const std::string&)>& motion, int* failed = nullptr, bool ids = false,
+                   int* renumbered = nullptr)
 {
     int n = 0;
     bool skip = false;
+    const PortMap* pm = nullptr;
     for (size_t i = 0; i < f.recs.size(); ++i) {
         oct::Rec& r = f.recs[i];
         if (r.level == 2 && f.name(r) == "SubNetwork") {
             skip = false;
-            for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
+            pm = ids ? clipPorts(f, i) : nullptr;
+            for (size_t j = i + 1, e = f.blockEnd(i); j < e && !pm; ++j)
                 if (f.recs[j].level == 5 && f.name(f.recs[j]) == "ConnectionTemplate") {
                     auto v = f.nameValues(f.recs[j]);
                     skip = !motion || v.empty() || !motion(v[0]);
@@ -228,8 +275,41 @@ inline int clips30(oct::File& f, const std::function<bool(const std::string&)>& 
         oct::Spec s = oct::spec(r.type);
         if (s.kind != oct::BYTE) continue;
         std::string out;
-        if (!clipBlock30(r.pay.substr(s.cw), out)) { if (failed) ++*failed; continue; }
+        if (!clipBlock30(r.pay.substr(s.cw), out, pm)) { if (failed) ++*failed; continue; }
         r = octx::blobRec(f, r.level, "ClipDataBlock", out);
+        ++n;
+        if (pm && renumbered) ++*renumbered;
+    }
+    return n;
+}
+
+// Model side of the same renumbering: a 1.0 BaseDataNodeLinks on a template in ports10.hpp gets its DataNodeLinks
+// (local per port) re-indexed by 3.0 port, so a served 1.0 model and the renumbered clips agree; octx::convertLink then
+// writes the 3.0 blobs from it. Returns the links renumbered.
+inline int links30(oct::File& f)
+{
+    int n = 0;
+    for (size_t i = 0; i < f.recs.size(); ++i) {
+        if (f.recs[i].level != 4 || f.name(f.recs[i]) != "BaseDataNodeLinks") continue;
+        const PortMap* pm = nullptr;
+        long dnl = -1;
+        for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
+            const std::string& nm = f.name(f.recs[j]);
+            if (nm == "ConnectionTemplate") {
+                auto v = f.nameValues(f.recs[j]);
+                pm = v.empty() ? nullptr : portMap(v[0].c_str());
+            } else if (nm == "DataNodeLinks") dnl = (long)j;
+        }
+        if (!pm || dnl < 0) continue;
+        std::vector<int32_t> old = f.ints(f.recs[dnl]), by30;
+        if (old.size() > pm->n10) continue;   // more ports than the 1.0 template has: not this template's numbering
+        for (size_t p = 0; p < old.size(); ++p) {
+            if (old[p] < 0) continue;
+            uint16_t q = pm->to30[p];
+            if (by30.size() <= q) by30.resize(q + 1, -1);
+            by30[q] = old[p];
+        }
+        f.setInts(f.recs[dnl], by30);
         ++n;
     }
     return n;
