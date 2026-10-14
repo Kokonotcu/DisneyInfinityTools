@@ -171,6 +171,7 @@ static struct {
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
     bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory has no case for type 10 (npcrt.hpp)
     bool choTime10 = true;           // cho.hpp: SubNetwork MinTime/MaxTime (choreography play range)
+    bool choAnim10 = true;           // cho.hpp: Float 'Global.Time' clip/event input -> AnimState 'AnimState' (3.0 clock + slot type)
     bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
@@ -255,6 +256,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
         else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
         else if (!strcmp(key, "chotime10")) g_cfg.choTime10 = atoi(val) != 0;
+        else if (!strcmp(key, "choanim10")) g_cfg.choAnim10 = atoi(val) != 0;
         else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
@@ -286,8 +288,8 @@ static void loadConfig(const char* dir)
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
          g_cfg.memtest);
-    logf("config cho: chotime10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d banm10=%d", g_cfg.choTime10,
-         g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10);
+    logf("config cho: chotime10=%d choanim10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d banm10=%d",
+         g_cfg.choTime10, g_cfg.choAnim10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10);
 }
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
@@ -590,6 +592,10 @@ static bool transcodeCho(oct::File& f, std::string& note)
     }
     if (g_cfg.choTime10)
         if (int n = cho::time30(f)) { note += "+time(" + std::to_string(n) + " subnetworks) "; changed = true; }
+    if (g_cfg.choAnim10) {
+        int sns = 0;
+        if (int n = cho::anim30(f, &sns)) { note += "+anim(" + std::to_string(n) + " in " + std::to_string(sns) + " subnetworks) "; changed = true; }
+    }
     return changed;
 }
 

@@ -35,6 +35,26 @@
 //   in the SubNetwork's NetworkBuffer at the node's NetworkBufferOffset: u32 n, n x (f32 time, f32 value), the same
 //   bytes in both games (bld_damage_explosion twin). Placed after VariantGroupPool, as 3.0 writes them.
 //
+// anim30 (choanim10): the time input of ClipProcessor / EventList. 1.0 drives them from a Float
+//   DataNode under the root header 'Global.Time'; 3.0 from an AnimState DataNode under the root header 'AnimState'.
+//   3.0 binds the input slot by type (EventListProcessor FUN_0054b180: slot 2 'Input' via FUN_00530ad0, AnimState type
+//   check DAT_0213e6b0/ac; a Float leaves the slot empty and the evaluate FUN_0052d390 passes NULL to FUN_0048d2b0:
+//   in-game 2026-10-13 AV at 0048D2B3 once time30 let ts_watersplashdown evaluate), and its play clock finds the node
+//   by path and type (FUN_007822e0 / FUN_007823b0 / FUN_0077d280 -> FUN_0077c530("AnimState"), same type check),
+//   connects its TimeProcessor to it (FUN_00780d50 / FUN_00780af0) and takes the asset range from its RangeMin /
+//   RangeMax (FUN_007823b0 -> FUN_0076c4d0). AnimState fields (field table 0x02003bb8): Time, RangeMin, RangeMax,
+//   DiscontinuityTime, StateData. Twins (choreographies + exploders, twinscan.py): every matched ClipProcessor (680)
+//   and EventList (716) Input is 1.0 Float 'Global.Time' -> 3.0 AnimState 'AnimState'; no other processor input
+//   changed type. All 606 1.0 'Global.Time' nodes are {Type Float, Data 0.0} used only as those Inputs; all 606 3.0
+//   AnimState nodes are {Type AnimState, Data {RangeMin, RangeMax}}. Range rule, exact on all 7,167 AnimState nodes
+//   of the 3.0 choreographies + exploders + motions (animrule.py; octtest --cho-anim regenerates them): min / max
+//   of the ClipDataBlock f32[0] / f32[1] and the event times of the ClipProcessors / EventLists whose Input is that
+//   node; no FLT_MIN floor, so it differs from MinTime/MaxTime when every time is <= 0 (cin_isw_e_insideout: -7.33..
+//   -0.5 vs ..FLT_MIN) or a clip has another input (krt_wkrh_kingcandy_*: BLINK clips -10..10 on a Float). Written
+//   so: the node's Type and Data replaced (Header kept), the root header string renamed in place. Skipped, node left
+//   as it was: the string also names another header, the SubNetwork already has an 'AnimState' string, or the node
+//   drives no clip or event (no range).
+//
 // layout30 (cholayout10): 3.0's layout reader (FUN_00789e80) has no ContextNodePool; actors and clips of a
 //   choreography are InstanceNodes (FUN_00787e30: Flags, Name, PlacementNodeRef, if 8 FilePath, if 0x20
 //   BoundingSceneNodeName) bound by Attachments with Base/LayerInstanceRef (FUN_00781410, applied in FUN_00788280).
@@ -201,9 +221,9 @@ inline int clips30(oct::File& f, const std::function<bool(const std::string&)>& 
 }
 
 // ---- time range ----
-inline oct::Rec floatRec(oct::File& f, const char* name, float v)
+inline oct::Rec floatRec(oct::File& f, const char* name, float v, uint16_t level = 3)
 {
-    oct::Rec r{3, (uint16_t)(oct::SCALAR | oct::FLOAT << 3), f.addName(name), std::string(4, '\0')};
+    oct::Rec r{level, (uint16_t)(oct::SCALAR | oct::FLOAT << 3), f.addName(name), std::string(4, '\0')};
     memcpy(&r.pay[0], &v, 4);
     return r;
 }
@@ -269,6 +289,119 @@ inline int time30(oct::File& f)
         f.recs.insert(f.recs.begin() + at, t.begin(), t.end());
         ++n;
     }
+    return n;
+}
+
+// Returns the DataNodes converted; *subnets = SubNetworks touched.
+inline int anim30(oct::File& f, int* subnets = nullptr)
+{
+    long pool = f.pool("SubNetworkPool");
+    if (pool < 0) return 0;
+    std::vector<size_t> sns;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
+        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
+    int n = 0, touched = 0;
+    for (auto it = sns.rbegin(); it != sns.rend(); ++it) {   // last first: edits keep earlier indices
+        size_t sn = *it, end = f.blockEnd(sn);
+        long hs = -1, hsi = -1, hl = -1, dp = -1, pp = -1;
+        std::string nb;
+        for (size_t i = sn + 1; i < end; ++i) {
+            if (f.recs[i].level != 3) continue;
+            const std::string& k = f.name(f.recs[i]);
+            if (k == "HeaderStrings") hs = (long)i;
+            else if (k == "HeaderStringIndices") hsi = (long)i;
+            else if (k == "HeaderLayout") hl = (long)i;
+            else if (k == "DataNodePool") dp = (long)i;
+            else if (k == "ProcessorNodePool") pp = (long)i;
+            else if (k == "NetworkBuffer") nb = f.recs[i].pay.substr(oct::spec(f.recs[i].type).cw);
+        }
+        if (hs < 0 || hsi < 0 || hl < 0 || dp < 0 || pp < 0) continue;
+        oct::Spec ss = oct::spec(f.recs[hs].type);
+        if (ss.kind != oct::NAME || ss.keyed) continue;
+        std::vector<std::string> strs = f.nameValues(f.recs[hs]);
+        std::vector<int32_t> idx = f.ints(f.recs[hsi]), lay = f.ints(f.recs[hl]);
+        auto at = std::find(strs.begin(), strs.end(), "Global.Time");
+        if (at == strs.end() || std::count(strs.begin(), strs.end(), "AnimState")) continue;
+        int32_t s = (int32_t)(at - strs.begin());
+        if (std::count(idx.begin(), idx.end(), s) != 1) continue;   // the string names another header too
+        // HeaderLayout: (parent header, child count) pairs; the children take the next HeaderStringIndices and are
+        // numbered from 1 (0 = root)
+        int h = -1;
+        size_t k = 0;
+        for (size_t p = 0; p + 1 < lay.size(); p += 2)
+            for (int32_t c = 0; c < lay[p + 1] && k < idx.size(); ++c, ++k)
+                if (lay[p] == 0 && idx[k] == s) h = (int)k + 1;
+        if (h < 0) continue;
+        // child of a node (level + 1) by name, -1 if none
+        auto kid = [&](size_t i, const char* nm) -> long {
+            for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
+                if (f.recs[j].level == f.recs[i].level + 1 && f.name(f.recs[j]) == nm) return (long)j;
+            return -1;
+        };
+        auto str1 = [&](long r) { auto v = r < 0 ? std::vector<std::string>{} : f.nameValues(f.recs[r]); return v.empty() ? std::string() : v[0]; };
+        std::vector<size_t> dns;
+        for (size_t i = dp + 1, e = f.blockEnd(dp); i < e; ++i)
+            if (f.recs[i].level == 4) dns.push_back(i);
+        // the time range of the clips and events this DataNode drives
+        auto range = [&](int d, float& t0, float& t1) {
+            bool any = false;
+            auto add = [&](float t) { t0 = any ? (std::min)(t0, t) : t; t1 = any ? (std::max)(t1, t) : t; any = true; };
+            for (size_t i = pp + 1, e = f.blockEnd(pp); i < e; ++i) {
+                if (f.recs[i].level != 4) continue;
+                std::string ty = str1(kid(i, "Type"));
+                long ar = kid(i, "DataNodeAttributes"), rr = kid(i, "DataNodeRefs");
+                if ((ty != "ClipProcessor" && ty != "EventList") || ar < 0 || rr < 0) continue;
+                auto attrs = f.nameValues(f.recs[ar]);
+                auto rf = f.ints(f.recs[rr]);
+                auto ref = [&](const char* a) { for (size_t q = 0; q < attrs.size() && q < rf.size(); ++q) if (attrs[q] == a) return rf[q]; return -1; };
+                if (ref("Input") != d) continue;
+                int src = ref(ty == "ClipProcessor" ? "ClipData" : "EventListData");
+                if (src < 0 || (size_t)src >= dns.size()) continue;
+                if (ty == "ClipProcessor") {
+                    long b = kid(dns[src], "ClipDataBlock");
+                    if (b < 0 || oct::spec(f.recs[b].type).kind != oct::BYTE) continue;
+                    std::string blk = f.recs[b].pay.substr(oct::spec(f.recs[b].type).cw);
+                    if (blk.size() < 8) continue;
+                    float a, z;
+                    memcpy(&a, &blk[0], 4);
+                    memcpy(&z, &blk[4], 4);
+                    add(a);
+                    add(z);
+                } else {
+                    long o = kid(dns[src], "NetworkBufferOffset");
+                    uint32_t off = (uint32_t)(o < 0 ? -1 : first(f, f.recs[o], -1)), cnt = rd(nb, off, 4);
+                    for (uint32_t k2 = 0; cnt != 0xffffffffu && k2 < cnt && off + 8 + 8 * (size_t)k2 <= nb.size(); ++k2) {
+                        float t;
+                        memcpy(&t, &nb[off + 4 + 8 * k2], 4);
+                        add(t);
+                    }
+                }
+            }
+            return any;
+        };
+        std::vector<std::vector<oct::Rec>> rep(dns.size());   // new children per DataNode, built before any edit
+        int here = 0;
+        for (size_t d = 0; d < dns.size(); ++d) {
+            long hd = kid(dns[d], "Header"), ty = kid(dns[d], "Type");
+            float t0 = 0, t1 = 0;
+            if (hd < 0 || ty < 0 || first(f, f.recs[hd], -1) != h || str1(ty) != "Float" || !range((int)d, t0, t1)) continue;
+            rep[d] = {f.recs[hd], f.nameScalar(5, f.recs[ty].name, "AnimState"), f.node(5, "Data"),
+                      floatRec(f, "RangeMin", t0, 6), floatRec(f, "RangeMax", t1, 6)};
+            ++here;
+        }
+        for (size_t d = dns.size(); d-- > 0;) {   // last first: edits keep earlier indices
+            if (rep[d].empty()) continue;
+            size_t i = dns[d];
+            f.recs.erase(f.recs.begin() + i + 1, f.recs.begin() + f.blockEnd(i));
+            f.recs.insert(f.recs.begin() + i + 1, rep[d].begin(), rep[d].end());
+        }
+        if (!here) continue;
+        uint16_t a = f.addName("AnimState");
+        memcpy(&f.recs[hs].pay[ss.cw + 2 * (size_t)s], &a, 2);
+        n += here;
+        ++touched;
+    }
+    if (subnets) *subnets = touched;
     return n;
 }
 
