@@ -131,6 +131,7 @@ static struct {
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
     bool trace = true;               // log every open
     bool missionTrace = false;       // log IN_ mission context state changes (one cheap hook; trace's cost frames)
+    bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
     bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
@@ -217,6 +218,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "serve10")) g_cfg.serve10 = atoi(val) != 0;
         else if (!strcmp(key, "trace")) g_cfg.trace = atoi(val) != 0;
         else if (!strcmp(key, "missiontrace")) g_cfg.missionTrace = atoi(val) != 0;
+        else if (!strcmp(key, "teardowntrace")) g_cfg.teardownTrace = atoi(val) != 0;
         else if (!strcmp(key, "shaders10")) g_cfg.shaders10 = atoi(val) != 0;
         else if (!strcmp(key, "translate10")) g_cfg.translate10 = atoi(val) != 0;
         else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
@@ -1277,6 +1279,126 @@ static void __fastcall hkAvRemove(void* self, void*, uint32_t a1)
     stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 12);
     logf("%s", line);
     g_avRemove(self, nullptr, a1);
+}
+
+// Probe (teardowntrace): who frees a Layout-held DataNode's memory during its own dtor (in-game 2026-10-13: AV write
+// 004EDDBB in FUN_004edda0 after the dtor wrote node+0 on the same page; in between run FUN_004b2780(0) on the node's
+// hierarchy entry and, inside FUN_004edda0 between its read and its write of node+0xc when the handle has 0x80000,
+// FUN_004edcc0 -> FUN_004e1a40 freeing that entry). Logs, for each Zoo::Layout dtor (FUN_00787bc0): every
+// placement's +4 scene node and +0xc DataNode (vtable, RTTI, refcount word, page protection, handle, hierarchy entry
+// words and their tagged targets); then, while that dtor runs, each Samurai::Node dtor (FUN_004ee5f0), entry release
+// (FUN_004b2780) and entry free (FUN_004e1a40) with the page protection of the node being destroyed before / after.
+// Reads only checked memory (CrabeLoader dumps every AV).
+static bool tdReadable(uintptr_t p, size_t n)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (p < 0x10000 || !VirtualQuery((void*)p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || !mbi.Protect ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+        return false;
+    return p + n <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+}
+static uint32_t tdRd(uintptr_t p) { return tdReadable(p, 4) ? *(const uint32_t*)p : 0xDEADBEEF; }
+static uint32_t tdProt(uintptr_t p)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    return p >= 0x10000 && VirtualQuery((void*)p, &mbi, sizeof(mbi)) ? (mbi.State == MEM_COMMIT ? mbi.Protect : 0x10000000 | mbi.State) : 0;
+}
+static uint32_t tdStatic(uint32_t v) { return v >= g_base && v < g_base + 0x0209B000 ? v - (uint32_t)g_base + 0x400000u : v; }
+// "ptr vt=<static> <rtti> ref=<word> prot=<protect>"
+static void tdObj(char* out, size_t cap, uintptr_t p)
+{
+    if (!tdReadable(p, 8)) { sprintf_s(out, cap, "%08X (unreadable, prot %X)", (uint32_t)p, tdProt(p)); return; }
+    uint32_t vt = tdRd(p), col = tdRd(vt - 4), td = tdRd(col + 12);
+    char name[96] = "";
+    if (td != 0xDEADBEEF) safeCopy(name, sizeof(name), (const char*)(uintptr_t)(td + 8));
+    MEMORY_BASIC_INFORMATION mbi{};
+    VirtualQuery((void*)p, &mbi, sizeof(mbi));
+    sprintf_s(out, cap, "%08X vt=%08X %s ref=%08X prot=%X alloc=%08X", (uint32_t)p, tdStatic(vt), name, tdRd(p + 4), tdProt(p),
+              (uint32_t)(uintptr_t)mbi.AllocationBase);
+}
+// hierarchy entry of a node handle (FUN_004b46d0 / FUN_004b2800, table at *(0x021B739C)); 0 if none
+static uintptr_t tdEntry(uint32_t handle)
+{
+    uint32_t h = handle & 0x7ffff, t = tdRd(rt(0x021B739C)), e;
+    if (h == 0x7ffff || t == 0xDEADBEEF) return 0;
+    if (!(h & 0x40000)) e = tdRd(t + 0x18 + (h >> 12) * 4) + (h & 0xfff) * 0x14;
+    else e = tdRd(tdRd(t + 0x130 + (((h >> 3) & 0x1fff7fff) >> 9) * 4) + ((h >> 3) & 0x1ff) * 4) + (h & 7) * 0x14;
+    return tdReadable(e, 0x14) ? e : 0;
+}
+static void tdEntryLog(const char* what, uintptr_t e)
+{
+    if (!e) { logf("td   %s entry: none", what); return; }
+    char a[200], b[200];
+    tdObj(a, sizeof(a), tdRd(e) & ~1u);
+    tdObj(b, sizeof(b), tdRd(e + 0x10) & ~1u);
+    logf("td   %s entry %08X: [0]=%08X [4]=%08X [8]=%08X [c]=%08X [10]=%08X; [0]-> %s; [10]-> %s", what, (uint32_t)e, tdRd(e),
+         tdRd(e + 4), tdRd(e + 8), tdRd(e + 12), tdRd(e + 0x10), a, b);
+}
+static __declspec(thread) int t_tdDepth;
+static __declspec(thread) uintptr_t t_tdNode;
+static volatile LONG g_tdLayouts, g_tdLines;
+typedef uint32_t(__fastcall* TdDtorFn)(void* self, void* edx);
+typedef void(__fastcall* EntryRelFn)(void* self, void* edx, uint32_t a1);
+static TdDtorFn g_layoutDtor, g_nodeDtor;
+static EntryRelFn g_entryRel;
+static uint32_t __fastcall hkLayoutDtor(void* self, void*)
+{
+    bool on = InterlockedIncrement(&g_tdLayouts) <= 60;
+    if (on) {
+        uintptr_t L = (uintptr_t)self;
+        uint32_t arr = tdRd(L + 0x40), n = tdRd(L + 0x44);
+        logf("td layout %08X dtor: %u placements (array %08X)", (uint32_t)L, n, arr);
+        for (uint32_t k = 0; k < n && k < 8 && arr != 0xDEADBEEF; ++k) {
+            uintptr_t el = arr + 0x18 * k;
+            char s[200], d[200], nm[64] = "";
+            tdObj(s, sizeof(s), tdRd(el + 4));
+            tdObj(d, sizeof(d), tdRd(el + 0xc));
+            safeCopy(nm, sizeof(nm), (const char*)(uintptr_t)tdRd(el + 8));
+            logf("td  placement %u '%s' flags %X: scene %s; node %s handle %08X", k, nm, tdRd(el + 0x10), s, d, tdRd(tdRd(el + 0xc) + 0xc));
+            uint32_t node = tdRd(el + 0xc);
+            if (node && node != 0xDEADBEEF) tdEntryLog("node", tdEntry(tdRd(node + 0xc)));
+        }
+    }
+    if (on) ++t_tdDepth;
+    uint32_t r = g_layoutDtor(self, nullptr);
+    if (on) { --t_tdDepth; logf("td layout %08X dtor done", (uint32_t)(uintptr_t)self); }
+    return r;
+}
+static uint32_t __fastcall hkNodeDtor(void* self, void*)
+{
+    uintptr_t prev = t_tdNode;
+    if (t_tdDepth > 0 && InterlockedIncrement(&g_tdLines) <= 400) {
+        char o[200];
+        tdObj(o, sizeof(o), (uintptr_t)self);
+        logf("td  node dtor %s handle %08X", o, tdRd((uintptr_t)self + 0xc));
+        tdEntryLog("own", tdEntry(tdRd((uintptr_t)self + 0xc)));
+        t_tdNode = (uintptr_t)self;
+    }
+    uint32_t r = g_nodeDtor(self, nullptr);
+    t_tdNode = prev;
+    return r;
+}
+static void __fastcall hkEntryRel(void* self, void*, uint32_t a1)
+{
+    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 400) { g_entryRel(self, nullptr, a1); return; }
+    uintptr_t e = (uintptr_t)self;
+    char o[200];
+    tdObj(o, sizeof(o), tdRd(e + 0x10) & ~1u);
+    logf("td   entry release %08X (arg %X) [10]=%08X -> %s; node %08X page prot %X", (uint32_t)e, a1, tdRd(e + 0x10), o,
+         (uint32_t)t_tdNode, tdProt(t_tdNode));
+    g_entryRel(self, nullptr, a1);
+    logf("td   entry release done; node %08X page prot %X", (uint32_t)t_tdNode, tdProt(t_tdNode));
+}
+// FUN_004e1a40 (thiscall on the entry table, arg = entry): frees a hierarchy entry; reached from the node dtor's
+// FUN_004edda0 -> FUN_004edcc0 between its read and its faulting write of node+0xc
+static EntryRelFn g_entryFree;
+static void __fastcall hkEntryFree(void* self, void*, uint32_t entry)
+{
+    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 400) { g_entryFree(self, nullptr, entry); return; }
+    tdEntryLog("freeing", tdReadable(entry, 0x14) ? entry : 0);
+    logf("td   entry free %08X; node %08X page prot %X", entry, (uint32_t)t_tdNode, tdProt(t_tdNode));
+    g_entryFree(self, nullptr, entry);
+    logf("td   entry free done; node %08X page prot %X", (uint32_t)t_tdNode, tdProt(t_tdNode));
 }
 
 // Trace: the spawn choreography. FUN_00a9f080 asks the creation cho for 'Cho Controls' (FUN_014835c0, thiscall 2 args)
@@ -2612,6 +2734,12 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.missionTrace)
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
+    if (g_cfg.teardownTrace) {
+        hook("Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor, (void**)&g_layoutDtor);
+        hook("Samurai::Node dtor (teardowntrace)", 0x004EE5F0, "6AFF68????????64A100000000", (void*)&hkNodeDtor, (void**)&g_nodeDtor);
+        hook("hierarchy entry release (teardowntrace)", 0x004B2780, "8B442404568D7110", (void*)&hkEntryRel, (void**)&g_entryRel);
+        hook("hierarchy entry free (teardowntrace)", 0x004E1A40, "83EC0853578B7C2414", (void*)&hkEntryFree, (void**)&g_entryFree);
+    }
     if ((g_cfg.aliases10 || g_cfg.native10) && g_merOk)
         hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry, (void**)&g_merRegistry);
     if (g_cfg.lockTrace10) {
