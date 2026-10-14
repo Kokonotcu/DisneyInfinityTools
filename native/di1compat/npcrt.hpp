@@ -34,10 +34,11 @@ static std::string g_psPath;                                // playset30: the se
 static const char* const KINDS[] = {"playset", "gamemode", "zone", "actor", "toy", "activity", "zonebackgroundload",
                                     "realm", "munition", "surfaceimpact", "costume", "powerdisc", "include"};
 
-// The router takes engine CStrings, not char*: FUN_018da710 / FUN_018da820 compare the type's length at type-0xc with
-// each loader's name, and the loader (FUN_018db270) add-refs the path's header (FUN_00caa0d0 on path-0xc). A plain
-// char* matched no loader (garbage length) and could have been written through. Ctor FUN_00418310, release FUN_00418230
-// (as sys's cbLoad).
+// The path must be an engine CString: the loader (FUN_018db270) add-refs its header (FUN_00caa0d0 on path-0xc: a
+// std::string buffer there is a garbage refcount incremented in place, or a garbage-length copy). The type may be a
+// plain char*: FUN_018da710 / FUN_018da820 intern it into their own argument slot first (FUN_00a72870 at 0x18da74d /
+// 0x18da844; FUN_0143acc0 passes the literal "DataMap"); a CString is just as good. Ctor FUN_00418310, release
+// FUN_00418230 (as sys's cbLoad).
 struct ECStr {
     char* p = nullptr;
     explicit ECStr(const std::string& s) { ((void*(__fastcall*)(void*, void*, const char*))rt(0x00418310))(&p, nullptr, s.c_str()); }
@@ -178,9 +179,25 @@ static uint32_t __fastcall hkPercApply(uint8_t* self, void*, int a1, int a2, voi
         void** vt = *(void***)net;
         if (((BoolFn)vt[8])(net, nullptr)) host = ((BoolFn)vt[9])(net, nullptr) != 0;
     }
+    // The original remove disables both sides of every zone record, the apply enabled one side (ifMatch if matched, else
+    // ifNot; hostonly records only on the host): an added id on a record's other side would lose one ref per such record
+    // at remove -- with two modifiers of this list overlapping, the first remove takes the addition from the other. Those
+    // refs are added here, so the remove leaves the count as apply found it.
+    const uint8_t* zone = *(const uint8_t**)(self + 0x34);
+    int nz = *(int*)(self + 0x38);
     std::vector<int> on;
-    for (auto& [id, h] : ids)
-        if (!h || host) { ((PercOnFn)rt(0x013F3BA0))(comp, nullptr, id); on.push_back(id); }
+    for (auto& [id, h] : ids) {
+        if (h && !host) continue;
+        int n = 1;
+        for (int z = 0; zone && z < nz; ++z) {
+            const uint8_t* rec = zone + 12 * z;
+            int ifMatch = *(const int*)rec, ifNot = *(const int*)(rec + 4);
+            int enabled = !rec[9] || host ? (rec[8] ? ifMatch : ifNot) : -1;
+            n += (ifMatch == id) + (ifNot == id) - (enabled == id);
+        }
+        while (n-- > 0) ((PercOnFn)rt(0x013F3BA0))(comp, nullptr, id);
+        on.push_back(id);
+    }
     std::lock_guard<std::mutex> lock(g_dbLock);
     g_percOn[{comp, self}].push_back(on);
     return r;
@@ -221,6 +238,7 @@ static void prepare(void* self, const char* name)
     delete g_db;
     g_db = new npc::GameDb(npc::gamedb30(m10, m30));
     g_dbPlayset = n;
+    g_psPath.clear();
     logf("gamedb30 %s: 1.0 DataMap (%u records), %u Playset tables, %u actors with 3.0 tables", name, (unsigned)m10.size(),
          (unsigned)g_db->playset.size(), (unsigned)g_db->actor.size());
     g_pl10.clear();
@@ -238,7 +256,6 @@ static void prepare(void* self, const char* name)
     // includes not in Toy Box come from the smallest other 3.0 DataMap (identical in all 8 that define them)
     std::string bo;
     npc::DataMap other;
-    g_psPath.clear();
     if (g_cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && npc::dataMap(bo, other, &why)) {
         std::string t = npc::playsetText(n, g_db->playset, m30, other);
         g_psPath = "GameDB/Core/" + std::string(name) + "DataMap30.lua";
@@ -266,7 +283,11 @@ static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
     if (name && kind >= 0 && kind <= 12) {
         std::lock_guard<std::mutex> lock(g_dbLock);
         if (kind == 0 && g_cfg.serve10) {
-            prepare(self, name);
+            try {
+                prepare(self, name);
+            } catch (std::exception& e) {   // never unwind into engine code (luaEval's .at() on a malformed chunk)
+                logf("gamedb30 %s: supplement failed: %s", name, e.what());
+            }
             if (g_db && g_dbPlayset == npc::lower(name)) {
                 g_dbActive = true;
                 todo = g_db->playset;
