@@ -162,6 +162,22 @@ int main(int argc, char** argv)
             if (!s.empty()) o << s << '\t' << sx::keyId(s.c_str()) << '\n';
         return 0;
     }
+    if (argc > 4 && std::string(argv[1]) == "--bmx") {   // --bmx <out dir> <1.0 characters dir> <1.0 scripts dir>: BMX-1
+        fs::path out = argv[2], scripts = argv[4];       // over every .bmx -> <out>/<name>.lua (bmxcheck.py)
+        fs::create_directories(out);
+        size_t ok = 0, bad = 0;
+        auto exists = [&](const std::string& p) { return fs::exists(scripts / fs::path(p).filename()); };
+        for (auto& e : fs::directory_iterator(argv[3])) {
+            if (e.path().extension() != ".bmx") continue;
+            std::string b = slurp(e.path()), o, why;
+            int k = sx::bmx::transcode(b.data(), b.size(), exists, o, &why);
+            if (k < 0) { ++bad; printf("REFUSED %s: %s\n", e.path().string().c_str(), why.c_str()); continue; }
+            ++ok;
+            std::ofstream(out / (e.path().stem().string() + ".lua"), std::ios::binary).write(o.data(), o.size());
+        }
+        printf("bmx transcoded %zu, refused %zu\n", ok, bad);
+        return bad ? 1 : 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--sx") {   // --sx <out dir> <dir>...: SX-1 over every .sx into
         fs::path out = argv[2];                        // <out>/<input dir name>/ (sxcheck.py checks the files);
         fs::create_directories(out);                   // <out>/natives.tsv, keys.tsv: the embedded tables
