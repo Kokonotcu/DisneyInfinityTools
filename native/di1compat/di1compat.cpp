@@ -150,6 +150,7 @@ static struct {
     bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them (Table::ports10)
     bool pins10 = true;              // .mer: complete pin tables on every instance (Table::pins10)
     bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (Table::gate10)
+    bool toggleType10 = true;        // .mer: Collision/VisibilityToggle keep their 1.0 mode in 3.0 (Table::toggleType10)
     bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
     bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
     bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
@@ -242,6 +243,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "ports10")) g_cfg.ports10 = atoi(val) != 0;
         else if (!strcmp(key, "pins10")) g_cfg.pins10 = atoi(val) != 0;
         else if (!strcmp(key, "gate10")) g_cfg.gate10 = atoi(val) != 0;
+        else if (!strcmp(key, "toggletype10")) g_cfg.toggleType10 = atoi(val) != 0;
         else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
         else if (!strcmp(key, "native10")) g_cfg.native10 = atoi(val) != 0;
         else if (!strcmp(key, "sx10")) g_cfg.sx10 = atoi(val) != 0;
@@ -307,7 +309,7 @@ static void loadConfig(const char* dir)
          g_cfg.choLayout10, g_cfg.clip10,
          g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10, g_cfg.variant10, g_cfg.teardownTrace);
     logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
-    logf("config mis: gate10=%d locktrace10=%d", g_cfg.gate10, g_cfg.lockTrace10);
+    logf("config mis: gate10=%d toggletype10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.lockTrace10);
 }
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
@@ -787,10 +789,10 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
                          std::to_string(actDrop) + " dropped) ";
         mer::Stats st;
         if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
-        char buf[240];
+        char buf[300];
         sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches, "
-                  "%d net-sync links) ", st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events,
-                  st.fetches, st.netSync);
+                  "%d net-sync links, %d toggle types) ", st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped,
+                  st.events, st.fetches, st.netSync, st.typed);
         note += buf;
         out = isMtc ? mer::mtc(f) : f.write();
         return isMtc ? "mtc" : "mer";
@@ -1906,6 +1908,31 @@ static void __fastcall hkNetSync(uint8_t* node, void*, void* payload)
     g_netSync(node, nullptr, payload);
 }
 
+// ColVisToggle family (toggletype10 checks): LoadParameters 0x01808FE0 (thiscall on the node, record, ret 4) sets the
+// mode bits at node+0x38 (1 collision, 2 visibility) from the 'Type' parameter and IsOn at +0x30; 0x01803550 (thiscall
+// on the node, actor list {?, items, count}, ret 4) applies +0x30 to the list (start callback 0x018090E0, TurnOn /
+// TurnOff / Toggle handlers 0x01803640..).
+static const char* colVisMode(uint8_t bits)
+{
+    return (bits & 3) == 3 ? "collision+visibility" : (bits & 1) ? "collision only" : (bits & 2) ? "visibility only" : "none";
+}
+typedef void(__fastcall* ColVisFn)(uint8_t* node, void* edx, void* arg);
+static ColVisFn g_colVisLoad, g_colVisApply;
+static void __fastcall hkColVisLoad(uint8_t* node, void*, void* rec)
+{
+    g_colVisLoad(node, nullptr, rec);
+    static volatile LONG lines;
+    if (lockTraceRoom(lines)) logf("colvis toggle %p loaded: %s, IsOn %d", node, colVisMode(node[0x38]), node[0x30]);
+}
+static void __fastcall hkColVisApply(uint8_t* node, void*, void* list)
+{
+    static volatile LONG lines;
+    uint32_t n = list ? *(const uint32_t*)((const uint8_t*)list + 8) : 0;
+    if (n && lockTraceRoom(lines))
+        logf("colvis toggle %p applies %s (%s) to %u actors", node, node[0x30] ? "ON" : "off", colVisMode(node[0x38]), n);
+    g_colVisApply(node, nullptr, list);
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -2855,6 +2882,7 @@ extern "C" void __stdcall Pentane_Main()
     g_mer.ports10 = g_cfg.ports10;
     g_mer.pins10 = g_cfg.pins10;
     g_mer.gate10 = g_cfg.gate10;
+    g_mer.toggleType10 = g_cfg.toggleType10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
     if (g_cfg.shaders10) {
@@ -2947,6 +2975,9 @@ extern "C" void __stdcall Pentane_Main()
         hook("load screen active update (locktrace10)", 0x0145B9A0, "5356578BF98D77ECBB01000000", (void*)&hkLoadTick, (void**)&g_loadTick);
         hook("master net sync Link_In (locktrace10)", 0x006EC4F0, "6AFF68????????64A100000000506489250000000083EC30535556578BF1",
              (void*)&hkNetSync, (void**)&g_netSync);
+        hook("colvis toggle parameters (locktrace10)", 0x01808FE0, "6AFF68????????64A1000000005064892500000000518B442414535657508BF1",
+             (void*)&hkColVisLoad, (void**)&g_colVisLoad);
+        hook("colvis toggle apply (locktrace10)", 0x01803550, "558B6C2408565733FF8BF1", (void*)&hkColVisApply, (void**)&g_colVisApply);
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);

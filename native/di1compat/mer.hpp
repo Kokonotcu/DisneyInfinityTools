@@ -23,6 +23,7 @@
 //               until they are ported (MER-3/6) such a node becomes a pinless NodeGroup and its links are dropped.
 //   Event       MissionPresentationList* 'Event' in the 3.0 mission event enum (mission.hpp; Table::events10)
 //   NetSync     MasterNetSync links from Link_Out leave from Private, the output 3.0 fires locally (Table::gate10)
+//   ToggleType  Collision/Visibility/ColVisToggle describe 'Type' = their class, 3.0's mode switch (Table::toggleType10)
 #pragma once
 #include <map>
 #include <set>
@@ -58,6 +59,7 @@ struct Table {
     bool ports10 = true;    // port names from owner fields (LeafNameHash), DataFetch 'Value' under its port (cfg ports10)
     bool pins10 = true;     // pin table = every plain non-parameter int; copies add the names an instance lacks (cfg pins10)
     bool gate10 = true;     // MasterNetSync Link_Out links leave from Private, the pin 3.0 fires locally (cfg gate10)
+    bool toggleType10 = true;   // Collision/VisibilityToggle get the 'Type' parameter 3.0 reads their mode from (cfg toggletype10)
     std::set<std::string> registered;
     std::map<std::string, Class> classes;
     bool load(const std::string& text)
@@ -152,7 +154,7 @@ inline int typeOf(const oct::File& f, const oct::Rec& r)
     return -1;
 }
 
-struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0, fetches = 0, netSync = 0; };
+struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0, fetches = 0, netSync = 0, typed = 0; };
 
 // False (f unchanged) if the file is not a 1.0 graph (already has descriptions, or no node pool).
 inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::string* why = nullptr)
@@ -408,6 +410,28 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             desc.append((const char*)&h, 4);
             desc.append((const char*)&o, 4);
             ++count;
+        }
+        // toggleType10: 3.0's ColVisToggle node (template FUN_0177dbc0, shared by ColVisToggle / CollisionToggle /
+        // VisibilityToggle) picks collision-only / visibility-only from the string PARAMETER 'Type' (LoadParameters
+        // 0x01808FE0: FUN_006baff0(lookup2("Type")), stricmp; no match keeps both bits). 1.0 reads the node's own Type
+        // record, the class name (0x010F7260: FUN_004c9b80(record, "Type")), and its nodes carry no such parameter, so
+        // every 1.0 CollisionToggle also drew and hid its targets in 3.0 (in_city.mer 3603 IsOn 1 showed the hidden
+        // GlassWall). Every shipped 3.0 node of the family describes Type = its class (1,292 / 585 / 927).
+        if (T.toggleType10 && !n.stub && !done.count("Type") &&
+            (n.type == "VisibilityToggle" || n.type == "CollisionToggle" || n.type == "ColVisToggle")) {
+            uint32_t so = (uint32_t)strs[ns].size();
+            int32_t o = (int32_t)val.size();
+            val.append((const char*)&so, 4);
+            val.append(8, '\xff');
+            strs[ns] += n.type;
+            strs[ns].push_back('\0');
+            uint8_t tb = T_STRING;
+            uint32_t h = lookup2("Type");
+            desc.append((const char*)&tb, 1);
+            desc.append((const char*)&h, 4);
+            desc.append((const char*)&o, 4);
+            ++count;
+            ++s.typed;
         }
         if (!n.stub) {   // the class's pin table on this instance too (the names it lacks)
             auto pt = pinTables.find(n.type);
