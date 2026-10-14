@@ -25,6 +25,7 @@
 #include "audio.hpp"
 #include <cstdarg>
 #include "vfx.hpp"
+#include "gameplay.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -1301,6 +1302,18 @@ int main(int argc, char** argv)
         printf("%d presentation events remapped\n", n);
         return 0;
     }
+    if (argc > 2 && std::string(argv[1]) == "--mischain") {   // --mischain <1.0 mission .lua>...: transcode() chains gp's
+        int both = 0, bad = 0;                                    // activityTasks30 into mis's luaEvents30; the order must not
+        for (int a = 2; a < argc; ++a) {                          // matter (disjoint keys): both orders give the same bytes
+            std::string t = slurp(argv[a]), x = t, y = t;
+            int a1 = gameplay::activityTasks30(x), e1 = x.compare(0, 9, "Mission =") ? 0 : mission::luaEvents30(x);
+            int e2 = y.compare(0, 9, "Mission =") ? 0 : mission::luaEvents30(y), a2 = gameplay::activityTasks30(y);
+            if (x != y || a1 != a2 || e1 != e2) { ++bad; printf("ORDER MATTERS %s\n", argv[a]); }
+            if (a1 && e1) { ++both; printf("both %s: %d activity tables, %d events\n", argv[a], a1, e1); }
+        }
+        printf("%d files, %d changed by both, %d order-dependent\n", argc - 2, both, bad);
+        return bad ? 1 : 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--missiongraph") {   // --missiongraph <1.0 __missiongraph.lua> <out.lua>
         std::string t = slurp(argv[2]);
         int n = mission::behaviour30(t);
@@ -1473,10 +1486,162 @@ int main(int argc, char** argv)
         lap("asset pool added", (int)octx::addAssetPool(f));
         lap("collision aggregates added", octx::collision30(f));
         lap("lighting nodes converted", octx::realm30w(f));
+        lap("curve associations bound", gameplay::curves30(f));
         lap("subnetworks with counts", octx::addAllCounts(f));
         std::string o = f.write();
         lap("write", (int)o.size());
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--challenge") {   // --challenge <out dir> <file>...: gameplay.hpp activity
+        // -> challenge transforms by file kind (challenge.py checks the outputs); a ChallengeData.lua needs the 1.0
+        // beacons file given before it
+        namespace fs = std::filesystem;
+        std::string beacons10;
+        for (int a = 3; a < argc; ++a) {
+            fs::path in = argv[a];
+            std::string t = slurp(in), o, name = in.filename().string(), kind;
+            for (char& c : name) c = (char)tolower((unsigned char)c);
+            int k = 0;
+            if (name == "defaultactivitybeacons.lua") { beacons10 = t; continue; }
+            if (name.rfind("activitytypedata", 0) == 0) { kind = "types"; k = gameplay::challengeTypes30(t); o = t; }
+            else if (name == "challengedata.lua") { kind = "beacons"; k = gameplay::beacons30(t, beacons10); o = t; }
+            else if (name.find("zonelist") != std::string::npos) { kind = "zonelist"; k = gameplay::zonelist30(t); o = t; }
+            else if (in.extension() == ".ap") { kind = "ap"; k = gameplay::apGivers30(t); o = t; }
+            else if (in.extension() == ".dnax") { kind = "dna"; k = gameplay::dnaGadgets30(t, o); }
+            else continue;
+            std::ofstream(fs::path(argv[2]) / in.filename(), std::ios::binary).write(o.data(), o.size());
+            printf("%-8s %-48s %d\n", kind.c_str(), in.filename().string().c_str(), k);
+        }
+        return 0;
+    }
+    if (argc > 4 && std::string(argv[1]) == "--activity") {   // --activity <mer table> <out dir> <1.0 file>...: activity
+        // missions -> challenge (gameplay.hpp); .mer: activityGraph30 (<name>.pre.mer) then mer::transcode (<name>.mer);
+        // mission .lua: activityTasks30; a missiongraph .ap: apGivers30 gated by activityGivers (files beside it)
+        namespace fs = std::filesystem;
+        mer::Table T;
+        if (!T.load(slurp(argv[2]))) { printf("mer table load failed\n"); return 2; }
+        for (int a = 4; a < argc; ++a) {
+            fs::path in = argv[a];
+            std::string t = slurp(in), name = in.filename().string();
+            fs::path outp = fs::path(argv[3]) / name;
+            if (in.extension() == ".mer") {
+                oct::File f = oct::File::parse(t.data(), t.size());
+                int re = 0, dr = 0, k = gameplay::activityGraph30(f, &re, &dr);
+                if (!k) { printf("mer %-52s unchanged\n", name.c_str()); continue; }
+                std::string pre = f.write();
+                std::ofstream(fs::path(argv[3]) / (in.stem().string() + ".pre.mer"), std::ios::binary).write(pre.data(), pre.size());
+                mer::Stats st;
+                std::string why;
+                bool ok = mer::transcode(T, f, &st, &why);
+                std::string o = f.write();
+                std::ofstream(outp, std::ios::binary).write(o.data(), o.size());
+                printf("mer %-52s %d nodes, %d rerouted, %d dropped; mer %s: %d nodes %d stubs %d links %d dropped\n", name.c_str(), k, re, dr,
+                       ok ? "ok" : why.c_str(), st.nodes, st.stubs, st.links, st.linksDropped);
+            } else if (in.extension() == ".lua") {
+                int k = gameplay::activityTasks30(t);
+                if (k) std::ofstream(outp, std::ios::binary).write(t.data(), t.size());
+                printf("lua %-52s %d\n", name.c_str(), k);
+            } else if (in.extension() == ".ap") {
+                fs::path dir = in.parent_path();
+                std::string graph = slurp(dir / (in.stem().string() + ".lua"));
+                auto ok = gameplay::activityGivers(graph, [&](const std::string& n, std::string& o) {
+                    std::string m = n + ".lua";
+                    for (char& c : m) c = (char)tolower((unsigned char)c);
+                    o = slurp(dir / m);
+                    return !o.empty();
+                });
+                int k = gameplay::apGivers30(t, &ok);
+                std::ofstream(outp, std::ios::binary).write(t.data(), t.size());
+                printf("ap  %-52s %d givers redirected:", name.c_str(), k);
+                for (auto& g : ok) printf(" %s", g.c_str());
+                printf("\n");
+            }
+        }
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--surf") {   // --surf <3.0 surfacetypes.lua> <1.0 .oct>...: OCT-5 (surf.py)
+        std::string lua = slurp(argv[2]);
+        std::vector<std::string> names30;   // entries '{ name = "dynamic" | "static" }' in order
+        for (size_t p = lua.find('{', lua.find('{') + 1); p != std::string::npos; p = lua.find('{', p + 1)) {
+            size_t a = lua.find_first_not_of(" \t\r\n", p + 1), b = lua.find_first_of(" \t=", a);
+            if (a != std::string::npos && b != std::string::npos) names30.push_back(lua.substr(a, b - a));
+        }
+        printf("%u names in the 3.0 table\n", (unsigned)names30.size());
+        for (int a = 3; a < argc; ++a) {
+            std::string b = slurp(argv[a]);
+            oct::File f = oct::File::parse(b.data(), b.size());
+            if (int n = gameplay::surfaces30(f, names30)) printf("%s: %d shapes remapped\n", argv[a], n);
+        }
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--tools") {   // --tools <1.0 ToolSet.bin> <zone>: TL-1 level lists (toolgate.py)
+        std::string b = slurp(argv[2]);
+        auto t = gameplay::toolLevels10((const uint8_t*)b.data(), b.size());
+        int listed = 0;
+        for (auto& kv : t) listed += !kv.second.empty();
+        printf("%u tools, %d with a level list; with a list allowing %s:", (unsigned)t.size(), listed, argv[3]);
+        for (auto& kv : t)
+            if (!kv.second.empty() && gameplay::levelAllows(kv.second, argv[3])) printf(" %s", kv.first.c_str());
+        printf("\n");
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--gpscan") {   // --gpscan <3.0 surfacetypes.lua> <1.0 install assets>: every
+        // gp load-time transform over every 1.0 archive member it would see (no parse may throw; prints what changes)
+        std::string lua = slurp(argv[2]);
+        std::vector<std::string> names30;   // as --surf
+        for (size_t p = lua.find('{', lua.find('{') + 1); p != std::string::npos; p = lua.find('{', p + 1)) {
+            size_t a = lua.find_first_not_of(" \t\r\n", p + 1), b = lua.find_first_of(" \t=", a);
+            if (a != std::string::npos && b != std::string::npos) names30.push_back(lua.substr(a, b - a));
+        }
+        std::map<std::string, int> seen, changed, failed;
+        for (auto& e : fs::recursive_directory_iterator(argv[3])) {
+            if (e.path().extension() != ".zip") continue;
+            mz_zip_archive z{};
+            if (!mz_zip_reader_init_file(&z, e.path().string().c_str(), 0)) continue;
+            for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&z); ++i) {
+                char nm[400];
+                mz_zip_reader_get_filename(&z, i, nm, sizeof(nm));
+                std::string m = nm;
+                for (char& c : m) c = (char)tolower((unsigned char)c);
+                auto ends = [&](const char* s) { size_t k = strlen(s); return m.size() >= k && !m.compare(m.size() - k, k, s); };
+                const char* kind = ends(".oct") ? "oct" : ends(".mer") ? "mer" : ends(".ap") ? "ap" : ends(".dnax") ? "dnax" :
+                                   ends(".lua") && !ends("__missiongraph.lua") ? "lua" : nullptr;
+                if (!kind) continue;
+                size_t n = 0;
+                void* d = mz_zip_reader_extract_to_heap(&z, i, &n, 0);
+                if (!d) continue;
+                std::string t((const char*)d, n), what;
+                mz_free(d);
+                ++seen[kind];
+                try {
+                    if (!strcmp(kind, "oct") && n >= 4 && oct::u((const uint8_t*)t.data(), 4) == oct::MAGIC) {
+                        oct::File f = oct::File::parse(t.data(), t.size());
+                        int fl = 0, cv = gameplay::curves30(f, &fl), sf = gameplay::surfaces30(f, names30);
+                        if (cv || fl || sf) what = "curves " + std::to_string(cv) + " flags " + std::to_string(fl) + " surf " + std::to_string(sf);
+                    } else if (!strcmp(kind, "mer") && n >= 4 && oct::u((const uint8_t*)t.data(), 4) == oct::MAGIC) {
+                        oct::File f = oct::File::parse(t.data(), t.size());
+                        if (int k = gameplay::activityGraph30(f)) what = "activity nodes " + std::to_string(k);
+                    } else if (!strcmp(kind, "ap")) {
+                        if (int k = gameplay::apGivers30(t)) what = "givers " + std::to_string(k);
+                    } else if (!strcmp(kind, "dnax") && n && t[0] == 0x1b) {
+                        std::string o;
+                        if (int k = gameplay::dnaGadgets30(t, o)) what = "gadgets " + std::to_string(k);
+                    } else if (!strcmp(kind, "lua") && n && t[0] != 0x1b) {
+                        if (int k = gameplay::activityTasks30(t)) what = "tasks " + std::to_string(k);
+                    }
+                } catch (std::exception& x) {
+                    ++failed[kind];
+                    printf("FAIL %s %s|%s: %s\n", kind, e.path().filename().string().c_str(), nm, x.what());
+                    continue;
+                }
+                if (what.empty()) continue;
+                ++changed[kind];
+                printf("%-4s %s|%s: %s\n", kind, e.path().filename().string().c_str(), nm, what.c_str());
+            }
+            mz_zip_reader_end(&z);
+        }
+        for (auto& [k, c] : seen) printf("summary %-4s seen %d changed %d failed %d\n", k.c_str(), c, changed[k], failed[k]);
         return 0;
     }
     if (argc > 2 && std::string(argv[1]) == "--datamap") {   // --datamap <1.0 *datamap.lua> [out]: PS-2 rewrite

@@ -36,6 +36,7 @@
 #include "ui.hpp"
 #include "audio.hpp"
 #include "vfx.hpp"
+#include "gameplay.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -191,6 +192,12 @@ static struct {
     bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
     bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
     bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
+    bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
+    bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
+    bool assetBufs10 = true;         // gp: read10 finds <stem>_<n>.vbuf/.ibuf in a per-asset archive <dir>/<stem>.zip
+    bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
+    bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
+    bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -269,6 +276,12 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "vfx10")) g_cfg.vfx10 = atoi(val) != 0;
         else if (!strcmp(key, "vfx_universal10")) g_cfg.vfxUniversal10 = atoi(val) != 0;
         else if (!strcmp(key, "vfx_trace")) g_cfg.vfxTrace = atoi(val) != 0;
+        else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
+        else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
+        else if (!strcmp(key, "assetbufs10")) g_cfg.assetBufs10 = atoi(val) != 0;
+        else if (!strcmp(key, "challenge10")) g_cfg.challenge10 = atoi(val) != 0;
+        else if (!strcmp(key, "selectmenu10")) g_cfg.selectMenu10 = atoi(val) != 0;
+        else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -329,15 +342,17 @@ static void* read10z(const std::string& p, size_t* size, std::string* where)
         if (asset.size() > 2 && asset.compare(asset.size() - 2, 2, "_0") == 0 && last == std::string::npos) asset.resize(asset.size() - 2);
         std::string shard = asset.size() >= 2 ? p.substr(0, top) + "/" + asset.substr(0, 2) + "/" + asset + ".zip" : dir + ".zip";
         // a buffer member (<asset>_0.vbuf) lives in its asset's archive in a shared folder too: characters/omnidroid/
-        // omnidroid_pieces.zip holds omnidroid_pieces_0.vbuf (in-game 2026-10-13: 7 1.0 models served without
-        // geometry; read10sim.py: 3,772 of 3,772 characters/ buffers found, 630 before)
+        // omnidroid_pieces.zip holds omnidroid_pieces_0.vbuf, characters/kiosk/kiosk_in_0.vbuf is in kiosk_in.zip
+        // (in-game 2026-10-13: 7 1.0 models served without geometry, all 14 MISSING buffers had this form;
+        // read10sim.py: 3,772 of 3,772 characters/ buffers found, 630 before; bufpaths.py: 5,234 such buffers).
+        // npc and gp each added this candidate: one candidate, npc's rule (a superset of gp's .vbuf/.ibuf rule), gp's key.
         size_t us = stem.find_last_of('_');
         std::string bufAsset = us != std::string::npos && us + 1 < stem.size() &&
                                        stem.find_first_not_of("0123456789", us + 1) == std::string::npos ? stem.substr(0, us) : stem;
         std::string zips[5] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard,
-                               dir + "/" + bufAsset + ".zip"};
+                               g_cfg.assetBufs10 ? dir + "/" + bufAsset + ".zip" : std::string()};
         for (auto& zr : zips) {
-            mz_zip_archive* z = zipFor(zr);
+            mz_zip_archive* z = zr.empty() ? nullptr : zipFor(zr);
             if (!z) continue;
             int i = mz_zip_reader_locate_file(z, member.c_str(), nullptr, 0);   // case-insensitive
             if (i < 0) continue;
@@ -584,6 +599,26 @@ static bool transcodeCho(oct::File& f, std::string& note)
 //   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
 //   DataNodeBasisConversion in FUN_004d0160).
 //   World render (render.hpp, REN-5 + geometry): the 1.0 .mtb named 1.0 shaders (int3 in Shader_LookupCrc).
+// gp: the engine's global surface table, in index order (FUN_00754eb0 fills *(0x2204830): +0xc {char*, bool}[],
+// +0x10 count; loaded from startup2 at boot, before any world). Empty until then.
+static std::vector<std::string> surfaceTable30()
+{
+    std::vector<std::string> t;
+    MEMORY_BASIC_INFORMATION mbi;
+    auto ok = [&](uintptr_t p) { return p >= 0x10000 && VirtualQuery((void*)p, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT; };
+    uintptr_t obj = *(const uintptr_t*)rt(0x02204830);
+    if (!ok(obj)) return t;
+    uintptr_t arr = *(const uintptr_t*)(obj + 0xc);
+    uint32_t n = *(const uint32_t*)(obj + 0x10);
+    if (n > 1024 || !ok(arr)) return t;
+    for (uint32_t i = 0; i < n; ++i) {
+        char s[64];
+        safeCopy(s, sizeof(s), *(const char* const*)(arr + 8 * i));
+        t.push_back(s);
+    }
+    return t;
+}
+
 static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
 {
     bool changed = transcodeAssetRender(path, f, note);
@@ -597,6 +632,9 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::realm30w(f)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
     if (transcodeCho(f, note)) changed = true;
+    int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
+    if (ncv || nfl) { note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) "; changed = true; }
+    if (int n = g_cfg.surfaces10 ? gameplay::surfaces30(f, surfaceTable30()) : 0) { note += "+surfaces(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
     return changed;
 }
@@ -634,6 +672,41 @@ static int missionGraph30(std::string& t)
 
 static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note)
 {
+    // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp): type data, giver sections, giver DNA
+    std::string np = norm(path);
+    bool types = !gameplay::challengeTypePath(np).empty(), ap = endsWith(path, ".ap"), dna = endsWith(path, ".dnax");
+    bool mlua = endsWith(path, ".lua") && np.rfind("mission_data/", 0) == 0 && !endsWith(path, "__missiongraph.lua");
+    std::string actLua;   // a mission table activityTasks30 changed
+    if (g_cfg.challenge10 && n && (types || ap || dna || mlua)) {
+        std::string t((const char*)data, n);
+        int k = 0;
+        const char* codec = nullptr;
+        if (types && t[0] != 0x1b) { k = gameplay::challengeTypes30(t); codec = "challengetypes"; }
+        else if (mlua && t[0] != 0x1b) { k = gameplay::activityTasks30(t); codec = "activitytasks"; }
+        else if (ap && t.find("\nActivityIcon=") != std::string::npos) {   // givers of the missions activityTasks30
+            std::string graph, dir = np.substr(0, np.rfind('/') + 1);                // converts (the missiongraph beside
+            std::set<std::string> ok;                                                 // the .ap names them)
+            if (read10s(np.substr(0, np.size() - 3) + ".lua", graph))
+                ok = gameplay::activityGivers(graph, [&](const std::string& name, std::string& o) {
+                    std::string m = dir + name + ".lua";
+                    for (char& c : m) c = (char)tolower((unsigned char)c);
+                    return read10s(m, o);
+                });
+            k = gameplay::apGivers30(t, &ok);
+            codec = "apgivers";
+        }
+        else if (dna && t[0] == 0x1b) {
+            std::string o;
+            try { k = gameplay::dnaGadgets30(t, o); } catch (std::exception&) { k = 0; }
+            if (k) t.swap(o);
+            codec = "dnagadgets";
+        }
+        if (k) {
+            note += std::string("+") + codec + "(" + std::to_string(k) + ") ";
+            if (mlua) actLua.swap(t);   // integration: mis's events10 still applies to it (below; disjoint keys)
+            else { out.swap(t); return codec; }
+        }
+    }
     if (endsWith(path, "__missiongraph.lua") && n && ((const char*)data)[0] != 0x1b) {
         std::string t((const char*)data, n);
         int k = missionGraph30(t), b = g_cfg.behav10 ? mission::behaviour30(t) : 0;
@@ -644,16 +717,16 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         return "missiongraph";
     }
     // a mission (Mission_Data/<playset>/<line>/<name>.lua): presentation events in the 3.0 enum (mission.hpp)
-    if (g_cfg.events10 && endsWith(path, ".lua") && n && ((const char*)data)[0] != 0x1b && norm(path).rfind("mission_data/", 0) == 0 &&
-        !strstr(path, "__")) {
-        std::string t((const char*)data, n);
-        if (t.compare(0, 9, "Mission =") != 0) return nullptr;
-        int k = mission::luaEvents30(t);
-        if (!k) return nullptr;
-        note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
+    if ((g_cfg.events10 || !actLua.empty()) && endsWith(path, ".lua") && n && ((const char*)data)[0] != 0x1b &&
+        norm(path).rfind("mission_data/", 0) == 0 && !strstr(path, "__")) {
+        std::string t = actLua.empty() ? std::string((const char*)data, n) : actLua;
+        int k = g_cfg.events10 && t.compare(0, 9, "Mission =") == 0 ? mission::luaEvents30(t) : 0;
+        if (k) note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
+        else if (actLua.empty()) return nullptr;
         out.swap(t);
-        return "mission";
+        return k ? "mission" : "activitytasks";
     }
+    if (!actLua.empty()) { out.swap(actLua); return "activitytasks"; }
     if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
         try {
             oct::File f = oct::File::parse(data, n);
@@ -676,6 +749,9 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         } else graph.assign((const char*)data, n);
         if (graph.size() < 4 || oct::u((const uint8_t*)graph.data(), 4) != oct::MAGIC) return nullptr;
         oct::File f = oct::File::parse(graph.data(), graph.size());
+        int actRe = 0, actDrop = 0, act = g_cfg.challenge10 ? gameplay::activityGraph30(f, &actRe, &actDrop) : 0;   // gp
+        if (act) note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) + " participant links, " +
+                         std::to_string(actDrop) + " dropped) ";
         mer::Stats st;
         if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
         char buf[240];
@@ -1943,6 +2019,26 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     // the file named Tips.lua only (FUN_00b70da0's literal), not every *tips.lua: the stream is consumed and re-served
     if (r && g_cfg.serve10 && g_cfg.tips10 && !(flags & 1) && (!_stricmp(p, "tips.lua") || endsWith(p, "/tips.lua") || endsWith(p, "\\tips.lua")))
         return tips30(path, flags, a3, a4, a5, r);
+    // gp: 3.0 files the activity -> challenge redirect extends (gameplay.hpp): the zone list (ChallengeTypeDataFile
+    // beside the 1.0 ActivityTypeDataFile) and ChallengeData.lua (+ the 1.0 beacons)
+    bool zl = endsWith(p, "zonelist.lua"), cd = endsWith(p, "challengedata/challengedata.lua") || endsWith(p, "challengedata\\challengedata.lua");
+    if (r && g_cfg.challenge10 && !(flags & 1) && (zl || cd)) {
+        typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
+        typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
+        typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
+        void** vt = *(void***)r;
+        std::string t, t10;
+        t.resize(((SizeFn)vt[4])(r, nullptr));
+        uint32_t got = t.empty() ? 0 : ((ReadFn)vt[5])(r, nullptr, &t[0], (uint32_t)t.size());
+        ((DtorFn)vt[11])(r, nullptr, 1);
+        int k = 0;
+        if (got == t.size() && !t.empty() && t[0] != 0x1b) {
+            if (zl) k = gameplay::zonelist30(t);
+            else if (read10s("activitydata/defaultactivitybeacons.lua", t10)) k = gameplay::beacons30(t, t10);
+        }
+        logf("%s: %d %s", p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
+        return k ? memFile(t.data(), t.size()) : g_open(path, flags, a3, a4, a5);
+    }
     if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
         char line[600];
         int len = sprintf_s(line, "gamedb package open %s, stack:", p);
@@ -1993,7 +2089,8 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             std::lock_guard<std::mutex> lock(g_sessLock);
             if ((scoped = !g_movies10.count(movie))) missWhy = " (image id of a movie not served from 1.0: not served)";
         }
-        void* data = scoped ? nullptr : read10(over.empty() ? p : over.c_str(), &n, &where);
+        std::string chal = g_cfg.challenge10 ? gameplay::challengeTypePath(np) : "";   // gp: ChallengeData/<1.0 type file>
+        void* data = scoped ? nullptr : read10(!chal.empty() ? chal.c_str() : over.empty() ? p : over.c_str(), &n, &where);
         // 3.0 registers a language table only with its controller variant <lang>_pc_con.dct beside it, which 1.0
         // never shipped: without one the whole playset table was dropped (in-game 2026-10-13, lang\IN). The WIN32
         // table stands in (same strings).
@@ -2375,6 +2472,7 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 }
 
 #include "vfxrt.hpp"
+#include "gprt.hpp"
 
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
@@ -2565,6 +2663,7 @@ extern "C" void __stdcall Pentane_Main()
         hook("emitter create (vfx trace)", 0x0066A1C0, "6AFF68????????64A100000000", (void*)&vfxrt::hkEmitter, (void**)&vfxrt::g_emitter);
         hook("slaved emitter create (vfx trace)", 0x0066E7F0, "6AFF68????????64A100000000", (void*)&vfxrt::hkAttached, (void**)&vfxrt::g_attached);
     }
+    gprt::install();
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
