@@ -187,6 +187,12 @@ static int renderTest(char** a)
     io.verbose = getenv("RENDER_VERBOSE") != nullptr;
     io.translate = getenv("RENDER_TRANSLATE") != nullptr;   // real 1.0 shaders (read10 finds shaders/shaders/<x>.shd)
     io.skinLayout = getenv("RENDER_SKIN") != nullptr;       // cfg skinlayout10 (the Python oracle keeps 'main')
+    render::Ssf ssf10, ssf30;                                 // cfg scenesettings10 (RENDER_SSF): SSET re-laid and kept
+    if (getenv("RENDER_SSF") && render::parseSsf(slurp(fs::path(ext10) / "assets/shaders/shaders/scenesettingsformat.ssf"), false, ssf10) &&
+        render::parseSsf(slurp(fs::path(ext30) / "assets/shaders/shaders/scenesettingsformat.ssf"), true, ssf30)) {
+        io.ssf10 = &ssf10;
+        io.ssf30 = &ssf30;
+    }
     gen30::VFormats vf10 = gen30::vformats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
     io.skinned = [&](uint32_t vf) { auto f = vf10.find(vf); return f != vf10.end() && f->second.count("BLENDINDICES0"); };
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
@@ -207,6 +213,7 @@ static int renderTest(char** a)
     if (!r.ibuf2.empty()) put("_2.ibuf", r.ibuf2);
     for (auto& [t, n] : r.tiers) printf("tier %s %d\n", t.c_str(), n);
     if (r.skinned) printf("skinned in skin layout %d\n", r.skinned);
+    if (r.sceneSettings) printf("scene settings %d\n", r.sceneSettings);
     printf("wrote %s: oct %zu, mtb %zu, vbuf %zu, ibuf %zu, ibuf2 %zu, 1.0 textures %zu\n", out.string().c_str(),
            f.write().size(), r.mtb.size(), r.vbuf.size(), r.ibuf.size(), r.ibuf2.size(), r.textures10.size());
     return 0;
@@ -2435,12 +2442,15 @@ int main(int argc, char** argv)
         render::IO io;
         io.read30 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / q.substr(2)); return !o.empty(); };
         io.read10 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / q); return !o.empty(); };
+        io.verbose = getenv("RENDER_VERBOSE") != nullptr;
+        io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
         render::Result r;
         bool ok = render::transcodeBundle(T, io, slurp(argv[5]), "3:" + p.substr(0, p.find('/') + 1), r);
         for (auto& pr : r.problems) printf("problem: %s\n", pr.c_str());
         int n = 0;
         for (auto& [t, c] : r.tiers) { printf("tier %s %d\n", t.c_str(), c); n += c; }
         printf("%s: %d materials, %zu 1.0 textures, %zu B\n", ok ? "ok" : "FAILED", n, r.textures10.size(), r.mtb.size());
+        if (ok && argc > 7) std::ofstream(argv[7], std::ios::binary).write(r.mtb.data(), r.mtb.size());   // [out .mtb]
         return ok ? 0 : 1;
     }
     if (argc > 3 && std::string(argv[1]) == "--zip") {   // --zip <1.0 zip> <member>: the plugin's read10 calls

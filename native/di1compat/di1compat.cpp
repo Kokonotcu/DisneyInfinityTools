@@ -136,6 +136,7 @@ static struct {
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
     bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 format's 'skin' layout, bones kept
+    bool sceneSettings10 = true;     // a 1.0 bundle's scene settings (SSET: fog, bloom, exposure, grading) re-laid into 3.0's
     bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
     int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
     int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
@@ -229,6 +230,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
         else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
         else if (!strcmp(key, "skinlayout10")) g_cfg.skinLayout10 = atoi(val) != 0;
+        else if (!strcmp(key, "scenesettings10")) g_cfg.sceneSettings10 = atoi(val) != 0;
         else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
         else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
@@ -507,6 +509,23 @@ static render::Table g_render;
 static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
 static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
+
+// Both games' scenesettingsformat.ssf (render.hpp ssfBlock30), parsed on first use; both or neither (cfg scenesettings10)
+static void sceneSettingsIO(render::IO& io)
+{
+    static std::mutex mx;
+    static bool done, ok;
+    static render::Ssf f10, f30;
+    std::lock_guard<std::mutex> lock(mx);
+    if (!done) {
+        done = true;
+        std::string a, b;
+        ok = read10s("shaders/shaders/scenesettingsformat.ssf", a) && read30x("3:shaders/shaders/scenesettingsformat.ssf", b) &&
+             render::parseSsf(a, false, f10) && render::parseSsf(b, true, f30);
+        logf("scene settings formats: %s (1.0 block %d B, 3.0 block %d B)", ok ? "ok" : "MISSING", f10.size, f30.size);
+    }
+    if (ok && g_cfg.sceneSettings10) { io.ssf10 = &f10; io.ssf30 = &f30; }
+}
 static mer::Table g_mer;
 static bool g_merOk;
 
@@ -564,6 +583,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
     io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
     io.skinLayout = g_cfg.skinLayout10;
+    sceneSettingsIO(io);
     render::Result r;
     if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
         for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
@@ -578,9 +598,10 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
         if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
     }
     char buf[200];
-    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s) ", r.tiers["translated"], r.tiers["real"],
+    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s%s) ", r.tiers["translated"], r.tiers["real"],
               r.tiers["same-sh"], r.tiers["generic"], (unsigned)r.textures10.size(),
-              r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "");
+              r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "",
+              r.sceneSettings ? (", " + std::to_string(r.sceneSettings) + " scene settings").c_str() : "");
     note += buf;
     return true;
 }
