@@ -184,6 +184,7 @@ static struct {
     bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
     bool choConst10 = true;          // cho.hpp: Static nodes of choreography graphs stay Static under constant headers
     bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
+    bool camFold10 = true;           // cho.hpp: a 1.0 camera's motion-clip attachments as an in-network ClipProcessor
     bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
@@ -282,6 +283,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "variant10")) g_cfg.variant10 = atoi(val) != 0;
         else if (!strcmp(key, "choconst10")) g_cfg.choConst10 = atoi(val) != 0;
         else if (!strcmp(key, "camworld10")) g_cfg.camWorld10 = atoi(val) != 0;
+        else if (!strcmp(key, "camfold10")) g_cfg.camFold10 = atoi(val) != 0;
         else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
@@ -315,9 +317,9 @@ static void loadConfig(const char* dir)
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
          g_cfg.memtest);
     logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d "
-         "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10, g_cfg.choScene10,
-         g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10,
-         g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10, g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
+         "banm10=%d variant10=%d camworld10=%d camfold10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
+         g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10,
+         g_cfg.variant10, g_cfg.camWorld10, g_cfg.camFold10, g_cfg.teardownTrace, g_cfg.breakTrace);
     logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
     logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
          g_cfg.lockTrace10);
@@ -637,6 +639,14 @@ static bool transcodeCho(oct::File& f, std::string& note)
         int failed = 0;
         if (int n = cho::clips30(f, motion, &failed)) { note += "+clips(" + std::to_string(n) + ") "; changed = true; }
         if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
+    }
+    if (g_cfg.camFold10) {   // after clips30 (writes its block in the 3.0 layout), before layout30 (1.0 ContextRefs)
+        std::string why;
+        if (int n = cho::camfold30(f, [](const std::string& p, std::string& out) { return read10s(p, out); }, &why)) {
+            note += "+camfold(" + std::to_string(n) + ") ";
+            changed = true;
+        }
+        if (!why.empty()) note += why;
     }
     if (g_cfg.choLayout10) {
         int inst = 0;
@@ -1374,12 +1384,16 @@ static std::mutex g_btMx;
 static std::unordered_map<void*, float> g_btFirst;   // processor -> first time seen
 static std::unordered_set<void*> g_btMoving;
 static volatile LONG g_btEvals;
+struct BtClock { ULONGLONG born, changed; float first, last; };
+static std::unordered_map<void*, BtClock> g_btClock;   // every processor's clock, for the 2-second report
+static ULONGLONG g_btReport;
 static void __fastcall hkClipEval(void* self, void*)
 {
     float t = ((float(__fastcall*)(void*, void*))rt(0x00528A70))(self, nullptr);
     LONG n = InterlockedIncrement(&g_btEvals);
     {
         std::lock_guard<std::mutex> l(g_btMx);
+        ULONGLONG now = GetTickCount64();
         auto it = g_btFirst.find(self);
         if (it == g_btFirst.end()) {
             g_btFirst[self] = t;
@@ -1389,9 +1403,78 @@ static void __fastcall hkClipEval(void* self, void*)
                      p[0x40 / 4], t);
             }
         } else if (it->second != t) g_btMoving.insert(self);
+        auto c = g_btClock.emplace(self, BtClock{now, now, t, t}).first;
+        if (c->second.last != t) { c->second.last = t; c->second.changed = now; }
         if (n % 20000 == 0) logf("breaktrace clip evals %ld: %zu processors, %zu with a moving clock", n, g_btFirst.size(), g_btMoving.size());
+        // every 2 s: the processors born in the last 60 s (a cinematic's), the youngest first, each one's clock and how
+        // long it has stood
+        if (now - g_btReport >= 2000) {
+            g_btReport = now;
+            std::vector<std::pair<ULONGLONG, void*>> fresh;
+            int moving = 0;
+            for (auto& e : g_btClock)
+                if (now - e.second.born <= 60000) {
+                    fresh.emplace_back(e.second.born, e.first);
+                    moving += e.second.first != e.second.last;
+                }
+            std::sort(fresh.begin(), fresh.end(), [](auto& a, auto& b) { return a.first > b.first; });
+            char line[900] = "";
+            size_t at = 0;
+            for (size_t i = 0; i < fresh.size() && i < 8; ++i) {
+                const BtClock& c = g_btClock[fresh[i].second];
+                at += sprintf_s(line + at, sizeof(line) - at, " %p born -%llu ms %.2f->%.2f (still %llu ms)", fresh[i].second,
+                                now - c.born, c.first, c.last, now - c.changed);
+            }
+            if (!fresh.empty()) logf("breaktrace clocks: %zu born in the last 60 s, %d moved; youngest:%s", fresh.size(), moving, line);
+        }
     }
     g_clipEval(self, nullptr);
+}
+// - choreography instance audio-sync wait FUN_01442ee0 (thiscall on the instance's +0x8c object {dialog request id,
+//   active, seconds left}; true = go) and start FUN_01449390 (thiscall on the instance; +0x38 its path, +0x1b4 flags:
+//   0x20 audio sync, 0x80 started). The tick FUN_0144a4d0 calls the wait until it says go, then the start.
+typedef char(__fastcall* BtReadyFn)(int32_t* sync, void* edx);
+static BtReadyFn g_choReady;
+static std::unordered_map<int32_t*, char> g_btReady;
+static char __fastcall hkChoReady(int32_t* sync, void*)
+{
+    int32_t id = sync ? sync[0] : -1;
+    int act = sync ? ((uint8_t*)sync)[4] : 0;
+    float left = sync ? ((float*)sync)[2] : 0.f;
+    char r = g_choReady(sync, nullptr);
+    std::lock_guard<std::mutex> l(g_btMx);
+    auto it = g_btReady.find(sync);
+    if (it == g_btReady.end() || it->second != r) {
+        g_btReady[sync] = r;
+        logf("breaktrace cho audio-sync %p: request %d active %d, %.2f s left -> %s", sync, id, act, left, r ? "go" : "waiting");
+    }
+    return r;
+}
+// Play FUN_01445e70 (thiscall on a handle {instance, ?, network, ?}; true = handled): not started -> sets the pending
+// flag 0x40000; started -> plays the network only when its +0x63 bit 0 is set, else does nothing. Logged for
+// audio-synced instances (0x20) only.
+typedef char(__fastcall* BtPlayFn)(uint32_t* h, void* edx);
+static BtPlayFn g_btPlay;
+static char __fastcall hkBtPlay(uint32_t* h, void*)
+{
+    uint8_t* inst = h ? (uint8_t*)(uintptr_t)h[0] : nullptr;
+    uint32_t before = inst ? *(uint32_t*)(inst + 0x1b4) : 0;
+    char r = g_btPlay(h, nullptr);
+    if (inst && (before & 0x20)) {
+        uint8_t* net = (uint8_t*)(uintptr_t)h[2];
+        logf("breaktrace cho play %p flags %08X -> %08X, network %p ready byte %d, sub %08X -> %d", inst, before,
+             *(uint32_t*)(inst + 0x1b4), net, net ? net[0x63] : -1, h[3], r);
+    }
+    return r;
+}
+typedef void(__fastcall* BtStartFn)(uint8_t* self, void* edx);
+static BtStartFn g_choStart;
+static void __fastcall hkChoStart(uint8_t* self, void*)
+{
+    char name[100] = "";
+    safeCopy(name, sizeof(name), *(const char**)(self + 0x38));
+    logf("breaktrace cho start %p '%s' flags %08X", self, name, *(uint32_t*)(self + 0x1b4));
+    g_choStart(self, nullptr);
 }
 typedef void(__cdecl* BtHitFn)(uint32_t actor, uint32_t a2, uint8_t* mun);
 static BtHitFn g_munHit;
@@ -3128,6 +3211,9 @@ extern "C" void __stdcall Pentane_Main()
         hook("ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&hkClipEval, (void**)&g_clipEval);
         hook("exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&hkMunHit, (void**)&g_munHit);
         hook("exploder explode (breaktrace)", 0x0151E130, "6AFF64A100000000", (void*)&hkExplode, (void**)&g_explode);
+        hook("choreography audio-sync wait (breaktrace)", 0x01442EE0, "568BF185F6744D8B06", (void*)&hkChoReady, (void**)&g_choReady);
+        hook("choreography start (breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart, (void**)&g_choStart);
+        hook("choreography play (breaktrace)", 0x01445E70, "5183790C00753B8B01", (void*)&hkBtPlay, (void**)&g_btPlay);
     }
     if (g_cfg.teardownTrace) {
         hook("Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor, (void**)&g_layoutDtor);

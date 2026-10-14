@@ -2253,6 +2253,23 @@ int main(int argc, char** argv)
         lap("curve associations bound", gameplay::curves30(f));
         if (argc > 4 && std::string(argv[4]) == "cho") {   // the plugin's choreography steps too (transcodeCho, const30)
             lap("clip blocks re-packed", cho::clips30(f, nullptr));
+            // camfold30 reads motion clips: 'choreographies/<name>/rest' from the extract's '<shard>/<name>/rest'
+            std::string in = argv[2];
+            for (char& c : in) if (c == '\\') c = '/';
+            size_t at = in.find("/choreographies/");
+            std::string assets = at == std::string::npos ? "" : in.substr(0, at + 1);
+            auto readExtract = [&](const std::string& p, std::string& out) {
+                size_t a = p.find('/'), b = a == std::string::npos ? a : p.find('/', a + 1);
+                if (assets.empty() || b == std::string::npos) return false;
+                std::string name = p.substr(a + 1, b - a - 1);
+                std::ifstream s(assets + p.substr(0, a + 1) + name.substr(0, 2) + "/" + p.substr(a + 1), std::ios::binary);
+                if (!s) return false;
+                out.assign(std::istreambuf_iterator<char>(s), {});
+                return true;
+            };
+            std::string why;
+            lap("camera attachments folded", cho::camfold30(f, readExtract, &why));
+            if (!why.empty()) printf("  %s\n", why.c_str());
             lap("layouts converted", cho::layout30(f));
             lap("time ranges", cho::time30(f));
             lap("anim inputs", cho::anim30(f));
