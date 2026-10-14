@@ -132,6 +132,7 @@ static struct {
     bool trace = true;               // log every open
     bool missionTrace = false;       // log IN_ mission context state changes (one cheap hook; trace's cost frames)
     bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
+    bool breakTrace = false;         // probe: clip evaluation clocks, exploder hits and explodes (log only)
     bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
@@ -177,6 +178,7 @@ static struct {
     bool choScene10 = true;          // cho.hpp: SceneTreeNodeRef on PlacementNode Associations (Layout holds the scene node)
     bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
     bool choConst10 = true;          // cho.hpp: Static nodes of choreography graphs stay Static under constant headers
+    bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
     bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
@@ -223,6 +225,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "trace")) g_cfg.trace = atoi(val) != 0;
         else if (!strcmp(key, "missiontrace")) g_cfg.missionTrace = atoi(val) != 0;
         else if (!strcmp(key, "teardowntrace")) g_cfg.teardownTrace = atoi(val) != 0;
+        else if (!strcmp(key, "breaktrace")) g_cfg.breakTrace = atoi(val) != 0;
         else if (!strcmp(key, "shaders10")) g_cfg.shaders10 = atoi(val) != 0;
         else if (!strcmp(key, "translate10")) g_cfg.translate10 = atoi(val) != 0;
         else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
@@ -268,6 +271,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "choscene10")) g_cfg.choScene10 = atoi(val) != 0;
         else if (!strcmp(key, "variant10")) g_cfg.variant10 = atoi(val) != 0;
         else if (!strcmp(key, "choconst10")) g_cfg.choConst10 = atoi(val) != 0;
+        else if (!strcmp(key, "camworld10")) g_cfg.camWorld10 = atoi(val) != 0;
         else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
@@ -301,9 +305,9 @@ static void loadConfig(const char* dir)
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
          g_cfg.memtest);
     logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d "
-         "banm10=%d variant10=%d teardowntrace=%d", g_cfg.choTime10, g_cfg.choAnim10, g_cfg.choScene10, g_cfg.choConst10,
-         g_cfg.choLayout10, g_cfg.clip10,
-         g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10, g_cfg.variant10, g_cfg.teardownTrace);
+         "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10, g_cfg.choScene10,
+         g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10,
+         g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10, g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
     logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
     logf("config mis: gate10=%d locktrace10=%d", g_cfg.gate10, g_cfg.lockTrace10);
 }
@@ -653,6 +657,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
     if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
+    if (int n = g_cfg.camWorld10 ? octx::camera30(f) : 0) { note += "+cameras(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::realm30w(f)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
     if (transcodeCho(f, note)) changed = true;
@@ -1321,6 +1326,69 @@ static uint32_t tdProt(uintptr_t p)
     return p >= 0x10000 && VirtualQuery((void*)p, &mbi, sizeof(mbi)) ? (mbi.State == MEM_COMMIT ? mbi.Protect : 0x10000000 | mbi.State) : 0;
 }
 static uint32_t tdStatic(uint32_t v) { return v >= g_base && v < g_base + 0x0209B000 ? v - (uint32_t)g_base + 0x400000u : v; }
+
+// Probe (breaktrace, log only): do played choreographies animate, and where does a 1.0 destructible's break stop?
+// - ClipProcessor evaluate FUN_00543f40 (thiscall, ret 0; time = FUN_00528a70, the processor's input clock, which it
+//   reads itself first): the first 40 processors (clip node +0x3c, output table +0x48, block +0x40, time), then a
+//   summary every 20000 evaluations: processors seen and how many of them had their time change (= animating).
+// - Exploder munition impact FUN_0151e420(actor, ?, munition) (cdecl, the callback FUN_01521560 registers when the
+//   Exploder gadget reads): first 40 with the munition's weapon FourCC (+0x68) and energy (+0x60).
+// - Exploder explode FUN_0151e130 (thiscall on ExploderData, 1 arg, ret 4): first 40 with PieceFile (+0x1c), PieceName
+//   (+0x20), PieceCount (+0x60) before / after (the piece spawners write the pieces found) and +0xf1 after (0x40 =
+//   exploded).
+typedef void(__fastcall* BtThisFn)(void* self, void* edx);
+static BtThisFn g_clipEval;
+static std::mutex g_btMx;
+static std::unordered_map<void*, float> g_btFirst;   // processor -> first time seen
+static std::unordered_set<void*> g_btMoving;
+static volatile LONG g_btEvals;
+static void __fastcall hkClipEval(void* self, void*)
+{
+    float t = ((float(__fastcall*)(void*, void*))rt(0x00528A70))(self, nullptr);
+    LONG n = InterlockedIncrement(&g_btEvals);
+    {
+        std::lock_guard<std::mutex> l(g_btMx);
+        auto it = g_btFirst.find(self);
+        if (it == g_btFirst.end()) {
+            g_btFirst[self] = t;
+            if (g_btFirst.size() <= 40) {
+                uint32_t* p = (uint32_t*)self;
+                logf("breaktrace clip eval: processor %p clip %08X table %08X block %08X t=%.3f", self, p[0x3c / 4], p[0x48 / 4],
+                     p[0x40 / 4], t);
+            }
+        } else if (it->second != t) g_btMoving.insert(self);
+        if (n % 20000 == 0) logf("breaktrace clip evals %ld: %zu processors, %zu with a moving clock", n, g_btFirst.size(), g_btMoving.size());
+    }
+    g_clipEval(self, nullptr);
+}
+typedef void(__cdecl* BtHitFn)(uint32_t actor, uint32_t a2, uint8_t* mun);
+static BtHitFn g_munHit;
+static volatile LONG g_btHits;
+static void __cdecl hkMunHit(uint32_t actor, uint32_t a2, uint8_t* mun)
+{
+    if (InterlockedIncrement(&g_btHits) <= 40 && tdReadable((uintptr_t)mun, 0x6c)) {
+        char cc[5] = {};
+        memcpy(cc, mun + 0x68, 4);
+        logf("breaktrace exploder hit: actor %08X weapon '%s' energy %.2f", actor, cc, *(float*)(mun + 0x60));
+    }
+    g_munHit(actor, a2, mun);
+}
+typedef void(__fastcall* BtOneFn)(void* self, void* edx, uint32_t a1);
+static BtOneFn g_explode;
+static volatile LONG g_btBooms;
+static void __fastcall hkExplode(void* self, void*, uint32_t a1)
+{
+    uint8_t* d = (uint8_t*)self;
+    int before = *(int*)(d + 0x60);
+    g_explode(self, nullptr, a1);
+    if (InterlockedIncrement(&g_btBooms) <= 40) {
+        char file[100] = "", piece[40] = "";
+        safeCopy(file, sizeof(file), *(const char**)(d + 0x1c));
+        safeCopy(piece, sizeof(piece), *(const char**)(d + 0x20));
+        logf("breaktrace explode: data %p actor %08X PieceFile '%s' PieceName '%s' pieces %d -> %d flags %02X", self,
+             *(uint32_t*)d, file, piece, before, *(int*)(d + 0x60), d[0xf1]);
+    }
+}
 // "ptr vt=<static> <rtti> ref=<word> prot=<protect>"
 static void tdObj(char* out, size_t cap, uintptr_t p)
 {
@@ -2919,6 +2987,11 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.missionTrace)
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
+    if (g_cfg.breakTrace) {
+        hook("ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&hkClipEval, (void**)&g_clipEval);
+        hook("exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&hkMunHit, (void**)&g_munHit);
+        hook("exploder explode (breaktrace)", 0x0151E130, "6AFF64A100000000", (void*)&hkExplode, (void**)&g_explode);
+    }
     if (g_cfg.teardownTrace) {
         hook("Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor, (void**)&g_layoutDtor);
         hook("Samurai::Node dtor (teardowntrace)", 0x004EE5F0, "6AFF68????????64A100000000", (void*)&hkNodeDtor, (void**)&g_nodeDtor);

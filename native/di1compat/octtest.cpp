@@ -2229,6 +2229,7 @@ int main(int argc, char** argv)
         lap("parse", 0);
         lap("skin influences redirected", octx::skin30(f));
         lap("locators redirected", octx::locator30(f));
+        lap("cameras given world twins", octx::camera30(f));
         lap("asset pool added", (int)octx::addAssetPool(f));
         lap("collision aggregates added", octx::collision30(f));
         lap("lighting nodes converted", octx::realm30w(f));
