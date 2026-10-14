@@ -138,6 +138,7 @@ static struct {
     bool sxPorts10 = true;           // sxNatives10 with the ported natives (0: stack-balanced stubs only)
     bool sxBeh10 = true;             // sxPorts10 + 1.0 behavior-type numbers into 1.0 scripts' SetInitialParams
     bool bmx10 = true;               // 1.0 behavior maps in 3.0's form (sx.hpp BMX-1; 0: raw, 3.0 drops them)
+    bool btx10 = true;               // 1.0 behavior trees in 3.0's form (sx.hpp BTX-1; 0: raw, 3.0 drops them)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -170,6 +171,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "sxports10")) g_cfg.sxPorts10 = atoi(val) != 0;
         else if (!strcmp(key, "sxbeh10")) g_cfg.sxBeh10 = atoi(val) != 0;
         else if (!strcmp(key, "bmx10")) g_cfg.bmx10 = atoi(val) != 0;
+        else if (!strcmp(key, "btx10")) g_cfg.btx10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -572,13 +574,15 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         note += "+sx(" + std::to_string(k) + " imports) ";
         return "sx";
     }
-    // a 1.0 behavior map (sx.hpp BMX-1): 3.0's loader FUN_015473f0 drops maps without Version 763
-    if (g_cfg.bmx10 && endsWith(path, ".bmx") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
+    // a 1.0 behavior map / behavior tree (sx.hpp BMX-1 / BTX-1): 3.0's loaders drop tables without Version 763
+    bool isBmx = g_cfg.bmx10 && endsWith(path, ".bmx"), isBtx = g_cfg.btx10 && endsWith(path, ".btx");
+    if ((isBmx || isBtx) && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
         std::string why;
-        int k = sx::bmx::transcode(data, n, [](const std::string& p) { std::string s; return read10s(p, s); }, out, &why);
-        if (k < 0) { note += "bmx: " + why + " "; return nullptr; }
-        note += "+bmx(" + std::to_string(k) + " behaviors) ";
-        return "bmx";
+        auto exists = [](const std::string& p) { std::string s; return read10s(p, s); };
+        int k = isBmx ? sx::ai::bmx(data, n, exists, out, &why) : sx::ai::btx(data, n, exists, out, &why);
+        if (k < 0) { note += std::string(isBmx ? "bmx: " : "btx: ") + why + " "; return nullptr; }
+        note += (isBmx ? "+bmx(" : "+btx(") + std::to_string(k) + (isBmx ? " behaviors) " : " tables) ");
+        return isBmx ? "bmx" : "btx";
     }
     return nullptr;
 }

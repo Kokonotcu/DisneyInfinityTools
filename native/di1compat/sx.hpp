@@ -702,20 +702,26 @@ inline void __fastcall hkCallByName(uint8_t* ctx, void*, const char* name, int a
     g_callByName(ctx, nullptr, name, arg);
 }
 
-// ---- BMX-1: a 1.0 behavior map (.bmx) in the form 3.0's loader takes, at serve time ----
-// 3.0 FUN_015473f0 runs the chunk and builds the map only if BehaviorMap.Version == 0x2fb (763); 1.0's loader
-// FUN_010198a0 reads no version, so 3.0 dropped every 1.0 .bmx (the 1.0 actors' CUSTOM scripts, Inc_Bomb.sx ..., never
-// started). The entry parsers match (1.0 FUN_00ffc6c0 / 3.0 FUN_0153fce0: Method string, Data table) except Data:
-// 1.0 {Name = value} keyed by the interned name (FUN_00ff2d20), 3.0 {{id, value}, ...} (FUN_0152d380: [1] key id, [2]
-// number or string). Method: 1.0 loads "scripts/<Method>", else "characters/<Method>" (FUN_00f53380; "none" and ""
-// skipped); 3.0 opens the string as the path (FUN_013fa680 -> FUN_00738a20; "none" skipped). All 55 1.0 .bmx are
-// table constructors only (NEWTABLE, SETTABLE, SETGLOBAL BehaviorMap, RETURN; string and number constants; Method
-// always a bare name: scratch\sx\bmxsurvey.py), which eval() reads; the result is Lua source (3.0's loadbuffer
-// FUN_0130ede0 = lua_load, the text parser is linked: "unexpected symbol" 0x1321f20).
-namespace bmx {
-struct Val { int kind = 0; double num = 0; std::string str; int tab = -1; };   // 0 nil, 1 number, 2 string, 3 table
+// ---- BMX-1 / BTX-1: 1.0 AI tables (.bmx behavior maps, .btx behavior trees) in the form 3.0's loaders take ----
+// Both 3.0 loaders run the chunk and build the table only if its Version == 0x2fb (763): .bmx FUN_015473f0, .btx
+// FUN_015459a0. 1.0's (FUN_010198a0, FUN_01016f20) read no version, so 3.0 dropped every 1.0 .bmx and .btx: the 1.0
+// actors (water tower, bomb, secret weapon, spawners, boss-fight objects ...) got no AI tree and no behavior map, so
+// none of their scripts started. Readers otherwise match field for field except:
+//  - keyed tables: .bmx Data and .btx leaf HashOverrides are 1.0 {Name = value} (FUN_00ff2d20, interned names), 3.0
+//    {{key id, value}, ...} (FUN_0152d380: [1] key id, [2] number or string); leaf parsers 1.0 FUN_01017aa0 / 3.0
+//    FUN_01546490 differ only there and in PersistBehaviorScript (3.0, default false when absent).
+//  - script names: 3.0 opens each as a path (behavior Method FUN_013fa680 -> FUN_00738a20; router RoutingScript
+//    FUN_015292a0, stored as is). 1.0 resolves bare names: a behavior Method, and the Method_Custom override that
+//    replaces it (FUN_00f5a610, the only reader of that key), as "scripts/<m>" else "characters/<m>" (FUN_00f53380;
+//    "none" / "" skipped); a RoutingScript (router FUN_00fee740, parallel node FUN_01017e40) as "Characters\<m>".
+// All 55 .bmx and 58 .btx of 1.0 are table constructors (NEWTABLE, SETTABLE, SETLIST, LOADK, LOADBOOL, SETGLOBAL,
+// RETURN; string/number constants; one global; every script name bare: bmxsurvey.py, btxsurvey.py), which eval()
+// reads. Written as Lua source: 3.0's loadbuffer FUN_0130ede0 is lua_load and its text parser is linked
+// ("unexpected symbol" 0x1321f20).
+namespace ai {
+struct Val { int kind = 0; double num = 0; std::string str; int tab = -1; };   // 0 nil, 1 number, 2 string, 3 table, 4 bool
 struct Table { std::vector<std::pair<Val, Val>> kv; };
-inline bool eval(const uint8_t* b, size_t n, std::vector<Table>& tabs, Val& bm, std::string* why)
+inline bool eval(const uint8_t* b, size_t n, const char* global, std::vector<Table>& tabs, Val& bm, std::string* why)
 {
     static const uint8_t HDR[12] = {0x1b, 'L', 'u', 'a', 0x51, 0, 1, 4, 4, 4, 8, 0};
     auto fail = [&](const char* w) { if (why) *why = w; return false; };
@@ -733,12 +739,22 @@ inline bool eval(const uint8_t* b, size_t n, std::vector<Table>& tabs, Val& bm, 
     for (Val& k : K) {
         if (at >= n) return fail("truncated");
         uint8_t t = b[at++];
-        if (t == 3 && at + 8 <= n) { k.kind = 1; memcpy(&k.num, b + at, 8); at += 8; }
+        if (t == 0) continue;                                                       // nil (constructors: boolK/nilK)
+        if (t == 1 && at < n) { k.kind = 4; k.num = b[at++] ? 1 : 0; }
+        else if (t == 3 && at + 8 <= n) { k.kind = 1; memcpy(&k.num, b + at, 8); at += 8; }
         else if (t == 4 && u32(len) && len && at + len <= n) { k.kind = 2; k.str.assign((const char*)b + at, len - 1); at += len; }
         else return fail("constant kind");
     }
     std::vector<Val> R(256);
     auto rk = [&](uint32_t x) -> const Val* { return x & 0x100 ? ((x & 0xff) < nk ? &K[x & 0xff] : nullptr) : &R[x & 0xff]; };
+    auto set = [&](const Val& t, const Val& k, const Val& v) {
+        auto& kv = tabs[t.tab].kv;
+        auto it = std::find_if(kv.begin(), kv.end(), [&](const std::pair<Val, Val>& e) {
+            return e.first.kind == k.kind && (k.kind == 2 ? e.first.str == k.str : e.first.num == k.num);
+        });
+        if (it != kv.end()) it->second = v;
+        else kv.emplace_back(k, v);
+    };
     for (uint32_t pc = 0; pc < ncode; ++pc) {
         uint32_t i;
         memcpy(&i, code + 4 * pc, 4);
@@ -747,19 +763,24 @@ inline bool eval(const uint8_t* b, size_t n, std::vector<Table>& tabs, Val& bm, 
         else if (op == 9) {                                                                                // SETTABLE
             const Val *k = rk(bb), *v = rk(c);
             if (R[a].kind != 3 || !k || !v || k->kind == 0 || k->kind == 3) return fail("SETTABLE operands");
-            auto& kv = tabs[R[a].tab].kv;
-            auto it = std::find_if(kv.begin(), kv.end(), [&](const std::pair<Val, Val>& e) {
-                return e.first.kind == k->kind && (k->kind == 1 ? e.first.num == k->num : e.first.str == k->str);
-            });
-            if (it != kv.end()) it->second = *v;
-            else kv.emplace_back(*k, *v);
+            set(R[a], *k, *v);
+        } else if (op == 1) {                                                                              // LOADK
+            if (bx >= nk) return fail("LOADK index");
+            R[a] = K[bx];
+        } else if (op == 2) {                                                                              // LOADBOOL
+            R[a] = Val(); R[a].kind = 4; R[a].num = bb ? 1 : 0;
+            if (c) ++pc;
+        } else if (op == 34) {                                                                             // SETLIST
+            if (!c) { if (++pc >= ncode) return fail("SETLIST"); memcpy(&c, code + 4 * pc, 4); }
+            if (R[a].kind != 3 || !bb || a + bb > 255) return fail("SETLIST operands");   // B == 0 (to top): unused
+            for (uint32_t j = 1; j <= bb; ++j) { Val k; k.kind = 1; k.num = (c - 1) * 50.0 + j; set(R[a], k, R[a + j]); }
         } else if (op == 7) {                                                                              // SETGLOBAL
-            if (bx >= nk || K[bx].kind != 2 || K[bx].str != "BehaviorMap") return fail("a global other than BehaviorMap");
+            if (bx >= nk || K[bx].kind != 2 || K[bx].str != global) return fail("an unexpected global");
             bm = R[a];
         } else if (op == 30) break;                                                                        // RETURN
         else return fail("opcode outside table constructors");
     }
-    if (bm.kind != 3) return fail("no BehaviorMap table");
+    if (bm.kind != 3) return fail("no table in the expected global");
     return true;
 }
 inline void luaStr(std::string& o, const std::string& s)
@@ -773,13 +794,59 @@ inline void luaStr(std::string& o, const std::string& s)
     o += '"';
 }
 inline void luaNum(std::string& o, double v) { char e[40]; sprintf_s(e, "%.17g", v); o += e; }
-// exists(path): the 1.0 install has that file (1.0's own search decides the directory) -> behaviors written, or -1
-inline int transcode(const void* data, size_t n, const std::function<bool(const std::string&)>& exists, std::string& out,
-                     std::string* why)
+typedef std::function<bool(const std::string&)> Exists;   // the 1.0 install has that file (1.0's search decides)
+inline std::string lower(std::string s)
+{
+    for (char& ch : s) ch = (ch == '\\') ? '/' : (char)tolower((unsigned char)ch);
+    return s;
+}
+// a behavior Method / Method_Custom as 1.0 loads it (FUN_00f53380)
+inline std::string method(const std::string& m, const Exists& exists)
+{
+    if (m.empty() || m == "none") return m;
+    std::string s = lower(m);
+    return (exists("scripts/" + s) ? "scripts/" : "characters/") + s;
+}
+// a keyed table {Name = value} as 3.0's {{key id, value}, ...}; number and string values (all the 1.0 data has)
+inline void keyed(std::string& o, const std::vector<Table>& tabs, const Val& t, const Exists& exists)
+{
+    o += "{";
+    for (auto& [k, x] : tabs[t.tab].kv) {
+        if (k.kind != 2 || (x.kind != 1 && x.kind != 2)) continue;
+        o += "{" + std::to_string(keyId(k.str.c_str())) + ", ";
+        if (x.kind == 1) luaNum(o, x.num);
+        else luaStr(o, k.str == "Method_Custom" ? method(x.str, exists) : x.str);
+        o += "}, ";
+    }
+    o += "}";
+}
+// any value; under the key "HashOverrides" a keyed table, under "RoutingScript" a "characters/" path
+inline void value(std::string& o, const std::vector<Table>& tabs, const Val& v, const std::string& key, const Exists& exists, int depth)
+{
+    if (v.kind == 1) luaNum(o, v.num);
+    else if (v.kind == 4) o += v.num ? "true" : "false";
+    else if (v.kind == 2) luaStr(o, key == "RoutingScript" && !v.str.empty() ? "characters/" + lower(v.str) : v.str);
+    else if (v.kind == 3 && key == "HashOverrides") keyed(o, tabs, v, exists);
+    else if (v.kind == 3 && depth < 64) {
+        o += "{";
+        for (auto& [k, x] : tabs[v.tab].kv) {
+            o += "[";
+            if (k.kind == 2) luaStr(o, k.str);
+            else if (k.kind == 4) o += k.num ? "true" : "false";
+            else luaNum(o, k.num);
+            o += "] = ";
+            value(o, tabs, x, k.kind == 2 ? k.str : std::string(), exists, depth + 1);
+            o += ", ";
+        }
+        o += "}";
+    } else o += "nil";
+}
+// .bmx -> behaviors written, or -1 (why)
+inline int bmx(const void* data, size_t n, const Exists& exists, std::string& out, std::string* why)
 {
     std::vector<Table> tabs;
     Val bm;
-    if (!eval((const uint8_t*)data, n, tabs, bm, why)) return -1;
+    if (!eval((const uint8_t*)data, n, "BehaviorMap", tabs, bm, why)) return -1;
     out = "BehaviorMap = {\n\tVersion = 763,\n";
     int entries = 0;
     for (auto& [type, e] : tabs[bm.tab].kv) {
@@ -789,24 +856,13 @@ inline int transcode(const void* data, size_t n, const std::function<bool(const 
         out += "] = {";
         for (auto& [f, v] : tabs[e.tab].kv) {
             if (f.kind == 2 && f.str == "Method" && v.kind == 2) {
-                std::string m = v.str;
-                if (!m.empty() && m != "none") {
-                    for (char& ch : m) ch = (ch == '\\') ? '/' : (char)tolower((unsigned char)ch);
-                    m = (exists("scripts/" + m) ? "scripts/" : "characters/") + m;
-                }
                 out += "Method = ";
-                luaStr(out, m);
+                luaStr(out, method(v.str, exists));
                 out += ", ";
             } else if (f.kind == 2 && f.str == "Data" && v.kind == 3) {
-                out += "Data = {";
-                for (auto& [k, x] : tabs[v.tab].kv) {
-                    if (k.kind != 2 || (x.kind != 1 && x.kind != 2)) continue;
-                    out += "{" + std::to_string(keyId(k.str.c_str())) + ", ";
-                    if (x.kind == 1) luaNum(out, x.num);
-                    else luaStr(out, x.str);
-                    out += "}, ";
-                }
-                out += "}, ";
+                out += "Data = ";
+                keyed(out, tabs, v, exists);
+                out += ", ";
             }
         }
         out += "},\n";
@@ -815,6 +871,24 @@ inline int transcode(const void* data, size_t n, const std::function<bool(const 
     out += "}\n";
     return entries;
 }
-}  // namespace bmx
+// .btx -> tables written, or -1 (why)
+inline int btx(const void* data, size_t n, const Exists& exists, std::string& out, std::string* why)
+{
+    std::vector<Table> tabs;
+    Val bt;
+    if (!eval((const uint8_t*)data, n, "BehaviorTree", tabs, bt, why)) return -1;
+    out = "BehaviorTree = {\n\tVersion = 763,\n";
+    for (auto& [k, x] : tabs[bt.tab].kv) {
+        if (k.kind != 2 || k.str == "Version") continue;
+        out += "\t[";
+        luaStr(out, k.str);
+        out += "] = ";
+        value(out, tabs, x, k.str, exists, 1);
+        out += ",\n";
+    }
+    out += "}\n";
+    return (int)tabs.size();
+}
+}  // namespace ai
 
 }  // namespace sx
