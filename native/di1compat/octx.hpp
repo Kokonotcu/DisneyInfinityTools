@@ -641,6 +641,34 @@ inline int skin30(oct::File& f)
 // The node a 1.0 binding path names, in 3.0 form: a graph header whose 'Transform' child is a Dilation becomes
 // '<path>|Transform|In WorldBasis.Transform' with the exporter's chain (see locator30); "" if the path does not have
 // that shape or already names a node.
+// The exporter's steps from node src (header xf, basis b) to the root basis: per basis conversion an 'In <basis>' node
+// of src's type written by 'Convert To <basis>' = Transform<src type>With<converter type> [Input, Converter, Output]
+// (one step when b converts to the root directly); the last is 'In WorldBasis'. The processor names the converter's
+// own type: the 3.0 corpus never feeds a converter of another type (concat.py; until 2026-10-14 this always wrote
+// TransformDilationWithDilation, 153 of them over a Transform converter in the 827 1.0 files with cameras, which 3.0
+// would fetch through a load-time 'As' adapter, the header kind instancing cannot map). Returns the last node, -1
+// (nothing added) when there is no chain or a converter is not Transform / Dilation / Matrix4x4.
+inline int worldChain(SnEdit& e, int xf, int src, bool lastExternal)
+{
+    bool found = false;
+    auto steps = e.toWorld(e.dns[src].basis, found);
+    if (!found) return -1;   // a root-basis src: no step, src itself
+    for (auto& s : steps) {
+        const std::string& ct = e.dns[s.first].type;
+        if (ct != "Transform" && ct != "Dilation" && ct != "Matrix4x4") return -1;
+    }
+    std::string t = e.dns[src].type;
+    int in = src;
+    for (auto& s : steps) {
+        std::string bn = s.second == 0 ? "WorldBasis" : "Basis" + std::to_string(s.second);
+        int ho = e.header("In " + bn, xf), hp = e.header("Convert To " + bn, xf);
+        int out = e.node(ho, t, s.second, lastExternal && s.second == 0);
+        e.processor(hp, "Transform" + t + "With" + e.dns[s.first].type, {in, s.first, out}, {"Input", "Converter", "Output"});
+        in = out;
+    }
+    return in;
+}
+
 inline std::string worldTransform30(SnEdit& e, const std::string& path)
 {
     int loc = e.find(path);
@@ -650,17 +678,8 @@ inline std::string worldTransform30(SnEdit& e, const std::string& path)
     if (src < 0 || e.dns[src].type != "Dilation") return "";
     std::string to = path + "|Transform|In WorldBasis.Transform";
     if (e.child(xf, "In WorldBasis.Transform") >= 0) return to;
-    bool found = false;
-    auto steps = e.toWorld(e.dns[src].basis, found);
-    if (!found) return "";
-    int in = src;
-    for (auto& s : steps) {
-        std::string bn = s.second == 0 ? "WorldBasis" : "Basis" + std::to_string(s.second);
-        int ho = e.header("In " + bn, xf), hp = e.header("Convert To " + bn, xf);
-        int out = e.node(ho, "Dilation", s.second, false);
-        e.processor(hp, "TransformDilationWithDilation", {in, s.first, out}, {"Input", "Converter", "Output"});
-        in = out;
-    }
+    int in = worldChain(e, xf, src, false);
+    if (in < 0) return "";
     int ht = e.header("In WorldBasis.Transform", xf), hc = e.header("ConvertDilationToTransform", ht);
     int nt = e.node(ht, "Transform", 0, true);
     e.processor(hc, "DilationToTransformVariantProcessor", {in, nt}, {"Input", "Output"});
@@ -668,6 +687,35 @@ inline std::string worldTransform30(SnEdit& e, const std::string& path)
 }
 
 inline int locator30(oct::File& f) { return redirectAssociations(f, "MeridianLocator", worldTransform30); }
+
+// Camera in 3.0 form (cfg camworld10). The 3.0 Camera association binder (Association::Camera FUN_004a6c80 ->
+// AnimationHelper::CameraAnimation vtable+0x24 = FUN_004a5d80) takes the camera header's 'Transform' node and, when
+// that is not in the root basis, its world-basis twin through FUN_0051c980 -> FUN_0051c810: FUN_00507c20 looks for a
+// child header of 'Transform' whose node is in the root basis and written by a converter processor; without one the
+// binder builds the chain at load, on the template (a ConcatenateChain over the basis conversions, each fetched as
+// the camera's type: a Dilation conversion under a Transform camera gets an 'AsTransform3d' adapter header outside
+// the header arena, FUN_005077e0 -> FUN_0056afc0). Instancing then reads that header's empty temp slot (in-game
+// 2026-10-14 03:06, INC_CIN_OpeningA: AV 004CDABE under FUN_004f5900 at variable header 72 =
+// 'Layout|Placement_All|Transform', the 5 -> 1 conversion of camera1's chain Transform <- Transform <- Dilation <-
+// Dilation; crash dump headers matched against the transcode).
+// 3.0 ships the twin: 489 of 502 cameras outside the root basis have 'Transform/In WorldBasis' (root basis,
+// External) written by 'Transform/Convert To WorldBasis' = Transform<camera type>With<converter type> [Input = the
+// camera node, Converter, Output] (camworld.py); 1.0: 0 of 683. Made with worldChain (a direct conversion gives
+// exactly the 3.0 shape; a longer chain stays within the processor signatures 3.0 ships: TransformTransformWithDilation
+// 3,226, ...WithTransform 569, TransformDilationWithDilation 33,551, ...WithTransform 770; 3.0 never mixes types in a
+// ConcatenateChain, concat.py). The association keeps naming the camera. Returns the cameras given one.
+inline int camera30(oct::File& f)
+{
+    int n = 0;
+    redirectAssociations(f, "Camera", [&](SnEdit& e, const std::string& path) -> std::string {
+        int cam = e.find(path), xf = cam > 0 ? e.child(cam, "Transform") : -1, src = xf > 0 ? e.dnOf(xf) : -1;
+        if (src < 0 || e.dns[src].basis == 0 || e.child(xf, "In WorldBasis") >= 0) return "";
+        if (e.dns[src].type != "Transform" && e.dns[src].type != "Dilation") return "";
+        if (worldChain(e, xf, src, true) >= 0) ++n;
+        return "";
+    });
+    return n;
+}
 
 // Collision in 3.0 form, as every shipped instance (24,287 aggregates in the 3.0 worlds + exploders checked):
 //   CollisionInstanceToDataNode names '<slot>|Transform|In WorldBasis.Transform' (1.0: the slot header, e.g.
