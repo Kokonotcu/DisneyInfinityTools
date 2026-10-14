@@ -713,7 +713,8 @@ inline void __fastcall hkCallByName(uint8_t* ctx, void*, const char* name, int a
 //  - script names: 3.0 opens each as a path (behavior Method FUN_013fa680 -> FUN_00738a20; router RoutingScript
 //    FUN_015292a0, stored as is). 1.0 resolves bare names: a behavior Method, and the Method_Custom override that
 //    replaces it (FUN_00f5a610, the only reader of that key), as "scripts/<m>" else "characters/<m>" (FUN_00f53380;
-//    "none" / "" skipped); a RoutingScript (router FUN_00fee740, parallel node FUN_01017e40) as "Characters\<m>".
+//    "none" / "" skipped); a RoutingScript (router FUN_00fee740, parallel node FUN_01017e40) as "Characters\<m>"; an
+//    InteractionScript (FUN_00ffb440; 3.0 FUN_01542940 stores it as is) as "Scripts\<m>".
 // All 55 .bmx and 58 .btx of 1.0 are table constructors (NEWTABLE, SETTABLE, SETLIST, LOADK, LOADBOOL, SETGLOBAL,
 // RETURN; string/number constants; one global; every script name bare: bmxsurvey.py, btxsurvey.py), which eval()
 // reads. Written as Lua source: 3.0's loadbuffer FUN_0130ede0 is lua_load and its text parser is linked
@@ -729,8 +730,8 @@ inline bool eval(const uint8_t* b, size_t n, const char* global, std::vector<Tab
     size_t at = 12;
     auto u32 = [&](uint32_t& v) { if (at + 4 > n) return false; memcpy(&v, b + at, 4); at += 4; return true; };
     uint32_t len, ncode, nk;
-    if (!u32(len) || (at += len) + 12 > n) return fail("truncated");
-    at += 12;   // linedefined, lastlinedefined, nups, numparams, is_vararg, maxstacksize
+    if (!u32(len) || len > n - at || n - at - len < 12) return fail("truncated");   // no 32-bit wrap of at + len
+    at += len + 12;   // source name; linedefined, lastlinedefined, nups, numparams, is_vararg, maxstacksize
     if (!u32(ncode) || at + 4ull * ncode > n) return fail("truncated");
     const uint8_t* code = b + at;
     at += 4ull * ncode;
@@ -742,7 +743,7 @@ inline bool eval(const uint8_t* b, size_t n, const char* global, std::vector<Tab
         if (t == 0) continue;                                                       // nil (constructors: boolK/nilK)
         if (t == 1 && at < n) { k.kind = 4; k.num = b[at++] ? 1 : 0; }
         else if (t == 3 && at + 8 <= n) { k.kind = 1; memcpy(&k.num, b + at, 8); at += 8; }
-        else if (t == 4 && u32(len) && len && at + len <= n) { k.kind = 2; k.str.assign((const char*)b + at, len - 1); at += len; }
+        else if (t == 4 && u32(len) && len && len <= n - at) { k.kind = 2; k.str.assign((const char*)b + at, len - 1); at += len; }
         else return fail("constant kind");
     }
     std::vector<Val> R(256);
@@ -820,12 +821,16 @@ inline void keyed(std::string& o, const std::vector<Table>& tabs, const Val& t, 
     }
     o += "}";
 }
-// any value; under the key "HashOverrides" a keyed table, under "RoutingScript" a "characters/" path
+// any value; under the key "HashOverrides" a keyed table, under "RoutingScript" a "characters/" path, under
+// "InteractionScript" a "scripts/" path (1.0 FUN_00ffb440 formats "Scripts\%s"; 3.0 FUN_01542940 stores it as is and
+// its own 54 values are "scripts/<m>")
 inline void value(std::string& o, const std::vector<Table>& tabs, const Val& v, const std::string& key, const Exists& exists, int depth)
 {
     if (v.kind == 1) luaNum(o, v.num);
     else if (v.kind == 4) o += v.num ? "true" : "false";
-    else if (v.kind == 2) luaStr(o, key == "RoutingScript" && !v.str.empty() ? "characters/" + lower(v.str) : v.str);
+    else if (v.kind == 2 && !v.str.empty() && key == "RoutingScript") luaStr(o, "characters/" + lower(v.str));
+    else if (v.kind == 2 && !v.str.empty() && key == "InteractionScript") luaStr(o, "scripts/" + lower(v.str));
+    else if (v.kind == 2) luaStr(o, v.str);
     else if (v.kind == 3 && key == "HashOverrides") keyed(o, tabs, v, exists);
     else if (v.kind == 3 && depth < 64) {
         o += "{";
