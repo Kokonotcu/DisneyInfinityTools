@@ -2038,8 +2038,84 @@ static int hostTest(char** argv)
     return !(ok && tInstall < 1000 && w == WAIT_TIMEOUT && up && init && mixer);
 }
 
+// --readable: sys::readable (working set first) against the VirtualQuery check it replaced, on every kind of page,
+// and the cost of both at the start of a touched 256 MB region (the engine arena's shape)
+static int readableTest()
+{
+    auto old = [](const void* p, size_t n) {
+        MEMORY_BASIC_INFORMATION m;
+        if ((uintptr_t)p < 0x10000 || !VirtualQuery(p, &m, sizeof(m)) || m.State != MEM_COMMIT || !m.Protect ||
+            (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            return false;
+        return (uintptr_t)p + n <= (uintptr_t)m.BaseAddress + m.RegionSize;
+    };
+    int bad = 0;
+    auto check = [&](const char* what, const void* p, size_t n, bool want) {
+        bool now = sys::readable(p, n), was = old(p, n);
+        bad += now != want;
+        printf("%-44s new %d old %d%s\n", what, now, was, now != want ? "  <-- WRONG" : now != was ? "  (both pages readable)" : "");
+    };
+    static const char rdata[] = "rdata";
+    int stackVar = 1;
+    std::vector<char> heap(64);
+    auto va = [](size_t n, DWORD type, DWORD prot) { return (char*)VirtualAlloc(nullptr, n, type, prot); };
+    char* reserved = va(0x10000, MEM_RESERVE, PAGE_NOACCESS);
+    char* fresh = va(0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    char* freed = va(0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    freed[0] = 1;
+    VirtualFree(freed, 0, MEM_RELEASE);
+    char* noacc = va(0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    char* guard = va(0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD);
+    char* split = va(0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);   // page 0 RW, page 1 no access / read-only
+    split[0] = 1;
+    DWORD was;
+    VirtualProtect(split + 0x1000, 0x1000, PAGE_NOACCESS, &was);
+    char* split2 = va(0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    split2[0] = split2[0x1000] = 1;
+    VirtualProtect(split2 + 0x1000, 0x1000, PAGE_READONLY, &was);
+    check("null", nullptr, 1, false);
+    check("0x1000", (void*)0x1000, 1, false);
+    check("stack", &stackVar, 4, true);
+    check("heap", heap.data(), heap.size(), true);
+    check(".rdata", rdata, sizeof(rdata), true);
+    check("reserved, not committed", reserved, 1, false);
+    check("committed, never touched (not resident)", fresh, 1, true);
+    check("released", freed, 1, false);
+    check("committed no-access", noacc, 1, false);
+    check("committed guard page", guard, 1, false);
+    MEMORY_BASIC_INFORMATION m;
+    VirtualQuery(guard, &m, sizeof(m));
+    bool armed = (m.Protect & PAGE_GUARD) != 0;
+    bad += !armed;
+    printf("%-44s %s\n", "guard page still armed after the checks", armed ? "yes" : "NO  <-- WRONG");
+    check("8 bytes up to a no-access page", split + 0xff8, 8, true);
+    check("8 bytes across into a no-access page", split + 0xffc, 8, false);
+    check("8 bytes across RW -> read-only", split2 + 0xffc, 8, true);
+    const size_t big = 256u << 20;
+    char* arena = va(big, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (arena) {
+        for (size_t o = 0; o < big; o += 0x1000) arena[o] = 1;
+        auto t = [](auto f) {
+            LARGE_INTEGER a, b, q;
+            QueryPerformanceFrequency(&q);
+            QueryPerformanceCounter(&a);
+            for (int i = 0; i < 200; ++i) f();
+            QueryPerformanceCounter(&b);
+            return 1e6 * (b.QuadPart - a.QuadPart) / q.QuadPart / 200;
+        };
+        double tNew = t([&] { sys::readable(arena + 16, 64); }), tOld = t([&] { old(arena + 16, 64); });
+        check("start of a touched 256 MB region", arena + 16, 64, true);
+        printf("cost per check there: new %.2f us, old (VirtualQuery) %.1f us\n", tNew, tOld);
+        bad += tNew > 50;
+        VirtualFree(arena, 0, MEM_RELEASE);
+    }
+    printf("READABLE %s\n", bad ? "FAILED" : "ok");
+    return bad != 0;
+}
+
 int main(int argc, char** argv)
 {
+    if (argc > 1 && std::string(argv[1]) == "--readable") return readableTest();
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
     if (argc > 2 && std::string(argv[1]) == "--host") return hostTest(argv);

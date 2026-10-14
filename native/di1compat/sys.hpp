@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <psapi.h>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -132,12 +133,29 @@ static const char* const kLocks10Prefix = "di1sys/locks10/";
 static const char* const kLocksTrigger = "GameDB/Incredibles/locks__lua.lua";
 static const char* const kLocks10[] = {"di1sys/locks10/GameDB/Incredibles/locks__lua.lua", "di1sys/locks10/gamedb/core/locks__lua.lua"};
 
+// p .. p + n can be read now: every page committed, not PAGE_NOACCESS / PAGE_GUARD. The one pointer check of the
+// plugin (safeCopy, cstr, the probes). Each page is asked of the working set first (QueryWorkingSetEx, constant time;
+// a resident page with a protection is readable: no-access and guard pages are never resident); only a page that is
+// not resident goes to VirtualQuery. VirtualQuery alone walks every touched page from p to the end of p's region to
+// size it (offline vqbench.cpp: 0.19 ms at the start of a touched 64 MB region, 5.1 ms at 768 MB; 0.4 us either way
+// for QueryWorkingSetEx), and the engine's strings sit in its big arena: in-game 2026-10-14 (run 15:02, loadprof10)
+// these checks were 85% of the main thread in play (7 fps) and ~100 ms of each served .oct's transcode.
 inline bool readable(const void* p, size_t n)
 {
-    MEMORY_BASIC_INFORMATION m;
-    if ((uintptr_t)p < 0x10000 || !VirtualQuery(p, &m, sizeof(m)) || m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-        return false;
-    return (uintptr_t)p + n <= (uintptr_t)m.BaseAddress + m.RegionSize;
+    uintptr_t a = (uintptr_t)p, end = a + (n ? n : 1);
+    if (a < 0x10000 || end < a) return false;
+    for (uintptr_t pg = a & ~(uintptr_t)0xfff; pg < end;) {
+        PSAPI_WORKING_SET_EX_INFORMATION ws{};
+        ws.VirtualAddress = (void*)pg;
+        DWORD prot = K32QueryWorkingSetEx(GetCurrentProcess(), &ws, sizeof(ws)) && ws.VirtualAttributes.Valid
+                         ? (DWORD)ws.VirtualAttributes.Win32Protection : 0;
+        if (prot && !(prot & (PAGE_NOACCESS | PAGE_GUARD))) { pg += 0x1000; continue; }
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery((void*)pg, &m, sizeof(m)) || m.State != MEM_COMMIT || !m.Protect || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            return false;
+        pg = (uintptr_t)m.BaseAddress + m.RegionSize;   // the rest of that region is readable too
+    }
+    return true;
 }
 
 // UIDs of every record a GameDB set loader's sets hold: loader +0xc sets[], +0x10 count (FUN_01612fa0 walks them to
