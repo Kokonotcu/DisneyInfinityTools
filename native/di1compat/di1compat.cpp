@@ -141,6 +141,7 @@ static struct {
     int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
     int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
     bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
+    bool fpsLog10 = false;           // test: once a second, frame time and how much of it the main thread waits on rendering
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
@@ -234,6 +235,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
         else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
+        else if (!strcmp(key, "fpslog10")) g_cfg.fpsLog10 = atoi(val) != 0;
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
@@ -1664,6 +1666,34 @@ static void __cdecl hkPlaceToy(void* msg) { logf("ToyCreation_PlaceToy callback 
 // Offsets from the context parser FUN_016748d0 and the update itself; +0x10 is the context's name string.
 typedef void(__fastcall* MissionTickFn)(uint8_t* self, void* edx, float dt);
 static MissionTickFn g_missionTick;
+// test (fpslog10): FUN_0047aab0 runs once per frame on the main thread (FUN_0047f0a0, the frame's render submit) and
+// spins while the render thread still holds the previous frame (+0x71f0 == 2). Call-to-call time = frame time; time
+// inside = the main thread waiting on rendering. Mostly waiting -> render thread / GPU / present bound; hardly
+// waiting at 33 ms -> the main thread's own work (simulation, graphs, AI) is the limit.
+typedef void(__cdecl* FrameSyncFn)();
+static FrameSyncFn g_frameSync;
+static void __cdecl hkFrameSync()
+{
+    static LARGE_INTEGER freq, last, second;
+    static double sumFrame, maxFrame, sumWait;
+    static int frames;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    g_frameSync();
+    QueryPerformanceCounter(&b);
+    if (last.QuadPart) {
+        double frame = 1000.0 * (a.QuadPart - last.QuadPart) / freq.QuadPart;
+        sumFrame += frame; maxFrame = (std::max)(maxFrame, frame); ++frames;
+        sumWait += 1000.0 * (b.QuadPart - a.QuadPart) / freq.QuadPart;
+    } else second = a;
+    last = a;
+    if (frames && a.QuadPart - second.QuadPart >= freq.QuadPart) {
+        logf("fps %.1f: frame %.2f ms avg, %.2f max; main thread waits on rendering %.2f ms of it", 1000.0 * frames / sumFrame,
+             sumFrame / frames, maxFrame, sumWait / frames);
+        sumFrame = maxFrame = sumWait = 0; frames = 0; second = a;
+    }
+}
 // test (opacitylog10): FUN_0044ad80 -> bit i set = primitive i is "faded" (opacity param * object fade < 1) and the
 // opaque G-buffer list skips it (FUN_00461020); logs our skipped primitives with the values that decided it
 typedef uint32_t(__cdecl* OpacityMaskFn)(uint32_t n, float fade, uint32_t prims, uint32_t insts);
@@ -2971,6 +3001,7 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
+    if (g_cfg.fpsLog10) hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync, (void**)&g_frameSync);
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
