@@ -603,7 +603,9 @@ inline bool psDna30(const std::string& dna10, const std::string& base30, std::st
 // therefore runs none of them.
 // A 3.0 list descends from the 1.0 list sharing the most zone-entry perception names (case-insensitive; unique, > 0): the
 // 70-entry standard list from 1.0's 50-entry one (11 shared, next 7); the 25-entry list ties (8 / 8) and keeps 1.0's
-// zone entries verbatim anyway. Additions = what the 1.0 list enables in the zone and the 3.0 list does not.
+// zone entries verbatim anyway. Additions = what the 1.0 list enables in the zone and the 3.0 list does not; 1.0's
+// ActivityInitiate / OffAdvert / LockedAdvert are 3.0's Challenge* (giver handlers 1.0 FUN_00c0ee50, 3.0 FUN_00d3f0a0),
+// already in the 3.0 list.
 struct PercEntry { char kind = 0; std::string on, off, pre; bool host = false; };   // kind 'p' plain, 'z' zone entry
 using PercList = std::vector<PercEntry>;
 using PercAdds = std::vector<std::pair<std::string, bool>>;                           // name, hostonly
@@ -693,7 +695,8 @@ inline std::vector<std::pair<int, PercAdds>> percAdds(const std::vector<PercList
         if (bs == 0 || second == bs) { out.push_back({-1, {}}); continue; }
         auto a10 = percActive(l10[best], zl), a30 = percActive(l, zl);
         PercAdds add;
-        for (auto& [k, v] : a10) if (!a30.count(k)) add.push_back(v);
+        for (auto& [k, v] : a10)   // 3.0 renamed Activity to Challenge (the giver handlers: gp challenge10)
+            if (!a30.count(k) && !(k.compare(0, 8, "activity") == 0 && a30.count("challenge" + k.substr(8)))) add.push_back(v);
         out.push_back({best, add});
     }
     return out;
