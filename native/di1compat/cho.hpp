@@ -13,7 +13,8 @@
 //   Measured (clipinv.py): 4,314/4,314 1.0 choreography + exploder blocks parse with the sampled table ending exactly
 //   at X and only 0xee after the constant table; on the 7,621 motion-clip twins the result has the 3.0 twin's length
 //   in 5,850 and equals it byte for byte in 70 (+136 when ids are renumbered, below).
-//   Ids: in scene clips (no LayerBind) an id is the ClipProcessor output index in both games (1.0 FUN_005444c0 with no
+//   Ids: in scene clips (any SubNetwork but Type 'Clip', base links / LayerBinds or not; clips30) an id is the
+//   ClipProcessor output index in both games (1.0 FUN_005444c0 with no
 //   table at +0x30, 3.0 FUN_00532050) and is kept. In motion clips it indexes the binding's ConnectionTemplate,
 //   named by LayerBind.ConnectionTemplate ('characters/biped/biped.ct'). 3.0 numbers the templates it has itself
 //   differently (twins, idrule.py: ids kept 105+55, 2i-2 273, other 4,161, e.g. _townspeople 29->56, 31->60,
@@ -248,10 +249,19 @@ inline const PortMap* clipPorts(const oct::File& f, size_t sn)
     return clip && !other ? pm : nullptr;
 }
 
-// Every ClipDataBlock of the file. A SubNetwork with a LayerBind (a motion clip) is re-packed only if
-// motion(ConnectionTemplate) says its ids index a template with 1.0 numbering (null: never), or, with ids, if
-// clipPorts gives its renumbering (then its ids go through it). Returns the blocks re-packed; *failed counts blocks
-// left as they are, *renumbered the re-packed ones with renumbered ids.
+// Every ClipDataBlock of the file. A motion clip (SubNetwork Type 'Clip' naming a ConnectionTemplate) is re-packed
+// only if motion(ConnectionTemplate) says its ids index a template with 1.0 numbering (null: never), or, with ids, if
+// clipPorts gives its renumbering (then its ids go through it). Every other SubNetwork's blocks are scene clips,
+// re-packed with ids kept whatever templates its base links or LayerBinds name: there each block is read by a
+// ClipProcessor of the same SubNetwork and its ids index that processor's outputs (idscan.py over choreographies +
+// exploders, + characters in 1.0: 1.0 2,971/2,971 Scene blocks, 361 beside a BaseDataNodeLinks / LayerBind
+// ConnectionTemplate; 3.0 8,014/8,014, 396 beside one; ids exactly 0..outputs-1 in all of them; no 1.0 Scene block
+// lacks a local ClipProcessor (3.0: 4, beside LayerBinds); 1.0 motion clips are Type 'Clip' with no processor). Keying the skip on any ConnectionTemplate left inc_dock_explode's three scene
+// blocks (debris, the embedded omnidroid rig's Cntrl_* controls, the camera; base link 'characters/omnidroid/
+// omnidroid.ct', an owner 3.0 has) in the 1.0 layout: 3.0's FUN_00532050 reads the interleaved {head, id} words as
+// heads, gets 0 comps or an id past the outputs (where it returns), and nothing moved for the whole play (in-game
+// 2026-10-14). Returns the blocks re-packed; *failed counts blocks left as they are, *renumbered the re-packed ones
+// with renumbered ids.
 inline int clips30(oct::File& f, const std::function<bool(const std::string&)>& motion, int* failed = nullptr, bool ids = false,
                    int* renumbered = nullptr)
 {
@@ -263,12 +273,17 @@ inline int clips30(oct::File& f, const std::function<bool(const std::string&)>& 
         if (r.level == 2 && f.name(r) == "SubNetwork") {
             skip = false;
             pm = ids ? clipPorts(f, i) : nullptr;
-            for (size_t j = i + 1, e = f.blockEnd(i); j < e && !pm; ++j)
-                if (f.recs[j].level == 5 && f.name(f.recs[j]) == "ConnectionTemplate") {
-                    auto v = f.nameValues(f.recs[j]);
-                    skip = !motion || v.empty() || !motion(v[0]);
-                    break;
-                }
+            bool clip = false;
+            long tmpl = -1;
+            for (size_t j = i + 1, e = f.blockEnd(i); j < e && !pm; ++j) {
+                const oct::Rec& q = f.recs[j];
+                if (q.level == 3 && f.name(q) == "Type") clip = f.nameValues(q) == std::vector<std::string>{"Clip"};
+                else if (q.level == 5 && tmpl < 0 && f.name(q) == "ConnectionTemplate") tmpl = (long)j;
+            }
+            if (clip && tmpl >= 0) {
+                auto v = f.nameValues(f.recs[tmpl]);
+                skip = !motion || v.empty() || !motion(v[0]);
+            }
             continue;
         }
         if (skip || f.name(r) != "ClipDataBlock") continue;
