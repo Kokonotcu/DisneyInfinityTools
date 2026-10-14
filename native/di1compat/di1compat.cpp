@@ -194,7 +194,7 @@ static struct {
     bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
     bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
-    bool assetBufs10 = true;         // gp: read10 finds <stem>_<n>.vbuf/.ibuf in a per-asset archive <dir>/<stem>.zip
+    bool assetBufs10 = true;         // gp+npc: read10 finds a <stem>_<n>.* member (buffers) in its per-asset archive <dir>/<stem>.zip
     bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
     bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
     bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
