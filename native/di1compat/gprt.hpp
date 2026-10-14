@@ -1,0 +1,76 @@
+// gp track, runtime side (hooks). Included by di1compat.cpp after its helpers (logf, hook, rt, g_cfg).
+#pragma once
+
+namespace gprt {
+
+// ---- selectmenu10: the 1.0 playset ribbon, the way to the Toy Store (plan KIO-1) ----
+// The story needs the Toy Store right after DockFire: Investigate_Explosions waits on Eval_LockState
+// RC_INC_MrInc_SportsCar == PURCHASED (investigate_explosions.lua; text "First you must buy the car from the toy
+// store"), Buy_Training_Facility / Buy_Tech_Building / Build_SMPrison on buildings bought there. 1.0 reached it with
+// Tab: TOY_STORE -> ShowRibbonUI -> FUN_00c37230 opens UI_GetRibbonName = FUN_00c32cf0: zone key worldIsPlayset ->
+// "SelectMenu" (1.0 selectmenu.lua: Scn_Pause_MissionLog -> UI_TriggerEvent("ProgressLog"), Scn_Pause_Catalog ->
+// AddScreen("Catalog")). 3.0's ribbon FUN_00b42540 is "MissionLog" in a playset and its opener FUN_00b68f60 knows only
+// MissionLog / RibbonToyBox, so no 1.0 store screen was reachable. 3.0 kept the rest: SelectMenu in containerdata.lua,
+// the Catalog screen (3.0 catalog.lua = 1.0's, same Catalog_* natives, 1.0's storefront.gfx), and the engine-bound
+// screen methods 1.0's selectmenu.lua / basemenu.lua call (AddScreen, RemoveScreen, CallFlashFunction: 1.0
+// FUN_01051440, 3.0 FUN_0156b200); both scripts are 1.0-only and served from 1.0. 3.0 reads zone keys with
+// lua_gettable (FUN_0139be30 -> FUN_00445190), and 3.0 zone records spell the key WorldIsPlayset (shipped 3.0 zone
+// list: 0 x worldIsPlayset, 1.0's: 47), so 1.0's own test selects 1.0 zones only.
+typedef char(__fastcall* ZoneBoolFn)(void* mgr, void* edx, const char* key, uint32_t zone, uint32_t a3, uint32_t def);
+typedef const char*(__fastcall* RibbonNameFn)(void* ecx, void* edx, int player, int a2);
+typedef int(__fastcall* ShowRibbonFn)(uint8_t* self, void* edx, int player);
+typedef void*(__fastcall* ScreenReqFn)(void* ui, void* edx, const char* name, int a2, int player);
+typedef char(__fastcall* ScreenPushFn)(void* ui, void* edx, void* req);
+typedef char(__cdecl* CanOpenFn)(int player);
+typedef bool(__cdecl* BlockedFn)();
+static RibbonNameFn g_ribbonName;
+static ShowRibbonFn g_showRibbon;
+static ScreenReqFn g_screenReq;
+
+static bool zonePlayset10()   // 1.0 FUN_00c32cf0's test, read by 3.0's zone-key reader FUN_0139de80
+{
+    uint8_t* mgr = *(uint8_t**)rt(0x0225F548);
+    return mgr && ((ZoneBoolFn)rt(0x0139DE80))(mgr, nullptr, "worldIsPlayset", *(uint32_t*)(mgr + 0x19C), 0, 0) != 0;
+}
+
+static const char* __fastcall hkRibbonName(void* ecx, void* edx, int player, int a2)
+{
+    const char* r = g_ribbonName(ecx, edx, player, a2);
+    return r && zonePlayset10() ? "SelectMenu" : r;
+}
+
+// 3.0's MissionLog branch of FUN_00b68f60 (00b68fdc..00b69048) with the 1.0 ribbon, minus its pauseGame parameter:
+// 1.0's opener passed none and selectmenu.lua pauses in onEnter (Pause_PauseGame).
+static int __fastcall hkShowRibbon(uint8_t* self, void* edx, int player)
+{
+    const char* name = ((RibbonNameFn)rt(0x00B42540))(*(void**)rt(0x0221CEA0), nullptr, player, 1);
+    if (!name || strcmp(name, "SelectMenu")) return g_showRibbon(self, edx, player);
+    if (!((CanOpenFn)rt(0x014362E0))(player) || ((BlockedFn)rt(0x00DB4110))()) return -1;
+    void* ui = *(void**)rt(0x02289E9C);
+    uint8_t* req = (uint8_t*)((ScreenReqFn)rt(0x0156DDE0))(ui, nullptr, "SelectMenu", 0, player);
+    logf("ribbon: SelectMenu for player %d -> %s", player, req ? "opened" : "no screen request");
+    if (!req) return -1;
+    *(uint32_t*)(self + 0x13F2C + player * 4) = *(uint32_t*)(req + 0x2C);
+    ((ScreenPushFn)rt(0x0156DF40))(ui, nullptr, req);
+    return -1;
+}
+
+// 1.0's ProgressLog screen is 3.0's MissionLog: tutorial element 62 is "ProgressLog" in 1.0 (FUN_00ba3950) and
+// "MissionLog" in 3.0 (FUN_00de3a60), and 3.0's containerdata.lua has no ProgressLog. selectmenu.lua's Mission Log
+// entry asks for it by the 1.0 name (UI_TriggerEvent -> FUN_0156dde0).
+static void* __fastcall hkScreenReq(void* ui, void* edx, const char* name, int a2, int player)
+{
+    if (name && !strcmp(name, "ProgressLog")) name = "MissionLog";
+    return g_screenReq(ui, edx, name, a2, player);
+}
+
+static void install()
+{
+    if (g_cfg.selectMenu10) {
+        hook("ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&hkRibbonName, (void**)&g_ribbonName);
+        hook("ribbon open (1.0 SelectMenu)", 0x00B68F60, "6AFF68????????64A100000000", (void*)&hkShowRibbon, (void**)&g_showRibbon);
+        hook("screen request (ProgressLog)", 0x0156DDE0, "64A1000000006AFF68", (void*)&hkScreenReq, (void**)&g_screenReq);
+    }
+}
+
+}   // namespace gprt

@@ -137,6 +137,7 @@ static struct {
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
     bool assetBufs10 = true;         // gp: read10 finds <stem>_<n>.vbuf/.ibuf in a per-asset archive <dir>/<stem>.zip
     bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
+    bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -168,6 +169,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
         else if (!strcmp(key, "assetbufs10")) g_cfg.assetBufs10 = atoi(val) != 0;
         else if (!strcmp(key, "challenge10")) g_cfg.challenge10 = atoi(val) != 0;
+        else if (!strcmp(key, "selectmenu10")) g_cfg.selectMenu10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1791,6 +1793,8 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
     return t30.substr(0, end30) + add + t30.substr(end30);
 }
 
+#include "gprt.hpp"
+
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
 {
@@ -1901,6 +1905,7 @@ extern "C" void __stdcall Pentane_Main()
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
+    gprt::install();
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
