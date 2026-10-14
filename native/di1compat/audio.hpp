@@ -1850,6 +1850,20 @@ inline int __fastcall hkQueuedPost(void* mgr, void*, uint32_t* req)
             ours = g.plays.count((uint32_t)r) != 0;
         }
         trace(id, name, !r ? "nothing (no Wwise or 1.0 event)" : ours ? "1.0 FMOD" : "Wwise");
+        if (ours) {   // where a 1.0 sound plays against the listener, first 4 posts of each name (blast sounds inaudible?)
+            static std::unordered_map<uint32_t, int> seen;
+            std::lock_guard<std::recursive_mutex> l(g.mx);
+            auto pl = g.plays.find((uint32_t)r);
+            if (pl != g.plays.end() && seen[id]++ < 4) {
+                std::lock_guard<std::mutex> p(g.posMx);
+                auto it = g.pos.find(pl->second.obj);
+                const float* v = it != g.pos.end() ? it->second.v : g.lpos;
+                float dx = v[0] - g.lpos[0], dy = v[1] - g.lpos[1], dz = v[2] - g.lpos[2];
+                AUDLOG("audio10: %s plays on obj %u at (%.1f %.1f %.1f)%s, %.1f from the listener (%.1f %.1f %.1f)", name,
+                       pl->second.obj, v[0], v[1], v[2], it != g.pos.end() ? "" : " (no position: the listener's)",
+                       sqrtf(dx * dx + dy * dy + dz * dz), g.lpos[0], g.lpos[1], g.lpos[2]);
+            }
+        }
     }
     return r;
 }
