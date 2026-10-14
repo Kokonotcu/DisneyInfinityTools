@@ -13,8 +13,11 @@
 #include <cstdio>
 #include <share.h>
 #include <cstring>
+#include <algorithm>
+#include <array>
 #include <map>
 #include <unordered_set>
+#include <vector>
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
@@ -143,6 +146,7 @@ static struct {
     int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
     bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
     bool fpsLog10 = false;           // test: once a second, frame time and how much of it the main thread waits on rendering
+    bool loadProf10 = false;         // diagnostic: per-open timings + a sampling profile of the frame/open/busiest threads
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
@@ -241,6 +245,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
         else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
         else if (!strcmp(key, "fpslog10")) g_cfg.fpsLog10 = atoi(val) != 0;
+        else if (!strcmp(key, "loadprof10")) g_cfg.loadProf10 = atoi(val) != 0;
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
@@ -312,8 +317,8 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "playsetmenu10")) g_cfg.playsetMenu10 = atoi(val) != 0;
     }
     fclose(f);
-    logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
-         g_cfg.memtest);
+    logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
+         g_cfg.memtest, g_cfg.fpsLog10, g_cfg.loadProf10);
     logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d choalias10=%d "
          "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10, g_cfg.choScene10,
          g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10,
@@ -1745,8 +1750,10 @@ static MissionTickFn g_missionTick;
 // waiting at 33 ms -> the main thread's own work (simulation, graphs, AI) is the limit.
 typedef void(__cdecl* FrameSyncFn)();
 static FrameSyncFn g_frameSync;
+static volatile DWORD g_frameTid;   // loadprof10: the thread that runs the frame sync
 static void __cdecl hkFrameSync()
 {
+    g_frameTid = GetCurrentThreadId();
     static LARGE_INTEGER freq, last, second;
     static double sumFrame, maxFrame, sumWait;
     static int frames;
@@ -1765,6 +1772,201 @@ static void __cdecl hkFrameSync()
         logf("fps %.1f: frame %.2f ms avg, %.2f max; main thread waits on rendering %.2f ms of it", 1000.0 * frames / sumFrame,
              sumFrame / frames, maxFrame, sumWait / frames);
         sumFrame = maxFrame = sumWait = 0; frames = 0; second = a;
+    }
+}
+
+// ---- loadprof10 (diagnostic): where a load's wall time goes ----
+// hkOpen appends its own timings to the served / MISSING lines. A sampler thread (high-resolution waitable timer,
+// ~1 kHz, so the system timer resolution the engine sees is untouched) suspends the frame thread, every thread that
+// entered hkOpen and the 3 busiest other threads of the last second, copies EIP and the top of the stack, resumes,
+// and only then attributes the sample (nothing is allocated or locked while a thread is suspended). Every 5 s:
+// a summary per thread in the log and every (thread, leaf, caller, caller's caller) count in di1compat_prof.tsv.
+// leaf = the static EIP in the exe, else 'm<module>!<nearest export>+<off>' (a waiting thread sits in ntdll's
+// NtWaitFor... / NtDelayExecution); callers = the first two exe return addresses on the stack (static VAs).
+static double qpcMs()
+{
+    static LARGE_INTEGER f;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return 1000.0 * (double)c.QuadPart / (double)f.QuadPart;
+}
+static volatile LONG g_openTidN;
+static volatile DWORD g_openTids[8];
+static void noteOpenThread()
+{
+    thread_local bool seen;
+    if (seen) return;
+    seen = true;
+    LONG i = InterlockedIncrement(&g_openTidN) - 1;
+    if (i < 8) g_openTids[i] = GetCurrentThreadId();
+}
+// bounded by the stack region, so no fault can reach the vectored handlers (avHandler logs, CrabeLoader dumps)
+// while the thread is suspended
+static int copyStack(const uint32_t* sp, uint32_t* out, int max)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return 0;
+    size_t room = ((const uint8_t*)mbi.BaseAddress + mbi.RegionSize - (const uint8_t*)sp) / 4;
+    int n = (int)(std::min)(room, (size_t)max);
+    memcpy(out, sp, n * 4);
+    return n;
+}
+static bool afterCallSafe(uint32_t v)
+{
+    __try { return afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// 'module!export+0xoff' for a code address outside the exe (nearest named export at or below it)
+static std::string symbolAt(uintptr_t a)
+{
+    HMODULE m = nullptr;
+    char full[MAX_PATH];
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) || !m ||
+        !GetModuleFileNameA(m, full, MAX_PATH))
+        return "?";
+    std::string s = strrchr(full, '\\') ? strrchr(full, '\\') + 1 : full;
+    const uint8_t* b = (const uint8_t*)m;
+    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    uint32_t rva = (uint32_t)(a - (uintptr_t)m), best = 0;
+    const char* name = nullptr;
+    if (dir.VirtualAddress && dir.Size) {
+        const IMAGE_EXPORT_DIRECTORY* ex = (const IMAGE_EXPORT_DIRECTORY*)(b + dir.VirtualAddress);
+        const uint32_t* fns = (const uint32_t*)(b + ex->AddressOfFunctions);
+        const uint32_t* names = (const uint32_t*)(b + ex->AddressOfNames);
+        const uint16_t* ords = (const uint16_t*)(b + ex->AddressOfNameOrdinals);
+        for (DWORD i = 0; i < ex->NumberOfNames; ++i)
+            if (uint32_t f = fns[ords[i]]; f <= rva && f > best) { best = f; name = (const char*)(b + names[i]); }
+    }
+    char off[48];
+    sprintf_s(off, "+0x%X", rva - best);
+    return s + "!" + (name ? name : "") + off;
+}
+static std::string g_profPath;
+static DWORD WINAPI profThread(void*)
+{
+    HANDLE tm = CreateWaitableTimerExW(nullptr, nullptr, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    logf("loadprof10: sampler up (%s timer)", tm ? "high-resolution" : "Sleep(1)");
+    const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    std::map<DWORD, HANDLE> handles;
+    std::map<DWORD, uint64_t> cpuLast;
+    std::map<std::array<uint32_t, 5>, uint32_t> counts;   // {tid, outside the exe?, EIP, caller, caller's caller}
+    std::map<uint32_t, std::string> syms;
+    std::map<DWORD, uint32_t> samples;
+    std::vector<DWORD> busy;
+    double nextCpu = qpcMs() + 1000, nextDump = qpcMs() + 5000;
+    int window = 0;
+    auto handle = [&](DWORD tid) {
+        auto it = handles.find(tid);
+        if (it != handles.end()) return it->second;
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+        return handles[tid] = h;
+    };
+    auto role = [&](DWORD tid) {
+        std::string r = tid == g_frameTid ? "frame" : "";
+        for (LONG i = 0; i < g_openTidN && i < 8; ++i)
+            if (g_openTids[i] == tid) r += r.empty() ? "open" : "+open";
+        return r.empty() ? std::string("busy") : r;
+    };
+    auto leafName = [&](const std::array<uint32_t, 5>& k) {
+        char b[16];
+        if (!k[1]) { sprintf_s(b, "%08X", k[2]); return std::string(b); }
+        auto it = syms.find(k[2]);
+        if (it == syms.end()) it = syms.emplace(k[2], symbolAt(k[2])).first;
+        return "m" + it->second;
+    };
+    for (;;) {
+        if (tm) {
+            LARGE_INTEGER due;
+            due.QuadPart = -10000;   // 1 ms
+            SetWaitableTimer(tm, &due, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(tm, 50);
+        } else Sleep(1);
+        std::vector<DWORD> tids;
+        if (DWORD f = g_frameTid) tids.push_back(f);
+        for (LONG i = 0; i < g_openTidN && i < 8; ++i)
+            if (DWORD o = g_openTids[i]; std::find(tids.begin(), tids.end(), o) == tids.end()) tids.push_back(o);
+        for (DWORD t : busy)
+            if (std::find(tids.begin(), tids.end(), t) == tids.end()) tids.push_back(t);
+        for (DWORD tid : tids) {
+            HANDLE h = handle(tid);
+            if (!h || tid == self) continue;
+            CONTEXT c{};
+            c.ContextFlags = CONTEXT_CONTROL;
+            uint32_t stk[384];
+            int n = 0;
+            if (SuspendThread(h) == (DWORD)-1) continue;
+            bool ok = GetThreadContext(h, &c) != 0;
+            if (ok) n = copyStack((const uint32_t*)(uintptr_t)c.Esp, stk, 384);
+            ResumeThread(h);
+            if (!ok) continue;
+            uintptr_t eip = c.Eip;
+            bool inExe = eip >= g_base && eip < g_base + 0x2100000;
+            std::array<uint32_t, 5> k{tid, inExe ? 0u : 1u, (uint32_t)(inExe ? eip - g_base + 0x400000 : eip), 0, 0};
+            for (int i = 0, f = 3; i < n && f < 5; ++i)
+                if ((stk[i] & 0xff00ff00) && afterCallSafe(stk[i])) k[f++] = (uint32_t)(stk[i] - g_base + 0x400000);
+            ++counts[k];
+            ++samples[tid];
+        }
+        double now = qpcMs();
+        if (now >= nextCpu) {   // CPU time per thread over the last second; the 3 busiest others are sampled next
+            nextCpu = now + 1000;
+            std::vector<std::pair<uint64_t, DWORD>> d;
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            THREADENTRY32 te{sizeof(te)};
+            for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+                if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+                HANDLE h = handle(te.th32ThreadID);
+                FILETIME a, b, k, u;
+                if (!h || !GetThreadTimes(h, &a, &b, &k, &u)) continue;
+                uint64_t t = ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
+                uint64_t& last = cpuLast[te.th32ThreadID];
+                if (last) d.push_back({t - last, te.th32ThreadID});
+                last = t;
+            }
+            CloseHandle(snap);
+            std::sort(d.rbegin(), d.rend());
+            busy.clear();
+            std::string line;
+            uint64_t total = 0;
+            for (auto& [t, tid] : d) total += t;
+            for (size_t i = 0; i < d.size() && i < 6; ++i) {
+                std::string r = role(d[i].second);
+                if (r == "busy" && busy.size() < 3) busy.push_back(d[i].second);
+                char b[80];
+                sprintf_s(b, " %s %u %.0f ms;", r.c_str(), (unsigned)d[i].second, d[i].first / 1e4);
+                line += b;
+            }
+            logf("prof cpu last second: process %.0f ms over %zu threads; busiest:%s", total / 1e4, d.size(), line.c_str());
+        }
+        if (now >= nextDump) {
+            nextDump = now + 5000;
+            ++window;
+            FILE* f = nullptr;
+            if (!fopen_s(&f, g_profPath.c_str(), window == 1 ? "w" : "a") && f) {
+                if (window == 1) fprintf(f, "window\ttid\trole\tleaf\tcaller\tcaller2\tcount\n");
+                for (auto& [k, v] : counts)
+                    fprintf(f, "%d\t%u\t%s\t%s\t%08X\t%08X\t%u\n", window, k[0], role(k[0]).c_str(), leafName(k).c_str(), k[3], k[4], v);
+                fclose(f);
+            }
+            for (auto& [tid, n] : samples) {   // per thread: share in the exe and in each module
+                std::map<std::string, uint32_t> mods;
+                for (auto& [k, v] : counts)
+                    if (k[0] == tid) {
+                        std::string s = k[1] ? leafName(k).substr(1) : "exe";
+                        mods[s.substr(0, s.find('!'))] += v;
+                    }
+                std::string line;
+                for (auto& [m, v] : mods) {
+                    char b[MAX_PATH + 24];
+                    sprintf_s(b, " %s %.0f%%", m.c_str(), 100.0 * v / n);
+                    line += b;
+                }
+                logf("prof window %d %s %u: %u samples:%s", window, role(tid).c_str(), (unsigned)tid, n, line.c_str());
+            }
+            counts.clear();
+            samples.clear();
+        }
     }
 }
 // test (opacitylog10): FUN_0044ad80 -> bit i set = primitive i is "faded" (opacity param * object fade < 1) and the
@@ -2503,7 +2705,11 @@ static int* tips30(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, i
 static std::string mergeVtxf(const std::string& t30, const std::string& t10);
 static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
 {
+    const bool prof = g_cfg.loadProf10;   // loadprof10: ms in the engine's own open, the 1.0 read, transcode, MemFile
+    double tIn = prof ? qpcMs() : 0, t30 = 0, tRead = 0, tTc = 0;
+    if (prof) noteOpenThread();
     int* r = g_open(path, flags, a3, a4, a5);
+    if (prof) t30 = qpcMs() - tIn;
     char p[300];
     safeCopy(p, sizeof(p), path);
     if (r && g_cfg.shaders10 && !(flags & 1) && _stricmp(p, "shaders/vformat.vtxf") == 0) {   // + 1.0's formats
@@ -2597,9 +2803,12 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         }
         if (!hit.empty()) {
             r = memFile(hit.data(), hit.size());
-            logf("served %s %u B from asset session -> %s", p, (unsigned)hit.size(), r ? "ok" : "FAILED");
+            char pf[100] = "";
+            if (prof) sprintf_s(pf, " [prof tid %u: 3.0 open %.2f, total %.2f ms]", GetCurrentThreadId(), t30, qpcMs() - tIn);
+            logf("served %s %u B from asset session -> %s%s", p, (unsigned)hit.size(), r ? "ok" : "FAILED", pf);
             return r;
         }
+        double tR = prof ? qpcMs() : 0;
         size_t n = 0;
         std::string where;
         missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)" : " (overlay " + over + " unreadable)";
@@ -2625,8 +2834,10 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             int i = z ? mz_zip_reader_locate_file(z, annoMember.c_str(), nullptr, 0) : -1;
             if (i >= 0 && (data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) != nullptr) where = annoZip + ":" + annoMember;
         }
+        if (prof) tRead = qpcMs() - tR;
         if (data) {
             indexZip10(where.substr(0, where.find(':')));
+            double tT = prof ? qpcMs() : 0;
             std::string out, note;
             const char* codec = nullptr;
             try {
@@ -2644,15 +2855,23 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             }
             if (!over.empty()) note += "(archive overlay) ";
             if (std::string mv = ui::flashMovie(np); !mv.empty()) { std::lock_guard<std::mutex> lock(g_sessLock); g_movies10.insert(mv); }
+            if (prof) tTc = qpcMs() - tT;
+            double tM = prof ? qpcMs() : 0;
             r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
-            logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
-                 codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED");
+            char pf[160] = "";
+            if (prof)
+                sprintf_s(pf, " [prof tid %u: 3.0 open %.2f, 1.0 read %.2f, transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(),
+                          t30, tRead, tTc, qpcMs() - tM, qpcMs() - tIn);
+            logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s%s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
+                 codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED", pf);
             mz_free(data);
             return r;
         }
     }
     // misses always (rare and cheap; what an unexplained fallback asks for), hits only when tracing
-    if (g_cfg.trace || !r) logf("open %s flags=%X -> %s%s", p, flags & 0xff, r ? "ok" : "MISSING", r ? "" : missWhy.c_str());
+    char pf[120] = "";
+    if (prof) sprintf_s(pf, " [prof tid %u: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]", GetCurrentThreadId(), t30, tRead, qpcMs() - tIn);
+    if (g_cfg.trace || !r) logf("open %s flags=%X -> %s%s%s", p, flags & 0xff, r ? "ok" : "MISSING", r ? "" : missWhy.c_str(), pf);
     return r;
 }
 
@@ -3161,7 +3380,11 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
-    if (g_cfg.fpsLog10) hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync, (void**)&g_frameSync);
+    if (g_cfg.fpsLog10 || g_cfg.loadProf10) hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync, (void**)&g_frameSync);
+    if (g_cfg.loadProf10) {
+        g_profPath = g_gameDir + "\\di1compat_prof.tsv";
+        if (HANDLE h = CreateThread(nullptr, 0, profThread, nullptr, 0, nullptr)) CloseHandle(h);
+    }
     hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
     hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
