@@ -34,6 +34,7 @@
 #include "npc.hpp"
 #include "cho.hpp"
 #include "ui.hpp"
+#include "audio.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -181,6 +182,11 @@ static struct {
     bool resident10 = true;          // the 1.0 startup*.zip members are served by their full paths (1.0 loads them resident)
     bool tutorial10 = true;          // ui: tutorial element 61 (1.0's SelectMenu ribbon) is answered by 3.0's ribbon
     bool context10 = true;           // ui: a 1.0 controller-context list keeps 3.0's extra gates of the actions it keeps
+    bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (audio.hpp)
+    bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
+    bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
+    bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
+    bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -251,6 +257,11 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "resident10")) g_cfg.resident10 = atoi(val) != 0;
         else if (!strcmp(key, "tutorial10")) g_cfg.tutorial10 = atoi(val) != 0;
         else if (!strcmp(key, "context10")) g_cfg.context10 = atoi(val) != 0;
+        else if (!strcmp(key, "audio10")) g_cfg.audio10 = atoi(val) != 0;
+        else if (!strcmp(key, "music10")) g_cfg.music10 = atoi(val) != 0;
+        else if (!strcmp(key, "vo10")) g_cfg.vo10 = atoi(val) != 0;
+        else if (!strcmp(key, "audiotrace10")) g_cfg.audioTrace10 = atoi(val) != 0;
+        else if (!strcmp(key, "mixer10")) g_cfg.mixer10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -1971,6 +1982,13 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             std::string w = std::string(p, strlen(p) - 11) + "_WIN32.dct";
             data = read10(w.c_str(), &n, &where);
         }
+        std::string annoZip, annoMember;   // a 1.0 dialog line's lipsync (audio.hpp annoSource, vo10)
+        if (!data && g_cfg.audio10 && g_cfg.vo10 && audio::annoSource(p, annoZip, annoMember)) {
+            std::lock_guard<std::mutex> lock(g_zipLock);
+            mz_zip_archive* z = zipFor(annoZip);
+            int i = z ? mz_zip_reader_locate_file(z, annoMember.c_str(), nullptr, 0) : -1;
+            if (i >= 0 && (data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) != nullptr) where = annoZip + ":" + annoMember;
+        }
         if (data) {
             indexZip10(where.substr(0, where.find(':')));
             std::string out, note;
@@ -2506,6 +2524,14 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.serve10 && g_cfg.context10)
         hook("controller context list (ui: 1.0 tutorial contexts)", 0x01224880, "5153558BE98A85A4000000", (void*)&hkCtxParse, (void**)&g_ctxParse);
+    if (g_cfg.audio10 && g_cfg.install10[0]) {
+        audio::logfn = logf;
+        audio::cfg.music = g_cfg.music10;
+        audio::cfg.vo = g_cfg.vo10;
+        audio::cfg.trace = g_cfg.audioTrace10;
+        audio::cfg.mixer = g_cfg.mixer10;
+        if (!audio::install(hook, rt, g_cfg.install10, g_gameDir)) logf("audio10: off (FMOD host failed)");
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
