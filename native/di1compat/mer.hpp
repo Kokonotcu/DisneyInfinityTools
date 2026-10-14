@@ -206,7 +206,8 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
     std::vector<std::set<std::string>> portRefs(nodes.size());
     for (size_t k = 0; k < nodes.size(); ++k) {
         long leaf = field(nodes[k], "LeafName");
-        if (leaf >= 0) port[k] = f.nameValues(f.recs[leaf])[0];
+        std::vector<std::string> v = leaf >= 0 ? f.nameValues(f.recs[leaf]) : std::vector<std::string>();
+        if (!v.empty()) port[k] = v[0];
     }
     for (size_t k = 0; T.ports10 && k < nodes.size(); ++k)
         for (size_t j = nodes[k].at + 1; j < nodes[k].end; ++j) {
