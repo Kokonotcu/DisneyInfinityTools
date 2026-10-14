@@ -19,6 +19,7 @@
 #include "luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
+#include "npc.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -382,6 +383,122 @@ int main(int argc, char** argv)
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         printf("wrote %zu B, %zu records\n", o.size(), f.recs.size());
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--nav") {   // --nav <out dir> <1.0 .oct>...: navmesh blobs -> 3.0 layout
+        // writes <out>/<stem>_<i>.bin per mesh (payload, no count) for navconv.py's byte comparison
+        int files = 0, meshes = 0, failed = 0;
+        for (int k = 3; k < argc; ++k) {
+            std::string b = slurp(argv[k]), why;
+            oct::File f = oct::File::parse(b.data(), b.size());
+            int n = npc::navmesh30(f, &why);
+            ++files;
+            if (n < 0) { ++failed; printf("FAIL %s: %s\n", argv[k], why.c_str()); continue; }
+            long p = f.pool("NavMeshPool");
+            int i = 0;
+            for (size_t j = p < 0 ? 0 : p + 1; p >= 0 && j < f.blockEnd(p); ++j)
+                if (f.name(f.recs[j]) == "Data") {
+                    oct::Spec s = oct::spec(f.recs[j].type);
+                    std::string pay = f.recs[j].pay.substr(s.cw);
+                    std::ofstream(fs::path(argv[2]) / (fs::path(argv[k]).stem().string() + "_" + std::to_string(i++) + ".bin"), std::ios::binary)
+                        .write(pay.data(), pay.size());
+                }
+            meshes += n;
+            std::string w = f.write();
+            oct::File::parse(w.data(), w.size());   // the edited file re-parses (count widths, sizes)
+        }
+        printf("nav: %d files, %d meshes converted, %d files failed\n", files, meshes, failed);
+        return failed ? 1 : 0;
+    }
+    if (argc > 4 && std::string(argv[1]) == "--skin") {   // --skin <1.0 vformat.vtxf> <out dir> <1.0 .oct>...: REN-3
+        // writes <out>/<stem>_0.vbuf: the .oct's vertex buffer with its InfluenceRemap palettes applied
+        npc::SkinLayouts L = npc::skinLayouts(slurp(argv[2]));
+        int files = 0, prims = 0;
+        for (int k = 4; k < argc; ++k) {
+            fs::path p = argv[k];
+            std::string b = slurp(p), vb = slurp(p.parent_path() / (p.stem().string() + "_0.vbuf")), why;
+            std::string ib = slurp(p.parent_path() / (p.stem().string() + "_0.ibuf"));
+            oct::File f = oct::File::parse(b.data(), b.size());
+            int n = npc::skinRemap(f, vb, ib, L, &why);
+            std::ofstream(fs::path(argv[3]) / (p.stem().string() + "_0.vbuf"), std::ios::binary).write(vb.data(), vb.size());
+            ++files; prims += n;
+            if (!why.empty()) printf("%s: %d primitives; %s\n", p.stem().string().c_str(), n, why.c_str());
+        }
+        printf("skin: %zu skinned 1.0 formats, %d files, %d primitives remapped\n", L.size(), files, prims);
+        return 0;
+    }
+    if (argc > 2 && std::string(argv[1]) == "--dmeval") {   // --dmeval <DataMap.lua>...: npc::dataMap, one line per entry
+        for (int k = 2; k < argc; ++k) {
+            npc::DataMap m;
+            std::string why;
+            if (!npc::dataMap(slurp(argv[k]), m, &why)) { printf("%s: FAILED %s\n", argv[k], why.c_str()); return 1; }
+            for (auto& [key, r] : m) {
+                for (auto& f : r.files) printf("%s|%s|F|%s\n", key.first.c_str(), key.second.c_str(), f.c_str());
+                for (auto& i : r.includes) printf("%s|%s|I|%s\n", key.first.c_str(), key.second.c_str(), i.c_str());
+            }
+        }
+        return 0;
+    }
+    if (argc > 4 && std::string(argv[1]) == "--psdna") {   // --psdna <1.0 characters dir> <3.0 characters dir> <out dir>
+        namespace fs = std::filesystem;
+        int ok = 0, no = 0;
+        for (auto& e : fs::directory_iterator(argv[2])) {
+            std::string n = e.path().filename().string();
+            if (n.size() < 9 || n.compare(n.size() - 8, 8, "_ps.dnax") || fs::exists(fs::path(argv[3]) / n)) continue;
+            fs::path base = fs::path(argv[3]) / (n.substr(0, n.size() - 8) + ".dnax");
+            if (!fs::exists(base)) continue;
+            std::string out, why;
+            bool r = npc::psDna30(slurp(e.path()), slurp(base), out, &why);
+            printf("%s: %s %s\n", n.c_str(), r ? "ok" : "kept 1.0", why.c_str());
+            if (r) std::ofstream(fs::path(argv[4]) / n, std::ios::binary).write(out.data(), out.size());
+            (r ? ok : no)++;
+        }
+        printf("psdna: %d served from the 3.0 base, %d kept\n", ok, no);
+        return 0;
+    }
+    if (argc > 5 && std::string(argv[1]) == "--playset") {   // --playset <1.0 DM> <ToyBox DM> <other 3.0 DM> <playset>
+        npc::DataMap m10, tb, other;
+        if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), tb) || !npc::dataMap(slurp(argv[4]), other)) {
+            printf("DataMap eval failed\n");
+            return 1;
+        }
+        std::string t = npc::playsetText(argv[5], npc::gamedb30(m10, tb).playset, tb, other);
+        fwrite(t.data(), 1, t.size(), stdout);
+        return 0;
+    }
+    if (argc > 4 && std::string(argv[1]) == "--avperc") {   // --avperc <1.0 avatar.btx> <3.0 avatar.btx> <zone>: npc::percAdds
+        std::vector<npc::PercList> l10, l30;
+        std::string why;
+        if (!npc::percLists(slurp(argv[2]), l10, &why) || !npc::percLists(slurp(argv[3]), l30, &why)) { printf("btx eval failed: %s\n", why.c_str()); return 1; }
+        auto adds = npc::percAdds(l10, l30, argv[4]);
+        std::set<std::string> lines;
+        auto names = [](const npc::PercList& l) {
+            std::set<std::string> s;
+            for (auto& e : l) { if (!e.on.empty()) s.insert(npc::lower(e.on)); if (!e.off.empty()) s.insert(npc::lower(e.off)); }
+            std::string o;
+            for (auto& n : s) o += (o.empty() ? "" : ",") + n;
+            return o;
+        };
+        for (size_t j = 0; j < l30.size(); ++j) {
+            if (adds[j].first < 0) continue;
+            std::map<std::string, std::string> a;
+            for (auto& [n, h] : adds[j].second) a[npc::lower(n)] = n + (h ? "|1" : "|0");
+            std::string s;
+            for (auto& [k, v] : a) s += (s.empty() ? "" : ",") + v;
+            lines.insert("L " + std::to_string(l30[j].size()) + " [" + names(l30[j]) + "] <- " + std::to_string(l10[adds[j].first].size()) + ": " + s);
+        }
+        printf("%zu 1.0 lists, %zu 3.0 lists\n", l10.size(), l30.size());
+        for (auto& l : lines) printf("%s\n", l.c_str());
+        return 0;
+    }
+    if (argc > 3 && std::string(argv[1]) == "--gamedb") {   // --gamedb <1.0 DataMap> <3.0 ToyBox DataMap>: npc::gamedb30
+        npc::DataMap m10, m30;
+        if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), m30)) { printf("DataMap eval failed\n"); return 1; }
+        npc::GameDb g = npc::gamedb30(m10, m30);
+        std::set<std::string> lines;
+        for (auto& [t, p] : g.playset) lines.insert("P " + t + " " + p);
+        for (auto& [a, v] : g.actor) for (auto& [t, p] : v) lines.insert("A " + a + " " + t + " " + p);
+        for (auto& l : lines) printf("%s\n", l.c_str());
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--oct") {   // --oct <1.0 .oct> <out>: the SubNetwork transforms only

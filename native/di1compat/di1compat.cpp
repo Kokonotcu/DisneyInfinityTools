@@ -31,6 +31,7 @@
 #include "luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
+#include "npc.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
 #include <thread>
@@ -157,6 +158,13 @@ static struct {
     bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
     bool perc10 = true;              // sys: the 1.0 perceptions 3.0 lacks through 3.0's perceptions loader (GLB-1)
     bool deliv10 = true;             // sys: 1.0 RewardType Delivery registered with 3.0's Multi reward (SYS-12)
+    bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
+    bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
+    bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 standard includes) as a DataMap
+    bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
+    bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
+    bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
+    bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory has no case for type 10 (npcrt.hpp)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -206,6 +214,13 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "econ10")) g_cfg.econ10 = atoi(val) != 0;
         else if (!strcmp(key, "perc10")) g_cfg.perc10 = atoi(val) != 0;
         else if (!strcmp(key, "deliv10")) g_cfg.deliv10 = atoi(val) != 0;
+        else if (!strcmp(key, "navmesh10")) g_cfg.navmesh10 = atoi(val) != 0;
+        else if (!strcmp(key, "gamedb30")) g_cfg.gamedb30 = atoi(val) != 0;
+        else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
+        else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
+        else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
+        else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
+        else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -253,7 +268,14 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
         std::string asset = last == std::string::npos ? stem : dir.substr(last + 1);
         if (asset.size() > 2 && asset.compare(asset.size() - 2, 2, "_0") == 0 && last == std::string::npos) asset.resize(asset.size() - 2);
         std::string shard = asset.size() >= 2 ? p.substr(0, top) + "/" + asset.substr(0, 2) + "/" + asset + ".zip" : dir + ".zip";
-        std::string zips[4] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard};
+        // a buffer member (<asset>_0.vbuf) lives in its asset's archive in a shared folder too: characters/omnidroid/
+        // omnidroid_pieces.zip holds omnidroid_pieces_0.vbuf (in-game 2026-10-13: 7 1.0 models served without
+        // geometry; read10sim.py: 3,772 of 3,772 characters/ buffers found, 630 before)
+        size_t us = stem.find_last_of('_');
+        std::string bufAsset = us != std::string::npos && us + 1 < stem.size() &&
+                                       stem.find_first_not_of("0123456789", us + 1) == std::string::npos ? stem.substr(0, us) : stem;
+        std::string zips[5] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard,
+                               dir + "/" + bufAsset + ".zip"};
         for (auto& zr : zips) {
             mz_zip_archive* z = zipFor(zr);
             if (!z) continue;
@@ -400,6 +422,8 @@ static void padSmallDxt(std::string& d)
     }
 }
 
+#include "npcrt.hpp"
+
 // The render half of a 1.0 asset with a material bundle -- a world, a mission graph, ... (render.hpp): materials
 // onto 3.0 shaders and, where the asset has buffers, its vertices into formats those shaders take.
 static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string& note)
@@ -412,6 +436,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     if (!read10s(dir + "/" + stem + ".mtb", mtb)) return false;     // nothing to render
     read10s(dir + "/" + stem + "_0.vbuf", vbuf);
     read10s(dir + "/" + stem + "_0.ibuf", ibuf);
+    if (g_cfg.skin10) note += npcrt::skin10(f, vbuf, ibuf);
     render::IO io;
     io.read30 = read30x;
     io.read10 = read10s;
@@ -440,15 +465,18 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
 }
 
 // .oct (worlds, missions, exploders ...). Steps, each from the research plan (PLAN.md section 4):
-//   NavMeshPool removed: 3.0's blob parser FUN_01909fb0 trusts the layout, and the 1.0 layout differs (in-game
-//   2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it). Interim until the navmesh codec (OCT-8).
+//   NavMeshPool blobs into the 3.0 layout (npc::navmesh30, OCT-8): 3.0's blob parser FUN_01909fb0 trusts the layout
+//   (in-game 2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it); a mesh that does not convert drops the pool.
 //   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
 //   DataNodeBasisConversion in FUN_004d0160).
 //   World render (render.hpp, REN-5 + geometry): the 1.0 .mtb named 1.0 shaders (int3 in Shader_LookupCrc).
 static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
 {
     bool changed = transcodeAssetRender(path, f, note);
-    if (f.dropPool("NavMeshPool")) { note += "-NavMeshPool "; changed = true; }
+    std::string navWhy = "navmesh10 off";
+    int navs = g_cfg.navmesh10 ? npc::navmesh30(f, &navWhy) : -1;
+    if (navs > 0) { note += "+navmesh(" + std::to_string(navs) + ") "; changed = true; }
+    else if (navs < 0 && f.dropPool("NavMeshPool")) { note += "-NavMeshPool (" + navWhy + ") "; changed = true; }
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
     if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
@@ -615,6 +643,14 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         note += buf;
         out = r.mtb;
         return "mtb";
+    }
+    // a 1.0 playset avatar DNA that 3.0 ships only as its base DNA: the base, naming the 1.0 _PS model (npc::psDna30)
+    if (g_cfg.psdna30 && endsWith(path, "_ps.dnax")) {
+        std::string p = norm(path), base, why;
+        if (!read30(p.substr(0, p.size() - 8) + ".dnax", base)) return nullptr;
+        if (!npc::psDna30(std::string((const char*)data, n), base, out, &why)) { note += "psdna30: " + why + " "; return nullptr; }
+        note += "+psdna30(3.0 base, " + why + ") ";
+        return "psdna30";
     }
     // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
     if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
@@ -2219,6 +2255,7 @@ extern "C" void __stdcall Pentane_Main()
             hook("Slang call by name (1.0 behavior type)", 0x00739090, "56578B7C240C8BF18B4E04", (void*)&sx::hkCallByName,
                  (void**)&sx::g_callByName);
     }
+    npcrt::install();
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
