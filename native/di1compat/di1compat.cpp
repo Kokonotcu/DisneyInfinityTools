@@ -1427,7 +1427,9 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         ((DtorFn)vt[11])(r, nullptr, 1);
         return g_open(path, flags, a3, a4, a5);
     }
-    if (r && g_cfg.serve10 && g_cfg.tips10 && !(flags & 1) && endsWith(p, "tips.lua")) return tips30(path, flags, a3, a4, a5, r);
+    // the file named Tips.lua only (FUN_00b70da0's literal), not every *tips.lua: the stream is consumed and re-served
+    if (r && g_cfg.serve10 && g_cfg.tips10 && !(flags & 1) && (!_stricmp(p, "tips.lua") || endsWith(p, "/tips.lua") || endsWith(p, "\\tips.lua")))
+        return tips30(path, flags, a3, a4, a5, r);
     if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
         char line[600];
         int len = sprintf_s(line, "gamedb package open %s, stack:", p);
