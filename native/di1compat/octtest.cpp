@@ -1280,6 +1280,75 @@ static int choClipsTest(char** a)
     return 0;
 }
 
+// --clip-ids <pairs.txt>: lines '<1.0 .oct>|<3.0 .oct>' (motion-clip twins). Each 1.0 motion clip on a template of
+// ports10.hpp through clipBlock30 with its port map, against the 3.0 twin's block at the same position when the twin
+// binds the same template: bytes, and the output ids per table (by position when the tables have the same sizes;
+// order-free: each of our ids among the twin block's ids). The same with the ids kept, for comparison.
+static int clipIdsTest(char** a)
+{
+    auto ids30 = [](const std::string& d) {   // output ids per table of a 3.0-layout block
+        std::vector<std::vector<uint32_t>> t;
+        uint32_t nDesc = cho::rd(d, 8, 2);
+        for (uint32_t i = 0; i < nDesc; ++i) {
+            uint32_t o = cho::rd(d, 0x10 + 4 * i, 4), n = cho::rd(d, o + 2, 2), x = cho::rd(d, o + 4 + 2 * n, 2);
+            for (size_t s : {(size_t)o + 6 + 2 * n, (size_t)o + x}) {
+                std::vector<uint32_t> v;
+                for (uint32_t h = 0, k = cho::rd(d, s, 2); k != 0xffffffffu && h < k; ++h) v.push_back(cho::rd(d, s + 2 + 2 * h, 2) & 0x1fff);
+                t.push_back(v);
+            }
+        }
+        return t;
+    };
+    std::map<std::string, size_t> c;
+    std::ifstream in(a[2]);
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t bar = line.find('|');
+        if (bar == std::string::npos) continue;
+        std::string ba, bb;
+        try { ba = slurp(line.substr(0, bar)); bb = slurp(line.substr(bar + 1)); } catch (...) { continue; }
+        if (ba.size() < 4 || bb.size() < 4) continue;
+        oct::File A = oct::File::parse(ba.data(), ba.size()), B = oct::File::parse(bb.data(), bb.size());
+        std::vector<std::string> blocksB;
+        std::string tmplB;
+        for (auto& r : B.recs) {
+            if (B.name(r) == "ClipDataBlock") blocksB.push_back(r.pay.substr(oct::spec(r.type).cw));
+            if (B.name(r) == "ConnectionTemplate" && tmplB.empty()) tmplB = B.nameValues(r)[0];
+        }
+        const cho::PortMap* pm = nullptr;
+        size_t k = 0;
+        for (size_t i = 0; i < A.recs.size(); ++i) {
+            if (A.recs[i].level == 2 && A.name(A.recs[i]) == "SubNetwork") { pm = cho::clipPorts(A, i); continue; }
+            if (A.name(A.recs[i]) != "ClipDataBlock") continue;
+            size_t at = k++;
+            if (!pm) continue;
+            ++c[std::string("blocks on ") + pm->tmpl];
+            if (_stricmp(tmplB.c_str(), pm->tmpl)) { ++c["  twin binds another template"]; continue; }
+            if (at >= blocksB.size()) { ++c["  twin has no block there"]; continue; }
+            std::string d = A.recs[i].pay.substr(oct::spec(A.recs[i].type).cw), ours, kept;
+            if (!cho::clipBlock30(d, ours, pm) || !cho::clipBlock30(d, kept)) { ++c["  NOT CONVERTED"]; continue; }
+            const std::string& y = blocksB[at];
+            ++c[ours == y ? "  bytes: identical to the twin" : ours.size() == y.size() ? "  bytes: same length" : "  bytes: other length"];
+            if (kept == y) ++c["  (ids kept: identical to the twin)"];
+            auto to = ids30(ours), tk = ids30(kept), ty = ids30(y);
+            std::set<uint32_t> sy;
+            for (auto& t : ty) sy.insert(t.begin(), t.end());
+            bool same = to.size() == ty.size();
+            for (size_t q = 0; same && q < to.size(); ++q) same = to[q].size() == ty[q].size();
+            for (size_t q = 0; q < to.size(); ++q)
+                for (size_t j = 0; j < to[q].size(); ++j) {
+                    c[sy.count(to[q][j]) ? "  ids, order-free: ours among the twin's" : "  ids, order-free: ours NOT among the twin's"]++;
+                    c[sy.count(tk[q][j]) ? "  (ids kept, order-free: among the twin's)" : "  (ids kept, order-free: NOT among)"]++;
+                    if (!same) continue;
+                    c[to[q][j] == ty[q][j] ? "  ids, same-size tables: same position" : "  ids, same-size tables: DIFFERENT"]++;
+                    c[tk[q][j] == ty[q][j] ? "  (ids kept, same-size tables: same position)" : "  (ids kept, same-size tables: different)"]++;
+                }
+        }
+    }
+    for (auto& [key, v] : c) printf("%8zu %s\n", v, key.c_str());
+    return c.count("  NOT CONVERTED") ? 1 : 0;
+}
+
 // --cho-file <1.0 .oct>...: the plugin's cho steps (clips with every motion clip, layout, time, anim) on each file; the
 // result must re-parse and re-write byte-identically, and every re-packed block must parse in the 3.0 layout (desc
 // tables ending at the next descriptor or the data). Prints what changed.
@@ -1327,13 +1396,20 @@ static int choFileTest(int argc, char** a)
             }
     } else files.assign(a + 2, a + argc);
     int bad = 0;
-    size_t tc = 0, tl = 0, ti = 0, tt = 0, tb = 0, ta = 0, ts = 0;
+    size_t tc = 0, tl = 0, ti = 0, tt = 0, tb = 0, ta = 0, ts = 0, tr = 0, tk = 0, changedIds = 0, changedElse = 0;
     for (auto& path : files) {
         std::string b = slurp(path);
         if (b.size() < 4 || oct::u((const uint8_t*)b.data(), 4) != oct::MAGIC) continue;   // empty / other tuples
         oct::File f = oct::File::parse(b.data(), b.size());
-        int failed = 0, inst = 0;
-        int nc = cho::clips30(f, [](const std::string&) { return true; }, &failed);
+        int failed = 0, inst = 0, ren = 0;
+        // clip10ids: the file without it must come out the same unless a clip or a link was renumbered
+        oct::File g0 = oct::File::parse(b.data(), b.size());
+        cho::clips30(g0, [](const std::string&) { return true; });
+        int nc = cho::clips30(f, [](const std::string&) { return true; }, &failed, true, &ren);
+        int nk = cho::links30(f);
+        if (f.write() != g0.write()) ++(ren || nk ? changedIds : changedElse);
+        tr += ren;
+        tk += nk;
         int nl = cho::layout30(f, &inst);
         int nt = cho::time30(f);
         int na = cho::anim30(f);
@@ -1354,9 +1430,11 @@ static int choFileTest(int argc, char** a)
                    "re-parse %s, %zu/%zu blocks parse as 3.0\n", good ? "ok " : "BAD", path.c_str(), nc, failed, nl, inst, nt, na,
                    ns, round ? "same" : "DIFFERS", ok30, blocks);
     }
+    printf("clip10ids: %zu blocks with 3.0 port ids, %zu model links renumbered; files changed by it %zu, changed without "
+           "a renumbered clip or link %zu\n", tr, tk, changedIds, changedElse);
     printf("%zu files, %d bad; %zu blocks re-packed of %zu, %zu layouts (%zu instances), %zu time ranges, %zu anim inputs, "
            "%zu scene refs\n", files.size(), bad, tc, tb, tl, ti, tt, ta, ts);
-    return bad ? 1 : 0;
+    return bad || changedElse ? 1 : 0;
 }
 
 // --banm <pairs.txt>: lines '<1.0 .banm>|<3.0 .banm (text)>|<engine path>'; cho::banm30 on the 1.0 binary tuple must
@@ -2085,6 +2163,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-layout") return choLayoutTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-time") return choTimeTest(argc, argv);
     if (argc > 2 && std::string(argv[1]) == "--cho-clips") return choClipsTest(argv);
+    if (argc > 2 && std::string(argv[1]) == "--clip-ids") return clipIdsTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-clipdump") return choClipDump(argv);
     if (argc > 2 && std::string(argv[1]) == "--cho-file") return choFileTest(argc, argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-corpus") return choFileTest(argc, argv);
