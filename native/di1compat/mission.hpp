@@ -54,4 +54,29 @@ inline int luaEvents30(std::string& t)
     return n;
 }
 
+// MissionBehavior in a mission line (<line>__missiongraph.lua). 1.0 knew 0 Activity, 1 Alert, else 'Mission' (1.0
+// 0x010284c0), and its progress log listed every 'Mission' record (1.0 missionlogdatahelpers ActiveMissions /
+// CompletedMissions; FUN_00f8df90 only drops copies with m_playerGroupIndex +0x3c >= 1). 3.0 names 2 'Mission', 3
+// 'Story Mission', 4 'Side Mission' (FUN_01678ef0) and its MissionLog lists only 3 and 4 (3.0 missionlogdatahelpers
+// PlaysetSortedMissions; FUN_015ac790 keeps the same +0x3c filter); 3/4 also pick the giver tags
+// MissionGivers_*_Story/_Side (FUN_015d22b0) and isStoryMission/isSideMission of MissionTaskNotify (FUN_015bfd10).
+// Corpus: every 1.0 Incredibles record is 0, 1 or 2; 3.0 ships its story/side missions as 3 (125) / 4 (143).
+// So 2 -> 3 on a story line, 4 on any other. Returns the records changed.
+inline int behaviour30(std::string& t)
+{
+    static const std::string key = "\t\t\t\tMissionBehavior = 2,\n", line = "\t\t\tline = \"";
+    int n = 0;
+    for (size_t p = t.find(key); p != std::string::npos; p = t.find(key, p + 1)) {
+        size_t next = t.find("\n\t\t{\n", p), l = t.find(line, p);   // this record's line = "...", before the next record
+        if (l == std::string::npos || (next != std::string::npos && l > next)) continue;
+        size_t q = l + line.size(), e = t.find('"', q);
+        if (e == std::string::npos) break;
+        std::string ln = t.substr(q, e - q);
+        for (char& c : ln) c = (char)tolower((unsigned char)c);
+        t[p + key.size() - 3] = ln.find("story") != std::string::npos ? '3' : '4';
+        ++n;
+    }
+    return n;
+}
+
 }  // namespace mission

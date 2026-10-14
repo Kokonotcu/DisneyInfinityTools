@@ -136,6 +136,7 @@ static struct {
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
     bool lockTrace10 = true;         // log control locks, controller contexts, choreography play/end, messages
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
+    bool behav10 = true;             // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -167,6 +168,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
         else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
         else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
+        else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -444,9 +446,10 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
 {
     if (endsWith(path, "__missiongraph.lua") && n && ((const char*)data)[0] != 0x1b) {
         std::string t((const char*)data, n);
-        int k = missionGraph30(t);
-        if (!k) return nullptr;
-        note += "+missiongraph(" + std::to_string(k) + " opening missions force-activated) ";
+        int k = missionGraph30(t), b = g_cfg.behav10 ? mission::behaviour30(t) : 0;
+        if (!k && !b) return nullptr;
+        note += "+missiongraph(" + std::to_string(k) + " opening missions force-activated, " + std::to_string(b) +
+                " behaviours 2 -> story/side) ";
         out.swap(t);
         return "missiongraph";
     }

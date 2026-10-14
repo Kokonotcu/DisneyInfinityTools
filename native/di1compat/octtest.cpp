@@ -192,6 +192,13 @@ int main(int argc, char** argv)
         printf("%d presentation events remapped\n", n);
         return 0;
     }
+    if (argc > 3 && std::string(argv[1]) == "--missiongraph") {   // --missiongraph <1.0 __missiongraph.lua> <out.lua>
+        std::string t = slurp(argv[2]);
+        int n = mission::behaviour30(t);
+        std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
+        printf("%d behaviours 2 -> story/side\n", n);
+        return 0;
+    }
     if (argc > 4 && std::string(argv[1]) == "--dct") {   // --dct <1.0 table> <its stringids> <key name>
         std::string raw = slurp(argv[2]), ids = slurp(argv[3]);
         dct::Dict d;
