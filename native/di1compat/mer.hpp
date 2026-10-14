@@ -22,6 +22,7 @@
 //               no node slot and shift every later index (verify-meridian claim 6: out-of-bounds link writes), so
 //               until they are ported (MER-3/6) such a node becomes a pinless NodeGroup and its links are dropped.
 //   Event       MissionPresentationList* 'Event' in the 3.0 mission event enum (mission.hpp; Table::events10)
+//   NetSync     MasterNetSync links from Link_Out leave from Private, the output 3.0 fires locally (Table::gate10)
 #pragma once
 #include <map>
 #include <set>
@@ -56,6 +57,7 @@ struct Table {
     bool portRefs = true;   // owner fields naming port sub-nodes: not described, not copied as pins (cfg portrefs10)
     bool ports10 = true;    // port names from owner fields (LeafNameHash), DataFetch 'Value' under its port (cfg ports10)
     bool pins10 = true;     // pin table = every plain non-parameter int; copies add the names an instance lacks (cfg pins10)
+    bool gate10 = true;     // MasterNetSync Link_Out links leave from Private, the pin 3.0 fires locally (cfg gate10)
     std::set<std::string> registered;
     std::map<std::string, Class> classes;
     bool load(const std::string& text)
@@ -150,7 +152,7 @@ inline int typeOf(const oct::File& f, const oct::Rec& r)
     return -1;
 }
 
-struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0, fetches = 0; };
+struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0, fetches = 0, netSync = 0; };
 
 // False (f unchanged) if the file is not a 1.0 graph (already has descriptions, or no node pool).
 inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::string* why = nullptr)
@@ -246,6 +248,23 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         if (!pins.empty()) pinTables[n.type] = pins;
     }
 
+    // a node's pin index by name: its own field, else the class table copied onto it above (-1: none)
+    auto pinOf = [&](size_t k, const char* name) -> int {
+        long j = field(nodes[k], name);
+        if (j >= 0 && isInt(f.recs[j])) return (int)f.ints(f.recs[j])[0];
+        auto pt = pinTables.find(nodes[k].type);
+        if (pt != pinTables.end())
+            for (auto& r : pt->second) if (f.name(r) == name) return (int)f.ints(r)[0];
+        return -1;
+    };
+    // gate10: 1.0's MasterNetSync fires Private, then Link_Out, on every Link_In (1.0 FUN_006b2350: def+0x30, def+0x28).
+    // 3.0's fires Private always but Link_Out only when its graph is networked and the host (FUN_006ec4f0: def+0x3c,
+    // then def+0x34 behind GraphInstance vf+0x10 FUN_006ab280 / vf+0x14), so 1.0 Link_Out chains need 3.0's Private:
+    // in_city.mer LoadScreenActive.Stopped -> 506 -> Saved Gate7 -> INC_CIN_OpeningA -> 'OpeningDone' never ran.
+    std::vector<int> nsOut(nodes.size(), -1), nsPriv(nodes.size(), -1);
+    for (size_t k = 0; T.gate10 && k < nodes.size(); ++k)
+        if (nodes[k].type == "MasterNetSync") nsOut[k] = pinOf(k, "Link_Out"), nsPriv[k] = pinOf(k, "Private");
+
     // links first: dropped ones change NumInLinks / NumOutLinks
     std::map<size_t, int> dIn, dOut;   // node index -> links dropped
     struct Out { size_t at; std::string data; };
@@ -300,6 +319,10 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
                     }
                     bool inside = a > ns.begin && a < ns.end && z > ns.begin && z < ns.end && a < nodes.size() && z < nodes.size();
                     if (!inside || nodes[a].stub || nodes[z].stub) { ++dOut[a]; ++dIn[z]; ++s.linksDropped; continue; }
+                    if (nsOut[a] >= 0 && nsPriv[a] >= 0 && (code >> 10) == nsOut[a]) {
+                        code = (uint16_t)((code & 0x3ff) | nsPriv[a] << 10);
+                        ++s.netSync;
+                    }
                     uint16_t row[3] = {code, (uint16_t)(a - ns.begin - 1), (uint16_t)(z - ns.begin - 1)};
                     out.append((const char*)row, 6);
                     ++kept;

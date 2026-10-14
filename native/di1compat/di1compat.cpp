@@ -148,7 +148,8 @@ static struct {
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
     bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them (Table::ports10)
     bool pins10 = true;              // .mer: complete pin tables on every instance (Table::pins10)
-    bool behav10 = true;             // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
+    bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (Table::gate10)
+    bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
     bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
     bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
     bool sxNatives10 = true;         // sx10's imports bound to 1.0-semantics natives by a linker hook (SX-3/4)
@@ -238,6 +239,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
         else if (!strcmp(key, "ports10")) g_cfg.ports10 = atoi(val) != 0;
         else if (!strcmp(key, "pins10")) g_cfg.pins10 = atoi(val) != 0;
+        else if (!strcmp(key, "gate10")) g_cfg.gate10 = atoi(val) != 0;
         else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
         else if (!strcmp(key, "native10")) g_cfg.native10 = atoi(val) != 0;
         else if (!strcmp(key, "sx10")) g_cfg.sx10 = atoi(val) != 0;
@@ -303,6 +305,7 @@ static void loadConfig(const char* dir)
          g_cfg.choLayout10, g_cfg.clip10,
          g_cfg.clip10Motions, g_cfg.choAlias10, g_cfg.banm10, g_cfg.variant10, g_cfg.teardownTrace);
     logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
+    logf("config mis: gate10=%d locktrace10=%d", g_cfg.gate10, g_cfg.lockTrace10);
 }
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
@@ -781,8 +784,9 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         mer::Stats st;
         if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
         char buf[240];
-        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches) ",
-                  st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches);
+        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches, "
+                  "%d net-sync links) ", st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events,
+                  st.fetches, st.netSync);
         note += buf;
         out = isMtc ? mer::mtc(f) : f.write();
         return isMtc ? "mtc" : "mer";
@@ -1845,6 +1849,59 @@ static void __fastcall hkMsgRecv(uint8_t* listener, void*, const char* data, uin
     g_msgRecv(listener, nullptr, data, a2, a3);
 }
 
+// The world graph's start gates (gate10 checks): the in_city.mer chains need these three node kinds to fire.
+//   MissionMonitor: FUN_01730490 (thiscall on the node, pin index, ret 4) runs once per output it fires, right before
+//     the fire (callers: the update FUN_01744090, the abort handler FUN_01730560); MissionName CString at node+0x64
+//     (FUN_01743f60 resolves the mission from it). 841 IN_City_DockFire 'Actived' -> 846 -> 848 -> 847.Off releases
+//     the TUT_DISABLE_ gate.
+//   LoadScreenActive: update FUN_0145b9a0 (thiscall on node+0x14, ret 4): IsOn at +0x24 (starts 1, FUN_0145b860),
+//     pending FireInit at +0xc; fires Started (def+0x28) or Stopped (def+0x30) when the load-screen state changes.
+//   MasterNetSync: Link_In body FUN_006ec4f0 (thiscall on the node, payload, ret 4): Private always, Link_Out only
+//     when GraphInstance vf+0x10 (networked, FUN_006ab280) and vf+0x14 (host) hold.
+static volatile LONG g_gateLines;   // load-screen and net-sync lines: their own budget
+typedef uint32_t(__fastcall* MonPinFn)(uint8_t* node, void* edx, int pin);
+static MonPinFn g_monPin;
+static uint32_t __fastcall hkMonPin(uint8_t* node, void*, int pin)
+{
+    static const char* const kPin[] = {"Locked", "Now Available", "Talking", "Actived", "Completed", "Failed", "Aborted",
+                                       "Selected", "Unselected"};
+    char n[128];
+    static volatile LONG lines;   // its own budget: load fires every FireImpulseOnLoad monitor once
+    if (lockTraceRoom(lines))
+        logf("mission monitor '%s' fires %s (pin %d)", cstr(node + 0x64, n, sizeof(n)), pin >= 0 && pin < 9 ? kPin[pin] : "?", pin);
+    return g_monPin(node, nullptr, pin);
+}
+typedef void(__fastcall* TickFn)(uint8_t* self, void* edx, uint32_t a1);
+static TickFn g_loadTick;
+static void __fastcall hkLoadTick(uint8_t* self, void*, uint32_t a1)
+{
+    uint8_t on = self[0x24], init = self[0xc];
+    g_loadTick(self, nullptr, a1);
+    static std::mutex m;
+    static std::set<uint8_t*> seen;
+    bool first;
+    { std::lock_guard<std::mutex> lock(m); first = seen.size() < 64 && seen.insert(self).second; }
+    bool fired = self[0x24] != on || (init && !self[0xc]);
+    if ((first || fired) && lockTraceRoom(g_gateLines))
+        logf("load screen node %p: %s (IsOn %d -> %d%s)", self - 0x14, fired ? (self[0x24] ? "fires Started" : "fires Stopped") : "first tick, no fire",
+             on, self[0x24], init ? ", FireInit" : "");
+}
+typedef void(__fastcall* NetSyncFn)(uint8_t* node, void* edx, void* payload);
+static NetSyncFn g_netSync;
+static void __fastcall hkNetSync(uint8_t* node, void*, void* payload)
+{
+    if (lockTraceRoom(g_gateLines)) {
+        typedef void*(__fastcall* GetFn)(void* self, void* edx);
+        typedef bool(__fastcall* FlagFn)(void* self, void* edx);
+        uint8_t* vb = node + 4 + *(int*)(*(uint8_t**)(node + 4) + 4);   // the ContainedBase, as FUN_006ec4f0 finds it
+        void* g = ((GetFn)(*(void***)vb)[2])(vb, nullptr);
+        int net = g ? ((FlagFn)(*(void***)g)[4])(g, nullptr) : -1, host = g ? ((FlagFn)(*(void***)g)[5])(g, nullptr) : -1;
+        logf("net sync node %p Link_In: graph networked %d host %d -> 3.0 fires Private%s", node, net, host,
+             net == 1 && host == 1 ? " and Link_Out" : " only");
+    }
+    g_netSync(node, nullptr, payload);
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -2793,6 +2850,7 @@ extern "C" void __stdcall Pentane_Main()
     g_mer.portRefs = g_cfg.portRefs10;
     g_mer.ports10 = g_cfg.ports10;
     g_mer.pins10 = g_cfg.pins10;
+    g_mer.gate10 = g_cfg.gate10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
     if (g_cfg.shaders10) {
@@ -2881,6 +2939,10 @@ extern "C" void __stdcall Pentane_Main()
         hook("choreography node event (locktrace10)", 0x017E5890, "538BD9568D73D057", (void*)&hkChoEvent, (void**)&g_choEvent);
         hook("message sender send (locktrace10)", 0x018120B0, "6AFF68????????64A100000000", (void*)&hkMsgSend, (void**)&g_msgSend);
         hook("message handler delivery (locktrace10)", 0x018049F0, "83EC08568BF18B4E20", (void*)&hkMsgRecv, (void**)&g_msgRecv);
+        hook("mission monitor fire (locktrace10)", 0x01730490, "5156578BF18B068B504833FF57", (void*)&hkMonPin, (void**)&g_monPin);
+        hook("load screen active update (locktrace10)", 0x0145B9A0, "5356578BF98D77ECBB01000000", (void*)&hkLoadTick, (void**)&g_loadTick);
+        hook("master net sync Link_In (locktrace10)", 0x006EC4F0, "6AFF68????????64A100000000506489250000000083EC30535556578BF1",
+             (void*)&hkNetSync, (void**)&g_netSync);
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
