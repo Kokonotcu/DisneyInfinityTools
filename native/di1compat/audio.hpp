@@ -385,7 +385,8 @@ struct Host {
     std::unordered_map<uint32_t, V3> pos;             // game object -> engine-space position (SetPosition)
     float lpos[3] = {}, lfwd[3] = {0, 0, 1}, lup[3] = {0, 1, 0};
     bool lset = false;
-    std::mutex posMx;                                 // pos and the listener: the game thread's SetPosition calls never
+    FR lres = 0;                                      // audiotrace10: the last set3DListenerAttributes result
+    std::mutex posMx;                                // pos and the listener: the game thread's SetPosition calls never
                                                       // wait for FMOD's update, which runs under mx
     volatile LONG* idCounter = nullptr;               // Wwise's own playing-id counter (FUN_01948a10), so ids never clash
     volatile LONG ownCounter = 0x40000000;            // octtest: no engine
@@ -781,7 +782,7 @@ struct Host {
             memcpy(lp, lpos, sizeof lp); memcpy(lf, lfwd, sizeof lf); memcpy(lu, lup, sizeof lu);
             ls = lset;
         }
-        if (ls) f.EventSystem_Set3DListenerAttributes(es, 0, lp, nullptr, lf, lu);
+        if (ls) lres = f.EventSystem_Set3DListenerAttributes(es, 0, lp, nullptr, lf, lu);
         for (auto& pl : plays)
             if (pl.second.ev) place(pl.second.ev, pl.second.obj);
         f.EventSystem_Update(es);
@@ -1865,6 +1866,32 @@ inline int __fastcall hkQueuedPost(void* mgr, void*, uint32_t* req)
                 AUDLOG("audio10: %s plays on obj %u at (%.1f %.1f %.1f)%s, %.1f from the listener (%.1f %.1f %.1f)", name,
                        pl->second.obj, v[0], v[1], v[2], it != g.pos.end() ? "" : " (no position: the listener's)",
                        sqrtf(dx * dx + dy * dy + dz * dz), g.lpos[0], g.lpos[1], g.lpos[2]);
+                // the mix it plays in: FMOD mode (0x10 3D, 0x8 2D, 0x40000 head-relative), category volumes, and whether
+                // FMOD took the listener (fwd / up must be unit and perpendicular)
+                unsigned mode = 0;
+                std::string chain;
+                if (void* ev = pl->second.ev) {
+                    g.f.Event_GetPropertyByIndex(ev, 14, &mode, 0);   // FMOD_EVENTPROPERTY_MODE
+                    void* c = nullptr;
+                    g.f.Event_GetCategory(ev, &c);
+                    for (int d = 0; c && d < 8; ++d) {
+                        char* cn = nullptr;
+                        float cv = -1;
+                        g.f.EventCategory_GetInfo(c, nullptr, &cn);
+                        g.f.EventCategory_GetVolume(c, &cv);
+                        char one[80];
+                        sprintf_s(one, "%s%s %.3f", chain.empty() ? "" : " < ", cn ? cn : "?", cv);
+                        chain += one;
+                        void* parent = nullptr;
+                        if (g.f.EventCategory_GetParentCategory(c, &parent)) break;
+                        c = parent;
+                    }
+                }
+                const float *lf = g.lfwd, *lu = g.lup;
+                AUDLOG("audio10: %s mode %x, categories %s; listener result %d, fwd (%.3f %.3f %.3f) up (%.3f %.3f %.3f) "
+                       "|fwd| %.3f |up| %.3f fwd.up %.3f", name, mode, chain.c_str(), (int)g.lres, lf[0], lf[1], lf[2], lu[0],
+                       lu[1], lu[2], sqrtf(lf[0] * lf[0] + lf[1] * lf[1] + lf[2] * lf[2]),
+                       sqrtf(lu[0] * lu[0] + lu[1] * lu[1] + lu[2] * lu[2]), lf[0] * lu[0] + lf[1] * lu[1] + lf[2] * lu[2]);
             }
         }
     }
