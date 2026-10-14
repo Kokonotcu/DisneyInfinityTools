@@ -335,6 +335,22 @@ inline void __cdecl reactionInfoFlipMotionName(uint8_t* ctx)
     Cell r; r.type = 2; r.s = buf; v.push(r);
 }
 
+// SlaveActorToVehicle: 1.0 0xa1de30 and 3.0 0xaa2b30 pop the same (name, name, actor, bool, actor) and attach through
+// the same steps (1.0 0x1156e80 / 3.0 0x18a8e10); 3.0 also pushes the vehicle (0x731d10), 1.0 pushes nothing.
+inline void __cdecl slaveActorToVehicle(uint8_t* ctx) { call30(0x00AA2B30, ctx); Vm{ctx}.top() -= 1; }
+// TriggerEvent (type, actor, value): 1.0 0x113c1b0 switches types 1..14, 3.0 0x1860e50 types 1..20 to event classes
+// registered by name (scratch\sx\evtypes.py): 1..9 equal (Thrown .. Dismount); 3.0 inserted Mounted/Dismounted at 10/11,
+// so 1.0 10..14 (Sprint, InvisibilityStateChanged, DropKicked, RailSlide, TrainBoothRequestActivate) are 3.0 12..16.
+// Twin scripts agree: enumdrift.py, TriggerEvent type slot: 10->12 x2, 12->14 x2, 13->15 x2, 14->16 x1, 0 other pairs.
+inline int eventTo30(int t10) { return t10 >= 10 && t10 <= 14 ? t10 + 2 : t10; }
+inline void __cdecl triggerEvent(uint8_t* ctx)
+{
+    Cell& t = Vm{ctx}.at(2);
+    if (t.type == 0) t.i = eventTo30(t.i);
+    else if (t.type == 1) t.f = (float)eventTo30((int)t.f);   // the pop (0x731fd0) truncates floats
+    call30(0x01860E50, ctx);
+}
+
 // AI behavior types. 1.0 numbers them by its table 0x15f5c04 (36, index 0 ACTION; bound 0x24 in 0xfd16c0/0xf2f9a0),
 // 3.0 by 0x210455c (30, index 0 ATTACK; FUN_01523c30, bound 0x1d in 0x13b7430): every index moved. Tested on the
 // scripts: the type constants of 19/19 twin scripts (behtwins.py) and the self-checks "INCORRECT Behavior ID ... not
@@ -576,6 +592,8 @@ inline Native g_ports[] = {
     {"AiBehaviorGetFloatProperty", 2, 1, &aiBehaviorGetFloatProperty},
     {"AiBehaviorGetBehaviorStringFromType", 1, 1, &aiBehaviorGetBehaviorStringFromType},
     {"AiBehaviorGetCurrentBehaviorType", 1, 1, &aiBehaviorGetCurrentBehaviorType},
+    {"SlaveActorToVehicle", 5, 0, &slaveActorToVehicle},
+    {"TriggerEvent", 3, 0, &triggerEvent},
 };
 
 inline std::unordered_map<std::string, Native*>& table()

@@ -185,6 +185,8 @@ int main(int argc, char** argv)
         for (auto& k : sx::KEYS30) kt << k.name << '\t' << k.id << '\n';
         std::ofstream bt(out / "beh10.tsv");
         for (auto* n : sx::BEH10) bt << n << '\n';
+        std::ofstream et(out / "events.tsv");   // TriggerEvent type map (sxcheck.py: == the exes' tables by name)
+        for (int t = 1; t <= 14; ++t) et << t << '\t' << sx::eventTo30(t) << '\n';
         const char* flips[][2] = {{"HIT_BACK_HEAVY", "HIT_FRONT_HEAVY"}, {"FRONT", "BACK"}, {"BACK", "FRONT"},
                                   {"FRONTBACK", "BACKFRONT"}, {"FRON", "FRON"}, {"BAC", "BAC"}, {"", ""}};
         for (auto& f : flips) {
