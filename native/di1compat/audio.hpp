@@ -1032,9 +1032,17 @@ inline std::vector<uint8_t> dbnkFromName10(uint16_t prefix, const std::vector<Dl
 //  figures keep their lines; where both define one, 1.0's wins (1.0's playset loads 1.0's script). 3.0 type 3
 //  {8-byte header ([4] n), n x (u32 prefix, u16 number, u16, u32 source name offset, u32)} keeps its names.
 struct DlgStats { int classes = 0, lines = 0, named = 0, ranges = 0, events = 0, unresolved = 0, dupLines = 0, kept30 = 0, lines30 = 0; };
+// A 1.0 type 3 / 4 entry of more than one line: {type, n x (char[2] prefix, u16 line, u32 event h131, u32 delay ms)}
+// from +0xc, 12 bytes each, count u32 at +8 (Inc_TBScript INC_CIN_OpeningA: NC001+0 NC002+8150 MR021+5600 SY010+3800
+// SY011+16390 SY012+8860 SY013+8400; 41 such entries over the 1.0 scripts, dlgtypes.py). 1.0 plays them in order
+// (FUN_00718650 starts item 0; FUN_00715fc0 / FUN_00715d80 advance): type 4 counts each delay from the previous line's
+// start, type 3 adds the previous line's length first (a gap after it ends). 3.0 has no such entry (its type 3 posts one
+// Wwise event whose timing is authored in Wwise), so the script keeps item 0 for 3.0 and vo's sequencer plays the rest.
+struct DlgSeqItem { uint16_t prefix, line; std::string event; uint32_t delay; };
+struct DlgSeq { uint8_t type; std::vector<DlgSeqItem> items; };
 inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_map<uint32_t, std::string>& evNames,
                          std::vector<uint8_t>& out, DlgStats* st = nullptr, std::string* err = nullptr,
-                         const std::vector<uint8_t>* base30 = nullptr)
+                         const std::vector<uint8_t>* base30 = nullptr, std::unordered_map<uint32_t, DlgSeq>* seqs = nullptr)
 {
     auto fail = [&](const char* why) { if (err) *err = why; return false; };
     auto rd32 = [&](size_t o) { return o + 4 <= in.size() ? *(const uint32_t*)(in.data() + o) : 0u; };
@@ -1109,6 +1117,17 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
             }
         } else if (e[0] == 3 || e[0] == 4) {
             if (off + 0x14 > in.size()) return fail("once past the end");
+            uint32_t items = rd32(off + 8);
+            if (seqs && items > 1 && items < 64 && off + 0xc + (size_t)items * 12 <= in.size()) {
+                DlgSeq q{e[0], {}};
+                for (uint32_t k = 0; k < items; ++k) {
+                    const uint8_t* it = e + 0xc + k * 12;
+                    auto nm = evNames.find(rd32(off + 0x10 + k * 12));
+                    q.items.push_back({(uint16_t)(it[0] | it[1] << 8), *(const uint16_t*)(it + 2),
+                                       nm == evNames.end() ? std::string() : nm->second, rd32(off + 0x14 + k * 12)});
+                }
+                (*seqs)[hash] = std::move(q);
+            }
             uint8_t h[16] = {1, (uint8_t)(e[1] >> 1), e[2], 0, 0, 0xff, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0};
             o.bytes.assign(h, h + 16);
             uint8_t item[8] = {e[0xc], e[0xd], 0, 0, e[0xe], e[0xf], ev(rd32(off + 0x10)), 0};
@@ -1379,6 +1398,78 @@ struct Vo {
         g.f.Sound_Release(b->snd);
         b->snd = nullptr;
         AUDLOG("vo10: unloaded %s", file.c_str());
+    }
+
+    // 1.0 dialog sequences (DlgSeq, by the entry's case-kept h131): armed by the request hook, started when 3.0 posts
+    // their first line (the item the script kept), then advanced by the host tick as 1.0's FUN_00715fc0 does
+    std::unordered_map<uint32_t, DlgSeq> seqs;
+    struct Armed { DlgSeq seq; DWORD at = 0; bool on = false; } armed;
+    struct Run { DlgSeq seq; size_t next; DWORD prevStart, prevEnd; uint32_t prevPid, obj; };
+    std::vector<Run> runs;
+
+    // the line a {bank, subsound} plays: the .name line whose subsounds (first .. first + variants) hold it
+    static int lineOf(DlgBank* b, int sub)
+    {
+        Name10 x = b->idx();
+        for (uint32_t l = x.lo(); l <= x.hi(); ++l) {
+            uint16_t v = x.entry(l);
+            int first = v & 0xfff, nv = v >> 12 > 1 ? v >> 12 : 1;
+            if (v != 0xffff && sub >= first && sub < first + nv) return (int)l;
+        }
+        return -1;
+    }
+    void onLinePosted(DlgBank* b, int sub, uint32_t obj, uint32_t pid)
+    {
+        std::lock_guard<std::recursive_mutex> l(mx);
+        if (!armed.on || GetTickCount() - armed.at > 5000 || armed.seq.items.empty()) return;
+        const DlgSeqItem& first = armed.seq.items[0];
+        if (b->idx().prefix() != first.prefix || lineOf(b, sub) != first.line) return;
+        DWORD now = GetTickCount();
+        runs.push_back({armed.seq, 1, now, 0, pid, obj});
+        armed.on = false;
+        AUDLOG("vo10: sequence of %u lines started at %c%c%03u (1.0 type %u)", (unsigned)runs.back().seq.items.size(),
+               first.prefix & 0xff, first.prefix >> 8, first.line, armed.seq.type);
+    }
+    uint32_t playSeqLine(const DlgSeqItem& it, uint32_t obj)
+    {
+        auto sp = speakers.find(it.prefix);
+        for (DlgBank* b : sp == speakers.end() ? std::vector<DlgBank*>() : sp->second.banks) {
+            uint16_t v = b->idx().entry(it.line);
+            if (v == 0xffff || !b->snd || it.event.empty()) continue;
+            int nv = v >> 12 > 1 ? v >> 12 : 1;
+            uint32_t id = g.playLine(fnv1(it.event), obj, 0, nullptr, nullptr, b->snd, (v & 0xfff) + (nv > 1 ? rand() % nv : 0));
+            AUDLOG("vo10: sequence line %c%c%03u -> %s", it.prefix & 0xff, it.prefix >> 8, it.line, id ? "1.0 FMOD dialog" : "not played");
+            return id;
+        }
+        AUDLOG("vo10: sequence line %c%c%03u: no loaded 1.0 bank holds it", it.prefix & 0xff, it.prefix >> 8, it.line);
+        return 0;
+    }
+    // per host tick: type 4 starts each line its delay after the previous one started; type 3 its delay after the
+    // previous one ended (1.0 FUN_00715d80 adds the line's length when it starts)
+    void seqTick()
+    {
+        std::lock_guard<std::recursive_mutex> l(mx);
+        DWORD now = GetTickCount();
+        for (size_t r = 0; r < runs.size();) {
+            Run& u = runs[r];
+            const DlgSeqItem& it = u.seq.items[u.next];
+            bool due = false;
+            if (u.seq.type == 4) due = now - u.prevStart >= it.delay;
+            else {
+                if (!u.prevEnd) {
+                    std::lock_guard<std::recursive_mutex> gl(g.mx);
+                    if (!g.plays.count(u.prevPid)) u.prevEnd = now;
+                }
+                due = u.prevEnd && now - u.prevEnd >= it.delay;
+            }
+            if (due) {
+                u.prevPid = playSeqLine(it, u.obj);
+                u.prevStart = u.seq.type == 4 ? u.prevStart + it.delay : now;
+                u.prevEnd = 0;
+                if (++u.next >= u.seq.items.size()) { runs.erase(runs.begin() + r); continue; }
+            }
+            ++r;
+        }
     }
 
     // the {DlgBank*, subsound} record an external source points at, if it is one of ours
@@ -1780,6 +1871,7 @@ inline uint32_t __cdecl hkPostExt(uint32_t ev, uint32_t obj, uint32_t flags, voi
         uint32_t id = g.playLine(ev, obj, flags, cb, cookie, b->snd, sub);
         Name10 x = b->idx();
         trace(ev ^ (uint32_t)sub, x.subName(sub), id ? "1.0 FMOD dialog" : "nothing (its 1.0 event is not loaded)");
+        if (id) vo.onLinePosted(b, sub, obj, id);   // the first line of an armed 1.0 sequence starts the rest
         return id;
     }
     return oPostExt(ev, obj, flags, cb, cookie, n, ext, pid);
@@ -1810,7 +1902,7 @@ inline void* __cdecl hkLoadFile(const char* path, uint32_t* size)
     std::lock_guard<std::recursive_mutex> l(vo.mx);
     vo.buildEvNames(g.sound10);
     uint8_t* p = nullptr;
-    if (dlgTranscode(in, vo.evNames, out, &st, &err, d30 ? &b30 : nullptr)) {
+    if (dlgTranscode(in, vo.evNames, out, &st, &err, d30 ? &b30 : nullptr, &vo.seqs)) {
         uint32_t got = 0;
         p = (uint8_t*)engineAlloc((uint32_t)out.size(), 0, &got, 0xffffffffu);
     } else
@@ -1842,6 +1934,12 @@ inline void* __fastcall hkDlgReq(void* pool, void*, const char** nameRec, uint32
 {
     const char* name = nameRec ? *nameRec : nullptr;
     uint8_t* dm = dialogMgr;
+    if (name) {   // a 1.0 sequence entry of that name is armed: its first line's post starts the rest (Vo::onLinePosted)
+        uint32_t cs = h131(name, false);
+        std::lock_guard<std::recursive_mutex> l(vo.mx);
+        auto s = vo.seqs.find(cs);
+        if (s != vo.seqs.end()) vo.armed = {s->second, GetTickCount(), true};
+    }
     if (name && dm) {
         uint32_t cs = h131(name, false), lo = h131(name, true);
         if (cs != lo) {
@@ -1882,6 +1980,7 @@ inline int tickAndDeliver()
         struct { void* cookie; uint32_t obj, pid, ev; } info = {d.second.cookie, d.second.obj, d.first, d.second.eventId};
         ((AkCallback)d.second.cb)(1, &info);   // AkEventCallbackInfo, as Wwise delivers it (3.0 LAB_01830120)
     }
+    vo.seqTick();   // 1.0 dialog sequences: the next line when due
     return (int)fin.size();
 }
 
