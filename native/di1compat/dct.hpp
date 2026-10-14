@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace dct {
@@ -122,6 +123,43 @@ inline int reseed(std::string& raw, const std::string& stringids, uint32_t seed,
     if (dropped) *dropped = (int)(d.keys.size() - o.keys.size());
     raw = dump(o);
     return (int)o.keys.size();
+}
+
+// Hashes of a table's keys (all 3.0 tables share SEED30, so hashes compare across them).
+inline bool hashes(const std::string& raw, std::unordered_set<uint32_t>& out)
+{
+    Dict d;
+    if (!load(raw, d)) return false;
+    for (auto& k : d.keys) out.insert(k.first);
+    return true;
+}
+
+// raw (a SEED30 table, e.g. reseed's output) + the keys of the 1.0 table raw10 (names from ids10) that neither raw
+// nor `have` (the hashes of 3.0's own tables) answers: 1.0's global text that 3.0 dropped -- 1.0 loaded lang/main
+// for every playset, 3.0's lang/main replaces it, and 3,154 of the 9,467 named 1.0 english keys are in no 3.0
+// english table (Load_Tips_Incredibles_01..28 among them). 3.0's own keys are never shadowed. -> keys added, or -1
+// if an input is not a table.
+inline int supplement(std::string& raw, const std::string& raw10, const std::string& ids10,
+                      const std::unordered_set<uint32_t>& have)
+{
+    Dict d, s, ids;
+    if (!load(raw, d) || d.initval != SEED30 || !load(raw10, s) || !load(ids10, ids)) return -1;
+    std::unordered_set<uint32_t> own;
+    for (auto& k : d.keys) own.insert(k.first);
+    std::unordered_map<uint32_t, const std::string*> names;
+    for (auto& [h, v] : ids.keys) names.emplace(h, &v);
+    int added = 0;
+    std::string b;
+    for (auto& [h, v] : s.keys) {
+        auto it = names.find(h);
+        if (it == names.end() || !latin1(*it->second, b)) continue;
+        uint32_t h30 = lookup2((const uint8_t*)b.data(), b.size(), SEED30);
+        if (have.count(h30) || !own.insert(h30).second) continue;
+        d.keys.emplace_back(h30, v);
+        ++added;
+    }
+    if (added) raw = dump(d);
+    return added;
 }
 
 }  // namespace dct
