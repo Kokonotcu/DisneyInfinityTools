@@ -87,9 +87,7 @@ static void safeCopy(char* out, size_t cap, const char* src)
 {
     // trace hooks pass values that may not be pointers; check first, so no first-chance AV reaches the vectored
     // handlers (CrabeLoader writes a dump per AV even when the __try below handles it)
-    MEMORY_BASIC_INFORMATION mbi;
-    if ((uintptr_t)src < 0x10000 || !VirtualQuery(src, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mbi.Protect) {
+    if (!sys::readable(src, 1)) {
         if (cap) out[0] = 0;
         return;
     }
@@ -669,13 +667,11 @@ static bool transcodeCho(oct::File& f, std::string& note)
 static std::vector<std::string> surfaceTable30()
 {
     std::vector<std::string> t;
-    MEMORY_BASIC_INFORMATION mbi;
-    auto ok = [&](uintptr_t p) { return p >= 0x10000 && VirtualQuery((void*)p, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT; };
     uintptr_t obj = *(const uintptr_t*)rt(0x02204830);
-    if (!ok(obj)) return t;
+    if (!sys::readable((const void*)obj, 0x14)) return t;
     uintptr_t arr = *(const uintptr_t*)(obj + 0xc);
     uint32_t n = *(const uint32_t*)(obj + 0x10);
-    if (n > 1024 || !ok(arr)) return t;
+    if (n > 1024 || !sys::readable((const void*)arr, 8 * (size_t)n)) return t;
     for (uint32_t i = 0; i < n; ++i) {
         char s[64];
         safeCopy(s, sizeof(s), *(const char* const*)(arr + 8 * i));
@@ -1351,14 +1347,7 @@ static void __fastcall hkAvRemove(void* self, void*, uint32_t a1)
 // words and their tagged targets); then, while that dtor runs, each Samurai::Node dtor (FUN_004ee5f0), entry release
 // (FUN_004b2780) and entry free (FUN_004e1a40) with the page protection of the node being destroyed before / after.
 // Reads only checked memory (CrabeLoader dumps every AV).
-static bool tdReadable(uintptr_t p, size_t n)
-{
-    MEMORY_BASIC_INFORMATION mbi;
-    if (p < 0x10000 || !VirtualQuery((void*)p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || !mbi.Protect ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-        return false;
-    return p + n <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-}
+static bool tdReadable(uintptr_t p, size_t n) { return sys::readable((const void*)p, n); }
 static uint32_t tdRd(uintptr_t p) { return tdReadable(p, 4) ? *(const uint32_t*)p : 0xDEADBEEF; }
 static uint32_t tdProt(uintptr_t p)
 {
@@ -2375,10 +2364,7 @@ static void __cdecl hkMerRegistry()
 static const char* cstr(const void* at, char* buf, size_t cap)   // the char* a CString member at 'at' holds
 {
     const char* p = nullptr;
-    MEMORY_BASIC_INFORMATION mbi;
-    if ((uintptr_t)at >= 0x10000 && VirtualQuery(at, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
-        !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && mbi.Protect)
-        p = *(const char* const*)at;
+    if (sys::readable(at, sizeof(p))) p = *(const char* const*)at;
     safeCopy(buf, cap, p);
     return buf;
 }
@@ -2452,8 +2438,7 @@ static void __fastcall hkMsgRecv(uint8_t* listener, void*, const char* data, uin
     char n[128], d[128];
     if (lockTraceRoom()) {
         const void* node = nullptr;
-        MEMORY_BASIC_INFORMATION mbi;
-        if (VirtualQuery(listener + 0x20, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT) node = *(void* const*)(listener + 0x20);
+        if (sys::readable(listener + 0x20, sizeof(node))) node = *(void* const*)(listener + 0x20);
         safeCopy(d, sizeof(d), data);
         logf("message recv '%s' data '%s'", node ? cstr((const uint8_t*)node + 0x4c, n, sizeof(n)) : "?", d);
     }

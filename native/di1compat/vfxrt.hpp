@@ -60,14 +60,7 @@ static std::mutex g_traceLock;
 static std::map<uint64_t, int> g_traceSeen;
 static LONG g_traceLines;
 
-static bool readable(const void* p, size_t n)
-{
-    MEMORY_BASIC_INFORMATION mbi;
-    if ((uintptr_t)p < 0x10000 || !VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mbi.Protect)
-        return false;
-    return (uintptr_t)p + n <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-}
+using sys::readable;
 
 static void trace(const char* what, uint32_t key, const char* name, const float* pl, uint32_t site, const char* note = "")
 {
