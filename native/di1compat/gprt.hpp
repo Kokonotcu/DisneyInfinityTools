@@ -20,7 +20,9 @@ typedef char(__fastcall* ZoneBoolFn)(void* mgr, void* edx, const char* key, uint
 typedef const char*(__fastcall* RibbonNameFn)(void* ecx, void* edx, int player, int a2);
 typedef int(__fastcall* ShowRibbonFn)(uint8_t* self, void* edx, int player);
 typedef void*(__fastcall* ScreenReqFn)(void* ui, void* edx, const char* name, int a2, int player);
-typedef char(__fastcall* ScreenPushFn)(void* ui, void* edx, void* req);
+typedef void(__fastcall* ThisFn)(void* self, void* edx);
+typedef void*(__fastcall* StrAssignFn)(void* str, void* edx, const char* v);
+typedef int(__fastcall* AddScreenFn)(void* ui, void* edx, void* req);
 typedef char(__cdecl* CanOpenFn)(int player);
 typedef bool(__cdecl* BlockedFn)();
 static RibbonNameFn g_ribbonName;
@@ -39,25 +41,32 @@ static const char* __fastcall hkRibbonName(void* ecx, void* edx, int player, int
     return r && zonePlayset10() ? "SelectMenu" : r;
 }
 
-// 3.0's MissionLog branch of FUN_00b68f60 (00b68fdc..00b69048) with the 1.0 ribbon, minus its pauseGame parameter:
-// 1.0's opener passed none and selectmenu.lua pauses in onEnter (Pause_PauseGame).
+// The opener for "SelectMenu", with 3.0's own gates of FUN_00b68f60's MissionLog branch (FUN_014362e0 may the player
+// open UI, FUN_00db4110 playset 7 blocked). That branch opens MissionLog through a UI event template (FUN_0156dde0
+// + FUN_0156df40), but no event names SelectMenu in either game (eventtoscreenmap.lua 1.0 / 3.0): 1.0's opener
+// FUN_00c37230 added the screen by name (UI manager vtable +0x6c). 3.0's add-by-name is the screen request
+// FUN_00b670a0 builds for the ribbon: ctor FUN_0155a630, name CString +0x40 (assign FUN_0041a250), player +0x6c,
+// FUN_015699b0 on [0x02289E88] (thiscall, ret 4; -1 = refused), dtor FUN_0155c270. No pauseGame parameter: 1.0's
+// opener passed none and selectmenu.lua pauses in onEnter (Pause_PauseGame).
 static int __fastcall hkShowRibbon(uint8_t* self, void* edx, int player)
 {
     const char* name = ((RibbonNameFn)rt(0x00B42540))(*(void**)rt(0x0221CEA0), nullptr, player, 1);
     if (!name || strcmp(name, "SelectMenu")) return g_showRibbon(self, edx, player);
     if (!((CanOpenFn)rt(0x014362E0))(player) || ((BlockedFn)rt(0x00DB4110))()) return -1;
-    void* ui = *(void**)rt(0x02289E9C);
-    uint8_t* req = (uint8_t*)((ScreenReqFn)rt(0x0156DDE0))(ui, nullptr, "SelectMenu", 0, player);
-    logf("ribbon: SelectMenu for player %d -> %s", player, req ? "opened" : "no screen request");
-    if (!req) return -1;
-    *(uint32_t*)(self + 0x13F2C + player * 4) = *(uint32_t*)(req + 0x2C);
-    ((ScreenPushFn)rt(0x0156DF40))(ui, nullptr, req);
+    alignas(8) uint8_t req[0x100] = {};   // the ctor sets 0x00..0x93
+    ((ThisFn)rt(0x0155A630))(req, nullptr);
+    ((StrAssignFn)rt(0x0041A250))(req + 0x40, nullptr, "SelectMenu");
+    *(int*)(req + 0x6C) = player;
+    int h = ((AddScreenFn)rt(0x015699B0))(*(void**)rt(0x02289E88), nullptr, req);
+    ((ThisFn)rt(0x0155C270))(req, nullptr);
+    logf("ribbon: SelectMenu for player %d -> screen %d", player, h);
     return -1;
 }
 
-// 1.0's ProgressLog screen is 3.0's MissionLog: tutorial element 62 is "ProgressLog" in 1.0 (FUN_00ba3950) and
-// "MissionLog" in 3.0 (FUN_00de3a60), and 3.0's containerdata.lua has no ProgressLog. selectmenu.lua's Mission Log
-// entry asks for it by the 1.0 name (UI_TriggerEvent -> FUN_0156dde0).
+// 1.0's ProgressLog screen is 3.0's MissionLog: 1.0's eventtoscreenmap.lua maps the event ProgressLog to the
+// ProgressLog screen, 3.0's has no ProgressLog and maps MissionLog to MissionLog; tutorial element 62 is "ProgressLog"
+// in 1.0 (FUN_00ba3950) and "MissionLog" in 3.0 (FUN_00de3a60). selectmenu.lua's Mission Log entry asks for the 1.0
+// event (UI_TriggerEvent -> FUN_0156dde0, the event-template request).
 static void* __fastcall hkScreenReq(void* ui, void* edx, const char* name, int a2, int player)
 {
     if (name && !strcmp(name, "ProgressLog")) name = "MissionLog";
