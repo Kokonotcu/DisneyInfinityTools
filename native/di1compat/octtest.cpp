@@ -299,6 +299,31 @@ int main(int argc, char** argv)
         fwrite(t.data(), 1, t.size(), stdout);
         return 0;
     }
+    if (argc > 4 && std::string(argv[1]) == "--avperc") {   // --avperc <1.0 avatar.btx> <3.0 avatar.btx> <zone>: npc::percAdds
+        std::vector<npc::PercList> l10, l30;
+        std::string why;
+        if (!npc::percLists(slurp(argv[2]), l10, &why) || !npc::percLists(slurp(argv[3]), l30, &why)) { printf("btx eval failed: %s\n", why.c_str()); return 1; }
+        auto adds = npc::percAdds(l10, l30, argv[4]);
+        std::set<std::string> lines;
+        auto names = [](const npc::PercList& l) {
+            std::set<std::string> s;
+            for (auto& e : l) { if (!e.on.empty()) s.insert(npc::lower(e.on)); if (!e.off.empty()) s.insert(npc::lower(e.off)); }
+            std::string o;
+            for (auto& n : s) o += (o.empty() ? "" : ",") + n;
+            return o;
+        };
+        for (size_t j = 0; j < l30.size(); ++j) {
+            if (adds[j].first < 0) continue;
+            std::map<std::string, std::string> a;
+            for (auto& [n, h] : adds[j].second) a[npc::lower(n)] = n + (h ? "|1" : "|0");
+            std::string s;
+            for (auto& [k, v] : a) s += (s.empty() ? "" : ",") + v;
+            lines.insert("L " + std::to_string(l30[j].size()) + " [" + names(l30[j]) + "] <- " + std::to_string(l10[adds[j].first].size()) + ": " + s);
+        }
+        printf("%zu 1.0 lists, %zu 3.0 lists\n", l10.size(), l30.size());
+        for (auto& l : lines) printf("%s\n", l.c_str());
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--gamedb") {   // --gamedb <1.0 DataMap> <3.0 ToyBox DataMap>: npc::gamedb30
         npc::DataMap m10, m30;
         if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), m30)) { printf("DataMap eval failed\n"); return 1; }

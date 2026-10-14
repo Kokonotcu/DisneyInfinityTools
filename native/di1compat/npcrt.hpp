@@ -69,6 +69,129 @@ static std::vector<std::pair<std::string, std::string>> route(const std::vector<
     return mine;
 }
 
+// ---- avperc10: the 1.0 avatar's perception policy in a 1.0 playset (npc::percAdds) ----
+// ModApplyPerceptionMode (vtable 0x1dc3a74). Its parse FUN_0154a470 resolves names through the PerceptionInfo name map
+// (FUN_01496720, thiscall on [0x2289700], case-sensitive, -1 unknown) into plain ids [+0x1c]/[+0x20] and zone records
+// [+0x34]/[+0x38] (12 B: ifMatch, ifNot, matched, hostonly). Apply FUN_0152ae80 (thiscall a1, a2, actor; ret 0xc; a2 == -7
+// does nothing) enables them on the actor's perception component (FUN_0069ecd0(actor, [0x2260044])) with the refcounted
+// FUN_013f3ba0, a hostonly record only on the host ([0x228db60] vtable +0x20 networked, +0x24 host); remove FUN_0152afa0
+// disables them (FUN_013c9e50). The 1.0 additions ride on the same two calls. A parsed modifier is matched to its 3.0
+// avatar.btx list by its ids (a -1 parsed before the name existed matches any id).
+typedef uint32_t(__fastcall* PercFn)(uint8_t* self, void* edx, int a1, int a2, void* actor);
+typedef int(__fastcall* PercIdFn)(void* self, void* edx, const char* name);
+typedef void(__fastcall* PercOnFn)(void* comp, void* edx, int id);
+static PercFn g_percApply, g_percRemove;
+static std::vector<npc::PercList> g_pl10, g_pl30;                // distinct avatar.btx lists (loaded with the playset)
+struct PercMod { const void* plain; const void* zone; int list; };
+static std::map<uint8_t*, PercMod> g_percMod;                     // modifier -> its 3.0 list (-1: none)
+static std::map<std::string, std::vector<npc::PercAdds>> g_percZone;   // zone -> additions per 3.0 list
+static std::map<std::pair<void*, uint8_t*>, std::vector<std::vector<int>>> g_percOn;   // ids enabled per apply
+
+static std::string zoneName()
+{
+    uint8_t* gm = *(uint8_t**)rt(0x0225F548);
+    if (!gm) return "";
+    typedef const char*(__stdcall * ZoneNameFn)(uint32_t zone, uint32_t flag);
+    const char* n = ((ZoneNameFn)rt(0x01391040))(*(uint32_t*)(gm + 0x19c), 1);   // as FUN_0154a470 reads it
+    return n ? npc::lower(n) : "";
+}
+
+static int percId(const std::string& name)
+{
+    void* pi = *(void**)rt(0x02289700);
+    return pi && !name.empty() ? ((PercIdFn)rt(0x01496720))(pi, nullptr, name.c_str()) : -1;
+}
+
+// the 3.0 list a parsed modifier holds (caller holds g_dbLock)
+static int percList(uint8_t* self)
+{
+    const int* plain = *(const int**)(self + 0x1c);
+    const int* zone = *(const int**)(self + 0x34);
+    uint32_t np = *(uint32_t*)(self + 0x20), nz = *(uint32_t*)(self + 0x38);
+    auto c = g_percMod.find(self);
+    if (c != g_percMod.end() && c->second.plain == plain && c->second.zone == zone) return c->second.list;
+    int found = -1, hits = 0;
+    for (size_t j = 0; j < g_pl30.size(); ++j) {
+        uint32_t p = 0, z = 0;
+        bool ok = true;
+        auto same = [](int parsed, int now) { return parsed == -1 || parsed == now; };
+        for (auto& e : g_pl30[j]) {
+            if (e.kind == 'p') ok = ok && p < np && same(plain[p++], percId(e.on));
+            else ok = ok && z < nz && same(zone[3 * z], percId(e.on)) && same(zone[3 * z + 1], percId(e.off)) && ++z;
+            if (!ok) break;
+        }
+        if (ok && p == np && z == nz) { found = (int)j; ++hits; }
+    }
+    int r = hits == 1 ? found : -1;
+    g_percMod[self] = {plain, zone, r};
+    return r;
+}
+
+static uint32_t __fastcall hkPercApply(uint8_t* self, void*, int a1, int a2, void* actor)
+{
+    uint32_t r = g_percApply(self, nullptr, a1, a2, actor);
+    if (a2 == -7 || !(r & 0xff) || !actor) return r;
+    std::vector<std::pair<int, bool>> ids;
+    {
+        std::lock_guard<std::mutex> lock(g_dbLock);
+        if (!g_dbActive || g_pl30.empty()) return r;
+        int j = percList(self);
+        if (j < 0) return r;
+        std::string z = zoneName();
+        auto zi = g_percZone.find(z);
+        if (zi == g_percZone.end()) {
+            zi = g_percZone.emplace(z, std::vector<npc::PercAdds>()).first;
+            for (auto& [from, add] : npc::percAdds(g_pl10, g_pl30, z)) {
+                zi->second.push_back(add);
+                if (add.empty()) continue;
+                std::string line;
+                for (auto& [n, h] : add) line += " " + n + (h ? "[hostonly]" : "") + "=" + std::to_string(percId(n));
+                logf("avperc10 zone %s: 3.0 avatar list %u (%u entries) from 1.0 list %d gets%s", z.c_str(),
+                     (unsigned)(zi->second.size() - 1), (unsigned)g_pl30[zi->second.size() - 1].size(), from, line.c_str());
+            }
+        }
+        for (auto& [n, h] : zi->second[j]) {
+            int id = percId(n);
+            if (id >= 0) ids.push_back({id, h});
+        }
+    }
+    if (ids.empty()) return r;
+    typedef void*(__cdecl * CompFn)(void* actor, uint32_t type);
+    void* comp = ((CompFn)rt(0x0069ECD0))(actor, *(uint16_t*)rt(0x02260044));
+    if (!comp) return r;
+    bool host = true;
+    if (void** net = *(void***)rt(0x0228DB60)) {
+        typedef uint8_t(__fastcall * BoolFn)(void* self, void* edx);
+        void** vt = *(void***)net;
+        if (((BoolFn)vt[8])(net, nullptr)) host = ((BoolFn)vt[9])(net, nullptr) != 0;
+    }
+    std::vector<int> on;
+    for (auto& [id, h] : ids)
+        if (!h || host) { ((PercOnFn)rt(0x013F3BA0))(comp, nullptr, id); on.push_back(id); }
+    std::lock_guard<std::mutex> lock(g_dbLock);
+    g_percOn[{comp, self}].push_back(on);
+    return r;
+}
+
+static uint32_t __fastcall hkPercRemove(uint8_t* self, void*, int a1, int a2, void* actor)
+{
+    uint32_t r = g_percRemove(self, nullptr, a1, a2, actor);
+    if (a2 == -7 || !actor) return r;
+    typedef void*(__cdecl * CompFn)(void* actor, uint32_t type);
+    void* comp = ((CompFn)rt(0x0069ECD0))(actor, *(uint16_t*)rt(0x02260044));
+    std::vector<int> off;
+    {
+        std::lock_guard<std::mutex> lock(g_dbLock);
+        auto it = comp ? g_percOn.find({comp, self}) : g_percOn.end();
+        if (it == g_percOn.end()) return r;
+        off.swap(it->second.back());
+        it->second.pop_back();
+        if (it->second.empty()) g_percOn.erase(it);
+    }
+    for (int id : off) ((PercOnFn)rt(0x013C9E50))(comp, nullptr, id);
+    return r;
+}
+
 // The 1.0 DataMap of playset 'name' with no Playset record in the engine: build its supplement (once per playset).
 static void prepare(void* self, const char* name)
 {
@@ -87,6 +210,17 @@ static void prepare(void* self, const char* name)
     g_dbPlayset = n;
     logf("gamedb30 %s: 1.0 DataMap (%u records), %u Playset tables, %u actors with 3.0 tables", name, (unsigned)m10.size(),
          (unsigned)g_db->playset.size(), (unsigned)g_db->actor.size());
+    g_pl10.clear();
+    g_pl30.clear();
+    if (g_cfg.avperc10) {   // the avatar trees: 1.0's from the 1.0 install, 3.0's (the one its DNA names) from 3.0
+        std::string a10, a30;
+        if (!read10s("characters/avatar.btx", a10) || !read30("Characters/Avatar.btx", a30) || !npc::percLists(a10, g_pl10, &why) ||
+            !npc::percLists(a30, g_pl30, &why)) {
+            g_pl10.clear();
+            g_pl30.clear();
+            logf("avperc10: avatar.btx unreadable (%s)", why.c_str());
+        } else logf("avperc10: %u 1.0 / %u 3.0 avatar perception lists", (unsigned)g_pl10.size(), (unsigned)g_pl30.size());
+    }
     // playset30: its Playset record as one more DataMap, served from the session (hkOpen) -- the playset-standard
     // includes not in Toy Box come from the smallest other 3.0 DataMap (identical in all 8 that define them)
     std::string bo;
@@ -170,6 +304,9 @@ static void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
         if (!name || !g_db || g_dbPlayset != npc::lower(name)) return;
         g_dbActive = false;
         g_dbRouted.clear();
+        g_percMod.clear();
+        g_percZone.clear();
+        g_percOn.clear();
         done.swap(g_dbOwned);
         psMap = g_psPath;
     }
@@ -204,6 +341,10 @@ inline void install()
     if (g_cfg.gamedb30) {
         hook("DataMap record include (gamedb30)", 0x0070D730, "6AFF68????????64A100000000", (void*)&hkInclude, (void**)&g_include);
         hook("DataMap playset unload (gamedb30)", 0x0070DF70, "566A0068????????8BF1", (void*)&hkPlaysetUnload, (void**)&g_playsetUnload);
+        if (g_cfg.avperc10) {
+            hook("perception mode apply (avperc10)", 0x0152AE80, "51837C240CF9578BF9", (void*)&hkPercApply, (void**)&g_percApply);
+            hook("perception mode remove (avperc10)", 0x0152AFA0, "837C2408F9568BF1", (void*)&hkPercRemove, (void**)&g_percRemove);
+        }
     }
 }
 

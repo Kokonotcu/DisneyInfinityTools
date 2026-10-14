@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -284,7 +285,8 @@ inline int skinRemap(oct::File& f, std::string& vbuf, const std::string& ibuf, c
 
 // ---- DataMaps: the 3.0 GameDB tables a 1.0 DataMap cannot name ----
 // A DataMap chunk is one Lua 5.1 function of NEWTABLE / LOADK / SETTABLE / SETLIST / SETGLOBAL / RETURN only (all 16
-// shipped DataMaps of both games, luaops.py), so it is evaluated here without a Lua state.
+// shipped DataMaps of both games, luaops.py), so it is evaluated here without a Lua state. Both avatar.btx add only
+// LOADBOOL.
 struct LVal { char t = 0; std::string s; double n = 0; int tab = -1; };   // t: 0 nil, 's', 'n', 'b', 't'
 struct LTab { std::vector<std::pair<LVal, LVal>> kv; };
 
@@ -335,6 +337,7 @@ inline bool luaEval(const std::string& b, std::vector<LTab>& tabs, std::vector<s
         auto rk = [&](uint32_t x) -> const LVal& { return x & 0x100 ? K.at(x & 0xff) : R.at(x); };
         if (A >= R.size()) return fail("register");
         if (op == 1) R[A] = K.at(Bx);                                                   // LOADK
+        else if (op == 2) { R[A] = LVal{'b', "", (double)(B != 0)}; if (C) ++pc; }      // LOADBOOL (.btx)
         else if (op == 10) { R[A] = LVal{'t', "", 0, (int)tabs.size()}; tabs.emplace_back(); }   // NEWTABLE
         else if (op == 9) {                                                              // SETTABLE
             if (R[A].t != 't') return fail("SETTABLE on a non-table");
@@ -588,6 +591,112 @@ inline bool psDna30(const std::string& dna10, const std::string& base30, std::st
     if (n != 1) return fail("rewrite");
     if (why) *why = from + " -> " + to;
     return true;
+}
+
+// ---- avperc10: the 1.0 avatar's perception policy in a 1.0 playset ----
+// A BehaviorTree modifier Apply_PerceptionMode lists perceptions as "Name" (always), {prefixes, ifMatch, ifNot
+// [, "hostonly"]} (3.0 parser FUN_0154a470: the zone name, lower-case, against each ','/' '-separated prefix by strstr
+// == 0; ifMatch when one matches, else ifNot; 0 = none) or {layer, "FullBody"}. 3.0 rewrote the avatar's standard list:
+// 1.0 enables building lots, delivery boxes, decorations everywhere but adv_ zones (["adv_", 0, "BuildingCustomize"]), 3.0
+// only in rumpus/tbx_ (["rumpus,tbx_", "BuildingCustomize", 0]); 1.0's in_-only RecruitHero / DismissHero /
+// SummonHelicopter / Inc_Driving and AvatarChest are gone from it. In IN_City the 3.0 avatar (served as 3.0 DNA, psdna30)
+// therefore runs none of them.
+// A 3.0 list descends from the 1.0 list sharing the most zone-entry perception names (case-insensitive; unique, > 0): the
+// 70-entry standard list from 1.0's 50-entry one (11 shared, next 7); the 25-entry list ties (8 / 8) and keeps 1.0's
+// zone entries verbatim anyway. Additions = what the 1.0 list enables in the zone and the 3.0 list does not.
+struct PercEntry { char kind = 0; std::string on, off, pre; bool host = false; };   // kind 'p' plain, 'z' zone entry
+using PercList = std::vector<PercEntry>;
+using PercAdds = std::vector<std::pair<std::string, bool>>;                           // name, hostonly
+
+// Every distinct Perceptions list of a .btx chunk, in walk order (tables in insertion order, shared tables once).
+inline bool percLists(const std::string& chunk, std::vector<PercList>& out, std::string* why = nullptr)
+{
+    std::vector<LTab> tabs;
+    std::vector<std::pair<std::string, LVal>> g;
+    if (!luaEval(chunk, tabs, g, why)) return false;
+    std::set<int> seen;
+    std::set<std::string> have;
+    auto list = [&](const LTab& t) {
+        PercList l;
+        std::string key;
+        for (auto& [k, v] : t.kv) {
+            PercEntry e;
+            if (v.t == 's') { e.kind = 'p'; e.on = v.s; }
+            else if (v.t == 't') {
+                const auto& kv = tabs[v.tab].kv;
+                auto at = [&](double i) -> const LVal* { for (auto& [a, b] : kv) if (a.t == 'n' && a.n == i) return &b; return nullptr; };
+                const LVal *p = at(1), *m = at(2), *n = at(3), *f = at(4);
+                if (!p || !m || !n || p->t != 's') continue;                          // a layer {name, "FullBody"}
+                e.kind = 'z';
+                e.pre = p->s;
+                if (m->t == 's') e.on = m->s;
+                if (n->t == 's') e.off = n->s;
+                e.host = f && f->t == 's' && lower(f->s) == "hostonly";
+            } else continue;
+            key += std::string(1, e.kind) + e.pre + '\x1f' + e.on + '\x1f' + e.off + (e.host ? "!" : "") + '\x1e';
+            l.push_back(e);
+        }
+        if (have.insert(key).second) out.push_back(l);
+    };
+    std::function<void(int)> walk = [&](int t) {
+        if (!seen.insert(t).second) return;
+        for (auto& [k, v] : tabs[t].kv) {
+            if (v.t != 't') continue;
+            if (k.t == 's' && k.s == "Perceptions") list(tabs[v.tab]);
+            walk(v.tab);
+        }
+    };
+    for (auto& [k, v] : g) if (v.t == 't') walk(v.tab);
+    return true;
+}
+
+// lower-case name -> (name, hostonly) a list enables in a zone (zone lower-case)
+inline std::map<std::string, std::pair<std::string, bool>> percActive(const PercList& l, const std::string& zone)
+{
+    std::map<std::string, std::pair<std::string, bool>> out;
+    for (auto& e : l) {
+        if (e.kind == 'p') { out.emplace(lower(e.on), std::make_pair(e.on, false)); continue; }
+        bool hit = false;
+        for (size_t a = 0, b; a < e.pre.size() && !hit; a = b + 1) {
+            b = e.pre.find_first_of(", ", a);
+            if (b == std::string::npos) b = e.pre.size();
+            if (b > a && !zone.compare(0, b - a, e.pre, a, b - a)) hit = true;   // the token as written
+        }
+        const std::string& n = hit ? e.on : e.off;
+        if (!n.empty()) out.emplace(lower(n), std::make_pair(n, e.host));
+    }
+    return out;
+}
+
+// per 3.0 list: the 1.0 list it descends from (-1: none) and the additions for the zone
+inline std::vector<std::pair<int, PercAdds>> percAdds(const std::vector<PercList>& l10, const std::vector<PercList>& l30, const std::string& zone)
+{
+    auto zset = [](const PercList& l) {
+        std::set<std::string> s;
+        for (auto& e : l) if (e.kind == 'z') { if (!e.on.empty()) s.insert(lower(e.on)); if (!e.off.empty()) s.insert(lower(e.off)); }
+        return s;
+    };
+    std::vector<std::set<std::string>> z10;
+    for (auto& l : l10) z10.push_back(zset(l));
+    std::vector<std::pair<int, PercAdds>> out;
+    std::string zl = lower(zone);
+    for (auto& l : l30) {
+        std::set<std::string> z = zset(l);
+        int best = -1;
+        size_t bs = 0, second = 0;
+        for (size_t i = 0; i < l10.size(); ++i) {
+            size_t s = 0;
+            for (auto& n : z10[i]) s += z.count(n);
+            if (s > bs) { second = bs; bs = s; best = (int)i; }
+            else if (s > second) second = s;
+        }
+        if (bs == 0 || second == bs) { out.push_back({-1, {}}); continue; }
+        auto a10 = percActive(l10[best], zl), a30 = percActive(l, zl);
+        PercAdds add;
+        for (auto& [k, v] : a10) if (!a30.count(k)) add.push_back(v);
+        out.push_back({best, add});
+    }
+    return out;
 }
 
 }  // namespace npc
