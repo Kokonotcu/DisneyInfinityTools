@@ -367,6 +367,8 @@ struct Play {
     uint32_t born;     // tick number at start: its end is delivered one tick later at the earliest (3.0 FUN_01830270
                        // stores the playing id in the cookie record after the post returns; Wwise ends events no sooner)
     void* fsb;         // a dialog line: the 1.0 bank whose subsound it plays
+    DWORD t0 = GetTickCount();   // audiotrace10: started at
+    bool stopReq = false;        // audiotrace10: 3.0 asked for its stop (StopPlayingID / action)
 };
 struct V3 { float v[3]; };
 
@@ -731,8 +733,9 @@ struct Host {
         std::lock_guard<std::recursive_mutex> l(mx);
         auto it = plays.find(id);
         if (it == plays.end()) return false;
-        if (action == 1 || action == 2) { if (it->second.ev) f.Event_SetPaused(it->second.ev, action == 1); }
-        else if (it->second.ev) f.Event_Stop(it->second.ev, 0);   // EVENTFINISHED arrives through the callback
+        if (action == 1 || action == 2) { if (it->second.ev) f.Event_SetPaused(it->second.ev, action == 1); return true; }
+        it->second.stopReq = true;
+        if (it->second.ev) f.Event_Stop(it->second.ev, 0);   // EVENTFINISHED arrives through the callback
         else { std::lock_guard<std::mutex> d(doneMx); done.push_back(id); }
         return true;
     }
@@ -1989,6 +1992,19 @@ inline int tickAndDeliver()
             {d.p.cookie, d.p.obj, d.id, d.p.eventId, d.ms, d.ms, 0, 0, 1};   // AkDurationCallbackInfo (3.0 LAB_01830120 type 8)
         ((AkCallback)d.p.cb)(8, &info);
     }
+    if (cfg.trace)   // how long each 1.0 sound played and what ended it, first 4 ends of each name (blasts inaudible?)
+        for (auto& d : fin) {
+            static std::unordered_map<uint32_t, int> seen;
+            if (d.second.fsb || seen[d.second.eventId]++ >= 4) continue;
+            std::string n;
+            {
+                std::lock_guard<std::recursive_mutex> l(g.mx);
+                auto e = g.byId.find(d.second.eventId);
+                if (e != g.byId.end()) n = e->second.name;
+            }
+            AUDLOG("audio10: %s ended after %lu ms (%s)", n.c_str(), GetTickCount() - d.second.t0,
+                   d.second.stopReq ? "stopped by 3.0" : d.second.ev ? "finished or stolen" : "retired");
+        }
     for (auto& d : fin) {
         if (!(d.second.flags & 1) || !d.second.cb) continue;   // AK_EndOfEvent requested
         struct { void* cookie; uint32_t obj, pid, ev; } info = {d.second.cookie, d.second.obj, d.first, d.second.eventId};

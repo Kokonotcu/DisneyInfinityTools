@@ -1658,6 +1658,62 @@ static int fmodTest(int argc, char** argv)
         } else
             printf("CUERUN %s: no prompt\n", c.c_str());
     }
+    // EV_RUN=<event>[,<event>...]: play each 15 units in front of the listener, as the dock cutscene's blasts are
+    // in-game; report its volume, 3D range, category chain and FMOD state (8 playing, 0x10 channels active) over 3 s
+    if (const char* er = getenv("EV_RUN")) {
+        typedef audio::FR(__stdcall* StateFn)(void*, unsigned*);
+        StateFn getState = (StateFn)GetProcAddress(GetModuleHandleA("fmod_event.dll"), "FMOD_Event_GetState");
+        audio::oListener = [](const float*, uint32_t) { return 1; };
+        audio::oSetPos = [](uint32_t, const float*) { return 1; };
+        const float lis[9] = {0, 0, 1, 0, 1, 0, 0, 0, 0}, at[6] = {0, 0, -15, 0, 0, 1};   // Wwise z = -engine z
+        audio::hkListener(lis, 0);
+        audio::hkSetPos(200, at);
+        std::string all = er;
+        for (size_t b = 0, e; b < all.size(); b = e + 1) {
+            e = all.find(',', b);
+            if (e == std::string::npos) e = all.size();
+            std::string n = all.substr(b, e - b);
+            uint32_t id = audio::g.play(audio::fnv1(n), 200, 1, (void*)cb, nullptr);
+            void* ev = nullptr;
+            std::string chain;
+            float vol = -1, dmin = -1, dmax = -1;
+            {
+                std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+                auto it = audio::g.plays.find(id);
+                if (it != audio::g.plays.end()) ev = it->second.ev;
+                if (ev) {
+                    audio::g.f.Event_GetPropertyByIndex(ev, 1, &vol, 1);    // FMOD_EVENTPROPERTY_VOLUME
+                    audio::g.f.Event_GetPropertyByIndex(ev, 17, &dmin, 1);  // 3D_MINDISTANCE
+                    audio::g.f.Event_GetPropertyByIndex(ev, 18, &dmax, 1);  // 3D_MAXDISTANCE
+                    void* c = nullptr;
+                    audio::g.f.Event_GetCategory(ev, &c);
+                    for (int d = 0; c && d < 8; ++d) {
+                        char* cn = nullptr;
+                        float cv = -1;
+                        audio::g.f.EventCategory_GetInfo(c, nullptr, &cn);
+                        audio::g.f.EventCategory_GetVolume(c, &cv);
+                        chain += std::string(chain.empty() ? "" : " < ") + (cn ? cn : "?") + " " + std::to_string(cv).substr(0, 4);
+                        void* parent = nullptr;
+                        if (audio::g.f.EventCategory_GetParentCategory(c, &parent)) break;
+                        c = parent;
+                    }
+                }
+            }
+            printf("EVRUN %s: id %u, volume %.2f, 3D %.1f..%.1f, categories %s\n", n.c_str(), id, vol, dmin, dmax, chain.c_str());
+            unsigned was = 0xffffffff;
+            for (int t = 0; t <= 3000 && ev; t += 50) {
+                unsigned st = 0;
+                {
+                    std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+                    auto it = audio::g.plays.find(id);
+                    if (it == audio::g.plays.end() || !it->second.ev) { printf("EVRUN %s ended at %d ms\n", n.c_str(), t); break; }
+                    if (getState) getState(ev, &st);
+                }
+                if (st != was) { printf("EVRUN %s at %d ms: state %x\n", n.c_str(), t, st); was = st; }
+                run(50);
+            }
+        }
+    }
 
     // a 'virtual' event at its playback limit (fire_loop: MAX_PLAYBACKS_BEHAVIOR 5, 'just fail if quietest'): with the
     // listener at the origin and the limit filled at 10 m, a post at 30 m fails and one at 2 m gets a voice by stealing
