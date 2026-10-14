@@ -348,6 +348,15 @@ inline oct::Rec keyedNode(oct::File& f, uint16_t level, const std::string& n, in
     return r;
 }
 
+// A variant processor's Input / Output pair as a VariantGroup (cfg variant10). Every *VariantProcessor of both shipped
+// corpora has its pair in a VariantGroup of its SubNetwork (choreographies + exploders + motions: 1.0 324/324, 3.0
+// 39,182/39,182; for the three kinds made here, DilationToTransform / DilationToMatrix4x4 / TransformToMatrix4x4,
+// 3.0 lists it [Input, Output] in 38,981 of 39,071, variants.py); the reader (FUN_004be770 via FUN_004cf2a0) links the
+// members (FUN_00614c10) and the DataNode dtor (FUN_005076f0) unlinks them. skin30 / worldTransform30 made such
+// processors without one: the only ungrouped variant processors anywhere, and present in every 1.0 choreography with
+// a locator (TS_WaterSplashdown among them, whose unload faulted in-game 2026-10-13).
+inline bool g_variantGroups = true;
+
 // One SubNetwork's header tree, DataNodes, processors and basis conversions, with appends that keep every existing
 // index: new headers go at the end of the layout, nodes and processors at the end of their pools (the 3.0 exporter's
 // constructs below are additions beside the 1.0 nodes, never rewrites of them).
@@ -355,6 +364,7 @@ struct SnEdit {
     oct::File& f;
     size_t sn;
     long hsAt = -1, hsiAt = -1, hlAt = -1, dnPool = -1, pnPool = -1;
+    std::vector<oct::Rec> addVg;
     struct DN { int header = -1, basis = 0; std::string type; };
     std::vector<DN> dns;
     int npn = 0;
@@ -475,6 +485,9 @@ struct SnEdit {
         addPn.push_back(f.nameScalar(5, f.addName("Type"), type));
         addPn.push_back(f.intList(5, "DataNodeRefs", refs));
         addPn.push_back(nameList(f, 5, "DataNodeAttributes", attrs));
+        size_t tl = type.size(), vl = strlen("VariantProcessor");
+        if (g_variantGroups && refs.size() == 2 && tl > vl && type.compare(tl - vl, vl, "VariantProcessor") == 0)
+            addVg.push_back(f.intList(4, "VariantGroup", refs));   // refs = {Input, Output}
     }
     // Basis b to the root basis 0 as converter steps (converter DataNode, target basis): directly when a b -> 0
     // conversion exists, else through the parent basis. found = false when no chain exists.
@@ -509,6 +522,14 @@ struct SnEdit {
         }
         f.recs.insert(f.recs.begin() + dnEnd, addDn.begin(), addDn.end());
         if (pnPool >= 0 && pnPool < dnPool) f.recs.insert(f.recs.begin() + f.blockEnd(pnPool), addPn.begin(), addPn.end());
+        if (addVg.empty()) return;
+        // after the other inserts: find the pool again
+        for (size_t i = sn + 1, end = f.blockEnd(sn); i < end; ++i)
+            if (f.recs[i].level == 3 && f.name(f.recs[i]) == "VariantGroupPool") {
+                f.recs.insert(f.recs.begin() + f.blockEnd(i), addVg.begin(), addVg.end());
+                return;
+            }
+        // ponytail: a SubNetwork without a VariantGroupPool keeps its processors ungrouped (none seen in 1.0 files)
     }
 };
 

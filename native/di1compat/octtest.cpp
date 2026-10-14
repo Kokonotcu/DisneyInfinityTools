@@ -771,6 +771,114 @@ static std::vector<std::filesystem::path> files(const std::filesystem::path& ass
 static bool tuple(const std::string& b) { return b.size() >= 4 && oct::u((const uint8_t*)b.data(), 4) == oct::MAGIC; }
 }  // namespace scene
 
+// --variants <1.0 assets> <3.0 assets>: octx::g_variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
+// the plugin's octx steps (addAssetPool, skin30, locator30, collision30, addAllCounts): every *VariantProcessor must sit
+// in a VariantGroup == [Input, Output], VariantGroupCount / VariantMemberCount must match the pool, the file must
+// re-parse identically. Twins: each group made for a 1.0 file must name, by DataNode header path, the members of a
+// group of the 3.0 twin's same-index SubNetwork.
+static int variantsTest(char** a)
+{
+    using namespace scene;
+    std::map<std::string, size_t> c;
+    // groups of every SubNetwork as sets of member header paths, plus the per-processor check
+    auto check = [&](const oct::File& f, const char* tag, std::vector<std::set<std::set<std::string>>>* out) {
+        auto S = anim::subnets(f);
+        size_t k = 0;
+        for (size_t i = 0; i < f.recs.size(); ++i) {
+            if (f.recs[i].level != 2 || f.name(f.recs[i]) != "SubNetwork") continue;
+            auto& s = S[k++];
+            std::vector<std::vector<int32_t>> vgs;
+            int vgc = -1, vmc = -1;
+            std::string pool;
+            for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
+                const oct::Rec& r = f.recs[j];
+                if (r.level == 3) {
+                    pool = f.name(r);
+                    if (pool == "VariantGroupCount") vgc = cho::first(f, r, -1);
+                    else if (pool == "VariantMemberCount") vmc = cho::first(f, r, -1);
+                } else if (r.level == 4 && pool == "VariantGroupPool") vgs.push_back(f.ints(r));
+            }
+            if (vgc >= 0) {
+                size_t m = 0;
+                for (auto& g : vgs) m += g.size();
+                ++c[std::string(tag) + (vgc == (int)vgs.size() && vmc == (int)m ? ": counts match the pool" : ": counts DIFFER from the pool")];
+            }
+            for (size_t pn : s.pns) {
+                std::string ty = anim::str1(f, pn, "Type");
+                if (ty.size() < 16 || ty.compare(ty.size() - 16, 16, "VariantProcessor")) continue;
+                long ar = anim::kid(f, pn, "DataNodeAttributes"), rr = anim::kid(f, pn, "DataNodeRefs");
+                auto at = f.nameValues(f.recs[ar]);
+                auto rf = f.ints(f.recs[rr]);
+                std::vector<int32_t> io(2, -1);
+                for (size_t q = 0; q < at.size() && q < rf.size(); ++q) {
+                    if (at[q] == "Input") io[0] = rf[q];
+                    else if (at[q] == "Output") io[1] = rf[q];
+                }
+                bool exact = std::find(vgs.begin(), vgs.end(), io) != vgs.end();
+                bool any = std::any_of(vgs.begin(), vgs.end(), [&](auto& g) { return std::count(g.begin(), g.end(), io[0]) && std::count(g.begin(), g.end(), io[1]); });
+                ++c[std::string(tag) + ": " + ty + (exact ? " group == [Input, Output]" : any ? " in a larger/reversed group" : " NO GROUP")];
+            }
+            if (out) {
+                out->emplace_back();
+                for (auto& g : vgs) {
+                    std::set<std::string> m;
+                    for (int32_t d : g) m.insert(d >= 0 && (size_t)d < s.dns.size() ? anim::path(f, s, s.dns[d]) : "?");
+                    out->back().insert(m);
+                }
+            }
+        }
+    };
+    auto convert = [](oct::File& f) {
+        octx::addAssetPool(f);
+        int n = octx::skin30(f) + octx::locator30(f);
+        octx::collision30(f);
+        octx::addAllCounts(f);
+        return n;
+    };
+    // 1.0 corpus
+    for (auto& p : files(a[2], true)) {
+        std::string b = slurp(p);
+        if (!tuple(b)) continue;
+        oct::File f = oct::File::parse(b.data(), b.size());
+        if (!convert(f)) continue;
+        ++c["1.0: files with redirected skin influences / locators"];
+        std::string w = f.write();
+        oct::File g = oct::File::parse(w.data(), w.size());
+        if (g.write() != w) ++c["1.0: re-parse DIFFERS"];
+        check(g, "1.0 converted", nullptr);
+    }
+    // twins: the groups made for 1.0 vs the 3.0 twin's
+    for (const char* sub : {"choreographies", "exploders"}) {
+        auto A = choIndex(a[2], sub), B = choIndex(a[3], sub);
+        for (auto& [n, p] : A) {
+            if (!B.count(n)) continue;
+            std::string b = slurp(p), b3 = slurp(B[n]);
+            if (!tuple(b) || !tuple(b3)) continue;
+            oct::File f = oct::File::parse(b.data(), b.size()), g = oct::File::parse(b3.data(), b3.size());
+            std::vector<std::set<std::set<std::string>>> before, after, t30;
+            check(f, "twin 1.0 raw", &before);
+            if (!convert(f)) continue;
+            check(f, "twin 1.0 converted", &after);
+            check(g, "twin 3.0", &t30);
+            for (size_t k = 0; k < after.size(); ++k)
+                for (auto& m : after[k]) {
+                    if (k < before.size() && before[k].count(m)) continue;   // a 1.0 group, not ours
+                    bool hit = k < t30.size() && t30[k].count(m);
+                    ++c[std::string("twin: group made for 1.0 ") + (hit ? "equals a 3.0 twin group (by header paths)" : "not in the 3.0 twin")];
+                    if (!hit && c["twin: group made for 1.0 not in the 3.0 twin"] <= 4) {
+                        std::string s;
+                        for (auto& x : m) s += "'" + x + "' ";
+                        printf("twin %s sn %zu: %s\n", n.c_str(), k, s.c_str());
+                    }
+                }
+        }
+    }
+    for (auto& [k, v] : c) printf("%7zu %s\n", v, k.c_str());
+    bool bad = false;
+    for (auto& [k, v] : c) bad |= k.find("NO GROUP") != std::string::npos && k.find("converted") != std::string::npos;
+    return bad || c.count("1.0: re-parse DIFFERS") || c.count("1.0 converted: counts DIFFER from the pool") ? 1 : 0;
+}
+
 static int choSceneTest(char** a)
 {
     using namespace scene;
@@ -1631,6 +1739,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-time10") return choTime10Test(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-anim") return choAnimTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-scene") return choSceneTest(argv);
+    if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) octx::g_variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
     if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
         std::string in = slurp(argv[2]), out;
         cho::Aliases al;
