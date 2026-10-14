@@ -582,8 +582,8 @@ inline std::map<std::string, std::vector<std::string>> toolLevels10(const uint8_
     const char* pool = (const char*)d + 4;
     size_t poolN = secs[0].second - 4, lists = secs[1].first + 4, listsEnd = secs[1].first + secs[1].second;
     auto str = [&](int32_t off) { return off >= 0 && (size_t)off < poolN ? std::string(pool + off, strnlen(pool + off, poolN - off)) : std::string(); };
-    size_t so = secs[11].first, cnt = oct::u(d + so + 4, 4);
-    if (8 + cnt * 76 != secs[11].second) return out;
+    size_t so = secs[11].first, sz = secs[11].second, cnt = oct::u(d + so + 4, 4);
+    if (sz < 8 || (sz - 8) % 76 || cnt != (sz - 8) / 76) return out;   // (no 32-bit wrap of cnt * 76)
     for (size_t r = 0; r < cnt; ++r) {
         const uint8_t* rec = d + so + 8 + r * 76;
         std::vector<std::string>& lv = out[str((int32_t)oct::u(rec, 4))];

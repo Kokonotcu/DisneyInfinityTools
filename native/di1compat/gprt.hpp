@@ -90,20 +90,20 @@ static ToolGateFn g_toolGate;
 
 static const std::map<std::string, std::vector<std::string>>& toolLevels10()
 {
-    static std::map<std::string, std::vector<std::string>> t;
-    static bool read = false;
-    std::lock_guard<std::mutex> lock(g_zipLock);
-    if (read) return t;
-    read = true;
-    if (mz_zip_archive* z = zipFor("startup5.zip")) {
-        int i = mz_zip_reader_locate_file(z, "var/toolset/toolset.bin", nullptr, 0);
-        size_t n = 0;
-        if (void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) {
-            t = gameplay::toolLevels10((const uint8_t*)d, n);
-            mz_free(d);
+    static const auto t = [] {   // read once (thread-safe static init): later calls take no lock on the game thread
+        std::map<std::string, std::vector<std::string>> m;
+        std::lock_guard<std::mutex> lock(g_zipLock);
+        if (mz_zip_archive* z = zipFor("startup5.zip")) {
+            int i = mz_zip_reader_locate_file(z, "var/toolset/toolset.bin", nullptr, 0);
+            size_t n = 0;
+            if (void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) {
+                m = gameplay::toolLevels10((const uint8_t*)d, n);
+                mz_free(d);
+            }
         }
-    }
-    logf("tools10: %u 1.0 tool records from startup5.zip:var/toolset/toolset.bin", (unsigned)t.size());
+        logf("tools10: %u 1.0 tool records from startup5.zip:var/toolset/toolset.bin", (unsigned)m.size());
+        return m;
+    }();
     return t;
 }
 

@@ -333,6 +333,64 @@ int main(int argc, char** argv)
         printf("\n");
         return 0;
     }
+    if (argc > 3 && std::string(argv[1]) == "--gpscan") {   // --gpscan <3.0 surfacetypes.lua> <1.0 install assets>: every
+        // gp load-time transform over every 1.0 archive member it would see (no parse may throw; prints what changes)
+        std::string lua = slurp(argv[2]);
+        std::vector<std::string> names30;   // as --surf
+        for (size_t p = lua.find('{', lua.find('{') + 1); p != std::string::npos; p = lua.find('{', p + 1)) {
+            size_t a = lua.find_first_not_of(" \t\r\n", p + 1), b = lua.find_first_of(" \t=", a);
+            if (a != std::string::npos && b != std::string::npos) names30.push_back(lua.substr(a, b - a));
+        }
+        std::map<std::string, int> seen, changed, failed;
+        for (auto& e : fs::recursive_directory_iterator(argv[3])) {
+            if (e.path().extension() != ".zip") continue;
+            mz_zip_archive z{};
+            if (!mz_zip_reader_init_file(&z, e.path().string().c_str(), 0)) continue;
+            for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&z); ++i) {
+                char nm[400];
+                mz_zip_reader_get_filename(&z, i, nm, sizeof(nm));
+                std::string m = nm;
+                for (char& c : m) c = (char)tolower((unsigned char)c);
+                auto ends = [&](const char* s) { size_t k = strlen(s); return m.size() >= k && !m.compare(m.size() - k, k, s); };
+                const char* kind = ends(".oct") ? "oct" : ends(".mer") ? "mer" : ends(".ap") ? "ap" : ends(".dnax") ? "dnax" :
+                                   ends(".lua") && !ends("__missiongraph.lua") ? "lua" : nullptr;
+                if (!kind) continue;
+                size_t n = 0;
+                void* d = mz_zip_reader_extract_to_heap(&z, i, &n, 0);
+                if (!d) continue;
+                std::string t((const char*)d, n), what;
+                mz_free(d);
+                ++seen[kind];
+                try {
+                    if (!strcmp(kind, "oct") && n >= 4 && oct::u((const uint8_t*)t.data(), 4) == oct::MAGIC) {
+                        oct::File f = oct::File::parse(t.data(), t.size());
+                        int fl = 0, cv = gameplay::curves30(f, &fl), sf = gameplay::surfaces30(f, names30);
+                        if (cv || fl || sf) what = "curves " + std::to_string(cv) + " flags " + std::to_string(fl) + " surf " + std::to_string(sf);
+                    } else if (!strcmp(kind, "mer") && n >= 4 && oct::u((const uint8_t*)t.data(), 4) == oct::MAGIC) {
+                        oct::File f = oct::File::parse(t.data(), t.size());
+                        if (int k = gameplay::activityGraph30(f)) what = "activity nodes " + std::to_string(k);
+                    } else if (!strcmp(kind, "ap")) {
+                        if (int k = gameplay::apGivers30(t)) what = "givers " + std::to_string(k);
+                    } else if (!strcmp(kind, "dnax") && n && t[0] == 0x1b) {
+                        std::string o;
+                        if (int k = gameplay::dnaGadgets30(t, o)) what = "gadgets " + std::to_string(k);
+                    } else if (!strcmp(kind, "lua") && n && t[0] != 0x1b) {
+                        if (int k = gameplay::activityTasks30(t)) what = "tasks " + std::to_string(k);
+                    }
+                } catch (std::exception& x) {
+                    ++failed[kind];
+                    printf("FAIL %s %s|%s: %s\n", kind, e.path().filename().string().c_str(), nm, x.what());
+                    continue;
+                }
+                if (what.empty()) continue;
+                ++changed[kind];
+                printf("%-4s %s|%s: %s\n", kind, e.path().filename().string().c_str(), nm, what.c_str());
+            }
+            mz_zip_reader_end(&z);
+        }
+        for (auto& [k, c] : seen) printf("summary %-4s seen %d changed %d failed %d\n", k.c_str(), c, changed[k], failed[k]);
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--datamap") {   // --datamap <1.0 *datamap.lua> [out]: PS-2 rewrite
         std::string in = slurp(argv[2]), out;
         std::map<std::string, int> kinds;
