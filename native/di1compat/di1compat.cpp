@@ -1338,7 +1338,7 @@ static void tdEntryLog(const char* what, uintptr_t e)
 }
 static __declspec(thread) int t_tdDepth;
 static __declspec(thread) uintptr_t t_tdNode;
-static volatile LONG g_tdLayouts, g_tdLines;
+static volatile LONG g_tdLayouts, g_tdLines, g_tdEarly;
 static std::mutex g_tdWatchLock;
 static std::map<uintptr_t, uintptr_t> g_tdWatch;   // placement +0xc node -> Layout (hkPlBind)
 typedef uint32_t(__fastcall* TdDtorFn)(void* self, void* edx);
@@ -1347,7 +1347,7 @@ static TdDtorFn g_layoutDtor, g_nodeDtor;
 static EntryRelFn g_entryRel;
 static uint32_t __fastcall hkLayoutDtor(void* self, void*)
 {
-    bool on = InterlockedIncrement(&g_tdLayouts) <= 60;
+    bool on = InterlockedIncrement(&g_tdLayouts) <= 3000;
     if (on) {
         uintptr_t L = (uintptr_t)self;
         uint32_t arr = tdRd(L + 0x40), n = tdRd(L + 0x44);
@@ -1383,7 +1383,7 @@ static uint32_t __fastcall hkPlBind(void* self, void*, uint32_t a1, uint32_t a2)
         uint32_t node = tdRd(arr + 0x18 * k + 0xc);
         if (!node || node == 0xDEADBEEF) continue;
         std::lock_guard<std::mutex> l(g_tdWatchLock);
-        if (g_tdWatch.emplace(node, L).second && InterlockedIncrement(&g_tdLines) <= 400) {
+        if (g_tdWatch.emplace(node, L).second && InterlockedIncrement(&g_tdLines) <= 30000) {
             char o[200];
             tdObj(o, sizeof(o), node);
             logf("td bind layout %08X placement %u node %s", (uint32_t)L, k, o);
@@ -1399,14 +1399,14 @@ static uint32_t __fastcall hkNodeDtor(void* self, void*)
         auto it = g_tdWatch.find((uintptr_t)self);
         if (it != g_tdWatch.end()) { layout = it->second; g_tdWatch.erase(it); }
     }
-    if (layout && t_tdDepth <= 0 && InterlockedIncrement(&g_tdLines) <= 400) {
+    if (layout && t_tdDepth <= 0 && InterlockedIncrement(&g_tdEarly) <= 200) {
         char o[200], line[600];
         tdObj(o, sizeof(o), (uintptr_t)self);
         int len = sprintf_s(line, "td PLACEMENT NODE DESTROYED OUTSIDE ITS LAYOUT DTOR (layout %08X): %s, stack:", (uint32_t)layout, o);
         stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 24);
         logf("%s", line);
     }
-    if (t_tdDepth > 0 && InterlockedIncrement(&g_tdLines) <= 400) {
+    if (t_tdDepth > 0 && InterlockedIncrement(&g_tdLines) <= 30000) {
         char o[200];
         tdObj(o, sizeof(o), (uintptr_t)self);
         logf("td  node dtor %s handle %08X", o, tdRd((uintptr_t)self + 0xc));
@@ -1419,7 +1419,7 @@ static uint32_t __fastcall hkNodeDtor(void* self, void*)
 }
 static void __fastcall hkEntryRel(void* self, void*, uint32_t a1)
 {
-    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 400) { g_entryRel(self, nullptr, a1); return; }
+    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 30000) { g_entryRel(self, nullptr, a1); return; }
     uintptr_t e = (uintptr_t)self;
     char o[200];
     tdObj(o, sizeof(o), tdRd(e + 0x10) & ~1u);
@@ -1433,7 +1433,7 @@ static void __fastcall hkEntryRel(void* self, void*, uint32_t a1)
 static EntryRelFn g_entryFree;
 static void __fastcall hkEntryFree(void* self, void*, uint32_t entry)
 {
-    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 400) { g_entryFree(self, nullptr, entry); return; }
+    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 30000) { g_entryFree(self, nullptr, entry); return; }
     tdEntryLog("freeing", tdReadable(entry, 0x14) ? entry : 0);
     logf("td   entry free %08X; node %08X page prot %X", entry, (uint32_t)t_tdNode, tdProt(t_tdNode));
     g_entryFree(self, nullptr, entry);
