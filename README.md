@@ -100,9 +100,9 @@ statically, so no Visual C++ runtime needs to be installed.
 
 ## Installing
 
-1. Install Pentane as described in [`third_party/pentane`](third_party/pentane/README.md). Its `config.toml`
-   already lists `di1compat.dll` under `enabled_plugins`. Then copy `di1compat.dll` to
-   `<3.0 install>\Pentane\Plugins\`.
+1. Install Pentane with `python pentane_install.py`. It patches the executable (with a backup), copies Pentane and
+   its config, and enables di1compat ([details and Pentane's options](third_party/pentane/README.md)). Then copy
+   `di1compat.dll` to `<3.0 install>\Pentane\Plugins\`.
 2. Create `di1compat.cfg` next to it, starting from
    [`di1compat.cfg.example`](native/di1compat/di1compat.cfg.example), and set `install10` to your 1.0 installation.
 3. Generate the 3.0-side tables next to the DLL:
