@@ -106,17 +106,20 @@ static uint32_t __fastcall hkByName(void* self, void*, const char* name, const f
     if (t_inCust) t_spark = 1;
     return g_byName(self, nullptr, name, t, a3, a4);
 }
-// AsyncActorCreator::Execute: mode +0x18, transform +0x20, buffers +0x64 / +0x6c, flags +0x70
+// AsyncActorCreator::Execute (FUN_0075a290, thiscall, no args): mode +0x18, the spawn transform at +0x20 (FUN_00749740
+// copies it, [4..6] at +0x30), flags +0x70 (ctor FUN_00746e60). The base spawn's flags are 0x22, or 0x23 after its
+// zone check, | 0x10 (params+0x81) | FUN_00742620(def+0x20) (0x2000 / 0x4000): never 0x40, the bit on which Execute
+// creates the actor deactivated (vf+0x1c(0)). Its completion callback 0x0160A270 kills the new actor when the pending
+// record's +0x80 is set (FUN_0074da00).
 static void __fastcall hkExec(uint8_t* self, void*)
 {
     ULONGLONG last = g_lastCapsule;
     if (last && GetTickCount64() - last < 5000 && sys::readable(self, 0x80) && InterlockedIncrement(&g_execLogged) <= 150) {
-        char a[96] = "", b[96] = "";
-        safeCopy(a, sizeof(a), *(const char**)(self + 0x64));
-        safeCopy(b, sizeof(b), *(const char**)(self + 0x6c));
+        char n[96] = "";   // +0x64 is a 4x4 matrix copy (or 0), not text; +0x6c a char* name (or 0)
+        if (*(const char**)(self + 0x6c)) safeCopy(n, sizeof(n), *(const char**)(self + 0x6c));
         const float* t = (const float*)(self + 0x20);
-        logf("capsuletrace10: creator %p executes: mode %u flags %02X at (%.1f, %.1f, %.1f) '%s' '%s'", self,
-             *(uint32_t*)(self + 0x18), *(uint32_t*)(self + 0x70), t[4], t[5], t[6], a, b);
+        logf("capsuletrace10: creator %p executes: mode %u flags %X at (%.1f, %.1f, %.1f) name '%s'", self,
+             *(uint32_t*)(self + 0x18), *(uint32_t*)(self + 0x70), t[4], t[5], t[6], n);
     }
     g_exec(self, nullptr);
 }
