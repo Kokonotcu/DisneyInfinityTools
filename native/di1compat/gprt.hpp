@@ -86,6 +86,38 @@ static void* __fastcall hkScreenReq(void* ui, void* edx, const char* name, int a
     return ev;
 }
 
+// The Toy Store entry: selectmenu.lua's ExitScreen removes the menu, then adds "Catalog" from it (self:RemoveScreen,
+// self:AddScreen). 3.0 queues adds and processes them on its next UI update (FUN_0156c3b0 -> FUN_0156b200, thiscall
+// (manager, request, a2), ret 8), and drops a request whose parent screen (+0x60) is gone unless that parent is the
+// player's root (0x0156B2B0: FUN_0154fed0(parent) == 0 and parent != manager vtable +0x9c(request +0x84) -> end).
+// So the Catalog never opened, and SelectMenu's pause, which 3.0's Catalog.onExit releases (Pause_UnPauseFromPausedScreen),
+// stayed: dump toystore-freeze.dmp has no Catalog or SelectMenu screen, none of catalog.lua's strings (never loaded),
+// player 0 paused. 1.0's selectmenu offers only these two entries (GetItems: Scn_Pause_MissionLog, Scn_Pause_Catalog
+// outside TS_CombatSim). In a 1.0 zone a Catalog request whose parent is gone goes to the player's root (+0x60 = -1,
+// 3.0's default for a request without parent); if no Catalog screen comes of it, the pause is released.
+typedef void(__fastcall* UiAddFn)(void* mgr, void* edx, uint8_t* req, uint32_t a2);
+typedef void*(__fastcall* ScreenByHandleFn)(void* mgr, void* edx, int handle);
+typedef int(__fastcall* ScreenByNameFn)(void* mgr, void* edx, const char* name, int player);
+typedef void(__cdecl* UnpauseFn)(int player);
+static UiAddFn g_uiAdd;
+static void __fastcall hkUiAdd(void* mgr, void* edx, uint8_t* req, uint32_t a2)
+{
+    const char* name = req ? *(const char**)(req + 0x40) : nullptr;
+    int parent = req ? *(int*)(req + 0x60) : -1;
+    if (!name || _stricmp(name, "Catalog") || !zonePlayset10()) return g_uiAdd(mgr, edx, req, a2);
+    int player = *(int*)(req + 0x6c);
+    bool orphan = parent != -1 && !((ScreenByHandleFn)rt(0x0154FED0))(mgr, nullptr, parent);
+    if (orphan) *(int*)(req + 0x60) = -1;
+    g_uiAdd(mgr, edx, req, a2);
+    int h = ((ScreenByNameFn)rt(0x01553E30))(mgr, nullptr, "Catalog", player);
+    logf("toy store: Catalog request for player %d, parent screen %d %s -> Catalog screen %d", player, parent,
+         orphan ? "gone (sent to the player's root)" : "present", h);
+    if (orphan && h == -1) {
+        ((UnpauseFn)rt(0x015E9150))(player < 0 ? 0 : player);
+        logf("toy store: no Catalog screen came of it; SelectMenu's pause released");
+    }
+}
+
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
 // 3.0 enables a tool only where its ToolSetTable LevelPrefix allows (gate FUN_0150f7d0, thiscall (tool, list) ret 4,
 // called by FUN_0151b960 with the Tools record + 4; result cached in tool +0x74): an empty list, a prefix the
@@ -146,6 +178,7 @@ static void install()
         hook("ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&hkRibbonName, (void**)&g_ribbonName);
         hook("ribbon open (1.0 SelectMenu)", 0x00B68F60, "6AFF68????????64A100000000", (void*)&hkShowRibbon, (void**)&g_showRibbon);
         hook("screen request (ProgressLog)", 0x0156DDE0, "64A1000000006AFF68", (void*)&hkScreenReq, (void**)&g_screenReq);
+        hook("UI process add (Toy Store Catalog)", 0x0156B200, "558BEC83E4F86AFF68????????64A100000000", (void*)&hkUiAdd, (void**)&g_uiAdd);
     }
 }
 
