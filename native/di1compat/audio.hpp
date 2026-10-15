@@ -398,6 +398,7 @@ struct Host {
     std::map<std::string, std::map<std::string, float>> faders;   // 3.0 volume faders: category -> source -> value
     std::map<std::string, float> mixer;                           // 1.0 'Mixer' source per 1.0 category (mixer10)
     std::map<std::string, std::string>* dropped = nullptr;   // octtest: events the 1.0 rule leaves out, with the reason
+    int testSpeakerMode = -1;                                 // octtest: the speaker mode a no-sound system mixes for
 
     // A 1.0 category's volume is the product of its fader sources (1.0 FUN_01136b10 drops a source that reaches 1.0:
     // neutral). 3.0's faders ('<src>_Volume_Fader_<cat>' RTPCs, FUN_0182c460) go onto the 1.0 categories of the same
@@ -434,8 +435,10 @@ struct Host {
         int drivers = 0;
         if (!r) r = f.System_GetNumDrivers(sys, &drivers);
         if (r) { AUDLOG("audio10: FMOD setup failed (%d)", r); return false; }
-        if (nosound || drivers == 0) f.System_SetOutput(sys, 2);   // FMOD_OUTPUTTYPE_NOSOUND, as 1.0 does with no driver
-        else {
+        if (nosound || drivers == 0) {
+            f.System_SetOutput(sys, 2);   // FMOD_OUTPUTTYPE_NOSOUND, as 1.0 does with no driver
+            if (testSpeakerMode >= 0) f.System_SetSpeakerMode(sys, testSpeakerMode);
+        } else {
             unsigned caps = 0;
             int mode = 0;
             if (!f.System_GetDriverCaps(sys, 0, &caps, nullptr, &mode)) f.System_SetSpeakerMode(sys, mode);
@@ -2005,6 +2008,30 @@ inline void* __fastcall hkDlgReq(void* pool, void*, const char** nameRec, uint32
         }
     }
     return oDlgReq(pool, nullptr, nameRec, a2);
+}
+
+// 1.0 ChoreographyInstance::SafeAudioSync (FUN_00ecabc0 -> FUN_00ec83c0, with the leaf name of the choreography path)
+// starts two sounds of that name and plays the choreography once both are ready:
+// - the dialog entry (FUN_0071b450 -> FUN_00718650, a type 3/4 line sequence: Vo);
+// - the sound event (FUN_0071b530 -> FUN_00717670 -> FUN_011371e0). For example in_city.fev 'INC_CIN_OpeningA' is the
+//   opening cinematic's effects track: 26 s, sound from 4.5 s (octtest --fmod EV_RUN, EV_SECS=30).
+// 3.0's audio sync (instance flag 0x20, enableAudioSync) requests only the dialog, because a 3.0 cinematic carries
+// one mixed track. So a 1.0 event of the choreography's name starts here, as the choreography starts. It plays at
+// the listener: 1.0's request carries the dialog's position, and a cinematic has none.
+// ponytail: the event plays out its own length, and 1.0's MixerPreset with it (FUN_00714180) is not applied. 1.0 also
+// stops the event with its request. Add both if a skippable or ducked 1.0 cinematic shows up.
+inline void choreographyStarted(const char* path, uint32_t flags)
+{
+    if (!(flags & 0x20) || !path || !*path || !ready()) return;
+    const char* leaf = strrchr(path, '/');
+    leaf = leaf ? leaf + 1 : path;
+    uint32_t ev = fnv1(leaf);
+    {
+        std::lock_guard<std::recursive_mutex> l(g.mx);
+        if (!g.byId.count(ev)) return;   // no 1.0 event of that name (every 3.0 choreography, most 1.0 ones)
+    }
+    uint32_t id = g.play(ev, 0, 0, nullptr, nullptr);
+    AUDLOG("audio10: %s (audio sync) starts the 1.0 sound event of its name -> %s", leaf, id ? "1.0 FMOD" : "not played");
 }
 
 // one tick plus the end-of-event callbacks of what finished, outside every lock

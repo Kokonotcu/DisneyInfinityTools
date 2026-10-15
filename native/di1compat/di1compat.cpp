@@ -205,6 +205,7 @@ static struct {
     bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
     bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
     bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
+    bool cineSync10 = true;          // audio10: an audio-synced choreography also starts the 1.0 sound event of its name
     bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
     bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
     bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
@@ -304,6 +305,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "music10")) g_cfg.music10 = atoi(val) != 0;
         else if (!strcmp(key, "vo10")) g_cfg.vo10 = atoi(val) != 0;
         else if (!strcmp(key, "audiotrace10")) g_cfg.audioTrace10 = atoi(val) != 0;
+        else if (!strcmp(key, "cinesync10")) g_cfg.cineSync10 = atoi(val) != 0;
         else if (!strcmp(key, "mixer10")) g_cfg.mixer10 = atoi(val) != 0;
         else if (!strcmp(key, "vfx10")) g_cfg.vfx10 = atoi(val) != 0;
         else if (!strcmp(key, "vfx_universal10")) g_cfg.vfxUniversal10 = atoi(val) != 0;
@@ -1467,8 +1469,10 @@ static void __fastcall hkChoStart(uint8_t* self, void*)
 {
     char name[100] = "";
     safeCopy(name, sizeof(name), *(const char**)(self + 0x38));
-    logf("breaktrace cho start %p '%s' flags %08X", self, name, *(uint32_t*)(self + 0x1b4));
+    uint32_t flags = *(uint32_t*)(self + 0x1b4);
+    if (g_cfg.breakTrace) logf("breaktrace cho start %p '%s' flags %08X", self, name, flags);
     g_choStart(self, nullptr);
+    if (g_cfg.audio10 && g_cfg.cineSync10) audio::choreographyStarted(name, flags);
 }
 // - choreography layout attachments FUN_00788280 (thiscall on the layout, 4 args, ret 0x10): after its gate
 //   FUN_00785b40(a1, a2) (ret 8; 0 = nothing applied) it walks the attachments (+0x30, count +0x34; 0xc each, base
@@ -3663,12 +3667,13 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.missionTrace)
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
+    if (g_cfg.breakTrace || (g_cfg.audio10 && g_cfg.cineSync10))   // cinesync10: 1.0's audio-sync sound event (audio.hpp)
+        hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart, (void**)&g_choStart);
     if (g_cfg.breakTrace) {
         hook("ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&hkClipEval, (void**)&g_clipEval);
         hook("exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&hkMunHit, (void**)&g_munHit);
         hook("exploder explode (breaktrace)", 0x0151E130, "6AFF64A100000000", (void*)&hkExplode, (void**)&g_explode);
         hook("choreography audio-sync wait (breaktrace)", 0x01442EE0, "568BF185F6744D8B06", (void*)&hkChoReady, (void**)&g_choReady);
-        hook("choreography start (breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart, (void**)&g_choStart);
         hook("choreography play (breaktrace)", 0x01445E70, "5183790C00753B8B01", (void*)&hkBtPlay, (void**)&g_btPlay);
         hook("layout attachments apply (breaktrace)", 0x00788280, "6AFF68????????64A100000000", (void*)&hkLayApply, (void**)&g_layApply);
         hook("layout attachments gate (breaktrace)", 0x00785B40, "8B4C240885C97407", (void*)&hkLayGate, (void**)&g_layGate);

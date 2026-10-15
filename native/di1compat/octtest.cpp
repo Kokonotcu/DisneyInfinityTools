@@ -1580,6 +1580,17 @@ static int fmodTest(int argc, char** argv)
     audio::logfn = stdoutLog;
     std::map<std::string, std::string> dropped;
     audio::g.dropped = &dropped;
+    if (getenv("FMOD_CAPS")) {   // the default device's speaker mode, as the plugin's init reads it (nothing is played)
+        audio::Api& f = audio::g.f;   // before init, as Host::init asks it (getDriverCaps answers only then)
+        void *es = nullptr, *sys = nullptr;
+        unsigned caps = 0;
+        int mode = -1;
+        if (!f.load(argv[2]) || f.EventSystem_Create(&es) || f.EventSystem_GetSystemObject(es, &sys)) return 1;
+        printf("FMODCAPS getDriverCaps -> %d\n", (int)f.System_GetDriverCaps(sys, 0, &caps, nullptr, &mode));
+        printf("FMODCAPS caps %x speaker mode %d (2 stereo, 3 quad, 4 surround, 5 5.1, 6 7.1)\n", caps, mode);
+        return 0;
+    }
+    if (const char* sm = getenv("FMOD_SPEAKERS")) audio::g.testSpeakerMode = atoi(sm);
     if (!audio::g.init(argv[2], true)) return 1;
     audio::g.loadTree("Initialize.fev", "Permanent");
     for (int i = 4; i < argc; ++i) {
@@ -1655,6 +1666,19 @@ static int fmodTest(int argc, char** argv)
         if (p) { audio::g.f.MusicPrompt_IsActive(p, &activeAfter); audio::g.f.MusicPrompt_Release(p); }
     }
     printf("LIFE music Inc_mx_Metroville: active %d after 1 s, fresh prompt active %d after end+reset\n", active, activeAfter);
+    // cinesync10 (needs IN_City.fev): an audio-synced choreography starts the 1.0 event of its leaf name, nothing else does
+    if (audio::g.byId.count(audio::fnv1("INC_CIN_OpeningA"))) {
+        audio::hostState = 1;   // octtest runs the host on this thread
+        const char* cin = "Choreographies/INC_CIN_OpeningA/INC_CIN_OpeningA";
+        size_t n0 = audio::g.plays.size();
+        audio::choreographyStarted(cin, 0x8);                    // no audio sync
+        audio::choreographyStarted("Choreographies/INC_Dock_Explode/INC_Dock_Explode", 0x20);   // no event of that name
+        size_t n1 = audio::g.plays.size();
+        audio::choreographyStarted(cin, 0x44128);                // INC_CIN_OpeningA's flags in-game
+        size_t n2 = audio::g.plays.size();
+        printf("CINESYNC unsynced / unnamed: %s; synced: %s\n", n1 == n0 ? "nothing started" : "STARTED", n2 == n1 + 1 ? "event started" : "NOTHING");
+        run(200);
+    }
     // CUE_RUN=<cue>[:seconds]: prompt that cue and report when its prompt stops being active (does it end by itself?)
     if (const char* cr = getenv("CUE_RUN")) {
         std::string c = cr;
@@ -1685,6 +1709,32 @@ static int fmodTest(int argc, char** argv)
         const float lis[9] = {0, 0, 1, 0, 1, 0, 0, 0, 0}, at[6] = {0, 0, -15, 0, 0, 1};   // Wwise z = -engine z
         audio::hkListener(lis, 0);
         audio::hkSetPos(200, at);
+        // EV_GEOM=lx,ly,lz,fx,fy,fz,ux,uy,uz,sx,sy,sz: listener and source in engine space, as audiotrace10 logs them
+        if (const char* gm = getenv("EV_GEOM")) {
+            float v[12] = {};
+            if (sscanf_s(gm, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f", v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6, v + 7, v + 8,
+                         v + 9, v + 10, v + 11) == 12) {
+                std::lock_guard<std::mutex> p(audio::g.posMx);
+                memcpy(audio::g.lpos, v, 12); memcpy(audio::g.lfwd, v + 3, 12); memcpy(audio::g.lup, v + 6, 12);
+                memcpy(audio::g.pos[200].v, v + 9, 12);
+            }
+        }
+        // EV_LOAD=<event>:<count>: that many instances of a loop playing 300 units away first, as in-game traffic does
+        if (const char* ld = getenv("EV_LOAD")) {
+            std::string s = ld;
+            size_t c = s.find(':');
+            int cnt = c == std::string::npos ? 70 : atoi(s.c_str() + c + 1), got = 0;
+            const float away[6] = {0, 0, -300, 0, 0, 1};
+            for (int i = 0; i < cnt; ++i) {
+                audio::hkSetPos(1000 + i, away);
+                got += audio::g.play(audio::fnv1(s.substr(0, c)), 1000 + i, 0, nullptr, nullptr) != 0;
+            }
+            run(500);
+            int playing = -1;
+            typedef audio::FR(__stdcall* ChFn)(void*, int*);
+            if (auto ch = (ChFn)GetProcAddress(GetModuleHandleA("fmodex.dll"), "FMOD_System_GetChannelsPlaying")) ch(audio::g.sys, &playing);
+            printf("EVLOAD %s: %d of %d started at 300 units; FMOD channels playing %d\n", s.substr(0, c).c_str(), got, cnt, playing);
+        }
         std::string all = er;
         for (size_t b = 0, e; b < all.size(); b = e + 1) {
             e = all.find(',', b);
@@ -1694,6 +1744,7 @@ static int fmodTest(int argc, char** argv)
             void* ev = nullptr;
             std::string chain;
             float vol = -1, dmin = -1, dmax = -1;
+            int prio = -1;
             {
                 std::lock_guard<std::recursive_mutex> l(audio::g.mx);
                 auto it = audio::g.plays.find(id);
@@ -1702,6 +1753,7 @@ static int fmodTest(int argc, char** argv)
                     audio::g.f.Event_GetPropertyByIndex(ev, 1, &vol, 1);    // FMOD_EVENTPROPERTY_VOLUME
                     audio::g.f.Event_GetPropertyByIndex(ev, 17, &dmin, 1);  // 3D_MINDISTANCE
                     audio::g.f.Event_GetPropertyByIndex(ev, 18, &dmax, 1);  // 3D_MAXDISTANCE
+                    audio::g.f.Event_GetPropertyByIndex(ev, 11, &prio, 1);  // PRIORITY (0 highest)
                     void* c = nullptr;
                     audio::g.f.Event_GetCategory(ev, &c);
                     for (int d = 0; c && d < 8; ++d) {
@@ -1716,19 +1768,60 @@ static int fmodTest(int argc, char** argv)
                     }
                 }
             }
-            printf("EVRUN %s: id %u, volume %.2f, 3D %.1f..%.1f, categories %s\n", n.c_str(), id, vol, dmin, dmax, chain.c_str());
+            printf("EVRUN %s: id %u, volume %.2f, priority %d, 3D %.1f..%.1f, categories %s\n", n.c_str(), id, vol, prio, dmin,
+                   dmax, chain.c_str());
+            {   // its parameters: one whose default sits where a volume curve is 0 plays in silence
+                typedef audio::FR(__stdcall* NumFn)(void*, int*);
+                typedef audio::FR(__stdcall* ByIdxFn)(void*, int, void**);
+                typedef audio::FR(__stdcall* InfoFn)(void*, int*, char**);
+                typedef audio::FR(__stdcall* ValFn)(void*, float*);
+                typedef audio::FR(__stdcall* RangeFn)(void*, float*, float*);
+                HMODULE em = GetModuleHandleA("fmod_event.dll");
+                auto num = (NumFn)GetProcAddress(em, "FMOD_Event_GetNumParameters");
+                auto byIdx = (ByIdxFn)GetProcAddress(em, "FMOD_Event_GetParameterByIndex");
+                auto info = (InfoFn)GetProcAddress(em, "FMOD_EventParameter_GetInfo");
+                auto val = (ValFn)GetProcAddress(em, "FMOD_EventParameter_GetValue");
+                auto range = (RangeFn)GetProcAddress(em, "FMOD_EventParameter_GetRange");
+                std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+                int np = 0;
+                if (ev && num && byIdx && info && val && range && !num(ev, &np))
+                    for (int i = 0; i < np; ++i) {
+                        void* p = nullptr;
+                        char* pn = nullptr;
+                        float v = 0, lo = 0, hi = 0;
+                        if (byIdx(ev, i, &p) || !p) continue;
+                        info(p, nullptr, &pn);
+                        val(p, &v);
+                        range(p, &lo, &hi);
+                        printf("EVRUN %s param %s = %.2f (range %.2f..%.2f)\n", n.c_str(), pn ? pn : "?", v, lo, hi);
+                    }
+            }
+            // what FMOD actually mixes: peak of the master output (System::getWaveData, both channels) over its run
+            typedef audio::FR(__stdcall* WaveFn)(void*, float*, int, int);
+            auto wave = (WaveFn)GetProcAddress(GetModuleHandleA("fmodex.dll"), "FMOD_System_GetWaveData");
+            float peak = 0, ch[8] = {};
             unsigned was = 0xffffffff;
-            for (int t = 0; t <= 3000 && ev; t += 50) {
+            const int window = getenv("EV_SECS") ? atoi(getenv("EV_SECS")) * 1000 : 3000;
+            int firstLoud = -1;   // the first time the output passes 0.01
+            for (int t = 0; t <= window && ev; t += 50) {
                 unsigned st = 0;
                 {
                     std::lock_guard<std::recursive_mutex> l(audio::g.mx);
                     auto it = audio::g.plays.find(id);
                     if (it == audio::g.plays.end() || !it->second.ev) { printf("EVRUN %s ended at %d ms\n", n.c_str(), t); break; }
                     if (getState) getState(ev, &st);
+                    float buf[512];
+                    for (int c = 0; c < 8 && wave; ++c)
+                        if (!wave(audio::g.sys, buf, 512, c))
+                            for (float s : buf) ch[c] = (std::max)(ch[c], fabsf(s)), peak = (std::max)(peak, fabsf(s));
                 }
                 if (st != was) { printf("EVRUN %s at %d ms: state %x\n", n.c_str(), t, st); was = st; }
+                if (firstLoud < 0 && peak > 0.01f) firstLoud = t;
                 run(50);
             }
+            printf("EVRUN %s output peak %.4f (first above 0.01 at %d ms)%s; per channel %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+                   n.c_str(), peak, firstLoud, wave ? "" : " (getWaveData missing)", ch[0], ch[1], ch[2], ch[3], ch[4], ch[5],
+                   ch[6], ch[7]);
         }
     }
 
