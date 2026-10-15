@@ -189,6 +189,7 @@ static struct {
     bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
     bool choConst10 = true;          // cho.hpp: Static nodes of choreography graphs stay Static under constant headers
     bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
+    bool realmFile10 = true;         // octx.hpp: a 1.0 realm file's RealmDataPool as 3.0's RealmData node (realm30.py rule)
     bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
@@ -294,6 +295,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "variant10")) g_cfg.variant10 = atoi(val) != 0;
         else if (!strcmp(key, "choconst10")) g_cfg.choConst10 = atoi(val) != 0;
         else if (!strcmp(key, "camworld10")) g_cfg.camWorld10 = atoi(val) != 0;
+        else if (!strcmp(key, "realmfile10")) g_cfg.realmFile10 = atoi(val) != 0;
         else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
         else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
@@ -334,7 +336,7 @@ static void loadConfig(const char* dir)
          "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
          g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.clip10Ids, g_cfg.choAlias10, g_cfg.banm10,
          g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
-    logf("config menu: playsetmenu10=%d zones10=%d", g_cfg.playsetMenu10, g_cfg.zones10);
+    logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d", g_cfg.playsetMenu10, g_cfg.zones10, g_cfg.realmFile10);
     logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
          g_cfg.lockTrace10);
 }
@@ -710,7 +712,7 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
     if (int n = g_cfg.camWorld10 ? octx::camera30(f) : 0) { note += "+cameras(" + std::to_string(n) + ") "; changed = true; }
     if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::realm30w(f)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
+    if (int n = octx::realm30w(f, g_cfg.realmFile10 && path.rfind("realms/", 0) == 0)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
     if (transcodeCho(f, note)) changed = true;
     int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
     if (ncv || nfl) { note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) "; changed = true; }
