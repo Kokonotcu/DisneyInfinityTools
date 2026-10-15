@@ -1323,25 +1323,37 @@ static int clipIdsTest(char** a)
             size_t at = k++;
             if (!pm) continue;
             ++c[std::string("blocks on ") + pm->tmpl];
-            if (_stricmp(tmplB.c_str(), pm->tmpl)) { ++c["  twin binds another template"]; continue; }
-            if (at >= blocksB.size()) { ++c["  twin has no block there"]; continue; }
+            // every count twice: over all templates, and under 'pm->tmpl:' for the per-template verdict
+            auto C = [&](const char* key) { ++c[key]; ++c[std::string(pm->tmpl) + ":" + key]; };
+            if (_stricmp(tmplB.c_str(), pm->tmpl)) { C("  twin binds another template"); continue; }
+            if (at >= blocksB.size()) { C("  twin has no block there"); continue; }
             std::string d = A.recs[i].pay.substr(oct::spec(A.recs[i].type).cw), ours, kept;
-            if (!cho::clipBlock30(d, ours, pm) || !cho::clipBlock30(d, kept)) { ++c["  NOT CONVERTED"]; continue; }
+            if (!cho::clipBlock30(d, ours, pm) || !cho::clipBlock30(d, kept)) { C("  NOT CONVERTED"); continue; }
             const std::string& y = blocksB[at];
-            ++c[ours == y ? "  bytes: identical to the twin" : ours.size() == y.size() ? "  bytes: same length" : "  bytes: other length"];
-            if (kept == y) ++c["  (ids kept: identical to the twin)"];
+            C(ours == y ? "  bytes: identical to the twin" : ours.size() == y.size() ? "  bytes: same length" : "  bytes: other length");
+            if (kept == y) C("  (ids kept: identical to the twin)");
             auto to = ids30(ours), tk = ids30(kept), ty = ids30(y);
             std::set<uint32_t> sy;
             for (auto& t : ty) sy.insert(t.begin(), t.end());
-            bool same = to.size() == ty.size();
+            bool same = to.size() == ty.size(), dropped = false;
             for (size_t q = 0; same && q < to.size(); ++q) same = to[q].size() == ty[q].size();
+            for (size_t q = 0; q < to.size(); ++q) {
+                dropped |= to[q].size() != tk[q].size();
+                for (size_t j = to[q].size(); j < tk[q].size(); ++j) C("  outputs dropped (kDropPort)");
+            }
+            // the other way, per table: a wrong number shows as a twin id we lack; a twin that dropped or re-ordered
+            // outputs (3.0 re-exports) does not
+            for (size_t q = 0; to.size() == ty.size() && q < to.size(); ++q) {
+                std::set<uint32_t> so(to[q].begin(), to[q].end());
+                for (uint32_t j : ty[q]) C(so.count(j) ? "  twin ids, per table: among ours" : "  twin ids, per table: NOT among ours");
+            }
             for (size_t q = 0; q < to.size(); ++q)
                 for (size_t j = 0; j < to[q].size(); ++j) {
-                    c[sy.count(to[q][j]) ? "  ids, order-free: ours among the twin's" : "  ids, order-free: ours NOT among the twin's"]++;
-                    c[sy.count(tk[q][j]) ? "  (ids kept, order-free: among the twin's)" : "  (ids kept, order-free: NOT among)"]++;
+                    C(sy.count(to[q][j]) ? "  ids, order-free: ours among the twin's" : "  ids, order-free: ours NOT among the twin's");
+                    if (!dropped) C(sy.count(tk[q][j]) ? "  (ids kept, order-free: among the twin's)" : "  (ids kept, order-free: NOT among)");
                     if (!same) continue;
-                    c[to[q][j] == ty[q][j] ? "  ids, same-size tables: same position" : "  ids, same-size tables: DIFFERENT"]++;
-                    c[tk[q][j] == ty[q][j] ? "  (ids kept, same-size tables: same position)" : "  (ids kept, same-size tables: different)"]++;
+                    C(to[q][j] == ty[q][j] ? "  ids, same-size tables: same position" : "  ids, same-size tables: DIFFERENT");
+                    if (!dropped) C(tk[q][j] == ty[q][j] ? "  (ids kept, same-size tables: same position)" : "  (ids kept, same-size tables: different)");
                 }
         }
     }
