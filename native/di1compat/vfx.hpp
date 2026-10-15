@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -57,8 +58,9 @@ inline uint32_t xc(uint32_t x)
     return c;
 }
 
-// emitter record 1.0 (0x108 + 2n) -> 3.0 (0x124 + 2n, 4-aligned)
-inline std::string emitter30(const std::string& a)
+// emitter record 1.0 (0x108 + 2n) -> 3.0 (0x124 + 2n, 4-aligned); chans: the 3.0 curve channels as 1.0 channel
+// indices, -1 = the key constKey (chan.hpp; null: the 1.0 channels as they are)
+inline std::string emitter30(const std::string& a, const std::vector<int>* chans = nullptr, uint16_t constKey = 0)
 {
     std::string o(0x124, '\0');
     memcpy(&o[0], a.data(), 0xa4);              // life, box, direction + cone, speed, accel, rotation ranges
@@ -83,11 +85,27 @@ inline std::string emitter30(const std::string& a)
         wr16(o, 0x110 + 2 * i, (uint16_t)(0x8000 + rd16(a, 0xec + 2 * i) / 2));
     wr32(o, 0x11c, a[0xf8] ? h131(a.data() + 0xf8, 8) : 0);
     uint8_t n = (uint8_t)a[0x105];
-    o[0x121] = (char)n;
-    o.append(a, 0x108, 2 * (size_t)n);
+    if (!chans) {
+        o[0x121] = (char)n;
+        o.append(a, 0x108, 2 * (size_t)n);
+    } else {
+        o[0x121] = (char)chans->size();
+        for (int c : *chans) {
+            uint16_t k = c >= 0 && c < n ? rd16(a, 0x108 + 2 * (size_t)c) : constKey;
+            o.append((const char*)&k, 2);
+        }
+    }
     o.resize((o.size() + 3) & ~(size_t)3, '\0');
     return o;
 }
+
+// The constant 1.0 curve key (cubic 1, 1, 1, 1, linear time, clamp 0..1): Disney's key in channels a 1.0 emitter
+// had no curve for (chan.hpp)
+inline const char* constKey() { return "\xff\x1f\x1f\xff\x55\xaa\x00\xff"; }
+
+// chanMap(material, 1.0 channel count, out): the 3.0 channels of an emitter drawn with that 1.0 material; false =
+// keep the 1.0 channels
+using ChanMap = std::function<bool(uint16_t material, int n10, std::vector<int>& chans)>;
 
 // param record 1.0 (0x24) -> 3.0 (0x34)
 inline std::string param30(const std::string& a)
@@ -103,10 +121,11 @@ inline std::string param30(const std::string& a)
     return o;
 }
 
-struct Stats { int emitters = 0, effects = 0, params = 0, keys = 0, meshes = 0; };
+struct Stats { int emitters = 0, effects = 0, params = 0, keys = 0, meshes = 0, rechanneled = 0, constChans = 0; };
 
-// 1.0 package -> 3.0 package; false (out untouched) if in is not a well-formed 1.0 package
-inline bool transcode(const std::string& in, std::string& out, Stats* st = nullptr)
+// 1.0 package -> 3.0 package; false (out untouched) if in is not a well-formed 1.0 package. chanMap: channel
+// re-layout per emitter material (null: the 1.0 channels as they are)
+inline bool transcode(const std::string& in, std::string& out, Stats* st = nullptr, const ChanMap* chanMap = nullptr)
 {
     if (!isPd10(in)) return false;
     size_t t = in.size() - 0x14;
@@ -131,7 +150,13 @@ inline bool transcode(const std::string& in, std::string& out, Stats* st = nullp
         std::string src = in.substr(recs[i].off, end - recs[i].off);
         if (recs[i].kind == 0 && 0x108 + 2 * (size_t)(uint8_t)src[0x105] > src.size()) return false;
         newOff[i] = (uint32_t)body.size();
-        if (recs[i].kind == 0) { body += emitter30(src); ++s.emitters; s.meshes += src[0xf8] != 0; }
+        std::vector<int> chans;
+        bool re = recs[i].kind == 0 && chanMap && *chanMap && (*chanMap)(rd16(in, recs[i].entry + 10), (uint8_t)src[0x105], chans);
+        if (re) {
+            ++s.rechanneled;
+            for (int c : chans) s.constChans += c < 0;
+        }
+        if (recs[i].kind == 0) { body += emitter30(src, re ? &chans : nullptr, nkeys); ++s.emitters; s.meshes += src[0xf8] != 0; }
         else if (recs[i].kind == 2) { body += param30(src); ++s.params; }
         else { body += src; ++s.effects; }
         body.resize((body.size() + 3) & ~(size_t)3, '\0');
@@ -139,6 +164,8 @@ inline bool transcode(const std::string& in, std::string& out, Stats* st = nullp
     body.resize((body.size() + 7) & ~(size_t)7, '\0');
     uint32_t keys30 = (uint32_t)body.size();
     body.append(in, keys, 8 * (size_t)nkeys);
+    uint16_t nkeys30 = nkeys;
+    if (s.constChans) { body.append(constKey(), 8); ++nkeys30; }   // index nkeys (emitter30's constKey)
     std::string emit(16 * (size_t)ne, '\0'), eff(8 * (size_t)nf, '\0'), par(8 * (size_t)np, '\0');
     for (size_t i = 0; i < recs.size(); ++i) {
         size_t e = recs[i].entry;
@@ -159,9 +186,9 @@ inline bool transcode(const std::string& in, std::string& out, Stats* st = nullp
     std::string tr(0x18, '\0');
     wr16(tr, 0, 0x123); wr16(tr, 2, 0x2f);
     wr32(tr, 4, keys30); wr32(tr, 8, keys30);
-    wr16(tr, 0xc, nkeys); wr16(tr, 0xe, ne); wr16(tr, 0x10, nf); wr16(tr, 0x12, np);
+    wr16(tr, 0xc, nkeys30); wr16(tr, 0xe, ne); wr16(tr, 0x10, nf); wr16(tr, 0x12, np);
     out = body + emit + eff + par + tr;
-    s.keys = nkeys;
+    s.keys = nkeys30;
     if (st) *st = s;
     return true;
 }

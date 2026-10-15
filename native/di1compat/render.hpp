@@ -454,6 +454,7 @@ struct Result {
     std::set<int> translated;           // materials on their real (translated) 1.0 shader
     int skinned = 0;                    // primitives written in their target's 'skin' layout (io.skinLayout)
     int sceneSettings = 0;              // SSET blocks re-laid into 3.0's format (io.ssf10/ssf30)
+    std::vector<std::pair<std::string, std::string>> shaders;   // per 1.0 material: (its 1.0 shader, the shader served)
 };
 
 struct Src { Bundle b; int i; };   // one material of a source bundle (merge input)
@@ -549,6 +550,7 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
             srcs.push_back({one, 0});
             r.tiers["translated"]++;
             r.translated.insert((int)k);
+            r.shaders.push_back({m10.shader, dm.shader});
             continue;
         }
         auto mi = T.matindex.find(m10.name);
@@ -664,6 +666,7 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
             r.tiers[tier]++;
         }
         const Material& fin = srcs.back().b.mats[srcs.back().i];
+        r.shaders.push_back({m10.shader, fin.shader});
         shaderVf[(int)k] = &T.shaders.at(fin.shader).vf;
     }
     if (!r.problems.empty()) return false;
