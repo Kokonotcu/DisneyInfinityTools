@@ -323,6 +323,14 @@ inline bool addAssetPool(oct::File& f)
         // instancing one hit a NULL root in FUN_004f5900, in-game 2026-10-12)
     }
     if (assets.empty()) return false;
+    // The older 1.0 exploder form keeps its scene graph on an 'Asset' ('GarbageCan', SubNetworkRef 0) beside a
+    // PrimaryAsset without one (SubNetworkRef -1): 183 1.0 exploders (MU's benches, garbage cans, FearTech decos,
+    // IN's lamp posts and trees, TS ...). 3.0 instances the Root asset, so their Geometry-bound node had no graph and
+    // never drew (MU roar tutorial, in-game 2026-10-15) -- the anchor form (IN building sockets: PrimaryAsset
+    // SubNetworkRef 0) and graph-less models (LR barrels) drew. Disney's 3.0 twins of that form ship one asset, Root
+    // with the graph (74 of 75 twins; assetpair.py), so Root takes it.
+    if (assets[0].name == "Root" && assets[0].sn < 0 && assets.size() == 2 && assets[1].sn >= 0)
+        assets = {A{"Root", assets[1].sn, assets[0].stn}};
     std::vector<oct::Rec> add = {f.node(1, "AssetPool")};
     for (size_t k = 0; k < assets.size(); ++k) {
         oct::Rec a{2, (uint16_t)(oct::NODE | 4), f.addName("Asset"), {}};   // keyed node: Asset = ['k']
