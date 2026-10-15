@@ -1060,9 +1060,12 @@ struct DlgStats { int classes = 0, lines = 0, named = 0, ranges = 0, events = 0,
 // Wwise event whose timing is authored in Wwise), so the script keeps item 0 for 3.0 and vo's sequencer plays the rest.
 struct DlgSeqItem { uint16_t prefix, line; std::string event; uint32_t delay; };
 struct DlgSeq { uint8_t type; std::vector<DlgSeqItem> items; };
+// lineEvents: each line a 1.0 line class lists -> that class's 1.0 event name, keyed dlgLineKey(prefix, number)
+inline uint32_t dlgLineKey(uint32_t pfx, uint16_t num) { return (pfx & 0xdfdf) << 16 | num; }
 inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_map<uint32_t, std::string>& evNames,
                          std::vector<uint8_t>& out, DlgStats* st = nullptr, std::string* err = nullptr,
-                         const std::vector<uint8_t>* base30 = nullptr, std::unordered_map<uint32_t, DlgSeq>* seqs = nullptr)
+                         const std::vector<uint8_t>* base30 = nullptr, std::unordered_map<uint32_t, DlgSeq>* seqs = nullptr,
+                         std::unordered_map<uint32_t, std::string>* lineEvents = nullptr)
 {
     auto fail = [&](const char* why) { if (err) *err = why; return false; };
     auto rd32 = [&](size_t o) { return o + 4 <= in.size() ? *(const uint32_t*)(in.data() + o) : 0u; };
@@ -1106,6 +1109,7 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
                 uint32_t pfx = (uint32_t)(li[0] & 0xdf) | (uint32_t)(li[1] & 0xdf) << 8;   // FUN_0182bc20's key
                 auto& slot = ranges[pfx];
                 uint16_t num = *(const uint16_t*)(li + 2);
+                if (lineEvents) (*lineEvents)[dlgLineKey(pfx, num)] = events[o.bytes[4]];
                 if (slot.count(num)) ++s.dupLines;
                 slot[num] = ci;
                 ++s.lines;
@@ -1423,6 +1427,7 @@ struct Vo {
     // 1.0 dialog sequences (DlgSeq, by the entry's case-kept h131): armed by the request hook, started when 3.0 posts
     // their first line (the item the script kept), then advanced by the host tick as 1.0's FUN_00715fc0 does
     std::unordered_map<uint32_t, DlgSeq> seqs;
+    std::unordered_map<uint32_t, std::string> lineEvents;   // 1.0 line -> its 1.0 class's event (dlgLineKey)
     struct Armed { DlgSeq seq; DWORD at = 0; bool on = false; } armed;
     struct Run { DlgSeq seq; size_t next; DWORD prevStart, prevEnd; uint32_t prevPid, obj; };
     std::vector<Run> runs;
@@ -1931,8 +1936,23 @@ inline uint32_t __cdecl hkPostExt(uint32_t ev, uint32_t obj, uint32_t flags, voi
     int sub = 0;
     std::lock_guard<std::recursive_mutex> l(vo.mx);   // the bank's FSB stays open through playLine (Vo::unload: vo.mx, g.mx)
     if (n == 1 && ext && ext[3] && vo.media((const void*)(uintptr_t)ext[3], &b, &sub)) {
-        uint32_t id = g.playLine(ev, obj, flags, cb, cookie, b->snd, sub);
         Name10 x = b->idx();
+        // a 1.0 line posted with an event 1.0 does not have (3.0's own entries of a merged script name the Wwise
+        // 'dialog_unassigned': in_mumblers' 36-speaker entries for the MU students SM/SN/SP...) plays with the event its
+        // 1.0 line class names, as 1.0 plays a line of that class (IN_Mumblers SN013 -> dialog_default_2d)
+        bool known;
+        {
+            std::lock_guard<std::recursive_mutex> gl(g.mx);
+            known = g.byId.count(ev) != 0;
+        }
+        if (!known) {
+            const char* nm = x.subName(sub);
+            if (nm && isalpha((uint8_t)nm[0]) && isalpha((uint8_t)nm[1]) && isdigit((uint8_t)nm[2])) {
+                auto le = vo.lineEvents.find(dlgLineKey((uint32_t)(uint8_t)nm[0] | (uint32_t)(uint8_t)nm[1] << 8, (uint16_t)atoi(nm + 2)));
+                if (le != vo.lineEvents.end()) ev = fnv1(le->second);
+            }
+        }
+        uint32_t id = g.playLine(ev, obj, flags, cb, cookie, b->snd, sub);
         trace(ev ^ (uint32_t)sub, x.subName(sub), id ? "1.0 FMOD dialog" : "nothing (its 1.0 event is not loaded)");
         if (cfg.trace) {   // every post (the first 300): the line's event, object and flags, and whether 1.0 sounds are paused
             static int posts = 0;
@@ -1980,7 +2000,7 @@ inline void* __cdecl hkLoadFile(const char* path, uint32_t* size)
     std::lock_guard<std::recursive_mutex> l(vo.mx);
     vo.buildEvNames(g.sound10);
     uint8_t* p = nullptr;
-    if (dlgTranscode(in, vo.evNames, out, &st, &err, d30 ? &b30 : nullptr, &vo.seqs)) {
+    if (dlgTranscode(in, vo.evNames, out, &st, &err, d30 ? &b30 : nullptr, &vo.seqs, &vo.lineEvents)) {
         uint32_t got = 0;
         p = (uint8_t*)engineAlloc((uint32_t)out.size(), 0, &got, 0xffffffffu);
     } else
