@@ -139,6 +139,7 @@ static struct {
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
     bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 format's 'skin' layout, bones kept
+    bool skinTr10 = true;            // skinned materials take their translated 1.0 shader too (identity bones; gen30)
     bool sceneSettings10 = true;     // a 1.0 bundle's scene settings (SSET: fog, bloom, exposure, grading) re-laid into 3.0's
     bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
     int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
@@ -181,6 +182,7 @@ static struct {
     bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 standard includes) as a DataMap
     bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
     bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (coins, sparks: sys.hpp)
+    bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType: coins, Toy Store (gameplay.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
@@ -254,6 +256,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
         else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
         else if (!strcmp(key, "skinlayout10")) g_cfg.skinLayout10 = atoi(val) != 0;
+        else if (!strcmp(key, "skintr10")) g_cfg.skinTr10 = atoi(val) != 0;
         else if (!strcmp(key, "scenesettings10")) g_cfg.sceneSettings10 = atoi(val) != 0;
         else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
@@ -296,6 +299,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
         else if (!strcmp(key, "hudmarker10")) g_cfg.hudMarker10 = atoi(val) != 0;
         else if (!strcmp(key, "rewards10")) g_cfg.rewards10 = atoi(val) != 0;
+        else if (!strcmp(key, "currency10")) g_cfg.currency10 = atoi(val) != 0;
         else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
         else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
         else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
@@ -554,6 +558,7 @@ static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1
 static std::set<std::string> g_screens10;   // presentation/<screen>.lua served from 1.0: lower-case screen names (gprt)
 static render::Table g_render;
 static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
+static gen30::VFormats g_vf30;              // 3.0's (skintr10: the formats skinned passes draw in), set with the vtxf
 static std::map<uint32_t, gen30::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
 static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
@@ -631,6 +636,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
     io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
     io.skinLayout = g_cfg.skinLayout10;
+    io.translateSkinned = g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty();
     io.tails10 = &g_tails10;
     sceneSettingsIO(io);
     render::Result r;
@@ -805,6 +811,36 @@ static std::vector<std::pair<std::string, std::string>> particleShaders(const st
     std::lock_guard<std::mutex> lock(g_sessLock);
     g_served.emplace(mp, r.mtb);
     return r.shaders;
+}
+
+// currency10: does a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path) carry FastCoin.IsSpark? Memoised.
+static bool isSpark10(const std::string& dnaFile)
+{
+    static std::mutex m;
+    static std::map<std::string, bool> memo;
+    std::string p = dnaFile;
+    for (char& c : p) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
+    if (p.empty() || p == "none") return false;
+    if (p.find('/') == std::string::npos) p = "expendables_data/dna/" + p;
+    if (!endsWith(p.c_str(), ".dnax")) p += ".dnax";
+    {
+        std::lock_guard<std::mutex> l(m);
+        if (auto it = memo.find(p); it != memo.end()) return it->second;
+    }
+    bool spark = false;
+    std::string b;
+    if (read10s(p, b)) {
+        try {
+            auto G = luachunk::eval(b);
+            const luachunk::Value* d = G.count("DNA") ? &G["DNA"] : nullptr;
+            const luachunk::Value* ag = d ? d->get("AgentGadgets") : nullptr;
+            const luachunk::Value* fc = ag ? ag->get("FastCoin") : nullptr;
+            const luachunk::Value* is = fc ? fc->get("IsSpark") : nullptr;
+            spark = is && is->t == luachunk::Value::BOOL && is->b;
+        } catch (std::exception&) {}
+    }
+    std::lock_guard<std::mutex> l(m);
+    return memo[p] = spark;
 }
 
 // mtc: for a .mer, also the .mtc built from the same transcoded graph (the engine asks for the .mtc right after,
@@ -1029,9 +1065,11 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         return vfx::p3d30(std::string((const char*)data, n), out) ? "p3d" : nullptr;
     // an expendables package: its 1.0 groups in the keys 3.0's group reader takes (sys::groups30)
     if (g_cfg.rewards10 && norm(path).rfind("expendables_data/", 0) == 0 && endsWith(path, ".lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        int over = 0, k = sys::groups30(std::string((const char*)data, n), out, &over);
+        int over = 0, sparks = 0;
+        int k = sys::groups30(std::string((const char*)data, n), out, &over, g_cfg.currency10 ? std::function<bool(const std::string&)>(isSpark10) : nullptr, &sparks);
         if (k) {
-            note += "+groups30(" + std::to_string(k) + " groups" + (over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "") + ") ";
+            note += "+groups30(" + std::to_string(k - sparks) + " groups" + (over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "") +
+                    (sparks ? ", " + std::to_string(sparks) + " spark pickups paying INV_SPARKS" : "") + ") ";
             return "expgroups";
         }
     }
@@ -2466,6 +2504,26 @@ static uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t
 static std::vector<gameplay::Playset10> g_playsets10;
 static std::vector<std::string> g_missionPrefix10;
 static std::mutex g_playsets10Lock;
+// currency10: inventoryFilter -> the 1.0 playset's currency (gameplay::currencies10), and 3.0's "currency of the
+// zone's inventory filter" FUN_00e21850 (thiscall, filter, CString* out; ret 8), which answers INV_SPARKS for every
+// filter. Its callers are all the zone-currency users: the Toy Store (UI_GetPlaysetCurrency -> catalog.lua prices and
+// balance), the coin cache that banks Spark-type pickups (FUN_00e27ba0 / FUN_00e27c90), the HUD, currency drops.
+static std::map<std::string, std::string> g_currency10;
+static std::mutex g_currency10Lock;
+typedef void(__fastcall* ZoneCurrencyFn)(void* self, void* edx, const char* filter, void* out);
+static ZoneCurrencyFn g_zoneCurrency;
+static void __fastcall hkZoneCurrency(void* self, void*, const char* filter, void* out)
+{
+    std::string cur;
+    if (filter) {
+        std::lock_guard<std::mutex> l(g_currency10Lock);
+        if (auto it = g_currency10.find(filter); it != g_currency10.end()) cur = it->second;
+    }
+    if (cur.empty()) return g_zoneCurrency(self, nullptr, filter, out);
+    ((void(__fastcall*)(void*, void*, const char*))rt(0x0041A250))(out, nullptr, cur.c_str());   // CString = cur
+    static volatile LONG told;
+    if (InterlockedIncrement(&told) <= 3) logf("currency10: zone currency for %s -> %s", filter, cur.c_str());
+}
 static int zones10(std::string& t, const char* p)
 {
     if (norm(p) != "gamedb/core/zonelist.lua") return 0;
@@ -2479,6 +2537,14 @@ static int zones10(std::string& t, const char* p)
             return GetFileAttributesA((w + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA(w.c_str()) != INVALID_FILE_ATTRIBUTES;
         };
         ps = gameplay::playsets10(t, g["ZoneList"], g_cfg.zones10, world);
+        if (g_cfg.currency10) {
+            auto cur = gameplay::currencies10(g["ZoneList"]);
+            std::string l;
+            for (auto& [f, c] : cur) l += " " + f + "=" + c;
+            logf("currency10: 1.0 playset currencies:%s", l.c_str());
+            std::lock_guard<std::mutex> lk(g_currency10Lock);
+            g_currency10 = std::move(cur);
+        }
     } catch (std::exception& e) {
         logf("zones10: 1.0 zone list not read (%s)", e.what());
         return 0;
@@ -3875,7 +3941,9 @@ static uint8_t* shader10(const char* name, bool create)
     out = nullptr;
     gen30::Generated g;
     g_compiling10 = name;
-    gen30::generate(g_render.shaders10, read10s, g_vf10, std::string(name + 1), compile10, g);
+    std::function<uint32_t(uint32_t)> skinTarget;
+    if (g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty()) skinTarget = [](uint32_t vf) { return render::skinTarget30(g_render, vf); };
+    gen30::generate(g_render.shaders10, read10s, g_vf10, std::string(name + 1), compile10, g, skinTarget, &g_vf30);
     for (auto& pr : g.problems) logf("shaders10 %s: %s", name, pr.c_str());
     if (g.shd.empty() || !g.problems.empty()) return nullptr;
     std::map<uint32_t, uint32_t> engineId, vsIndex, psIndex;   // generator id -> engine id; engine id -> index
@@ -3924,6 +3992,7 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 {
     int n = 0;
     std::string m = gen30::mergeVtxf(t30, t10, n, g_tails10);
+    g_vf30 = gen30::vformats(t30);
     logf("shaders10: vformat.vtxf + %d 1.0 formats, %u with their vertex colour in its own stream", n, (unsigned)g_tails10.size());
     return m;
 }
@@ -4029,6 +4098,8 @@ extern "C" void __stdcall Pentane_Main()
         hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath, (void**)&g_econOnDeath);
     if (g_cfg.popin10 || g_cfg.deliv10)
         hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
+    if (g_cfg.currency10)
+        hook("zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&hkZoneCurrency, (void**)&g_zoneCurrency);
     if (g_cfg.popin10)
         hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);
     hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar, (void**)&g_playsetChar);

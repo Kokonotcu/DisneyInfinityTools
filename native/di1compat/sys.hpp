@@ -679,15 +679,32 @@ inline thread_local int g_pkg10 = -1;   // definitions given the 1.0 pop-in in t
 // Chance}, ...} (630 groups in the 1.0 packages), so every 1.0 group spawned nothing: no coins, no sparks from a
 // broken crate (in-game 2026-10-15). Served as Lua text with the 3.0 keys added (3.0 loads Lua text as well as
 // bytecode); a 5th+ spawn has no 3.0 key and is counted in *over. Returns the groups given keys (0: nothing to do).
-inline int groups30(const std::string& chunk, std::string& out, int* over = nullptr)
+// currency10 (isSpark set): a 1.0 FastCurrency pickup pays its playset's currency (gameplay::currencies10, through
+// 3.0's zone-currency FUN_00e21850) unless its DNA's FastCoin gadget says IsSpark (1.0 FastCoin_Spark; the gold coins
+// have none). 3.0 types a FastCurrency entry instead: those get Type 'Stat' + Stat 'INV_SPARKS' (3.0's own form for a
+// pickup paying one named currency: Empire's coins, Stat INV_EMPIRE_CURRENCY), so sparks stay sparks; *sparks counts.
+inline int groups30(const std::string& chunk, std::string& out, int* over = nullptr,
+                    const std::function<bool(const std::string& dnaFile)>& isSpark = nullptr, int* sparks = nullptr)
 {
     using luachunk::Value;
     auto G = luachunk::eval(chunk);
     auto pkg = G.find("ExpendablesPackage");
-    const Value* groups = pkg == G.end() ? nullptr : pkg->second.get("Groups");
-    if (!groups || groups->t != Value::TAB) return 0;
+    if (pkg == G.end()) return 0;
     auto str = [](const std::string& s) { Value v; v.t = Value::STR; v.s = s; return v; };
     int n = 0;
+    const Value* ents = pkg->second.get("Expendables");
+    if (isSpark && ents && ents->t == Value::TAB)
+        for (auto& [k, e] : *ents->tab) {
+            if (e.t != Value::TAB || _stricmp(e.str("RewardType").c_str(), "FastCurrency") || e.get("FastCurrency.Type") ||
+                !isSpark(e.str("DnaFile")))
+                continue;
+            e.tab->push_back({str("FastCurrency.Type"), str("Stat")});
+            e.tab->push_back({str("FastCurrency.Stat"), str("INV_SPARKS")});
+            ++n;
+            if (sparks) ++*sparks;
+        }
+    const Value* groups = pkg->second.get("Groups");
+    if (groups && groups->t == Value::TAB)
     for (auto& [k, g] : *groups->tab) {
         const Value* found = g.get("ExpendablesSpawned");
         if (g.t != Value::TAB || !found || found->t != Value::TAB) continue;

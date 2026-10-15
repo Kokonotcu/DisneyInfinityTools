@@ -299,6 +299,47 @@ static int renderTest(char** a)
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
     auto t0 = std::chrono::steady_clock::now();
     io.read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
+    // RENDER_SKINTR: cfg skintr10. RENDER_GENCHECK=<d3dcompiler cache dir>: a shader translates only if the plugin's
+    // generator makes it and every program compiles (the plugin's io.translatable); without it every one is assumed to
+    io.translateSkinned = getenv("RENDER_SKINTR") != nullptr;
+    gen30::VFormats vf30 = gen30::vformats(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"));
+    std::map<std::string, bool> made;
+    typedef HRESULT(WINAPI * CompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, void**, void**);
+    static CompileFn cf = nullptr;
+    if (const char* gc = getenv("RENDER_GENCHECK")) {
+        if (HMODULE dc = LoadLibraryA("d3dcompiler_47.dll")) cf = (CompileFn)GetProcAddress(dc, "D3DCompile");
+        std::string cacheDir = gc;
+        io.translatable = [&, cacheDir](const std::string& sh) {
+            auto m = made.find(sh);
+            if (m != made.end()) return m->second;
+            gen30::Read rd = [&](const std::string& p, std::string& o) { return io.read10(p, o); };
+            std::function<uint32_t(uint32_t)> st;
+            if (io.translateSkinned) st = [&](uint32_t vf) { return render::skinTarget30(T, vf); };
+            gen30::Compile comp = [&](const std::string& hlsl, const char* target, std::string& code, std::string& msg) {
+                uint64_t h = 1469598103934665603ull;
+                for (unsigned char c : std::string(target) + "\n" + hlsl) h = (h ^ c) * 1099511628211ull;
+                char nm[40];
+                sprintf_s(nm, "%016llx.dxbc", (unsigned long long)h);
+                fs::path path = fs::path(cacheDir) / nm;
+                code = slurp(path);
+                if (code.size() > 32) return true;
+                void *c = nullptr, *e = nullptr;
+                if (!cf || FAILED(cf(hlsl.data(), hlsl.size(), "di1compat", nullptr, nullptr, "main", target, 0, 0, &c, &e)) || !c) {
+                    if (e) { void** vt = *(void***)e; msg.assign((const char*)((void*(__stdcall*)(void*))vt[3])(e)); }
+                    return false;
+                }
+                void** vt = *(void***)c;
+                code.assign((const char*)((void*(__stdcall*)(void*))vt[3])(c), ((SIZE_T(__stdcall*)(void*))vt[4])(c));
+                fs::create_directories(cacheDir);
+                std::ofstream(path, std::ios::binary).write(code.data(), code.size());
+                return true;
+            };
+            gen30::Generated g;
+            gen30::generate(T.shaders10, rd, vf10, sh, comp, g, st, &vf30);
+            for (auto& p : g.problems) printf("shaders10 x%s: %s\n", sh.c_str(), p.c_str());
+            return made[sh] = !g.shd.empty() && g.problems.empty();
+        };
+    }
     std::string ob = slurp(world / (stem + ".oct"));
     oct::File f = oct::File::parse(ob.data(), ob.size());
     render::Result r;
@@ -2498,19 +2539,43 @@ int main(int argc, char** argv)
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--vtxf") return vtxfTest(argv, argc);
     if (argc > 3 && std::string(argv[1]) == "--groups30") {   // --groups30 <out dir> <1.0 package.lua>...: sys::groups30
+        // GROUPS30_DNA=<1.0 extract assets dir>: currency10 too (spark pickups by their DNA's FastCoin.IsSpark)
         namespace fs = std::filesystem;
-        int groups = 0, over = 0, files = 0;
+        int groups = 0, over = 0, files = 0, sparks = 0;
+        const char* dnaRoot = getenv("GROUPS30_DNA");
+        std::function<bool(const std::string&)> isSpark;
+        if (dnaRoot) isSpark = [&](const std::string& d) {
+            std::string p = d;
+            for (char& c : p) c = (char)tolower((unsigned char)c);
+            if (p.empty() || p == "none") return false;
+            if (p.find('/') == std::string::npos) p = "expendables_data/dna/dna/" + p;
+            if (p.size() < 5 || p.compare(p.size() - 5, 5, ".dnax")) p += ".dnax";
+            std::string b = slurp(fs::path(dnaRoot) / p);
+            try {
+                auto G = luachunk::eval(b);
+                const luachunk::Value* fc = G.count("DNA") && G["DNA"].get("AgentGadgets") ? G["DNA"].get("AgentGadgets")->get("FastCoin") : nullptr;
+                const luachunk::Value* is = fc ? fc->get("IsSpark") : nullptr;
+                return is && is->t == luachunk::Value::BOOL && is->b;
+            } catch (std::exception&) { return false; }
+        };
         for (int i = 3; i < argc; ++i) {
             std::string out;
-            int k = 0;
-            try { k = sys::groups30(slurp(argv[i]), out, &over); }
+            int k = 0, s = 0;
+            try { k = sys::groups30(slurp(argv[i]), out, &over, isSpark, &s); }
             catch (std::exception& e) { printf("%s: %s\n", argv[i], e.what()); }
             if (!k) continue;
             ++files;
-            groups += k;
+            groups += k - s;
+            sparks += s;
             std::ofstream(fs::path(argv[2]) / fs::path(argv[i]).filename(), std::ios::binary).write(out.data(), out.size());
         }
-        printf("%d packages with 1.0 groups, %d groups given 3.0 keys, %d spawns past the 4th\n", files, groups, over);
+        printf("%d packages with 1.0 groups, %d groups given 3.0 keys, %d spawns past the 4th, %d spark pickups paying INV_SPARKS\n",
+               files, groups, over, sparks);
+        return 0;
+    }
+    if (argc > 2 && std::string(argv[1]) == "--currency10") {   // --currency10 <1.0 zonelist.lua>: gameplay::currencies10
+        auto g = luachunk::eval(slurp(argv[2]));
+        for (auto& [f, c] : gameplay::currencies10(g["ZoneList"])) printf("%s -> %s\n", f.c_str(), c.c_str());
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--sxkeys") {   // --sxkeys <names file> <out.tsv>: sx::keyId of every line
@@ -3219,9 +3284,14 @@ int main(int argc, char** argv)
             }
         }
         size_t probs = 0;
+        // WARM_EXT30=<3.0 extract root>: as the plugin with cfg skintr10 on (skinned passes take their 3.0 skin target)
+        gen30::VFormats vf30;
+        if (const char* e30 = getenv("WARM_EXT30")) vf30 = gen30::vformats(slurp(fs::path(e30) / "assets/shaders/shaders/vformat.vtxf"));
+        std::function<uint32_t(uint32_t)> st;
+        if (!vf30.empty()) st = [&](uint32_t v) { return render::skinTarget30(T, v); };
         for (auto& sh : shaders) {
             gen30::Generated g;
-            gen30::generate(T.shaders10, read10, vf, sh, comp, g);
+            gen30::generate(T.shaders10, read10, vf, sh, comp, g, st, &vf30);
             for (auto& pr : g.problems) if (++probs <= 10) printf("  %s: %s\n", sh.c_str(), pr.c_str());
         }
         printf("%zu shaders: %zu programs compiled, %zu already cached, %zu failed, %zu problems\n", shaders.size(), compiled, cached, failed, probs);

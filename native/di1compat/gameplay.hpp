@@ -276,6 +276,34 @@ inline int zonelist30(std::string& t)
     return n;
 }
 
+// currency10: a 1.0 playset's currency, from the 1.0 zone list -- PlaysetProperties.<playset>.inventoryFilter ->
+// its MissionParams.DefaultRewardType (LVL_INCREDIBLES -> INV_NSA_BUCKS, LVL_MONSTERS -> INV_MONSTERS_CURRENCY,
+// LVL_TOYSTORYINSPACE -> INV_SPACE_CRYSTAL, ...). 3.0 keeps these as GLOBAL-scope stats; its "currency of the zone's
+// inventory filter" FUN_00e21850 answers INV_SPARKS for every filter, so coins paid sparks and the Toy Store priced
+// in sparks (in-game 2026-10-15). 3.0's own legacy branches for them stay (FUN_0115e880: INV_SPACE_CRYSTAL /
+// INV_CARS_CASH / INV_NSA_BUCKS reward groups).
+inline std::map<std::string, std::string> currencies10(const luachunk::Value& zoneList10)
+{
+    std::map<std::string, std::string> out;
+    const luachunk::Value* rec = zoneList10.get("Records");
+    const luachunk::Value* pp = rec ? rec->get("PlaysetProperties") : nullptr;
+    if (!pp || pp->t != luachunk::Value::TAB) return out;
+    auto currency = [&](const luachunk::Value& p) { const luachunk::Value* mp = p.get("MissionParams"); return mp ? mp->str("DefaultRewardType") : ""; };
+    for (auto& [k, p] : *pp->tab) {
+        std::string filter = p.str("inventoryFilter"), cur = currency(p);
+        if (!filter.empty() && !cur.empty()) out[filter] = cur;
+    }
+    // a zone record may carry the filter itself (Zones.LR_Colby: inventoryFilter LVL_LONERANGER, PlaysetProperties
+    // 'LoneRanger'); 3.0 asks the current zone (FUN_0139e0b0 "inventoryFilter")
+    if (const luachunk::Value* zs = rec->get("Zones"); zs && zs->t == luachunk::Value::TAB)
+        for (auto& [k, z] : *zs->tab) {
+            std::string filter = z.str("inventoryFilter");
+            const luachunk::Value* p = pp->get(z.str("PlaysetProperties"));
+            if (!filter.empty() && p && !out.count(filter) && !currency(*p).empty()) out[filter] = currency(*p);
+        }
+    return out;
+}
+
 // PS-1 (cfg zones10): every 1.0 playset in 3.0's zone list as it loads, from the 1.0 zone list (startup2.zip
 // gamedb/core/zonelist.lua, a compiled table constructor: luachunk::eval). A playset is a 1.0 PlaysetProperties record
 // of Type "Playset" whose StartWorld is one of its own zones (zone field PlaysetProperties = its name) and is in the

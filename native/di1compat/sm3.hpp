@@ -127,6 +127,8 @@ struct Binding {
         return t + "." + method + "(" + s + ", " + uv + (extra.empty() ? "" : ", " + extra) + ")";
     }
     virtual std::string inputType(const std::string&) { return "float"; }
+    // a VS input given by an expression instead of the vertex (true: not declared in VSIn)
+    virtual bool inputConst(const std::string&, std::string&) { return false; }
     bool gbuffer = false;
     bool depthOnly = false;   // a depth-only pass (3.0 writes no colour there): keep the discards, drop the outputs
     std::string epilogue;
@@ -276,7 +278,13 @@ inline std::string toHlsl(const Program& P, Binding& B)
     for (const char* v : VARYINGS) io += std::string(" float4 ") + v + " : " + v + ";";
     if (vs) {
         std::string in;
-        for (auto& [k, v] : inputs) in += (in.empty() ? "" : " ") + B.inputType(v) + "4 v" + std::to_string(k) + " : " + v + ";";
+        std::map<int, std::string> given;   // inputs the binding supplies itself
+        for (auto& [k, v] : inputs) {
+            std::string e;
+            if (B.inputConst(v, e)) given[k] = e;
+            else in += (in.empty() ? "" : " ") + B.inputType(v) + "4 v" + std::to_string(k) + " : " + v + ";";
+        }
+        for (auto& [k, e] : given) inputs.erase(k);
         out.push_back("struct VSIn { " + in + " };");
         out.push_back("struct VSOut { " + io + " };");
         out.push_back("VSOut main(VSIn vin) {");
@@ -288,6 +296,7 @@ inline std::string toHlsl(const Program& P, Binding& B)
         out.push_back(os + ";");
         out.push_back("    int4 a0 = 0;");
         for (auto& [k, v] : inputs) out.push_back("    float4 v" + std::to_string(k) + " = (float4)vin.v" + std::to_string(k) + ";");
+        for (auto& [k, e] : given) out.push_back("    float4 v" + std::to_string(k) + " = " + e + ";");
     } else {
         std::string outs;
         for (int k = 0; k < 4; ++k) {
