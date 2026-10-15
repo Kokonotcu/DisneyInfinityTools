@@ -144,6 +144,7 @@ static struct {
     int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
     int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
     bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
+    int fadeProbe10 = 0;             // test: 1 log the inputs of every faded object's fade (visibility test FUN_0044b8f0); 2 also draw it unfaded
     bool fpsLog10 = false;           // test: once a second, frame time and how much of it the main thread waits on rendering
     bool loadProf10 = false;         // diagnostic: per-open timings + a sampling profile of the frame/open/busiest threads
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
@@ -247,6 +248,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
         else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
+        else if (!strcmp(key, "fadeprobe10")) g_cfg.fadeProbe10 = atoi(val);
         else if (!strcmp(key, "fpslog10")) g_cfg.fpsLog10 = atoi(val) != 0;
         else if (!strcmp(key, "loadprof10")) g_cfg.loadProf10 = atoi(val) != 0;
         else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
@@ -2376,6 +2378,42 @@ static uint32_t __cdecl hkOpacityMask(uint32_t n, float fade, uint32_t prims, ui
     return r;
 }
 
+// test (fadeprobe10): where the object fade comes from. FUN_0044b8f0 (cdecl, 6 args: render node, world sphere
+// {x, y, z, r?}, ?, view params (view + 0x340), view mask, out) is the main-view visibility test of a node with
+// flag 8 (FUN_00459af0); out[1] is the object fade FUN_0044ad80 then compares (< 1: the primitive leaves the opaque
+// G-buffer list). Two terms: screen size (node byte +0xf bit 0: s = pi * sphere[3] / (z^2 * view[+0xd0]), culled
+// under view[+0x130], fade (s - [+0x130]) * [+0x170] up to [+0x150]) and distance (node +0xc bit 0x80: start
+// +0x10, end +0x14). Logs each faded node's inputs, once per node per 3 s, up to 800 lines. fadeprobe10 = 2 also
+// draws every visible faded object unfaded (out[1] = 1), to see whether the faded path is what draws black.
+typedef uint8_t(__cdecl* VisTestFn)(uint8_t* node, float* sphere, void* a3, uint8_t* view, uint8_t mask, float* out);
+static VisTestFn g_visTest;
+static uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t* view, uint8_t mask, float* out)
+{
+    uint8_t r = g_visTest(node, sphere, a3, view, mask, out);
+    if (!(r & 1) || !(mask & 1) || out[1] >= 0.999f) return r;
+    struct Unfade { float* o; bool on; ~Unfade() { if (on) o[1] = 1.0f; } } unfade{out, g_cfg.fadeProbe10 == 2};
+    static std::mutex m;
+    static std::unordered_map<uint8_t*, ULONGLONG> last;
+    static int lines;
+    ULONGLONG now = GetTickCount64();
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if (lines >= 800) return r;
+        auto it = last.find(node);
+        if (it != last.end() && now - it->second < 3000) return r;
+        last[node] = now;
+        ++lines;
+    }
+    auto F = [&](size_t o) { return *(float*)(view + o); };
+    float z = F(0x70) * sphere[1] + F(0x50) * sphere[0] + F(0x90) * sphere[2] + F(0xb0);
+    float s = sphere[3] * 3.1415927f / (z * z * F(0xd0));
+    logf("fade probe: node %p id %08X flags %04X f %02X start %.2f end %.2f | sphere (%.2f %.2f %.2f) %.4f z %.2f | k %.6g "
+         "pop %.6g fadeEnd %.6g scale %.6g -> screen %.6g fade %.3f", node, *(uint32_t*)(node + 0x34), *(uint16_t*)(node + 0xc),
+         node[0xf], *(float*)(node + 0x10), *(float*)(node + 0x14), sphere[0], sphere[1], sphere[2], sphere[3], z, F(0xd0),
+         F(0x130), F(0x150), F(0x170), s, out[1]);
+    return r;
+}
+
 static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc loaded in-process, one frame captured once the world runs
 static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
 {
@@ -3438,7 +3476,12 @@ static bool linkShader(uint8_t* shd)
     int npass = shd[0x19];
     for (int i = 0; i < npass; ++i) {
         uint8_t* p = passes + 0x50 * i;
-        if (!p[0x14]) continue;                        // no stage (yet): not drawn
+        if (!p[0x14]) {                                // no stage (yet): not drawn
+            if (g_cfg.fadeProbe10 && !seen)
+                logf("fade probe: shader %s pass %d word %08x has no stage at link time (no record)",
+                     *(const char**)shd ? *(const char**)shd : "(built-in)", i, *(uint32_t*)p);
+            continue;
+        }
         uint16_t& count = *(uint16_t*)rt(0x02173A66);
         uint16_t had = *(uint16_t*)(p + 0x16);         // linked already: its record points back at this pass
         uint32_t* old = (uint32_t*)rt(0x02173A68) + 14 * had;
@@ -3755,6 +3798,8 @@ extern "C" void __stdcall Pentane_Main()
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
+    if (g_cfg.fadeProbe10)
+        hook("visibility test (fadeprobe10)", 0x0044B8F0, "8B5424088A442414F30F10620C", (void*)&hkVisTest, (void**)&g_visTest);
     if (g_cfg.fpsLog10 || g_cfg.loadProf10) hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync, (void**)&g_frameSync);
     if (g_cfg.loadProf10) {
         hook("fiber switch (loadprof10)", 0x0041E480, "8B44240C85C0740C", (void*)&hkFiberSwitch, (void**)&g_fiberSwitch);
