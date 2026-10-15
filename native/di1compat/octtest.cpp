@@ -2539,19 +2539,43 @@ int main(int argc, char** argv)
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--vtxf") return vtxfTest(argv, argc);
     if (argc > 3 && std::string(argv[1]) == "--groups30") {   // --groups30 <out dir> <1.0 package.lua>...: sys::groups30
+        // GROUPS30_DNA=<1.0 extract assets dir>: currency10 too (spark pickups by their DNA's FastCoin.IsSpark)
         namespace fs = std::filesystem;
-        int groups = 0, over = 0, files = 0;
+        int groups = 0, over = 0, files = 0, sparks = 0;
+        const char* dnaRoot = getenv("GROUPS30_DNA");
+        std::function<bool(const std::string&)> isSpark;
+        if (dnaRoot) isSpark = [&](const std::string& d) {
+            std::string p = d;
+            for (char& c : p) c = (char)tolower((unsigned char)c);
+            if (p.empty() || p == "none") return false;
+            if (p.find('/') == std::string::npos) p = "expendables_data/dna/dna/" + p;
+            if (p.size() < 5 || p.compare(p.size() - 5, 5, ".dnax")) p += ".dnax";
+            std::string b = slurp(fs::path(dnaRoot) / p);
+            try {
+                auto G = luachunk::eval(b);
+                const luachunk::Value* fc = G.count("DNA") && G["DNA"].get("AgentGadgets") ? G["DNA"].get("AgentGadgets")->get("FastCoin") : nullptr;
+                const luachunk::Value* is = fc ? fc->get("IsSpark") : nullptr;
+                return is && is->t == luachunk::Value::BOOL && is->b;
+            } catch (std::exception&) { return false; }
+        };
         for (int i = 3; i < argc; ++i) {
             std::string out;
-            int k = 0;
-            try { k = sys::groups30(slurp(argv[i]), out, &over); }
+            int k = 0, s = 0;
+            try { k = sys::groups30(slurp(argv[i]), out, &over, isSpark, &s); }
             catch (std::exception& e) { printf("%s: %s\n", argv[i], e.what()); }
             if (!k) continue;
             ++files;
-            groups += k;
+            groups += k - s;
+            sparks += s;
             std::ofstream(fs::path(argv[2]) / fs::path(argv[i]).filename(), std::ios::binary).write(out.data(), out.size());
         }
-        printf("%d packages with 1.0 groups, %d groups given 3.0 keys, %d spawns past the 4th\n", files, groups, over);
+        printf("%d packages with 1.0 groups, %d groups given 3.0 keys, %d spawns past the 4th, %d spark pickups paying INV_SPARKS\n",
+               files, groups, over, sparks);
+        return 0;
+    }
+    if (argc > 2 && std::string(argv[1]) == "--currency10") {   // --currency10 <1.0 zonelist.lua>: gameplay::currencies10
+        auto g = luachunk::eval(slurp(argv[2]));
+        for (auto& [f, c] : gameplay::currencies10(g["ZoneList"])) printf("%s -> %s\n", f.c_str(), c.c_str());
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--sxkeys") {   // --sxkeys <names file> <out.tsv>: sx::keyId of every line
