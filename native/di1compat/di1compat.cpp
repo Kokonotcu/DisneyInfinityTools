@@ -2504,25 +2504,89 @@ static uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t
 static std::vector<gameplay::Playset10> g_playsets10;
 static std::vector<std::string> g_missionPrefix10;
 static std::mutex g_playsets10Lock;
-// currency10: inventoryFilter -> the 1.0 playset's currency (gameplay::currencies10), and 3.0's "currency of the
-// zone's inventory filter" FUN_00e21850 (thiscall, filter, CString* out; ret 8), which answers INV_SPARKS for every
-// filter. Its callers are all the zone-currency users: the Toy Store (UI_GetPlaysetCurrency -> catalog.lua prices and
-// balance), the coin cache that banks Spark-type pickups (FUN_00e27ba0 / FUN_00e27c90), the HUD, currency drops.
+// currency10: inventoryFilter -> the 1.0 playset's currency (gameplay::currencies10). 3.0 answers INV_SPARKS in three
+// places, all redirected to it:
+// - "currency of the zone's inventory filter" FUN_00e21850 (thiscall, filter, CString* out; ret 8): every filter. Its
+//   callers pass the zone's filter: the coin cache that banks Spark-type pickups (FUN_00e27ba0 / FUN_00e27c90),
+//   currency drops, legacy reward groups.
+// - UI_GetPlaysetCurrency FUN_00b54b50 (thiscall(L), ret 4): the Toy Store's currencyName (balance, price icon;
+//   catalog.lua) and player_hud_info.lua's. It reads the zone's filter, then asks FUN_00e21850 for LVL_RUMPUSROOM's;
+//   1.0's FUN_00b40a40 asked with the zone's filter, as this does again (lua_pushstring FUN_0130d840).
+// - the HUD's currency FUN_00fbb420 (below). Prices need nothing: a 1.0 recipe card's PelletCost names its currency
+//   ('INV_NSA_BUCKS:1000') and catalog.lua charges that (UI_ChangePelletCount).
 static std::map<std::string, std::string> g_currency10;
 static std::mutex g_currency10Lock;
+static std::string currency10(const char* filter, const char* who)
+{
+    if (!filter || !*filter) return {};
+    std::lock_guard<std::mutex> l(g_currency10Lock);
+    auto it = g_currency10.find(filter);
+    if (it == g_currency10.end()) return {};
+    static std::set<std::string> told;
+    if (told.insert(std::string(who) + filter).second) logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
+    return it->second;
+}
+// The zone's: the zone manager's (*0x0225f548) string field inventoryFilter of its zone (+0x19c), read through
+// FUN_0139e0b0 (thiscall: key, zone, a3, default; ret 0x10) as FUN_00e27ba0 and FUN_00b54b50 read it.
+static std::string zoneCurrency10(const char* who)
+{
+    uint8_t* zm = *(uint8_t**)rt(0x0225F548);
+    uint32_t zone = zm ? *(uint32_t*)(zm + 0x19C) : 0;
+    if (!zone) return {};
+    typedef const char*(__fastcall* StrFn)(void*, void*, const char*, uint32_t, uint32_t, const char*);
+    return currency10(((StrFn)rt(0x0139E0B0))(zm, nullptr, "inventoryFilter", zone, 0, ""), who);
+}
 typedef void(__fastcall* ZoneCurrencyFn)(void* self, void* edx, const char* filter, void* out);
 static ZoneCurrencyFn g_zoneCurrency;
 static void __fastcall hkZoneCurrency(void* self, void*, const char* filter, void* out)
 {
-    std::string cur;
-    if (filter) {
-        std::lock_guard<std::mutex> l(g_currency10Lock);
-        if (auto it = g_currency10.find(filter); it != g_currency10.end()) cur = it->second;
-    }
+    std::string cur = currency10(filter, "zone");
     if (cur.empty()) return g_zoneCurrency(self, nullptr, filter, out);
     ((void(__fastcall*)(void*, void*, const char*))rt(0x0041A250))(out, nullptr, cur.c_str());   // CString = cur
-    static volatile LONG told;
-    if (InterlockedIncrement(&told) <= 3) logf("currency10: zone currency for %s -> %s", filter, cur.c_str());
+}
+typedef int(__fastcall* PlaysetCurrencyFn)(void* self, void* edx, void* L);
+static PlaysetCurrencyFn g_playsetCurrency;
+static int __fastcall hkPlaysetCurrency(void* self, void*, void* L)
+{
+    std::string cur = zoneCurrency10("Toy Store / UI_GetPlaysetCurrency");
+    if (cur.empty()) return g_playsetCurrency(self, nullptr, L);
+    ((void(__cdecl*)(void*, const char*))rt(0x0130D840))(L, cur.c_str());
+    return 1;
+}
+// The HUD's currency FUN_00fbb420 (thiscall(data), ret 4; FUN_00fc11b0's pick unless the HUD's playset is Empire,
+// InsideOut or PlaysetX, which have their own) shows INV_SPARKS with icon "SPARKS", both fixed. In a 1.0 playset's
+// zone this shows the playset's currency through the same steps: amount FUN_00e07f60 (inventory *0x02289734,
+// thiscall(name), ret 4); into the hud's (+0x5c) table PlayerInfo (FUN_0154c520) when its currencyAmt (FUN_004510b0,
+// lua_tointeger FUN_0130d530, release FUN_0130e4d0) differs or the hud forces it (+0x87): currencyIcon (FUN_00b3f0a0)
+// = the currency less "INV_" (the icon naming of 3.0's empire_currency / scrapcurrency / out_balloons, and of
+// catalog.lua's MangleIconName: ui/icons/nsa_bucks.mtb ...), dirty (FUN_00b3f060), PlayerCurrencyAmt (FUN_0154c100).
+struct ScriptRef { void* L; uint32_t idx; };
+typedef uint8_t(__fastcall* HudCurrencyFn)(uint8_t* hud, void* edx, void* data);
+static HudCurrencyFn g_hudCurrency;
+static uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
+{
+    std::string cur = zoneCurrency10("HUD");
+    if (cur.empty() || cur == "INV_SPARKS") return g_hudCurrency(hud, nullptr, data);
+    typedef void(__cdecl* ReleaseFn)(void*, uint32_t);
+    int amt = ((int(__fastcall*)(void*, void*, const char*))rt(0x00E07F60))(*(void**)rt(0x02289734), nullptr, cur.c_str());
+    ScriptRef info{nullptr, 0xFFE17B81u}, f{nullptr, 0};
+    ((void(__fastcall*)(void*, void*, const char*, ScriptRef*))rt(0x0154C520))(*(void**)(hud + 0x5C), nullptr, "PlayerInfo", &info);
+    ScriptRef* got = ((ScriptRef*(__fastcall*)(ScriptRef*, void*, ScriptRef*, const char*))rt(0x004510B0))(&info, nullptr, &f, "currencyAmt");
+    int shown = ((int(__cdecl*)(void*, uint32_t))rt(0x0130D530))(got->L, got->idx);
+    if (f.L) ((ReleaseFn)rt(0x0130E4D0))(f.L, f.idx);
+    uint8_t changed = 0;
+    if (shown != amt || hud[0x87]) {
+        std::string icon = cur.compare(0, 4, "INV_") ? cur : cur.substr(4);
+        const char* key = "currencyIcon";
+        const char* val = icon.c_str();
+        ((void(__fastcall*)(ScriptRef*, void*, const char**, const char**))rt(0x00B3F0A0))(&info, nullptr, &key, &val);
+        changed = 1;
+        key = "dirty";
+        ((void(__fastcall*)(ScriptRef*, void*, const char**, uint8_t*))rt(0x00B3F060))(&info, nullptr, &key, &changed);
+        ((void(__fastcall*)(void*, void*, const char*, int))rt(0x0154C100))(data, nullptr, "PlayerCurrencyAmt", amt);
+    }
+    if (info.L) ((ReleaseFn)rt(0x0130E4D0))(info.L, info.idx);
+    return changed;
 }
 static int zones10(std::string& t, const char* p)
 {
@@ -4098,8 +4162,11 @@ extern "C" void __stdcall Pentane_Main()
         hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath, (void**)&g_econOnDeath);
     if (g_cfg.popin10 || g_cfg.deliv10)
         hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
-    if (g_cfg.currency10)
+    if (g_cfg.currency10) {
         hook("zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&hkZoneCurrency, (void**)&g_zoneCurrency);
+        hook("UI_GetPlaysetCurrency (currency10)", 0x00B54B50, "6AFF68????????64A100000000", (void*)&hkPlaysetCurrency, (void**)&g_playsetCurrency);
+        hook("HUD currency (currency10)", 0x00FBB420, "6AFF68????????64A100000000", (void*)&hkHudCurrency, (void**)&g_hudCurrency);
+    }
     if (g_cfg.popin10)
         hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);
     hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar, (void**)&g_playsetChar);
