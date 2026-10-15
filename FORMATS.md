@@ -481,6 +481,18 @@ Code: `native30.convert`, `graph.expand`
 - **The start slot's processor outputs** (`In WorldBasis.Transform`, a Transform DataNode, and `In WorldBasis`, a Dilation) are pre-filled with the same position, because the Layout basis is identity. 125 shipped worlds likewise hold the position in that Transform.
 - **1.0 locators**: a locator's world position is its `<name>|Transform` Dilation plus its basis chain (`native30.graph_locator`). `native30` starts at the 1.0 locator named `*StartPoint` unless `--start x,y,z` or `--start-locator` is given. Metroville uses `--start`, since `IN_City_StartPoint` lies outside the playable city.
 
+### 5.7 Building lots and SpawnBuilding
+Code: `native/di1compat/bldrt.hpp` (cfg `building10`, probe `spawntrace10`). Measured on the six 1.0 playset start worlds and both exes.
+
+- **A lot** is an actor in the world's `.ap`: `AddComponent_BuildingLot=True`, `BuildingLot_Uuid`, `creationKey=BuildingLot`, `order=N`, `StartEnabled`, `LotIsStatic` (Cars 10 lots, LR 15, TS 9, Pirates 4 static, MU 6, Metroville 4). Its entity is `characters/buildings/building_master_new` (the empty lot). In the `.mer` the lot is an `Actor` node (Uuid = `MeridianActor_Uuid`) plus a `NodeGroup` (Uuid = `BuildingLot_Uuid`) with the ports `Enable` and `BuildingActor`. 3.0's one shipped lot (`emp_hoth_render`) has the same shape.
+- **Registration** reads `building`, `order`, `LotIsStatic`, `StartEnabled` from the actor's parameters (1.0 FUN_00bab4a0, 3.0 FUN_00cf69b0, same code) and adds a lot-state record keyed by `order` with the lot actor (3.0 FUN_00cefe60 on the manager at `0x02221348`).
+- **SpawnBuilding** (`building` = a building name, `Source` = the lot's `Actor` node): its Link_In handler (1.0 FUN_00d3ab50, 3.0 FUN_011854b0) finds the lot key (FUN_00cc9d20: record[2] = actor -> record[0]) and calls BuildingLotManager's spawn (1.0 FUN_00b9f410, 3.0 FUN_00cef120: thiscall `(out handle, lot key, StringT name by value, char useOwnMatrix)`, ret 0x10).
+  - 1.0 records the pending name on the lot (FUN_00b8c640) and **creates the building**: the lot's matrix, zone at that position (FUN_00ef1f80), create by name (FUN_00a19600 -> FUN_00d1da30 `(out, name, 0, zone, 0, 1, &matrix)`), owner hand-over (FUN_00d1bd60), object flag 8, vf+0x18(1); `out` = the handle.
+  - 3.0 records the pending name (FUN_00ce4f20) and returns `out = 0`; the lot matrix is still computed and never used. No 3.0 reader of the pending name creates anything (all are UI getters or the `BuildingActor` source), and no shipped 3.0 graph uses SpawnBuilding. So no 1.0 playset building is ever created in 3.0: in the 2026-10-15 runs no `characters/buildings/<b>` model of Cars, TS, MU or Pirates was opened, and LR's datamap-preloaded ones were never placed.
+  - 3.0 kept creation by name: the Lua native `RumpusSpawn` (3.0 FUN_00aa1350; 1.0 FUN_00a1bcd0 calls the same FUN_00d1da30) does zone (FUN_01390e30 on `0x0225F548`), create (FUN_00a9de70 -> FUN_00f7e3e0, ret 0x1c, `(out, name, 0, zone, 0, 1, 0)`), matrix (FUN_00f9dbd0 on a live object, else `obj+0x40`), vf+0x1c(1). `building10` completes a call from the node's site (`0x0118559A`) that way.
+- **Metroville's** four SpawnBuilding nodes fire only from a `DebugInput` ("Place Buildings" -> `PlaceBuildings` message), so its lots stay empty in 1.0 too; its buildings come from the store.
+- Not decoded: 3.0's twins of the owner hand-over FUN_00d1bd60 and of 1.0's object flag 8.
+
 ---
 
 ## 6. Materials (.mtb) and textures (.tbody)
