@@ -226,6 +226,7 @@ static struct {
     bool actionMap10 = true;         // ui: a 1.0 movie's UsesActionMap sets its screen's action map, as in 1.0 (gprt.hpp)
     bool focus10 = true;             // ui: a 3.0 Screen on a 1.0 movie gets 3.0's non-FSM focus (SetHasFocus, +0x60) (gprt.hpp)
     bool keys10 = true;              // ui: a 3.0 script on a 1.0 movie: its mapped actions also reach the movie as key events, as in 1.0 (gprt.hpp)
+    bool accept10 = true;            // gp: a 1.0 mission activated in a 1.0 zone posts the tutorial 'mission accepted' event (gprt.hpp)
     bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
     bool playsetMenu10 = true;       // menu: one Play Sets entry per registered 1.0 playset, opening its start zone (ui::playsetMenu10)
     bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
@@ -343,6 +344,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "actionmap10")) g_cfg.actionMap10 = atoi(val) != 0;
         else if (!strcmp(key, "focus10")) g_cfg.focus10 = atoi(val) != 0;
         else if (!strcmp(key, "keys10")) g_cfg.keys10 = atoi(val) != 0;
+        else if (!strcmp(key, "accept10")) g_cfg.accept10 = atoi(val) != 0;
         else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
         else if (!strcmp(key, "playsetmenu10")) g_cfg.playsetMenu10 = atoi(val) != 0;
         else if (!strcmp(key, "zones10")) g_cfg.zones10 = atoi(val) != 0;
