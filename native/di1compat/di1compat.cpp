@@ -151,6 +151,7 @@ static struct {
     bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
+    bool progress10 = true;          // mission .lua: 1.0's mission-generated objective line -> ProgressString "<default>"
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
     bool lockTrace10 = true;         // log control locks, controller contexts, choreography play/end, messages
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
@@ -259,6 +260,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
         else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
         else if (!strcmp(key, "events10")) g_cfg.events10 = atoi(val) != 0;
+        else if (!strcmp(key, "progress10")) g_cfg.progress10 = atoi(val) != 0;
         else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
         else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
         else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
@@ -842,15 +844,18 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         out.swap(t);
         return "missiongraph";
     }
-    // a mission (Mission_Data/<playset>/<line>/<name>.lua): presentation events in the 3.0 enum (mission.hpp)
-    if ((g_cfg.events10 || !actLua.empty()) && endsWith(path, ".lua") && n && ((const char*)data)[0] != 0x1b &&
-        norm(path).rfind("mission_data/", 0) == 0 && !strstr(path, "__")) {
+    // a mission (Mission_Data/<playset>/<line>/<name>.lua): presentation events in the 3.0 enum, the 1.0
+    // mission-generated objective line as 3.0's ProgressString "<default>" (mission.hpp)
+    if ((g_cfg.events10 || g_cfg.progress10 || !actLua.empty()) && endsWith(path, ".lua") && n &&
+        ((const char*)data)[0] != 0x1b && norm(path).rfind("mission_data/", 0) == 0 && !strstr(path, "__")) {
         std::string t = actLua.empty() ? std::string((const char*)data, n) : actLua;
-        int k = g_cfg.events10 && t.compare(0, 9, "Mission =") == 0 ? mission::luaEvents30(t) : 0;
+        bool m = t.compare(0, 9, "Mission =") == 0;
+        int k = g_cfg.events10 && m ? mission::luaEvents30(t) : 0, pr = g_cfg.progress10 && m ? mission::progress30(t) : 0;
         if (k) note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
-        else if (actLua.empty()) return nullptr;
+        if (pr) note += "+progress(objective line <MissionName>_Desc) ";
+        if (!k && !pr && actLua.empty()) return nullptr;
         out.swap(t);
-        return k ? "mission" : "activitytasks";
+        return k || pr ? "mission" : "activitytasks";
     }
     if (!actLua.empty()) { out.swap(actLua); return "activitytasks"; }
     if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {

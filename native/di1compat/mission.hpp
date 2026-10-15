@@ -57,6 +57,32 @@ inline int luaEvents30(std::string& t)
     return n;
 }
 
+// The mission's objective line (Mission Log 'Mission Objectives'). 1.0's builder FUN_00f97b60: a mission whose
+// Parms.UseMissionGeneratedProgressStringNew is true (FUN_00fa4100 -> +0x2a8 bit 1) lists one ACTIVE entry,
+// Localize(key, 1, 0) with key = +0x168 or, when that is empty, "<MissionName>_Desc" (+0x168 is "" from the ctor
+// FUN_00fa3210 on and nothing else writes it); else it asks the eval tree (+0x1dc). 3.0's builder FUN_015cff90 lists
+// the same one ACTIVE entry (ctor FUN_015ca690), Localize(+0x350, 1, 0), when +0x350 is set, else asks the eval tree
+// (+0x248); its mission loader FUN_015bddb0 sets +0x350 = "<MissionName>_Desc" from Parms.ProgressString =
+// "<default>". 3.0 has no UseMissionGeneratedProgressStringNew, so a 1.0 mission fell to the eval tree, whose 1.0
+// evals 3.0 hides (eval loader FUN_01722b70: ProgressString absent or "" -> HideProgress): 0 entries, an empty pane.
+// So a Parms block with the 1.0 flag and no ProgressString gets ProgressString = "<default>". Both Localize
+// (1.0 FUN_0067f4b0, 3.0 FUN_006952d0) return the key itself on a miss. Corpus: every 1.0 mission but 3 Toy Story
+// ones (buildalot, customizealiens, powertower: flag false, eval tree in 1.0 too). Returns 1 if changed.
+// The two logs show it differently: 1.0's progresslog.lua listed ProgressData only for HasTasks (= flag false;
+// GetMissionObjectives) and showed "<MissionName>_Desc" as the details text (GetMissionDetails); 3.0's
+// missiondetailspanel.lua lists every non-empty ProgressString under Mission Objectives and shows the same _Desc key
+// as the description except on an AVAILABLE mission (missionlog.lua SelectedItemChanged: HideDescription).
+// cfg progress10.
+inline int progress30(std::string& t)
+{
+    size_t p = t.find("\n\tParms = "), e = p == std::string::npos ? p : t.find("\n\t}", p);
+    if (e == std::string::npos) return 0;
+    size_t f = t.find("\n\t\tUseMissionGeneratedProgressStringNew = true,", p);
+    if (f > e || t.find("\n\t\tProgressString = ", p) < e) return 0;
+    t.insert(f, "\n\t\tProgressString = \"<default>\",");
+    return 1;
+}
+
 // MissionBehavior in a mission line (<line>__missiongraph.lua). 1.0 knew 0 Activity, 1 Alert, 3 Adventure, else
 // 'Mission' (1.0 FUN_01028180, 0x010284c0; IN uses 0/1/2 only), and its progress log listed every 'Mission' record (1.0 missionlogdatahelpers ActiveMissions /
 // CompletedMissions; FUN_00f8df90 only drops copies with m_playerGroupIndex +0x3c >= 1). 3.0 names 2 'Mission', 3
