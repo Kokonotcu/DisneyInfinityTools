@@ -3,6 +3,7 @@
 // fmv10, text10, tips10).
 #pragma once
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -208,6 +209,29 @@ end
 return C
 )LUA";
     return s;
+}
+
+// A texture-only bundle (one TEXB entry) re-emitted under the TEXB name `name`, its texture hash kept; "" when b is not
+// one. 3.0's MissionPresentation asks a radio call's giver as <icon>_Holo (missionpresentation.lua GetGiverIcon), which
+// 3.0 ships for 7 givers and 1.0 for none; the 1.0 portrait stands in under the asked name, as 3.0's own bundles name
+// their TEXB after the file (in3_missiongivers_c3po_holo.mtb). Layout, a rule on all 424 shipped 1.0 + 3.0
+// charactericons bundles (_scratch\marker\texbrule.py): BNDL, 1, 16 + chunk, 1 | TEXB, 3, chunk, 1 | u32 name length
+// with NUL, name padded to 4, u64 hash, u32 0 | chunk padded to 16.
+inline std::string texBundleAs(const std::string& b, const std::string& name)
+{
+    auto u = [&](size_t o) { uint32_t v; memcpy(&v, b.data() + o, 4); return v; };
+    if (b.size() < 0x24 || b.compare(0, 4, "BNDL") || b.compare(16, 4, "TEXB") || u(28) != 1) return "";
+    uint32_t ln = u(0x20);
+    size_t h = 0x24 + ((ln + 3) & ~3u);
+    if (!ln || h + 8 > b.size()) return "";
+    auto le = [](uint32_t v) { return std::string((const char*)&v, 4); };
+    std::string e = le((uint32_t)name.size() + 1) + name;
+    e.append(((name.size() + 1 + 3) & ~(size_t)3) - name.size(), '\0');
+    e.append(b, h, 8);
+    e.append(4, '\0');
+    size_t cs = (16 + e.size() + 15) & ~(size_t)15;
+    e.append(cs - 16 - e.size(), '\0');
+    return "BNDL" + le(1) + le((uint32_t)(16 + cs)) + le(1) + "TEXB" + le(3) + le((uint32_t)cs) + le(1) + e;
 }
 
 }  // namespace ui

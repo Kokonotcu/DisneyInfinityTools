@@ -2449,6 +2449,15 @@ int main(int argc, char** argv)
         return 0;
     }
     if (argc > 4 && std::string(argv[1]) == "--ui") return uiTest(argv, argc);
+    if (argc > 3 && std::string(argv[1]) == "--texname") {   // --texname <texture-only .mtb> <out dir/<name>.mtb>: ui::texBundleAs
+        std::string o = argv[3], name = o.substr(o.find_last_of("/\\") + 1);
+        name.resize(name.size() - 4);
+        std::string t = ui::texBundleAs(slurp(argv[2]), name);
+        if (t.empty()) { printf("not a texture-only bundle\n"); return 1; }
+        std::ofstream(o, std::ios::binary).write(t.data(), t.size());
+        printf("%s: %u B, TEXB %s\n", o.c_str(), (unsigned)t.size(), name.c_str());
+        return 0;
+    }
     if (argc > 2 && std::string(argv[1]) == "--chd") {   // --chd <root>: every .chd with its .lua beside it, compiled
         size_t ok = 0, bad = 0;
         for (auto& e : fs::recursive_directory_iterator(argv[2])) {
