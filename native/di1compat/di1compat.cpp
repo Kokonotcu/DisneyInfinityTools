@@ -3775,6 +3775,12 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(nullptr, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
     if (slash) strcpy_s(slash + 1, path + MAX_PATH - (slash + 1), "di1compat.log");
+    {   // the last 5 runs' logs stay as di1compat.1.log (newest) .. di1compat.5.log: a launch must not erase the evidence
+        std::string base(path, strlen(path) - 4);
+        for (int i = 4; i >= 0; --i)
+            MoveFileExA(i ? (base + "." + std::to_string(i) + ".log").c_str() : path,
+                        (base + "." + std::to_string(i + 1) + ".log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
     g_log = _fsopen(path, "w", _SH_DENYNO);   // readable while the game runs
     g_base = (uintptr_t)GetModuleHandleA(nullptr);
     g_gameDir.assign(path, slash ? slash - path : 0);
