@@ -228,6 +228,7 @@ static struct {
     bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
     bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (bldrt.hpp)
     bool spawnTrace10 = false;       // probe: lots registered, SpawnBuilding firing, lot spawns, player start lookups (log only)
+    bool capsuleTrace10 = false;     // probe: capsule spawn requests and the branch each capsule spawn took (caprt.hpp, log only)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -340,6 +341,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "zones10")) g_cfg.zones10 = atoi(val) != 0;
         else if (!strcmp(key, "building10")) g_cfg.building10 = atoi(val) != 0;
         else if (!strcmp(key, "spawntrace10")) g_cfg.spawnTrace10 = atoi(val) != 0;
+        else if (!strcmp(key, "capsuletrace10")) g_cfg.capsuleTrace10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -3851,6 +3853,7 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 #include "vfxrt.hpp"
 #include "gprt.hpp"
 #include "bldrt.hpp"
+#include "caprt.hpp"
 
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
@@ -4101,6 +4104,7 @@ extern "C" void __stdcall Pentane_Main()
     }
     gprt::install();
     bldrt::install();
+    caprt::install();
     if (g_cfg.spawnTrace10 && !g_cfg.trace) {   // where the player is put (Pirates fall): trace's start hooks alone
         hook("start lookup (spawntrace10)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup, (void**)&g_startLookup);
         hook("start query (spawntrace10)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery);
