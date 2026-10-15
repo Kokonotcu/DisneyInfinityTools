@@ -250,12 +250,62 @@ static void __fastcall hkFocusLoss(uint8_t* mgr, void* edx, uint8_t** holder)
     movieFocus10(holder ? holder[0] : nullptr, false, "loss");
 }
 
-// probe (locktrace10): for a screen on a 1.0 movie, each frame's delivery: the gates when they change, and every map
-// entry whose action state reads down/changed (map vt[5] = FUN_00b48250 -> FUN_00b48120: key code +0x20, bytes
-// +0x10 / +0x11 of the mapper entry), with whether the gates let it through to the movie.
+// keys10: where an action goes. 1.0 handed a screen's mapped actions to its movie as Flash key events whose keyCode is
+// the action's code (storefront.keyDownListener: keyCode == KeyMap.CATALOG_CANCEL 134 -> _Hide -> list clip frame 30
+// -> CallLua("ExitScreen"); CATALOG_PURCHASE_OR_PLACE 133 -> BuyCurrentItem -> CallLua("BuyItem")). 3.0 hands them to
+// the screen's Lua instead: the delivery FUN_01565330 queries each map entry (vt[5] FUN_00b48250 -> FUN_00b48120:
+// key +0x20, down +0x10, released +0x11) and calls Lua onKeyDown / onKeyUp {action = key, controllerId} on the
+// screen (0x01565552 / 0x015655c3, FUN_015604a0; 204 3.0 scripts define onKeyDown, no 1.0 script does). The movie
+// gets only raw keyboard events (FUN_007f3320: KeyDown, type 5, keyCode 8/9/13/27/37-40/46, into
+// FUN_015520c0(screen) +0x3c, vt+0x8c HandleEvent). 3.0's catalog.lua has no onKeyDown, so run-in-store4 has 48 x
+// key 133 and 22 x 134 queried with focus open and not one movie call after them. For a screen whose movie came from
+// 1.0 and whose script is 3.0's (not in g_screens10: a 1.0 script's screen keeps today's path, SelectMenu works on
+// raw keys and would see its select twice), each action 3.0 finds down is also sent to the movie as 1.0 did: a
+// KeyDown event with that keyCode, built as FUN_007f3320 builds one, into the same movie. The movie's checks pass:
+// IsMyPlayer returns true for playerNum < 0 and 3.0 never sets playerNum (its trait default is -2; 3.0 writes only
+// luaName, 0x015646ff), and HasFocus is true (storefront.Init ends with SetHasFocus(true); focus10 too).
+typedef char(__fastcall* MapStateFn)(void* map, void* edx, int i, uint32_t* key, uint8_t* down, uint8_t* up);
+typedef uint32_t(__fastcall* HandleEventFn)(void* movie, void* edx, const void* ev);
+static MapStateFn g_mapState;
+static uint8_t* g_keysScreen;   // set while FUN_01565330 runs for a 3.0-script screen on a 1.0 movie (main thread only)
+static void* g_keysMovie;
+
+static bool script10(const uint8_t* screen)
+{
+    char t[64] = "";
+    safeCopy(t, sizeof(t), *(const char* const*)(screen + 0xc));
+    for (char* c = t; *c; ++c) *c = (char)tolower((unsigned char)*c);
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    return g_screens10.count(t) != 0;
+}
+
+static char __fastcall hkMapState(void* map, void* edx, int i, uint32_t* key, uint8_t* down, uint8_t* up)
+{
+    char r = g_mapState(map, edx, i, key, down, up);
+    if (r && g_keysScreen && key && down && up && (*down || *up)) {
+        char name[64] = "";
+        safeCopy(name, sizeof(name), *(const char**)(g_keysScreen + 0x10));
+        bool sent = false;
+        if (*down && g_keysMovie && g_cfg.keys10) {
+            // as FUN_007f3320 fills its KeyDown (0x007f3451..0x007f3480): type 5, modifiers, keyCode, +0xc and +0x14 =
+            // the player slot (its arg 1; here the map's slot +0x20, which FUN_00b48250 queries), +0x10 = 0
+            uint32_t slot = *(const uint8_t*)((const uint8_t*)map + 0x20);
+            uint32_t ev[6] = {5, 0, *key, slot, 0, slot};
+            (*(HandleEventFn**)g_keysMovie)[0x8C / 4](g_keysMovie, nullptr, ev);
+            sent = true;
+        }
+        if (inputRoom())
+            logf("input10: %s action key %u (map entry %d) %s -> %s", name, *key, i, *down ? "down" : "released",
+                 sent ? "sent to the movie as a key event" : "not sent");
+    }
+    return r;
+}
+
+// probe (locktrace10): the delivery gates of a screen on a 1.0 movie whenever they change.
 static void __fastcall hkDeliver(uint8_t* screen, void* edx, void* a1, void* a2)
 {
-    if (g_cfg.lockTrace10 && screen && movie10(screen)) {
+    bool ten = screen && movie10(screen);
+    if (ten && g_cfg.lockTrace10) {
         static uint8_t* last;
         static uint32_t lastGates = ~0u;
         void* map = *(void**)screen;
@@ -264,19 +314,32 @@ static void __fastcall hkDeliver(uint8_t* screen, void* edx, void* a1, void* a2)
         char name[64] = "";
         safeCopy(name, sizeof(name), *(const char**)(screen + 0x10));
         if ((screen != last || gates != lastGates) && inputRoom())
-            logf("input10: %s delivery gates: focus(+0x60) %d loaded %d hidden %d hiding %d, map %u actions, input %p", name,
-                 screen[0x60], screen[0x6d], screen[0x6c], screen[0x6b], n, a1);
+            logf("input10: %s delivery gates: focus(+0x60) %d loaded %d hidden %d hiding %d, map %u actions, input %p, 1.0 script %d",
+                 name, screen[0x60], screen[0x6d], screen[0x6c], screen[0x6b], n, a1, script10(screen));
         last = screen, lastGates = gates;
-        bool open = a1 && screen[0x60] && screen[0x6d] && !screen[0x6c] && !screen[0x6b];
-        for (uint32_t i = 0; map && i < n; ++i) {
-            uint32_t key = 0;
-            uint8_t b1 = 0, b2 = 0;
-            if ((*(ActionStateFn**)map)[5](map, nullptr, (int)i, &key, &b1, &b2) && (b1 || b2) && inputRoom())
-                logf("input10: %s action key %u (entry %u) state %d/%d -> %s", name, key, i, b1, b2,
-                     open ? "delivered to the movie" : "blocked by the gates");
+    }
+    if (ten && a1 && !script10(screen)) {
+        g_keysScreen = screen;
+        g_keysMovie = *(void**)((uint8_t*)a1 + 0x3C);
+        // probe: every UI action of the player's mapper that turns down while this screen takes input, in or out of
+        // its map (the mapper: manager +0xd54 + slot * 0x1bc4; entries +0xc / count +0x10; entry +0x10 down, +0x20 key)
+        void* map = *(void**)screen;
+        uint8_t* mgr = *(uint8_t**)rt(0x02289E88);
+        uint32_t slot = map ? *(const uint8_t*)((const uint8_t*)map + 0x20) : 0;
+        uint8_t* mp = mgr && slot < 11 ? mgr + 0xD54 + slot * 0x1BC4 : nullptr;
+        uint8_t** es = mp ? *(uint8_t***)(mp + 0xC) : nullptr;
+        uint32_t ne = mp ? *(uint32_t*)(mp + 0x10) : 0;
+        static uint8_t wasDown[256];
+        for (uint32_t i = 0; es && i < ne && i < 256; ++i) {
+            uint8_t d = es[i] ? es[i][0x10] : 0;
+            if (d && !wasDown[i] && inputRoom())
+                logf("input10: %s player slot %u UI action down: mapper entry %u key %u", *(const char**)(screen + 0x10), slot, i,
+                     *(uint32_t*)(es[i] + 0x20));
+            wasDown[i] = d;
         }
     }
     g_deliver(screen, edx, a1, a2);
+    g_keysScreen = nullptr, g_keysMovie = nullptr;
 }
 
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
@@ -350,9 +413,11 @@ static void install()
         hook("screen focus loss (1.0 movies)", 0x01554590, "64A1000000006AFF68????????506489250000000083EC28", (void*)&hkFocusLoss,
              (void**)&g_focusLoss);
     }
-    if (g_cfg.lockTrace10)
-        hook("screen action delivery (input10 probe)", 0x01565330, "64A1000000006AFF68????????506489250000000083EC44",
+    if (g_cfg.lockTrace10 || g_cfg.keys10) {
+        hook("screen action delivery (keys10; input10 probe)", 0x01565330, "64A1000000006AFF68????????506489250000000083EC44",
              (void*)&hkDeliver, (void**)&g_deliver);
+        hook("action map entry state (keys10)", 0x00B48250, "8B44240456578BF1508D4E04", (void*)&hkMapState, (void**)&g_mapState);
+    }
 }
 
 }   // namespace gprt
