@@ -180,6 +180,108 @@ inline VFormats vformats(const std::string& t)
     return out;
 }
 
+// ---- the served vformat.vtxf: 3.0's formats plus every 1.0 format 3.0 lacks ----
+// The engine's parser (FUN_004642f0, 'main' layouts) numbers element names first come (FUN_0044d730, 32 of them) and
+// gives each name 8 descriptor slots (FUN_0044d790 at 0x0216f260; descriptor = size, type, semantic, offset, stream).
+// A 9th distinct descriptor returns name*8|8: the NEXT name's slot 0, so that element turns into another one. 3.0
+// uses 7 for color0; 1.0's formats add five more (color0 ending stream 1 at offsets 8..28), 12 in all: in the
+// parser's Lua table order 3.0's 1a9a10d9 got COLOR1@stream 1+32 for its COLOR0, so the env shader 88c83eaf's
+// G-buffer VS had no COLOR0 and the 3.0-native expendables on that format drew black (dock crates) or in flat
+// per-face colours (dumpster) (in-game 2026-10-14). So a 1.0 format whose last stream ends in vertex colour at a
+// non-zero offset gets that colour as a stream of its own (color0 at 0: a descriptor 3.0 has), and translated
+// primitives in it are split the same way (render::transcodeWorld). Names and semantics are untouched.
+struct ColourTail { int stream = 0, offset = 0, size = 0; };   // bytes [offset, offset+size) of stream -> stream+1
+
+// direct child tables of the table opening at t[open]: {open, close} pairs
+inline std::vector<std::pair<size_t, size_t>> children(const std::string& t, size_t open)
+{
+    std::vector<std::pair<size_t, size_t>> out;
+    int d = 0;
+    size_t start = 0;
+    for (size_t i = open; i < t.size(); ++i) {
+        if (t[i] == '{') { if (++d == 2) start = i; }
+        else if (t[i] == '}') { if (d == 2) out.push_back({start, i}); if (--d == 0) break; }
+    }
+    return out;
+}
+
+inline std::string field(const std::string& t, size_t a, size_t b, const char* key)   // key = "..." within [a, b)
+{
+    std::string k = std::string(key) + " = \"";
+    size_t p = t.find(k, a);
+    if (p == std::string::npos || p >= b) return "";
+    size_t q = t.find('"', p + k.size());
+    return t.substr(p + k.size(), q - p - k.size());
+}
+
+inline std::map<std::string, int> typeSizes(const std::string& t)   // 'types' table: name -> sizeInBytes
+{
+    std::map<std::string, int> out;
+    size_t ty = t.find("\ttypes");
+    if (ty == std::string::npos) return out;
+    for (auto [a, b] : children(t, t.find('{', ty))) {
+        size_t s = t.rfind('=', a);
+        while (s > 0 && isspace((unsigned char)t[s - 1])) --s;
+        size_t n0 = s;
+        while (n0 > 0 && (isalnum((unsigned char)t[n0 - 1]) || t[n0 - 1] == '_')) --n0;
+        size_t z = t.find("sizeInBytes = ", a);
+        if (z != std::string::npos && z < b) out[t.substr(n0, s - n0)] = atoi(t.c_str() + z + 14);
+    }
+    return out;
+}
+
+// one format entry's text with a trailing vertex colour moved to its own stream (unchanged if it has none)
+inline std::string relayColour(const std::string& f, const std::map<std::string, int>& sizes, ColourTail& tail)
+{
+    size_t m = f.find("main"), st = m == std::string::npos ? m : f.find("streams", m);
+    if (st == std::string::npos) return f;
+    auto streams = children(f, f.find('{', st));
+    if (streams.size() < 2) return f;
+    auto [so, sc] = streams.back();
+    auto el = children(f, so);
+    std::vector<int> off;
+    int o = 0;
+    for (auto [a, b] : el) {
+        auto ty = sizes.find(field(f, a, b, "type"));
+        if (ty == sizes.end()) return f;
+        off.push_back(o);
+        o += ty->second;
+    }
+    size_t k = el.size();
+    while (k > 0 && field(f, el[k - 1].first, el[k - 1].second, "semantic").compare(0, 5, "COLOR") == 0) --k;
+    if (k == el.size() || k == 0) return f;            // no trailing colour, or the stream is colour only
+    std::string moved;
+    for (size_t i = k; i < el.size(); ++i) moved += "\n" + f.substr(el[i].first, el[i].second - el[i].first + 1) + ",";
+    tail = {(int)streams.size() - 1, off[k], o - off[k]};
+    size_t cut = f.find(',', el[k - 1].second) + 1;    // after the last element kept
+    return f.substr(0, cut) + "\n}," + "\n{" + moved + "\n}" + f.substr(sc + 1);
+}
+
+// added: 1.0 formats appended; tails: vformat GUID hash (ehash lower) -> the colour moved out of a re-laid one
+inline std::string mergeVtxf(const std::string& t30, const std::string& t10, int& added, std::map<uint32_t, ColourTail>& tails)
+{
+    added = 0;
+    size_t end30 = 0;
+    auto e30 = ventries(t30, &end30);
+    if (!end30) return t30;
+    std::set<std::string> have;
+    for (auto& e : e30) { std::string g = e.guid; for (char& c : g) c = (char)tolower((unsigned char)c); have.insert(g); }
+    auto sizes = typeSizes(t10);
+    std::string add;
+    for (auto& e : ventries(t10)) {
+        std::string g = e.guid;
+        for (char& c : g) c = (char)tolower((unsigned char)c);
+        if (have.count(g)) continue;
+        ColourTail ct;
+        std::string block = relayColour(t10.substr(e.start, e.end - e.start), sizes, ct);
+        if (ct.size) tails[ehash(g, true)] = ct;
+        if (block.back() != ',') block += ",";
+        add += "\t\t" + block + "\n";
+        ++added;
+    }
+    return t30.substr(0, end30) + add + t30.substr(end30);
+}
+
 inline uint32_t convWord(uint32_t w)
 {
     return ((w & 7) << 3) | (((w >> 3) & 0xf) << 6) | (((w >> 7) & 3) << 10) | (((w >> 9) & 0xf) << 12) | (((w >> 13) & 7) << 16);
