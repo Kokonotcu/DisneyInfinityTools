@@ -136,6 +136,7 @@ Diagnostics, all off by default and log-only:
 | `audiotrace10` | Each sound posted and the backend that played it, its position, its mix and its lifetime |
 | `breaktrace` | Choreography clocks, clip setup, layout attachments and destructible hits |
 | `missiontrace` | Mission context state changes |
+| `spawntrace10` | Building lots registered, SpawnBuilding nodes firing, lot spawns, the player start lookups |
 | `renderdoc10` | Captures one frame with RenderDoc that many seconds into the world |
 
 The full list, including the per-subsystem switches, is the `Cfg` structure at the top of

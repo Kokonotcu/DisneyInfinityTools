@@ -225,6 +225,8 @@ static struct {
     bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
     bool playsetMenu10 = true;       // menu: one Play Sets entry per registered 1.0 playset, opening its start zone (ui::playsetMenu10)
     bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
+    bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (bldrt.hpp)
+    bool spawnTrace10 = false;       // probe: lots registered, SpawnBuilding firing, lot spawns, player start lookups (log only)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -334,6 +336,8 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
         else if (!strcmp(key, "playsetmenu10")) g_cfg.playsetMenu10 = atoi(val) != 0;
         else if (!strcmp(key, "zones10")) g_cfg.zones10 = atoi(val) != 0;
+        else if (!strcmp(key, "building10")) g_cfg.building10 = atoi(val) != 0;
+        else if (!strcmp(key, "spawntrace10")) g_cfg.spawnTrace10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -342,7 +346,8 @@ static void loadConfig(const char* dir)
          "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
          g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.clip10Ids, g_cfg.choAlias10, g_cfg.banm10,
          g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
-    logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d", g_cfg.playsetMenu10, g_cfg.zones10, g_cfg.realmFile10);
+    logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d spawntrace10=%d", g_cfg.playsetMenu10, g_cfg.zones10,
+         g_cfg.realmFile10, g_cfg.building10, g_cfg.spawnTrace10);
     logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
          g_cfg.lockTrace10);
 }
@@ -3843,6 +3848,7 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 
 #include "vfxrt.hpp"
 #include "gprt.hpp"
+#include "bldrt.hpp"
 
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
@@ -4092,6 +4098,11 @@ extern "C" void __stdcall Pentane_Main()
         hook("slaved emitter create (vfx trace)", 0x0066E7F0, "6AFF68????????64A100000000", (void*)&vfxrt::hkAttached, (void**)&vfxrt::g_attached);
     }
     gprt::install();
+    bldrt::install();
+    if (g_cfg.spawnTrace10 && !g_cfg.trace) {   // where the player is put (Pirates fall): trace's start hooks alone
+        hook("start lookup (spawntrace10)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup, (void**)&g_startLookup);
+        hook("start query (spawntrace10)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery);
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
