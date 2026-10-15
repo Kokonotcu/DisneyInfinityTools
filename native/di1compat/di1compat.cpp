@@ -2842,6 +2842,66 @@ static void __fastcall hkMisProgress(uint8_t* mission, void*, void* table)
     }
 }
 
+// missiontrace: a 1.0 mission's actor focus points (MU tutorial 2026-10-15: no marker on the FearTech decorations).
+// The graph node MissionFocusPoint_Actor (Meridian::FocusPointActor, vtable 01DE726C) binds at init to the mission's
+// FocusPoint_Actor record by its MissionID 'name:id' (FUN_01747160: +0x40 the string, +0x28 the mission element,
+// +0x30 the id; slot 28 sets +0x64 = record). Its Update pin (FUN_01730e80, cdecl(pin context), [ctx+4] = node) only
+// marks the record (FUN_01571690: +0x140 |= 0x10) and does nothing while +0x64 is 0. The record (vtable 01DCA744)
+// update FUN_015df390 (thiscall, int, ret 4) then tags the node's ActorList (node FUN_01740880 -> +0x180 = 1 once the
+// pin had actors). Record fields: +0x142 MissionID, +0x144 ParentMissionID -> +0x148 parent task (+0xc flags: bit 0
+// active), +0x140 flags (1 active, 4 turned off, 0x10 update), +0x168 FUN_015930d0's last active check, +0x17c tag,
+// +0x190 node, +0xd4 mission context (+0x10 name), +0xe8/+0xec beacon cho/placement (FUN_015c30a0), +0x150
+// EnableCompass, +0x160 MissionTarget, +0x170 NoHudMarker. Log-only: one line per record whenever that state changes.
+typedef void(__fastcall* FpUpdateFn)(uint8_t* fp, void* edx, int a);
+static FpUpdateFn g_fpUpdate;
+static void __fastcall hkFpUpdate(uint8_t* fp, void*, int a)
+{
+    g_fpUpdate(fp, nullptr, a);
+    if (!fp || *(uint32_t*)fp != (uint32_t)rt(0x01DCA744)) return;   // the engine's own this: no probe needed
+    uint8_t* ctx = *(uint8_t**)(fp + 0xd4);
+    char name[64];
+    safeCopy(name, sizeof(name), ctx && sys::readable(ctx + 0x10, 4) ? *(const char**)(ctx + 0x10) : nullptr);
+    if (!ctx || !playsetMission10(name)) return;
+    uint8_t *parent = *(uint8_t**)(fp + 0x148), *node = *(uint8_t**)(fp + 0x190);
+    char tag[64], cho[64], pl[64], ntag[64] = "";
+    void *nRec = nullptr, *nAct = nullptr;
+    if (node && sys::readable(node + 0x5c, 12)) { cstr(node + 0x60, ntag, sizeof(ntag)); nAct = *(void**)(node + 0x5c); nRec = *(void**)(node + 0x64); }
+    uint8_t f = fp[0x140];
+    char sig[512];
+    sprintf_s(sig, "flags %02X (active %d, off %d, update %d) check %d, parent %d %p flags %d, node %p (record %p, tag '%s', "
+                   "ActorTag %p), tagged %d tag '%s', beacon '%s' '%s', compass %d target %d nohud %d",
+              f, f & 1, f >> 2 & 1, f >> 4 & 1, fp[0x168], *(int16_t*)(fp + 0x144), parent,
+              parent && sys::readable(parent + 0xc, 1) ? parent[0xc] : -1, node, nRec, ntag, nAct, fp[0x180],
+              cstr(fp + 0x17c, tag, sizeof(tag)), cstr(fp + 0xe8, cho, sizeof(cho)), cstr(fp + 0xec, pl, sizeof(pl)), fp[0x150],
+              fp[0x160], fp[0x170]);
+    static std::mutex m;
+    static std::unordered_map<uint8_t*, std::string> last;
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if (last.size() > 400) return;
+        std::string& l = last[fp];
+        if (l == sig) return;
+        l = sig;
+    }
+    static volatile LONG lines;
+    if (lockTraceRoom(lines) && lines <= 300) logf("focus point %.60s:%d %s", name, *(int16_t*)(fp + 0x142), sig);
+}
+typedef void(__cdecl* FpPinFn)(uint8_t* pinCtx);
+static FpPinFn g_fpNodeUpdate;
+static void __cdecl hkFpNodeUpdate(uint8_t* pinCtx)
+{
+    uint8_t* node = pinCtx && sys::readable(pinCtx + 4, 4) ? *(uint8_t**)(pinCtx + 4) : nullptr;
+    if (node && sys::readable(node, 0x68) && *(uint32_t*)node == (uint32_t)rt(0x01DE726C)) {
+        char id[96];
+        cstr(node + 0x40, id, sizeof(id));
+        static volatile LONG lines;
+        if (playsetMission10(id) && lockTraceRoom(lines) && lines <= 200)
+            logf("focus point node %p '%s' Update: record %p, mission element %p, id %d", node, id, *(void**)(node + 0x64),
+                 *(void**)(node + 0x28), *(int*)(node + 0x30));
+    }
+    g_fpNodeUpdate(pinCtx);
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -3918,8 +3978,12 @@ extern "C" void __stdcall Pentane_Main()
             hook("shader linker (deferred)", 0x00472050, "83EC50A1????????535657", (void*)&hkLinkAll, (void**)&g_linkAll);
         hook("pass-state clone (locked)", 0x0045C5C0, "83EC4856578B7C2454", (void*)&hkCloneRec, (void**)&g_cloneRec);
     }
-    if (g_cfg.missionTrace)
+    if (g_cfg.missionTrace) {
         hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick, (void**)&g_missionTick);
+        hook("FocusPoint_Actor update (missiontrace)", 0x015DF390, "6AFF64A10000000068????????50", (void*)&hkFpUpdate, (void**)&g_fpUpdate);
+        hook("FocusPointActor Update pin (missiontrace)", 0x01730E80, "8B4424048B40048B486485C9", (void*)&hkFpNodeUpdate,
+             (void**)&g_fpNodeUpdate);
+    }
     if (g_cfg.breakTrace || (g_cfg.audio10 && g_cfg.cineSync10))   // cinesync10: 1.0's audio-sync sound event (audio.hpp)
         hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart, (void**)&g_choStart);
     if (g_cfg.breakTrace) {
