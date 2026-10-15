@@ -320,6 +320,7 @@ Code: `realm30.py`. Rules measured on `rlm_intro_day`, which ships in both games
 - **Order and check**: pools and associations go into the shipped orders ([4.1](#41-pools-and-their-order), [4.6](#46-associations)). Record kinds are checked against the shipped realms (`check_foreign(s, 'realms')`).
 - **Files**: `<r>.oct`, `<r>.mtb` and an empty `<r>.ap`, packed with `di3arc.pack_dir` and `key_for('realms/<r>.zip')`.
 - **Textures**: the realm's 1.0-only textures go into the zip's `textures/` folder, as `rlm_moa_motunui_day` ships them.
+- **The RealmData node is required.** Every shipped 3.0 realm file has one (365 of 365; 367 nodes, all in the same field order, `NodeRef` = own index, `SkyNodeRef` 0 in 363, `DisplayLayer` -1 in all 118 files without a `DisplayLayerPool`). After a realm loads, `RealmLoaderTask` (vtable `0x01B46A9C`, FUN_0070ed30 -> FUN_00708d70) looks up the realm manager's entries for the realm's name hash (FUN_00641140; container at manager `+0x50`, 0x6c-byte entries, name hash at `+0x34`). With no entry it reads an unset list slot, FUN_00640ee0 returns -1 and FUN_00640f80 writes `entry[-1]`: an AV at `0x00640F8E` writing `0xFFFFFFC4` when the container is empty (the MonstersU and Pirates crashes of 2026-10-14), a write 0x3c bytes before the array otherwise. di1compat applies the rule above at load (`octx::realm30w(f, true)`, cfg `realmfile10`); `octtest --oct` on 1.0 `rlm_intro_day` gives the shipped twin's 629 records.
 
 ### 4.8 Exploders
 Code: `expl30.py`

@@ -888,8 +888,22 @@ inline int collision30(oct::File& f)
 //   Light Point -> LightType 0, Spot -> 1, LightData [r, g, b, I, FalloffRadius, FalloffStrength, FalloffClamp,
 //     (Spot: ConeAngle, PenumbraAngle, Dropoff,) -1], FeatureCaps = Specular (fitted on the twin files below);
 //   LightRig gains a Uuid after LightRefs; the two 1.0 pools go.
-// Only worlds (a RealmData NodeRef that is a Transform node); realm files have their own rule (realm30.py).
-inline int realm30w(oct::File& f)
+// Only worlds (a RealmData NodeRef that is a Transform node); realm files have their own rule (realm30.py),
+// applied when realmFile is set (a realms/ asset, cfg realmfile10):
+//   RealmDataPool entry -> a RealmData scene node at index 1, after the Scene node, in the field order all 367
+//     shipped 3.0 RealmData nodes have: NodeName (Name upper-cased), Uuid, DisplayLayer (0 with a DisplayLayerPool,
+//     else -1: 118 / 118 shipped without one hold -1), Type, ParentNodeReferences [0], identity matrix, Name,
+//     NodeRef 1 (itself, as every shipped one), SkyNodeRef 0, the entry's fields (SunLightRef + 1), AddToZone 1,
+//     RotateToGravity / RotateSkipLighting / BlendWithGravity 0;
+//   node references >= 1 shift by one; root children hang under the RealmData node; lights and rigs as above;
+//   SurfaceTypesPool and the PrimaryAsset association go (addAssetPool already made the 'Root' Asset).
+// Why: 3.0 registers a realm's lighting entry from its RealmData node (realm manager +0x50: 0x6c-byte entries keyed
+// by the realm name hash at +0x34). Applying a realm (FUN_0070ed30 -> FUN_00708d70) that has no entry reads an unset
+// list slot, FUN_00640ee0 returns -1 and FUN_00640f80 writes entry[-1]: with an empty container that is the write
+// to FFFFFFC4 at 00640F8E (crash dumps 2026-10-14: MonstersU as rlm_mu_campus_night loaded, Pirates as
+// rlm_pc_calypsobayou_day did; Lone Ranger died right after rlm_lr_colby_midday was served).
+// Checked: octtest --oct on 1.0 rlm_intro_day against its shipped 3.0 twin (realmcmp.py, realm30.py's selftest).
+inline int realm30w(oct::File& f, bool realmFile = false)
 {
     long np = f.pool("SceneTreeNodePool");
     if (np < 0) return 0;
@@ -948,7 +962,8 @@ inline int realm30w(oct::File& f)
         blocks[n] = b;
         ++done;
     }
-    if (!worldRealms && rds.size()) return 0;   // a realm file: realm30.py's rule, not this one
+    realmFile = realmFile && !worldRealms && rds.size() == 1;
+    if (!worldRealms && rds.size() && !realmFile) return 0;   // a realm file without realmFile: left as it is
     for (auto& e : rvs) {
         auto ref = field(e, "NodeRef");
         int n = ref ? f.ints(*ref)[0] : -1;
@@ -1034,7 +1049,7 @@ inline int realm30w(oct::File& f)
         }
         ++done;
     }
-    if (!done) return 0;
+    if (!done && !realmFile) return 0;
     // replace the node blocks in one pass over the records (an erase + insert per node shifted the whole file each time)
     {
         std::vector<oct::Rec> out;
@@ -1049,6 +1064,19 @@ inline int realm30w(oct::File& f)
         out.insert(out.end(), std::make_move_iterator(f.recs.begin() + at), std::make_move_iterator(f.recs.end()));
         f.recs.swap(out);
     }
+    // a realm file's name seeds its Uuids, so a world and the realms loaded beside it never share one
+    std::string realmName;
+    if (realmFile)
+        if (auto r = field(rds[0], "Name")) realmName = f.nameValues(*r)[0];
+    auto uuid = [&](const std::string& seed, int k) {   // FNV-1a of seed + ordinal (empty seed: the world form)
+        std::string id(16, '\0');
+        uint64_t h1 = 1469598103934665603ull, h2 = 0x9e3779b97f4a7c15ull;
+        for (unsigned char c : seed) { h1 = (h1 ^ c) * 1099511628211ull; h2 = (h2 ^ c) * 0x100000001b3ull + 0x52; }
+        for (int q = 0; q < 4; ++q) { h1 = (h1 ^ (uint8_t)(k >> (8 * q))) * 1099511628211ull; h2 = (h2 ^ (uint8_t)(k >> (8 * q))) * 0x100000001b3ull + 0x52; }
+        memcpy(&id[0], &h1, 8);
+        memcpy(&id[8], &h2, 8);
+        return id;
+    };
     // rigs gain a Uuid after LightRefs (FNV-1a of the rig's ordinal: unique within the file, stable)
     if (long rp = f.pool("LightRigPool"); rp >= 0) {
         int k = 0;
@@ -1060,13 +1088,65 @@ inline int realm30w(oct::File& f)
                 if (f.name(f.recs[j]) == "LightRefs") refs = j;
             }
             if (has || !refs) continue;
-            std::string id(16, '\0');
-            uint64_t h1 = 1469598103934665603ull, h2 = 0x9e3779b97f4a7c15ull;
-            for (int q = 0; q < 4; ++q) { h1 = (h1 ^ (uint8_t)(k >> (8 * q))) * 1099511628211ull; h2 = (h2 ^ (uint8_t)(k >> (8 * q))) * 0x100000001b3ull + 0x52; }
-            memcpy(&id[0], &h1, 8);
-            memcpy(&id[8], &h2, 8);
-            f.recs.insert(f.recs.begin() + refs + 1, blobRec(f, f.recs[refs].level, "Uuid", id));
+            f.recs.insert(f.recs.begin() + refs + 1, blobRec(f, f.recs[refs].level, "Uuid", uuid(realmName, k)));
         }
+    }
+    long np2 = f.pool("SceneTreeNodePool");
+    if (realmFile && np2 >= 0 && (size_t)np2 + 1 < f.recs.size() && f.recs[np2 + 1].level == 2) {
+        const auto& e = rds[0];
+        // node references >= 1 shift by one (the new node is 1); root children hang under it
+        for (auto& r : f.recs) {
+            const std::string& n = f.name(r);
+            int mode = n == "ParentNodeReferences" ? 1 : (n == "LightRefs" || n == "LinkedSceneTreeNodeRefs") ? 2
+                     : n == "LinkedNodeRefs" ? 3 : n == "SceneTreeNodeRef" ? 4 : 0;
+            if (!mode || oct::spec(r.type).kind != oct::INT) continue;
+            auto v = f.ints(r);
+            for (auto& x : v)
+                x = mode == 1 ? (x >= 1 ? x + 1 : x == 0 ? 1 : x) : mode == 2 ? x + 1 : mode == 3 ? (x >= 0 ? x + 1 : x) : (x >= 1 ? x + 1 : x);
+            if (oct::spec(r.type).shape == oct::SCALAR) { if (!v.empty()) f.setInt(r, v[0]); }
+            else f.setInts(r, v);
+        }
+        std::string up = realmName;
+        for (char& c : up) c = (char)toupper((unsigned char)c);
+        std::vector<oct::Rec> b = {keyedNode(f, 2, "Node", 1)};
+        b.push_back(f.nameScalar(3, f.addName("NodeName"), up));
+        b.push_back(blobRec(f, 3, "Uuid", uuid(realmName + "/RealmData", 0)));
+        b.push_back(f.intScalar(3, "DisplayLayer", f.pool("DisplayLayerPool") >= 0 ? 0 : -1));
+        b.push_back(f.nameScalar(3, f.addName("Type"), "RealmData"));
+        b.push_back(f.intList(3, "ParentNodeReferences", {0}));
+        b.push_back(floatList(f, 3, "LocalToParentMatrix", {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}));
+        if (auto r = field(e, "Name")) b.push_back(*r);
+        b.push_back(f.intScalar(3, "NodeRef", 1));
+        b.push_back(f.intScalar(3, "SkyNodeRef", 0));
+        if (auto r = field(e, "SunLightRef")) { oct::Rec s = *r; f.setInt(s, f.ints(s)[0] + 1); b.push_back(s); }
+        for (const char* k : {"AmbientRigRef", "SunRigRef", "SceneSettingsRef", "SettingsName", "ZoneName", "RigBlendType", "SettingsNonDefault",
+                              "SunNoDirection", "SunNoColor", "StartWeight", "FollowsCamera", "ParallaxFactor", "GlobalOverride"})
+            if (auto r = field(e, k)) b.push_back(*r);
+        b.push_back(f.intScalar(3, "AddToZone", 1));
+        for (const char* k : {"RotateToGravity", "RotateSkipLighting", "BlendWithGravity"}) b.push_back(f.intScalar(3, k, 0));
+        f.recs.insert(f.recs.begin() + f.blockEnd(np2 + 1), b.begin(), b.end());   // after the Scene node
+        int k = 0;   // node keys '0', '1', ...
+        for (size_t i = np2 + 1, end = f.blockEnd(np2); i < end; i = f.blockEnd(i))
+            if (f.recs[i].level == 2) { f.recs[i].pay.clear(); oct::File::put(f.recs[i].pay, f.addName(std::to_string(k++)), 2); }
+        // the PrimaryAsset association goes (3.0 has the AssetPool 'Root' instead); entries renumbered
+        if (long ap = f.pool("AssociationPool"); ap >= 0) {
+            std::vector<oct::Rec> out(f.recs.begin(), f.recs.begin() + ap + 1);
+            int a = 0;
+            size_t end = f.blockEnd(ap);
+            for (size_t i = ap + 1; i < end; i = f.blockEnd(i)) {
+                bool primary = false;
+                for (size_t j = i + 1; j < f.blockEnd(i); ++j)
+                    if (f.name(f.recs[j]) == "Type" && f.nameValues(f.recs[j])[0] == "PrimaryAsset") primary = true;
+                if (primary) continue;
+                size_t first = out.size();
+                out.insert(out.end(), f.recs.begin() + i, f.recs.begin() + f.blockEnd(i));
+                if (oct::spec(out[first].type).keyed) { out[first].pay.clear(); oct::File::put(out[first].pay, f.addName(std::to_string(a++)), 2); }
+            }
+            out.insert(out.end(), f.recs.begin() + end, f.recs.end());
+            f.recs.swap(out);
+        }
+        f.dropPool("SurfaceTypesPool");
+        ++done;
     }
     f.dropPool("RealmDataPool");
     f.dropPool("RealmVolumePool");

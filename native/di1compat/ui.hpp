@@ -173,6 +173,10 @@ inline int mergeTips(std::string& t30, const std::string& t10, IsZone zone)
 // characterSelected. The VR stores saveTarget as the number 2, which its relaunch would read back as the string "2"
 // (save target 0), so "world" is put back. The housekeeping around the launch is PlaysetSelectMenu.HandleWorldSelect's,
 // 3.0's own path from a menu into the VR.
+// The screen shows numVisibleElements rows (onEnter sets 8; the movie then asks GetItemData for ids 1..9) and 3.0's
+// six entries never needed more. With the 1.0 entries the list holds 12: in every run of the 2026-10-14 test the
+// user moved through ids 10-12 (GetItemData requests in loader.log) and still could not find Toy Story (id 10), so
+// the list is made as tall as its entries instead of relying on the scroll.
 inline std::string playsetMenu10(const std::string& chunk, const std::vector<std::pair<std::string, std::string>>& playsets)
 {
     auto q = [](const std::string& x) {
@@ -204,6 +208,7 @@ C.PopulateWorldCatagoryList = function(self, ...)
     self:AddListButton(p[1])
     table.insert(self.listData, at + k - 1, table.remove(self.listData))
   end
+  if #self.listData > (self.numVisibleElements or 0) then self.numVisibleElements = #self.listData end
 end
 C.SelectItem = function(self, ...)
   local t, zone = self.listData[self.selectedIndex]
