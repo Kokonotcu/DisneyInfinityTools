@@ -148,8 +148,10 @@ static int __fastcall hkLuaAddScreen(uint8_t* screen, void* edx, void* L)
 // 'CATALOG_PURCHASE_OR_PLACE,CATALOG_CANCEL,CATALOG_LEFT,..', then SetHasFocus(true) itself) kept 3.0's default map
 // (dump catalog-input-0649: START, RIGHT, LEFT, DOWN, UP, .._NOREP, RT, LT, RSTICK_*), and its keyDownListener acts
 // only on CATALOG_*: no key, Esc included, did anything. For a screen whose movie was served from 1.0 (+0x14 in
-// g_movies10) the map is set from the list (clear, then 3.0's AppendActionMap; the names have the same ids in both
-// exes: CATALOG_* 133-134 / 171-175, GN_LST_* 143-146).
+// g_movies10) the map is set from the list (clear, then 3.0's AppendActionMap). The map holds entries of the
+// player's UI control mapper (manager +0xd54 + slot*0x1bc4, names -> entries at +0x18); it has every CATALOG_* entry
+// with the key codes the movie's KeyMap expects (dump: CATALOG_PURCHASE_OR_PLACE 133, CATALOG_CANCEL 134,
+// CATALOG_UP..VIEW_COMMERCIAL 171-175). The map alone is not enough: see focus10 below.
 typedef void(__cdecl* FlashCallFn)(void* a1, void* a2, const char* name, uint8_t* args, void* a5);
 typedef int(__fastcall* ScreenByNameFn)(void* mgr, void* edx, const char* name);
 typedef uint8_t*(__fastcall* ScreenByHandleFn)(void* mgr, void* edx, int handle);
@@ -167,23 +169,114 @@ static bool movie10(const uint8_t* screen)
     return g_movies10.count(k) != 0;
 }
 
-static void __cdecl hkFlashCall(void* a1, void* a2, const char* name, uint8_t* args, void* a5)
+static const char* gfxString(const uint8_t* v)   // a GFx Value (type +0xc: 6 string, bit 6 managed = one more hop)
 {
-    if (name && args && !strcmp(name, "UsesActionMap")) {
-        const uint8_t* v = *(const uint8_t* const*)(args + 0x10);   // args[0], the Lua name; type bit 6: one more hop
-        if ((*(const uint32_t*)(args + 0xc) >> 6 & 1) && sys::readable(v, 4)) v = *(const uint8_t* const*)v;
-        char lua[64] = "";
-        safeCopy(lua, sizeof(lua), (const char*)v);
-        void* mgr = *(void**)rt(0x02289E88);
-        int h = *lua && mgr ? ((ScreenByNameFn)rt(0x01550050))(mgr, nullptr, lua) : -1;
-        uint8_t* s = h != -1 ? ((ScreenByHandleFn)rt(0x0154FED0))(mgr, nullptr, h) : nullptr;
-        if (s && movie10(s)) {
-            if (void* map = *(void**)s) (*(ActionMapClearFn**)map)[1](map, nullptr);   // vt[1] FUN_007f3640: empty it
-            logf("actionmap10: %s (1.0 movie) UsesActionMap -> its map is the movie's list", lua);
-            name = "AppendActionMap";
+    if (!sys::readable(v, 0x14)) return nullptr;
+    uint32_t t = *(const uint32_t*)(v + 0xc);
+    const uint8_t* p = *(const uint8_t* const*)(v + 0x10);
+    if ((t & 0x8f) != 6) return nullptr;
+    if (t & 0x40) p = sys::readable(p, 4) ? *(const uint8_t* const*)p : nullptr;
+    return (const char*)p;
+}
+
+static uint8_t* screenOfCall(const uint8_t* args, char* lua, size_t cap)   // args[0] = the screen's Lua name
+{
+    safeCopy(lua, cap, gfxString(args));
+    void* mgr = *(void**)rt(0x02289E88);
+    int h = *lua && mgr ? ((ScreenByNameFn)rt(0x01550050))(mgr, nullptr, lua) : -1;
+    return h != -1 ? ((ScreenByHandleFn)rt(0x0154FED0))(mgr, nullptr, h) : nullptr;
+}
+
+static volatile LONG g_inputLines;   // probe budget (locktrace10): movie calls, focus, delivery gates, actions
+static bool inputRoom() { return g_cfg.lockTrace10 && InterlockedIncrement(&g_inputLines) <= 600; }
+
+static void __cdecl hkFlashCall(void* a1, void* a2, const char* name, uint8_t* args, void* argc)
+{
+    char lua[64] = "";
+    uint8_t* s = name && args ? screenOfCall(args, lua, sizeof(lua)) : nullptr;
+    bool ten = s && movie10(s);
+    if (ten && !strcmp(name, "UsesActionMap") && g_cfg.actionMap10) {
+        if (void* map = *(void**)s) (*(ActionMapClearFn**)map)[1](map, nullptr);   // vt[1] FUN_007f3640: empty it
+        logf("actionmap10: %s (1.0 movie) UsesActionMap -> its map is the movie's list", lua);
+        name = "AppendActionMap";
+    }
+    if (ten && inputRoom()) {   // probe: what the 1.0 movie asks of its screen (PlaySound names, ExitScreen, BuyItem, ...)
+        char a[64] = "";
+        if ((uintptr_t)argc >= 2) safeCopy(a, sizeof(a), gfxString(args + 0x20));
+        logf("input10: movie of %s calls %s('%s'), %u args", lua, name, a, (unsigned)(uintptr_t)argc);
+    }
+    g_flashCall(a1, a2, name, args, argc);
+}
+
+// focus10: the manager tells the top screen's movie it has the focus (FUN_01559480 gain, FUN_01554590 loss; thiscall
+// on the manager, ret 4). A screen with HasScreenFSM (3.0's Screen) gets root.GainFocus()/LoseFocus() and the movie
+// answers CallLua("NotifyFocusChange", b) (callback 0x01564e2a: screen +0x60 = b); any other screen gets
+// root.SetHasFocus(b) from FUN_01552390, which also sets +0x60 itself. +0x60 gates every action: the per-frame
+// delivery FUN_01565330 (thiscall(screen, a1, a2), ret 8) passes a screen's map entries to its movie only while +0x60
+// is set (0x01565400), the movie loaded (+0x6d) and neither hidden (+0x6c) nor hiding (+0x6b). A 1.0 movie has no
+// GainFocus and never sends NotifyFocusChange, so the Catalog (3.0 catalog.lua, a Screen, on 1.0's storefront.gfx)
+// kept +0x60 = 0 (dump catalog-input-0649: Catalog45 the only screen of player 0's focus list, +0x60 0): no action
+// reached it. (8ed4a27 called FUN_01552390 but put 3.0's +0x60 back afterwards, which undid exactly this.) A screen
+// whose movie was served from 1.0 now gets the non-FSM treatment, FUN_01552390(focus), after 3.0's own.
+typedef void(__fastcall* FocusGainFn)(uint8_t* mgr, void* edx, uint8_t* screen);
+typedef void(__fastcall* FocusLossFn)(uint8_t* mgr, void* edx, uint8_t** holder);
+typedef void(__fastcall* SetHasFocusFn)(uint8_t* screen, void* edx, int focus);
+typedef void(__fastcall* DeliverFn)(uint8_t* screen, void* edx, void* a1, void* a2);
+typedef char(__fastcall* ActionStateFn)(void* map, void* edx, int i, uint32_t* key, uint8_t* b1, uint8_t* b2);
+static FocusGainFn g_focusGain;
+static FocusLossFn g_focusLoss;
+static DeliverFn g_deliver;
+
+static void movieFocus10(uint8_t* screen, bool focus, const char* why)
+{
+    if (!screen || !screen[0x6d] || !movie10(screen)) return;
+    ((SetHasFocusFn)rt(0x01552390))(screen, nullptr, focus ? 1 : 0);
+    char name[64] = "";
+    safeCopy(name, sizeof(name), *(const char**)(screen + 0x10));
+    logf("focus10: %s (1.0 movie) %s: SetHasFocus(%d), +0x60 now %d", name, why, focus ? 1 : 0, screen[0x60]);
+}
+
+static void __fastcall hkFocusGain(uint8_t* mgr, void* edx, uint8_t* screen)
+{
+    g_focusGain(mgr, edx, screen);
+    uint8_t* head = screen ? *(uint8_t**)(mgr + 0x28C + *(int*)(screen + 0x50) * 0x20) : nullptr;   // the top: what 3.0 focused
+    uint8_t** holder = head ? *(uint8_t***)(head + 8) : nullptr;
+    movieFocus10(holder ? holder[0] : nullptr, true, "gain");
+}
+
+static void __fastcall hkFocusLoss(uint8_t* mgr, void* edx, uint8_t** holder)
+{
+    g_focusLoss(mgr, edx, holder);
+    movieFocus10(holder ? holder[0] : nullptr, false, "loss");
+}
+
+// probe (locktrace10): for a screen on a 1.0 movie, each frame's delivery: the gates when they change, and every map
+// entry whose action state reads down/changed (map vt[5] = FUN_00b48250 -> FUN_00b48120: key code +0x20, bytes
+// +0x10 / +0x11 of the mapper entry), with whether the gates let it through to the movie.
+static void __fastcall hkDeliver(uint8_t* screen, void* edx, void* a1, void* a2)
+{
+    if (g_cfg.lockTrace10 && screen && movie10(screen)) {
+        static uint8_t* last;
+        static uint32_t lastGates = ~0u;
+        void* map = *(void**)screen;
+        uint32_t n = map ? *(uint32_t*)((uint8_t*)map + 8) : 0;
+        uint32_t gates = screen[0x60] | screen[0x6d] << 1 | screen[0x6c] << 2 | screen[0x6b] << 3 | n << 8 | (a1 ? 1u << 31 : 0);
+        char name[64] = "";
+        safeCopy(name, sizeof(name), *(const char**)(screen + 0x10));
+        if ((screen != last || gates != lastGates) && inputRoom())
+            logf("input10: %s delivery gates: focus(+0x60) %d loaded %d hidden %d hiding %d, map %u actions, input %p", name,
+                 screen[0x60], screen[0x6d], screen[0x6c], screen[0x6b], n, a1);
+        last = screen, lastGates = gates;
+        bool open = a1 && screen[0x60] && screen[0x6d] && !screen[0x6c] && !screen[0x6b];
+        for (uint32_t i = 0; map && i < n; ++i) {
+            uint32_t key = 0;
+            uint8_t b1 = 0, b2 = 0;
+            if ((*(ActionStateFn**)map)[5](map, nullptr, (int)i, &key, &b1, &b2) && (b1 || b2) && inputRoom())
+                logf("input10: %s action key %u (entry %u) state %d/%d -> %s", name, key, i, b1, b2,
+                     open ? "delivered to the movie" : "blocked by the gates");
         }
     }
-    g_flashCall(a1, a2, name, args, a5);
+    g_deliver(screen, edx, a1, a2);
 }
 
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
@@ -249,9 +342,17 @@ static void install()
         hook("screen AddScreen by name (1.0 scripts)", 0x0156A360, "558BEC83E4F86AFF68????????64A100000000", (void*)&hkLuaAddScreen,
              (void**)&g_luaAddScreen);
     }
-    if (g_cfg.actionMap10)
-        hook("movie ExternalInterface call (1.0 UsesActionMap)", 0x01564790, "64A1000000006AFF68????????506489250000000081ECC8000000",
-             (void*)&hkFlashCall, (void**)&g_flashCall);
+    if (g_cfg.actionMap10 || g_cfg.lockTrace10)
+        hook("movie ExternalInterface call (1.0 UsesActionMap; input10 probe)", 0x01564790,
+             "64A1000000006AFF68????????506489250000000081ECC8000000", (void*)&hkFlashCall, (void**)&g_flashCall);
+    if (g_cfg.focus10) {
+        hook("screen focus gain (1.0 movies)", 0x01559480, "568B742408578BF98B4E50C1E105", (void*)&hkFocusGain, (void**)&g_focusGain);
+        hook("screen focus loss (1.0 movies)", 0x01554590, "64A1000000006AFF68????????506489250000000083EC28", (void*)&hkFocusLoss,
+             (void**)&g_focusLoss);
+    }
+    if (g_cfg.lockTrace10)
+        hook("screen action delivery (input10 probe)", 0x01565330, "64A1000000006AFF68????????506489250000000083EC44",
+             (void*)&hkDeliver, (void**)&g_deliver);
 }
 
 }   // namespace gprt
