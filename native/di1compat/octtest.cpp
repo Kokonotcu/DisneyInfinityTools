@@ -2758,9 +2758,9 @@ int main(int argc, char** argv)
     }
     if (argc > 3 && std::string(argv[1]) == "--mission") {   // --mission <1.0 mission .lua> <out.lua>: events, progress
         std::string t = slurp(argv[2]);
-        int n = mission::luaEvents30(t), p = mission::progress30(t);
+        int n = mission::luaEvents30(t), p = mission::progress30(t), tl = mission::taskLines30(t);
         std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
-        printf("%d presentation events remapped, %d progress string\n", n, p);
+        printf("%d presentation events remapped, %d progress string, %d task lines\n", n, p, tl);
         return 0;
     }
     if (argc > 2 && std::string(argv[1]) == "--mischain") {   // --mischain <1.0 mission .lua>...: transcode() chains gp's

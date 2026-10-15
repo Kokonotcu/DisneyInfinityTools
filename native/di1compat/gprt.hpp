@@ -200,7 +200,9 @@ static void __cdecl hkFlashCall(void* a1, void* a2, const char* name, uint8_t* a
         logf("actionmap10: %s (1.0 movie) UsesActionMap -> its map is the movie's list", lua);
         name = "AppendActionMap";
     }
-    if (ten && inputRoom()) {   // probe: what the 1.0 movie asks of its screen (PlaySound names, ExitScreen, BuyItem, ...)
+    // probe: what the 1.0 movie asks of its screen (PlaySound names, ExitScreen, BuyItem, ...); genericlist asks
+    // CanChangeSelection every frame while a key is held, which used up the budget in run-in-store5
+    if (ten && strcmp(name, "CanChangeSelection") && inputRoom()) {
         char a[64] = "";
         if ((uintptr_t)argc >= 2) safeCopy(a, sizeof(a), gfxString(args + 0x20));
         logf("input10: movie of %s calls %s('%s'), %u args", lua, name, a, (unsigned)(uintptr_t)argc);
@@ -382,6 +384,26 @@ static void __fastcall hkMissionActivate(uint8_t* mission, void* edx)
     }
 }
 
+// probe (locktrace10), Cars Tab: Tab = TOY_STORE -> ShowRibbonUI exists only in the Biped layers, and its filter
+// needs the context Allow_UIRibbon (avatar_controls_win32.xldb ShowRibbonUI_filter). 3.0 sets Allow_UIRibbon in one
+// place, when a player takes control of a vehicle (FUN_00d612a0, thiscall(control, vehicle), ret 4), and only if the
+// zone's PlaysetProperties is "ToyBox" (FUN_0139e6e0 -> FUN_01377970), not CartRacing (FUN_0139e790) and the actor
+// carries tag 0xff. A 1.0 car avatar drives as a vehicle (Cars: Tow prompt, Vehicle_Control). Logs each takeover in
+// a 1.0 zone with the ToyBox test, so a Cars run shows whether this gate is what leaves Tab dead.
+typedef void(__fastcall* VehicleCtlFn)(uint8_t* ctl, void* edx, void* vehicle);
+typedef char(__fastcall* ZoneFlagFn)(void* zm, void* edx, int zone);
+static VehicleCtlFn g_vehicleCtl;
+static void __fastcall hkVehicleCtl(uint8_t* ctl, void* edx, void* vehicle)
+{
+    void* old = ctl ? *(void**)(ctl + 0xF0) : nullptr;
+    g_vehicleCtl(ctl, edx, vehicle);
+    if (!g_cfg.lockTrace10 || !zonePlayset10() || !inputRoom()) return;
+    void* zm = *(void**)rt(0x0225F548);
+    char toy = zm ? ((ZoneFlagFn)rt(0x0139E6E0))(zm, nullptr, 0) : 0;
+    logf("vehicle10: player control %p takes vehicle %p (was %p); zone PlaysetProperties ToyBox %d -> 3.0 %s Allow_UIRibbon "
+         "(Tab = ShowRibbonUI needs it)", ctl, vehicle, old, toy, vehicle && toy ? "may set" : "does not set");
+}
+
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
 // 3.0 enables a tool only where its ToolSetTable LevelPrefix allows (gate FUN_0150f7d0, thiscall (tool, list) ret 4,
 // called by FUN_0151b960 with the Tools record + 4; result cached in tool +0x74): an empty list, a prefix the
@@ -437,6 +459,9 @@ static uint32_t __fastcall hkToolGate(uint8_t* tool, void* edx, const uint8_t* p
 
 static void install()
 {
+    if (g_cfg.lockTrace10)
+        hook("vehicle control takeover (vehicle10 probe)", 0x00D612A0, "6AFF68????????64A100000000", (void*)&hkVehicleCtl,
+             (void**)&g_vehicleCtl);
     if (g_cfg.accept10)
         hook("mission activation (accept10)", 0x015BCC10, "83EC14568BF18A86DB03000084C0", (void*)&hkMissionActivate,
              (void**)&g_missionActivate);
