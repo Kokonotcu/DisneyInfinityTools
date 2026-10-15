@@ -342,6 +342,18 @@ struct Binding30 : sm3::Binding {
     std::map<int, std::string> sname;                     // sampler register -> 1.0 sampler name
     bool envOff(int) { return false; }   // test 2026-10-13: dropping environment maps did not fix the black objects
     std::vector<std::string> unresolved;
+    // skinned pass (cfg skintr10): 3.0 skins on the GPU before the material shader, so the VS reads vertices skinned
+    // already, in world space (3.0's own skinned-material VSs: worldToProjected only, no bone input). The 1.0 VS's
+    // own skinning becomes identity: bone indices 0, weights (1, 0, 0, 0), every bone the identity matrix.
+    bool skin = false;
+    std::set<std::string> needed;   // the vertex inputs the VS still reads
+    bool inputConst(const std::string& sem, std::string& expr) override
+    {
+        if (skin && sem.compare(0, 12, "BLENDINDICES") == 0) { expr = "float4(0, 0, 0, 0)"; return true; }
+        if (skin && sem.compare(0, 11, "BLENDWEIGHT") == 0) { expr = "float4(1, 0, 0, 0)"; return true; }
+        needed.insert(sem);
+        return false;
+    }
     Binding30(const Tables& t, const Layout& l, const std::vector<Const>& ct, std::map<std::string, std::string> f, bool gb)
         : T(t), L(l), fmt(std::move(f))
     {
@@ -373,6 +385,10 @@ struct Binding30 : sm3::Binding {
     std::string constant(int num, const std::string& rel) override
     {
         auto hit = creg.find(num);
+        if (skin && hit != creg.end() && hit->second.first == "g_skinning_boneTransforms") {   // row_major float4x4 per bone
+            static const char* const I[] = {"float4(1, 0, 0, 0)", "float4(0, 1, 0, 0)", "float4(0, 0, 1, 0)", "float4(0, 0, 0, 1)"};
+            return I[(num - hit->second.second) & 3];
+        }
         int cb = 0, base = 0;
         std::string expr;
         if (hit == creg.end() || !locate(hit->second.first, cb, base, expr)) {
@@ -543,8 +559,11 @@ inline std::string buildShd(const Tables& T, const std::string& raw10, const Shd
     return out;
 }
 
-// gen30.generate: compile may be empty (sizes 0, as gen30.py with compile_=False).
-inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, const std::string& shader, const Compile& compile, Generated& g)
+// gen30.generate: compile may be empty (sizes 0, as gen30.py with compile_=False). skinTarget / vf30 (cfg skintr10):
+// a skinned 1.0 format -> the 3.0 format its vertices are converted to, and 3.0's formats; without them a skinned
+// pass is a problem (the material keeps another tier).
+inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, const std::string& shader, const Compile& compile, Generated& g,
+                     const std::function<uint32_t(uint32_t)>& skinTarget = nullptr, const VFormats* vf30 = nullptr)
 {
     std::string raw10;
     if (!read10("shaders/shaders/" + shader + ".shd", raw10)) { g.problems.push_back("no 1.0 shader " + shader); return false; }
@@ -562,6 +581,16 @@ inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, co
         std::map<std::string, std::string> fmt;
         if (auto f = vf.find(p.vf); f != vf.end()) fmt = f->second;
         else g.problems.push_back("pass " + std::to_string(i) + ": vformat unknown");
+        // a skinned pass (its 1.0 format has bone indices) draws 3.0's skinned vertices: the pass takes the 3.0 format
+        // the render transcode converts that 1.0 format to (skinTarget), whose main layout is what 3.0's skinning writes
+        uint32_t pvf = p.vf;
+        bool skinned = false;
+        if (skinTarget && fmt.count("BLENDINDICES0")) {
+            uint32_t t = skinTarget(p.vf);
+            auto f30 = vf30 && t ? vf30->find(t) : VFormats::const_iterator();
+            if (!t || !vf30 || f30 == vf30->end()) g.problems.push_back("pass " + std::to_string(i) + ": skinned, no 3.0 format to draw it in");
+            else { pvf = t; fmt = f30->second; skinned = true; }
+        }
         uint32_t ids[2] = {0, 0}, sizes[2] = {0, 0};
         for (int k = 0; k < 2; ++k) {
             uint32_t pid = k ? p.ps : p.vs;
@@ -578,8 +607,12 @@ inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, co
                 // depth field 1 = a depth-only pass: no colour output in 1549 of 3.0's 1550. 1.0's wrote linear depth as
                 // colour; translated as is it painted near-black, dithered, over fading objects (2026-10-13)
                 B.depthOnly = k == 1 && ((w >> 3) & 7) == 1;
+                B.skin = skinned && k == 0;
                 pr.hlsl = sm3::toHlsl(prog, B);
                 if (!B.unresolved.empty()) g.problems.push_back("pass " + std::to_string(i) + ": unresolved " + B.unresolved[0]);
+                if (B.skin)   // every input it still reads must be in the 3.0 format, or no input layout can be made
+                    for (auto& sem : B.needed)
+                        if (!fmt.count(sem)) g.problems.push_back("pass " + std::to_string(i) + ": skinned, 3.0 format lacks " + sem);
             } catch (std::exception& e) {
                 g.problems.push_back("pass " + std::to_string(i) + ": " + e.what());
                 continue;
@@ -592,7 +625,7 @@ inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, co
             sizes[k] = (uint32_t)pr.code.size();
             g.programs.push_back(std::move(pr));
         }
-        passes.emplace_back(w, p.vf, tech, ids[0], ids[1], sizes[0], sizes[1]);
+        passes.emplace_back(w, pvf, tech, ids[0], ids[1], sizes[0], sizes[1]);
     }
     g.name = "x" + shader;
     g.shd = buildShd(T, raw10, s, L, passes);

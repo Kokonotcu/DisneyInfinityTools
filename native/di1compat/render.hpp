@@ -447,7 +447,22 @@ struct IO {
     // the served vformat.vtxf's re-laid 1.0 formats (gen30::mergeVtxf): a translated primitive in one has its
     // trailing vertex colour split into a stream of its own, as that layout says
     const std::map<uint32_t, gen30::ColourTail>* tails10 = nullptr;
+    // cfg skintr10: a material drawn only with skinned formats may take its translated 1.0 shader too. Its vertices
+    // still go to their 3.0 'skin' layout target (skinTarget30: 3.0's GPU skinning reads that and nothing else), and
+    // the translated shader takes that target's skinned output (gen30: skin passes, identity bones)
+    bool translateSkinned = false;
 };
+
+// The 3.0 format a skinned 1.0 format's vertices go to: its first target with an R plan (into the target's 'skin'
+// layout) -- the pick transcodeWorld makes for a material whose shader declares no format (0: none).
+inline uint32_t skinTarget30(const Table& T, uint32_t crc10)
+{
+    auto t = T.targets.find(crc10);
+    if (t != T.targets.end())
+        for (uint32_t c : t->second)
+            if (T.skinPlans.count({crc10, c})) return c;
+    return 0;
+}
 
 struct Result {
     std::string mtb, vbuf, ibuf, ibuf2;
@@ -529,10 +544,18 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
         Bundle* bnd = nullptr;
         std::string raw10;
         gen30::Shd10 s10;
-        bool skin = false;
+        bool skin = false, rigid = false;
         if (auto dk = drawn.find((int)k); dk != drawn.end() && io.skinned)
-            for (uint32_t c : dk->second) skin |= io.skinned(c);
-        if (io.translate && !skin && io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) && gen30::parse10(raw10, s10) &&
+            for (uint32_t c : dk->second) (io.skinned(c) ? skin : rigid) = true;
+        // skinned: only when every format it is drawn with is skinned (the translated shader's passes take the 3.0
+        // skin target; a rigid primitive would need the 1.0 format) and each has a target, and not when Disney ships
+        // the material (the real tier: its 3.0 twin is drawn skinned already) -- this is for the ones that fell to a
+        // stand-in shader (same-sh / generic: pupils, translucent FX, screen-space water)
+        bool skinOk = io.translateSkinned && !rigid &&
+                      !(!m10.name.empty() && T.matindex.count(m10.name) && !T.notReal.count(m10.name));
+        if (skin && skinOk)
+            for (uint32_t c : drawn.at((int)k)) skinOk &= skinTarget30(T, c) != 0 && T.plans.count({c, skinTarget30(T, c)}) != 0;
+        if (io.translate && (!skin || skinOk) && io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) && gen30::parse10(raw10, s10) &&
             (!io.translatable || io.translatable(m10.shader))) {
             gen30::Layout L = gen30::layout(s10);
             Material dm;
@@ -552,6 +575,8 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
             one.mats.push_back(dm);
             srcs.push_back({one, 0});
             r.tiers["translated"]++;
+            if (skin) r.tiers["translated skinned"]++;
+            if (io.verbose) io.log("translated " + m10.name + " [" + m10.shader + "]" + (skin ? " skinned" : ""));
             r.translated.insert((int)k);
             r.shaders.push_back({m10.shader, dm.shader});
             continue;
@@ -762,8 +787,10 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     std::map<std::pair<int, uint32_t>, uint32_t> vmap;
     for (auto& [crc, refs] : users) {
         bool all = true;
+        const bool skinnedFmt = io.skinned && io.skinned(crc);
         for (int ref : refs) {
-            if (r.translated.count(ref)) vmap[{ref, crc}] = crc;   // its own shader takes the 1.0 format as it is
+            // its own shader takes the 1.0 format as it is -- a skinned one its 3.0 skin target (skintr10)
+            if (r.translated.count(ref)) vmap[{ref, crc}] = skinnedFmt ? skinTarget30(T, crc) : crc;
             else all = false;
         }
         if (all) continue;
@@ -786,7 +813,8 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
     for (auto& [crc, refs] : users)
         for (int ref : refs) {
             auto t = T.targets.find(crc);
-            if (!io.skinLayout || r.translated.count(ref) || t == T.targets.end()) continue;
+            if (!io.skinLayout || t == T.targets.end()) continue;
+            if (r.translated.count(ref) && !(io.skinned && io.skinned(crc))) continue;   // translated rigid: 1.0 format
             auto sv = shaderVf.find(ref);
             for (uint32_t c : t->second)
                 if (T.skinPlans.count({crc, c}) && (sv == shaderVf.end() || sv->second->count(c))) { smap[{ref, crc}] = c; break; }

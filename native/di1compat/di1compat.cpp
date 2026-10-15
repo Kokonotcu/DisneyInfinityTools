@@ -139,6 +139,7 @@ static struct {
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
     bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 format's 'skin' layout, bones kept
+    bool skinTr10 = true;            // skinned materials take their translated 1.0 shader too (identity bones; gen30)
     bool sceneSettings10 = true;     // a 1.0 bundle's scene settings (SSET: fog, bloom, exposure, grading) re-laid into 3.0's
     bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
     int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
@@ -251,6 +252,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
         else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
         else if (!strcmp(key, "skinlayout10")) g_cfg.skinLayout10 = atoi(val) != 0;
+        else if (!strcmp(key, "skintr10")) g_cfg.skinTr10 = atoi(val) != 0;
         else if (!strcmp(key, "scenesettings10")) g_cfg.sceneSettings10 = atoi(val) != 0;
         else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
         else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
@@ -548,6 +550,7 @@ static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1
 static std::set<std::string> g_screens10;   // presentation/<screen>.lua served from 1.0: lower-case screen names (gprt)
 static render::Table g_render;
 static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
+static gen30::VFormats g_vf30;              // 3.0's (skintr10: the formats skinned passes draw in), set with the vtxf
 static std::map<uint32_t, gen30::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
 static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
@@ -625,6 +628,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
     io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
     io.skinLayout = g_cfg.skinLayout10;
+    io.translateSkinned = g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty();
     io.tails10 = &g_tails10;
     sceneSettingsIO(io);
     render::Result r;
@@ -3793,7 +3797,9 @@ static uint8_t* shader10(const char* name, bool create)
     out = nullptr;
     gen30::Generated g;
     g_compiling10 = name;
-    gen30::generate(g_render.shaders10, read10s, g_vf10, std::string(name + 1), compile10, g);
+    std::function<uint32_t(uint32_t)> skinTarget;
+    if (g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty()) skinTarget = [](uint32_t vf) { return render::skinTarget30(g_render, vf); };
+    gen30::generate(g_render.shaders10, read10s, g_vf10, std::string(name + 1), compile10, g, skinTarget, &g_vf30);
     for (auto& pr : g.problems) logf("shaders10 %s: %s", name, pr.c_str());
     if (g.shd.empty() || !g.problems.empty()) return nullptr;
     std::map<uint32_t, uint32_t> engineId, vsIndex, psIndex;   // generator id -> engine id; engine id -> index
@@ -3842,6 +3848,7 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 {
     int n = 0;
     std::string m = gen30::mergeVtxf(t30, t10, n, g_tails10);
+    g_vf30 = gen30::vformats(t30);
     logf("shaders10: vformat.vtxf + %d 1.0 formats, %u with their vertex colour in its own stream", n, (unsigned)g_tails10.size());
     return m;
 }
