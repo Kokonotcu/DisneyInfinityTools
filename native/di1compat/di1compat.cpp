@@ -131,7 +131,7 @@ static struct {
     char install10[MAX_PATH] = "";   // the 1.0 install (its assets\ holds plain zips)
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
     bool trace = true;               // log every open
-    bool missionTrace = false;       // log IN_ mission context state changes (one cheap hook; trace's cost frames)
+    bool missionTrace = false;       // log 1.0 playset mission context state changes (one cheap hook; trace's cost frames)
     bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
     bool breakTrace = false;         // probe: clip evaluation clocks, exploder hits and explodes (log only)
     bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
@@ -214,7 +214,8 @@ static struct {
     bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
     bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
     bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
-    bool playsetMenu10 = true;       // menu: an Incredibles entry on the Play Sets list opens IN_City (ui::playsetMenu10)
+    bool playsetMenu10 = true;       // menu: one Play Sets entry per registered 1.0 playset, opening its start zone (ui::playsetMenu10)
+    bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -315,6 +316,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "selectmenu10")) g_cfg.selectMenu10 = atoi(val) != 0;
         else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
         else if (!strcmp(key, "playsetmenu10")) g_cfg.playsetMenu10 = atoi(val) != 0;
+        else if (!strcmp(key, "zones10")) g_cfg.zones10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -323,7 +325,7 @@ static void loadConfig(const char* dir)
          "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
          g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.clip10Ids, g_cfg.choAlias10, g_cfg.banm10,
          g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
-    logf("config menu: playsetmenu10=%d", g_cfg.playsetMenu10);
+    logf("config menu: playsetmenu10=%d zones10=%d", g_cfg.playsetMenu10, g_cfg.zones10);
     logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
          g_cfg.lockTrace10);
 }
@@ -948,6 +950,7 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
     if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
         int k = luachunk::rewrite(std::string((const char*)data, n), out, [](std::string& s) {
             if (g_cfg.choAlias10) g_choAlias.add(s);
+            sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
             return datamap::normalise(s);
         });
         note += std::to_string(k) + " entries normalised ";
@@ -2330,12 +2333,57 @@ static uint32_t __cdecl hkOpacityMask(uint32_t n, float fade, uint32_t prims, ui
     return r;
 }
 
+// PS-1 (zones10): the 1.0 playsets the 3.0 zone list holds once it has loaded (gameplay::playsets10; added here unless
+// zones10 is off), for the Play Sets menu, and their zones' name prefixes ("IN_", "MU_", "PC_" ...: the 1.0 missions
+// carry them) for missiontrace.
+static std::vector<gameplay::Playset10> g_playsets10;
+static std::vector<std::string> g_missionPrefix10;
+static std::mutex g_playsets10Lock;
+static int zones10(std::string& t, const char* p)
+{
+    if (norm(p) != "gamedb/core/zonelist.lua") return 0;
+    std::string c10;
+    if (!read10s("gamedb/core/zonelist.lua", c10)) { logf("zones10: no 1.0 zone list in the 1.0 install"); return 0; }
+    std::vector<gameplay::Playset10> ps;
+    try {
+        auto g = luachunk::eval(c10);
+        auto world = [](const std::string& zone) {   // the start world is in the 1.0 install: worlds\<zone>[.zip]
+            std::string w = std::string(g_cfg.install10) + "\\assets\\worlds\\" + zone;
+            return GetFileAttributesA((w + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA(w.c_str()) != INVALID_FILE_ATTRIBUTES;
+        };
+        ps = gameplay::playsets10(t, g["ZoneList"], g_cfg.zones10, world);
+    } catch (std::exception& e) {
+        logf("zones10: 1.0 zone list not read (%s)", e.what());
+        return 0;
+    }
+    int added = 0;
+    std::vector<std::string> pre;
+    for (auto& x : ps) {
+        added += x.added;
+        for (auto& z : x.zones)
+            if (z.find('_') != std::string::npos && std::find(pre.begin(), pre.end(), z.substr(0, z.find('_') + 1)) == pre.end())
+                pre.push_back(z.substr(0, z.find('_') + 1));
+        if (x.added) logf("zones10: %s registered, PlaysetUniqueID %d, %u zones, start %s", x.name.c_str(), x.id, (unsigned)x.zones.size(), x.start.c_str());
+        else logf("zones10: %s already in the 3.0 zone list (start %s)", x.name.c_str(), x.start.c_str());
+    }
+    std::lock_guard<std::mutex> l(g_playsets10Lock);
+    g_playsets10 = ps;
+    g_missionPrefix10 = pre;
+    return added;
+}
+static bool playsetMission10(const char* name)
+{
+    std::lock_guard<std::mutex> l(g_playsets10Lock);
+    for (auto& x : g_missionPrefix10) if (!_strnicmp(name, x.c_str(), x.size())) return true;
+    return false;
+}
+
 static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc loaded in-process, one frame captured once the world runs
 static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
 {
     g_missionTick(self, nullptr, dt);
     const char* name = *(const char**)(self + 0x10);
-    if (!name || _strnicmp(name, "IN_", 3)) return;
+    if (!name || !playsetMission10(name)) return;   // a 1.0 playset's mission (zones10's prefixes)
     static bool armed;
     if (g_rdoc && !armed) {
         armed = true;
@@ -2716,13 +2764,14 @@ static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint
     uint32_t r = gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
     char p[300];
     safeCopy(p, sizeof(p), path);
-    if (g_cfg.locks10 && _stricmp(p, sys::kLocksTrigger) == 0)   // PS-5: the 1.0 tables' records the Locks DB lacks
-        for (const char* s : sys::kLocks10) {
+    bool playset10 = sys::dbTrigger10(p, "locks__lua.lua");   // a 1.0 playset DataMap's locks table
+    if (g_cfg.locks10 && playset10)   // PS-5: the 1.0 tables' records the Locks DB lacks
+        for (std::string s : {std::string(sys::kLocks10Prefix) + p, std::string(sys::kLocks10Core)}) {
             sys::setLockUids(sys::loaderUids(self));
-            gameDbLoad(g_loadLocks, "locks", self, s, a2, a3);
+            gameDbLoad(g_loadLocks, "locks", self, s.c_str(), a2, a3);
         }
     // GLB-1: 1.0 ChestInfo.bin through 3.0's chestInfo loader
-    void* loader = g_cfg.chest10 && _stricmp(p, sys::kLocksTrigger) == 0 ? singletonLoader(0x022896FC) : nullptr;
+    void* loader = g_cfg.chest10 && playset10 ? singletonLoader(0x022896FC) : nullptr;
     if (loader) {
         uint8_t ok = cbLoad(loader, sys::kChest10, a2, a3);
         uint8_t *ci = *(uint8_t**)rt(0x022896FC), *chests = ci + 0x1c;
@@ -2779,7 +2828,7 @@ static uint8_t __fastcall hkCbLoad(void* self, void*, const char* path, uint32_t
     uint8_t r = g_cbLoad(self, nullptr, path, a2, a3);
     char p[300];
     safeCopy(p, sizeof(p), path);
-    if (_stricmp(p, sys::kBitsTrigger) != 0) return r;
+    if (!sys::dbTrigger10(p, "bitmasks.lua")) return r;   // a 1.0 playset DataMap's bitmasks
     if (g_cfg.bits10) logf("bitMask loader given %s after %s -> %u", sys::kBits10, p, cbLoad(self, sys::kBits10, a2, a3));
     void* pl = g_cfg.perc10 ? singletonLoader(0x02289700) : nullptr;
     const uint8_t* pi = pl ? *(uint8_t**)rt(0x02289700) : nullptr;
@@ -3035,22 +3084,30 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     // the file named Tips.lua only (FUN_00b70da0's literal), not every *tips.lua: the stream is consumed and re-served
     if (r && g_cfg.serve10 && g_cfg.tips10 && !(flags & 1) && (!_stricmp(p, "tips.lua") || endsWith(p, "/tips.lua") || endsWith(p, "\\tips.lua")))
         return tips30(path, flags, a3, a4, a5, r);
-    // menu: the Play Sets list (screen PlaysetListWin32) gets an Incredibles entry; its 3.0 chunk runs as shipped
+    // menu: the Play Sets list (screen PlaysetListWin32) gets the registered 1.0 playsets; its 3.0 chunk runs as shipped
     if (r && g_cfg.playsetMenu10 && !(flags & 1) && endsWith(p, "playsetlistwin32.lua") && norm(p) == "presentation/playsetlistwin32.lua") {
+        std::vector<std::pair<std::string, std::string>> ps;
+        {
+            std::lock_guard<std::mutex> l(g_playsets10Lock);
+            for (auto& x : g_playsets10) ps.push_back({x.name, x.start});
+        }
         std::string t;
-        if (readStream(r, t) && !t.empty() && t[0] == 0x1b) {
-            std::string s = ui::playsetMenu10(t);
-            logf("%s: Incredibles entry added (%u B 3.0 chunk -> %u B Lua)", p, (unsigned)t.size(), (unsigned)s.size());
+        if (readStream(r, t) && !t.empty() && t[0] == 0x1b && !ps.empty()) {
+            std::string s = ui::playsetMenu10(t, ps), names;
+            for (auto& x : ps) names += " " + x.first + "->" + x.second;
+            logf("%s: %u 1.0 playset entries added:%s (%u B 3.0 chunk -> %u B Lua)", p, (unsigned)ps.size(), names.c_str(),
+                 (unsigned)t.size(), (unsigned)s.size());
             return memFile(s.data(), s.size());
         }
-        logf("%s: not the 3.0 chunk (%u B): unchanged", p, (unsigned)t.size());
+        logf("%s: %s (%u B): unchanged", p, ps.empty() ? "no 1.0 playset registered" : "not the 3.0 chunk", (unsigned)t.size());
         return g_open(path, flags, a3, a4, a5);
     }
     // gp: 3.0 files the activity -> challenge redirect extends (gameplay.hpp): the zone list (ChallengeTypeDataFile
     // beside the 1.0 ActivityTypeDataFile) and ChallengeData.lua (+ the 1.0 beacons)
     bool zl = endsWith(p, "zonelist.lua"), cd = endsWith(p, "challengedata/challengedata.lua") || endsWith(p, "challengedata\\challengedata.lua");
     // mis (beacon10): the zone list's 1.0 MissionParams.BeaconMap rows in 3.0's row form (mission::beaconMap30)
-    if (r && !(flags & 1) && ((g_cfg.challenge10 && (zl || cd)) || (g_cfg.beacon10 && zl))) {
+    bool zl10 = zl && (g_cfg.zones10 || g_cfg.playsetMenu10 || g_cfg.missionTrace);   // the 1.0 playsets (zones10)
+    if (r && !(flags & 1) && ((g_cfg.challenge10 && (zl || cd)) || (g_cfg.beacon10 && zl) || zl10)) {
         typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
         typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
         typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
@@ -3059,17 +3116,18 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         t.resize(((SizeFn)vt[4])(r, nullptr));
         uint32_t got = t.empty() ? 0 : ((ReadFn)vt[5])(r, nullptr, &t[0], (uint32_t)t.size());
         ((DtorFn)vt[11])(r, nullptr, 1);
-        int k = 0, kb = 0, ka = 0;
+        int k = 0, kb = 0, ka = 0, kz = 0;
         if (got == t.size() && !t.empty() && t[0] != 0x1b) {
+            if (zl10) kz = zones10(t, p);   // first: the steps below apply to the added records as to written ones
             if (zl && g_cfg.challenge10) k = gameplay::zonelist30(t);
             else if (cd && read10s("activitydata/defaultactivitybeacons.lua", t10)) k = gameplay::beacons30(t, t10);
             if (zl && g_cfg.beacon10) kb = mission::beaconMap30(t, &ka);
         }
         if (g_cfg.challenge10) logf("%s: %d %s", p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
         if (zl && g_cfg.beacon10) logf("%s: %d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added (beacon10)", p, kb, ka);
-        return k || kb ? memFile(t.data(), t.size()) : g_open(path, flags, a3, a4, a5);
+        return k || kb || kz ? memFile(t.data(), t.size()) : g_open(path, flags, a3, a4, a5);
     }
-    if (g_cfg.trace && (_stricmp(p, "GameDB/Incredibles/bitmasks.lua") == 0 || _stricmp(p, "gamedb/theclonewars/bitmasks.lua") == 0)) {
+    if (g_cfg.trace && !_strnicmp(p, "gamedb/", 7) && endsWith(p, "/bitmasks.lua")) {   // any playset's, 1.0 or 3.0
         char line[600];
         int len = sprintf_s(line, "gamedb package open %s, stack:", p);
         stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 24);

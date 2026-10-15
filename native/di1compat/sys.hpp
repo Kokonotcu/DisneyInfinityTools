@@ -122,16 +122,52 @@ inline bool keepRecords(const std::string& t, const std::function<bool(uint32_t)
 }
 
 // ---- PS-5: supplemental 1.0 lock records ----
-// The 1.0 DataMap loads its playset locks from GameDB/Incredibles/locks__lua.lua; 3.0 ships a file at that path (18
-// records), so the engine reads 3.0's and the 1.0 table (66) never loads: its 55 INCREDIBLES_STAR records (31 named by
-// the 1.0 missions' GoldStar contexts / Eval_LockState) are absent. 1.0 also loaded its core table at boot
-// (startup2.zip gamedb/core/locks__lua.lua, 2,325 records, 1,757 of them in no 3.0 locks table by UID, 0 by name;
-// CUST_BH_Frozone_B, the lock reward of a 1.0 mission, is one). After the playset file, the same 3.0 loader is run on
-// each 1.0 table served through kLocks10Prefix: only the records whose UID the Locks DB does not hold yet (merge by
+// A 1.0 playset DataMap loads its playset locks from GameDB/<folder>/locks__lua.lua (Incredibles, MonstersU, Pirates,
+// Cars, LoneRanger; the folder is not always the playset's name: MonstersU's bitmasks are GameDB/Monsters/). 3.0
+// ships a file at GameDB/Incredibles/locks__lua.lua (18 records), so the engine reads 3.0's and the 1.0 table (66)
+// never loads: its 55 INCREDIBLES_STAR records (31 named by the 1.0 missions' GoldStar contexts / Eval_LockState) are
+// absent. 1.0 also loaded its core table at boot (startup2.zip gamedb/core/locks__lua.lua, 2,325 records, 1,757 of
+// them in no 3.0 locks table by UID, 0 by name; CUST_BH_Frozone_B, the lock reward of a 1.0 mission, is one). After a
+// playset file a 1.0 DataMap named (dbTrigger10), the same 3.0 loader is run on that path's 1.0 table and on the core
+// table, both served through kLocks10Prefix: only the records whose UID the Locks DB does not hold yet (merge by
 // DBName, FUN_01612fa0; a duplicate UID re-points the record index, FUN_0149f900, so duplicates are never sent).
 static const char* const kLocks10Prefix = "di1sys/locks10/";
-static const char* const kLocksTrigger = "GameDB/Incredibles/locks__lua.lua";
-static const char* const kLocks10[] = {"di1sys/locks10/GameDB/Incredibles/locks__lua.lua", "di1sys/locks10/gamedb/core/locks__lua.lua"};
+static const char* const kLocks10Core = "di1sys/locks10/gamedb/core/locks__lua.lua";
+
+// The GameDB tables 1.0 playset DataMaps name ("GameDB|GameDB/<folder>/<file>.lua" entries, seen as the DataMap is
+// served: dbTrigger10Add), lower case. A load of one of them is where a 1.0 playset's tables come in, whatever the
+// playset: the locks and bitMask loaders run the 1.0 supplements after it. 3.0's own DataMaps name compiled .chd.
+inline std::set<std::string>& dbTriggers10()
+{
+    static std::set<std::string> s;
+    return s;
+}
+inline std::mutex& dbTriggers10Lock()
+{
+    static std::mutex m;
+    return m;
+}
+inline void dbTrigger10Add(const std::string& entry)
+{
+    static const char kind[] = "GameDB|";
+    const size_t k = sizeof(kind) - 1;
+    if (entry.compare(0, k, kind)) return;
+    size_t bar = entry.find('|', k);
+    std::string p = entry.substr(k, bar == std::string::npos ? std::string::npos : bar - k);
+    for (char& c : p) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
+    std::lock_guard<std::mutex> l(dbTriggers10Lock());
+    dbTriggers10().insert(p);
+}
+// path (as the loader got it) is a GameDB table a 1.0 DataMap named, and its file name is `file` ("locks__lua.lua")
+inline bool dbTrigger10(const char* path, const char* file)
+{
+    std::string p = path;
+    for (char& c : p) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
+    size_t n = strlen(file);
+    if (p.size() <= n || p.compare(p.size() - n, n, file) || p[p.size() - n - 1] != '/') return false;
+    std::lock_guard<std::mutex> l(dbTriggers10Lock());
+    return dbTriggers10().count(p) != 0;
+}
 
 // p .. p + n can be read now: every page committed, not PAGE_NOACCESS / PAGE_GUARD. The one pointer check of the
 // plugin (safeCopy, cstr, the probes). Each page is asked of the working set first (QueryWorkingSetEx, constant time;
@@ -614,8 +650,7 @@ static const char* const kChest10 = "di1sys/chest10/var/chests/chestinfo.lua";
 // filter is OR-ed with the package's, FUN_00710d60 -> FUN_006f99c0; 3.0's own packages grow sets past their declared
 // count, e.g. ActorType 167 declared, 918 masks), so the 1.0 file goes in verbatim after the playset's.
 static const char* const kRaw10Prefix = "di1sys/raw10/";   // + a 1.0 path 3.0 also has: the 1.0 bytes
-static const char* const kBitsTrigger = "GameDB/Incredibles/bitmasks.lua";
-static const char* const kBits10 = "di1sys/raw10/gamedb/core/bitmasks.lua";
+static const char* const kBits10 = "di1sys/raw10/gamedb/core/bitmasks.lua";   // after a bitmasks.lua a 1.0 DataMap named
 
 // ---- PS-8: pop-in of 1.0 expendable definitions ----
 // ExpendablesDefBase (ctor FUN_016022c0, one Lua entry) keeps the pop-in range squared at +0x9c and (range+14)^2 at

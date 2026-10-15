@@ -276,6 +276,118 @@ inline int zonelist30(std::string& t)
     return n;
 }
 
+// PS-1 (cfg zones10): every 1.0 playset in 3.0's zone list as it loads, from the 1.0 zone list (startup2.zip
+// gamedb/core/zonelist.lua, a compiled table constructor: luachunk::eval). A playset is a 1.0 PlaysetProperties record
+// of Type "Playset" whose StartWorld is one of its own zones (zone field PlaysetProperties = its name) and is in the
+// 1.0 install (worldExists): Incredibles, MonstersU, Pirates, Cars, LoneRanger, ToyStoryInSpace (RumpusRoom is Type
+// "RumpusRoom", Miscellaneous "Other"). One the 3.0 text already holds by name is left as it is (a zone list written
+// by zonereg.py); the others get, in 1.0's own GlobalData.OrderedPlaysets order (Incredibles first, then MonstersU,
+// Pirates, Cars, LoneRanger, ToyStoryInSpace), the lowest PlaysetUniqueID no record of the text uses (3.0: 1-10, and
+// 12/13 in InheritList; the registration loop FUN_0139e820 skips a playset whose name or id is taken, zone ids are
+// id*0x100 + 0x401 + n) -- 11, 14, 15 ... -- and are written as zonereg.py wrote Incredibles: their 1.0 zone records
+// verbatim at the top of Zones (by name, the ones 3.0 lacks), the 1.0 PlaysetProperties record plus the keys 3.0
+// reads there (PlaysetUniqueID; WorldIsPlayset, 1.0 spelled it worldIsPlayset; SaveGameKey = the name, SaveGamePrefix
+// = playsetDict, as 3.0's own records pair them; LoadingScreens = playsetDict/LoadingScreen, 1.0's key; _ShowInMenu_
+// and the two build flags) at the top of PlaysetProperties, and an OrderedPlaysets entry. Returns the 1.0 playsets
+// the text holds afterwards, in that order.
+struct Playset10 { std::string name, start; int id = 0; bool added = false; std::vector<std::string> zones; };
+inline std::vector<Playset10> playsets10(std::string& t, const luachunk::Value& zoneList10, bool add,
+                                         const std::function<bool(const std::string&)>& worldExists)
+{
+    using luachunk::Value;
+    const size_t npos = std::string::npos;
+    std::vector<Playset10> out;
+    const Value* rec = zoneList10.get("Records");
+    const Value *pp10 = rec ? rec->get("PlaysetProperties") : nullptr, *z10 = rec ? rec->get("Zones") : nullptr;
+    const Value* gd10 = rec ? rec->get("GlobalData") : nullptr;
+    const Value* op10 = gd10 ? gd10->get("OrderedPlaysets") : nullptr;
+    if (!pp10 || !z10 || pp10->t != Value::TAB || z10->t != Value::TAB) return out;
+    std::vector<std::string> order, rest;
+    if (op10 && op10->t == Value::TAB)
+        for (auto& e : *op10->tab) if (e.second.t == Value::TAB) order.push_back(e.second.str("Name"));
+    for (auto& e : *pp10->tab)
+        if (e.first.t == Value::STR && std::find(order.begin(), order.end(), e.first.s) == order.end()) rest.push_back(e.first.s);
+    std::sort(rest.begin(), rest.end());
+    order.insert(order.end(), rest.begin(), rest.end());
+
+    // the 3.0 text: its Records tables, the playsets / zones it has, the ids its records use
+    auto toks = luaTokens(t);
+    auto zl = luaGlobalTable(t, toks, "ZoneList");
+    if (zl.first == npos) return out;
+    std::map<std::string, size_t> recs;   // table name -> its '{'
+    for (auto& e : luaTableEntries(t, toks, zl.first))
+        if (e.first == "Records")
+            for (auto& r : luaTableEntries(t, toks, t.find('{', e.second.first))) recs[r.first] = t.find('{', r.second.first);
+    auto names = [&](const char* table) {
+        std::set<std::string> s;
+        if (recs.count(table)) for (auto& e : luaTableEntries(t, toks, recs[table])) s.insert(e.first);
+        return s;
+    };
+    std::set<std::string> have = names("PlaysetProperties"), zones = names("Zones");
+    std::set<int> used;
+    for (auto& k : toks)
+        if (k.kind == 'i' && !t.compare(k.at, k.len, "PlaysetUniqueID") && assignedAt(t, k.at + k.len)) used.insert(atoi(t.c_str() + t.find('=', k.at) + 1));
+    std::string ordered;
+    size_t opOpen = npos;
+    if (recs.count("GlobalData"))
+        for (auto& e : luaTableEntries(t, toks, recs["GlobalData"]))
+            if (e.first == "OrderedPlaysets") { opOpen = t.find('{', e.second.first); ordered = t.substr(opOpen, e.second.second - opOpen); }
+    add = add && recs.count("Zones") && recs.count("PlaysetProperties") && opOpen != npos;
+
+    auto record = [](const std::string& name, const Value& r, const std::map<std::string, std::string>& over) {
+        std::map<std::string, std::string> kv = over;   // key -> Lua text, sorted by key (zonereg.py record_text)
+        for (auto& e : *r.tab) {
+            std::string k = e.first.t == Value::STR ? e.first.s : luachunk::text(e.first);
+            if (!over.count(k)) kv[k] = luachunk::text(e.second);
+        }
+        std::string s = "\t\t\t" + name + " = \n\t\t\t{\n";
+        for (auto& [k, v] : kv) s += "\t\t\t\t" + (luachunk::ident(k) ? k : "[" + luachunk::quote(k) + "]") + " = " + v + ",\n";
+        return s + "\t\t\t},\n";
+    };
+    std::string zoneText, ppText, opText;
+    for (auto& name : order) {
+        const Value* pp = pp10->get(name);
+        if (!pp || pp->t != Value::TAB || pp->str("Type") != "Playset") continue;
+        Playset10 ps{name, pp->str("StartWorld")};
+        for (auto& e : *z10->tab)
+            if (e.first.t == Value::STR && e.second.t == Value::TAB && e.second.str("PlaysetProperties") == name) ps.zones.push_back(e.first.s);
+        std::sort(ps.zones.begin(), ps.zones.end());
+        if (std::find(ps.zones.begin(), ps.zones.end(), ps.start) == ps.zones.end() || !worldExists(ps.start)) continue;
+        if (!have.count(name)) {
+            if (!add) continue;
+            while (used.count(++ps.id)) {}
+            used.insert(ps.id);
+            ps.added = true;
+            std::string dict = pp->str("playsetDict");
+            std::map<std::string, std::string> over = {{"PlaysetUniqueID", std::to_string(ps.id)}, {"WorldIsPlayset", "true"},
+                                                       {"SaveGameKey", luachunk::quote(name)}, {"_ShowInMenu_", "true"},
+                                                       {"availableInConsumerBuild", "true"}, {"availableInShippingBuild", "true"}};
+            if (!dict.empty()) {
+                over["SaveGamePrefix"] = luachunk::quote(dict);
+                over["LoadingScreens"] = luachunk::quote(dict + "/" + pp->str("LoadingScreen"));
+            }
+            ppText += record(name, *pp, over);
+            for (auto& z : ps.zones) if (!zones.count(z)) zoneText += record(z, *z10->get(z), {});
+            if (ordered.find(luachunk::quote(name)) == npos)
+                opText += "\t\t\t\t{ Name = " + luachunk::quote(name) + ", availableInConsumerBuild = true, availableInShippingBuild = true,\t\t\t\t},\n";
+        }
+        out.push_back(ps);
+    }
+    // inserted on the line after each table's '{' (OrderedPlaysets: after the last 1.0 playset it lists already, so
+    // they keep 1.0's order and a listed one its place), the last table first so the earlier offsets hold
+    auto lineAfter = [&](size_t at) { size_t nl = t.find('\n', at); return nl == npos ? at + 1 : nl + 1; };
+    size_t opAt = opOpen;
+    for (auto& ps : out)
+        if (!ps.added && ordered.find(luachunk::quote(ps.name)) != npos) opAt = (std::max)(opAt, opOpen + ordered.find(luachunk::quote(ps.name)));
+    std::vector<std::pair<size_t, std::string>> ed;
+    if (!zoneText.empty()) ed.push_back({lineAfter(recs["Zones"]), zoneText});
+    if (!ppText.empty()) ed.push_back({lineAfter(recs["PlaysetProperties"]), ppText});
+    if (!opText.empty()) ed.push_back({lineAfter(opAt), opText});
+    std::sort(ed.begin(), ed.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    for (auto& e : ed) t.insert(e.first, e.second);
+    return out;
+}
+
 // 'ChallengeData/ActivityTypeData_IN.lua' (the zone list's 1.0 file name under 3.0's folder) -> the 1.0 path, or "".
 inline std::string challengeTypePath(const std::string& normPath)
 {
