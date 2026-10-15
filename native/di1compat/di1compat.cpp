@@ -534,6 +534,7 @@ static std::map<std::string, std::string> g_served;
 static std::map<std::string, std::string> g_over10;
 static std::set<std::string> g_indexed10;
 static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1.0 (ui: their images may be too)
+static std::set<std::string> g_screens10;   // presentation/<screen>.lua served from 1.0: lower-case screen names (gprt)
 static render::Table g_render;
 static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
 static std::map<uint32_t, gen30::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
@@ -3397,6 +3398,10 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
             }
             if (!over.empty()) note += "(archive overlay) ";
             if (std::string mv = ui::flashMovie(np); !mv.empty()) { std::lock_guard<std::mutex> lock(g_sessLock); g_movies10.insert(mv); }
+            if (np.rfind("presentation/", 0) == 0 && endsWith(p, ".lua")) {
+                std::lock_guard<std::mutex> lock(g_sessLock);
+                g_screens10.insert(np.substr(13, np.size() - 17));
+            }
             if (prof) tTc = qpcMs() - tT;
             double tM = prof ? qpcMs() : 0;
             r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
