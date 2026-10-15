@@ -342,6 +342,46 @@ static void __fastcall hkDeliver(uint8_t* screen, void* edx, void* a1, void* a2)
     g_keysScreen = nullptr, g_keysMovie = nullptr;
 }
 
+// ---- accept10: a 1.0 mission activated in the world counts as accepted for the tutorial's log step ----
+// The "Press E to activate the mission" box is Mission_Tutorial's Text Dialog3 (@IN_City_MissionLog_Accept): shown at
+// the Activate of task 13 (Eval_TutorialElement 63) and removed only at that task's Success (presentation list
+// mission_tutorial:15 -> TextDialog.Remove) or the mission's (list mission_tutorial:1). Element 63 completes on one
+// event: 1.0 posts MissionLog_MissionAccepted from the log's accept (0x00c3dc96, id [0x016bf920]; handler
+// 0x00b54620), 3.0 the same slot from Mission_MissionActivated (FUN_00b67560 -> FUN_0069efe0([0x0221cdcc],
+// player id, 0)); the only handler is the element's (3.0 FUN_00dae4e0: element +0xc0 == 0x3f -> +0xc5 |= 0x20, read
+// by the evaluator FUN_00de3a60 case 0x3f). 1.0 kept the player in the log for that step
+// (UI_TUT_DISABLE_PROG_LOG_*,-.._ACTIVATE_MISSION: no cancel), but 3.0's MissionLog runs on GN_LST_* actions, so the
+// player can leave it (run-in-store5: MissionLog52/61/65 closed, IN_City_TeachTrapped activated at its giver at
+// 11:29:39) and the box stays. Forcing the 1.0 lock onto GN_LST_* would trap the player on 3.0's E = GuideMission,
+// which aborts the selected mission when it is the active one (missionlog.lua GuideMission: IsSelected & canAbort
+// -> AbortMission; that log opened on the active Investigate_Explosions). So in a 1.0 zone a mission's activation
+// (FUN_015bcc10, the MissionNode's one-time activation, +0x3db bit 7) also posts that event for each local player,
+// as Mission_MissionActivated does (player id: FUN_004291b0; 3.0's player count is 4, FUN_01204cf0).
+typedef void(__fastcall* MissionActivateFn)(uint8_t* mission, void* edx);
+typedef void*(__fastcall* PlayerIdFn)(void* pm, void* edx, uint32_t* out, int player);
+typedef void(__cdecl* PostEventFn)(uint32_t id, uint32_t data, uint32_t a3);
+static MissionActivateFn g_missionActivate;
+
+static void __fastcall hkMissionActivate(uint8_t* mission, void* edx)
+{
+    bool first = mission && !(mission[0x3DB] & 0x80);
+    g_missionActivate(mission, edx);
+    if (!first || !(mission[0x3DB] & 0x80) || !zonePlayset10()) return;
+    uint8_t* pm = *(uint8_t**)rt(0x0225F540);
+    uint8_t* players = pm ? *(uint8_t**)(pm + 0x108) : nullptr;
+    uint32_t ev = *(const uint16_t*)rt(0x0221CDCC);
+    char name[96] = "";
+    uint8_t* ctx = *(uint8_t**)(mission + 0x140);
+    safeCopy(name, sizeof(name), ctx ? *(const char**)(ctx + 0x10) : nullptr);
+    for (int p = 0; players && p < 4; ++p) {
+        if (*(int*)(players + 0x10 + p * 0x50) != 1) continue;   // the local players FUN_015bcc10 selects for
+        uint32_t id = 0;
+        ((PlayerIdFn)rt(0x004291B0))(pm, nullptr, &id, p);
+        ((PostEventFn)rt(0x0069EFE0))(ev, id, 0);
+        logf("accept10: %s activated in a 1.0 zone -> tutorial 'mission accepted' event %u for player %d", name, ev, p);
+    }
+}
+
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
 // 3.0 enables a tool only where its ToolSetTable LevelPrefix allows (gate FUN_0150f7d0, thiscall (tool, list) ret 4,
 // called by FUN_0151b960 with the Tools record + 4; result cached in tool +0x74): an empty list, a prefix the
@@ -397,6 +437,9 @@ static uint32_t __fastcall hkToolGate(uint8_t* tool, void* edx, const uint8_t* p
 
 static void install()
 {
+    if (g_cfg.accept10)
+        hook("mission activation (accept10)", 0x015BCC10, "83EC14568BF18A86DB03000084C0", (void*)&hkMissionActivate,
+             (void**)&g_missionActivate);
     if (g_cfg.tools10) hook("tool level gate (1.0 lists)", 0x0150F7D0, "538BD9837B74FF", (void*)&hkToolGate, (void**)&g_toolGate);
     if (g_cfg.selectMenu10) {
         hook("ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&hkRibbonName, (void**)&g_ribbonName);
