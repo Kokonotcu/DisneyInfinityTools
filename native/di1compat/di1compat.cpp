@@ -2906,6 +2906,82 @@ static void __cdecl hkFpNodeUpdate(uint8_t* pinCtx)
     }
     g_fpNodeUpdate(pinCtx);
 }
+// MU run 2026-10-15 10:54 (run-mu-1054.log): the tutorial's five records bind, tag and turn active exactly as
+// SuperCollect's, whose pennants got 20 Beacon_Mission_Arrow choreographies; the FearTech decorations got none. Two
+// steps remain between the tag and a beacon:
+//   node tag apply FUN_0173a3f0 (thiscall node): reads the ActorList pin into a list; each handle -> actor through
+//     FUN_0074b200 (handle table + actor class check), which is tagged (FUN_014ac0a0)
+//   record scan, FocusPoint_Actor slot 12 FUN_015d5f80 (thiscall record): the tag's type-1 entries (FUN_014ac5a0)
+//     -> FUN_0074b200 -> actor; an actor with +0x10e == 2, or in actor state 0xe53 (0x1079 when HideOnSpawn), is
+//     skipped, else a beacon item joins the record's list at +0x118 (head; next at [0])
+// Each is wrapped once here, and FUN_0074b200 counts its calls (and the passes' +0x10e) only inside them.
+struct FpScope { int mode, calls, actors; uint8_t b10e[4]; };
+static thread_local FpScope g_fpScope;
+typedef uint8_t*(__cdecl* ActorOfFn)(uint32_t handle);
+static ActorOfFn g_actorOf;
+static uint8_t* __cdecl hkActorOf(uint32_t handle)
+{
+    uint8_t* a = g_actorOf(handle);
+    FpScope& s = g_fpScope;
+    if (s.mode) {
+        ++s.calls;
+        if (a && s.actors < 4) s.b10e[s.actors] = a[0x10e];
+        if (a) ++s.actors;
+    }
+    return a;
+}
+static const char* fpScopeText(char* buf, size_t cap)
+{
+    const FpScope& s = g_fpScope;
+    sprintf_s(buf, cap, "%d handles -> %d actors (+0x10e %d %d %d %d)", s.calls, s.actors, s.actors > 0 ? s.b10e[0] : -1,
+              s.actors > 1 ? s.b10e[1] : -1, s.actors > 2 ? s.b10e[2] : -1, s.actors > 3 ? s.b10e[3] : -1);
+    return buf;
+}
+typedef void(__fastcall* FpThisFn)(uint8_t* self, void* edx);
+static FpThisFn g_fpApply, g_fpScan;
+static void __fastcall hkFpApply(uint8_t* node, void*)
+{
+    char id[96] = "";
+    bool mine = node && *(uint32_t*)node == (uint32_t)rt(0x01DE726C) && playsetMission10(cstr(node + 0x40, id, sizeof(id)));
+    if (!mine) return g_fpApply(node, nullptr);
+    g_fpScope = FpScope{1};
+    g_fpApply(node, nullptr);
+    char t[96], sig[160];
+    sprintf_s(sig, "tag apply: ActorList %s, ActorTag %p", fpScopeText(t, sizeof(t)), *(void**)(node + 0x5c));
+    g_fpScope.mode = 0;
+    static std::mutex m;
+    static std::unordered_map<uint8_t*, std::string> last;
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if (last.size() > 400 || last[node] == sig) return;
+        last[node] = sig;
+    }
+    static volatile LONG lines;
+    if (lockTraceRoom(lines) && lines <= 200) logf("focus point node %p '%s' %s", node, id, sig);
+}
+static void __fastcall hkFpScan(uint8_t* fp, void*)
+{
+    uint8_t* ctx = fp && *(uint32_t*)fp == (uint32_t)rt(0x01DCA744) ? *(uint8_t**)(fp + 0xd4) : nullptr;
+    char name[64];
+    safeCopy(name, sizeof(name), ctx && sys::readable(ctx + 0x10, 4) ? *(const char**)(ctx + 0x10) : nullptr);
+    if (!ctx || !playsetMission10(name)) return g_fpScan(fp, nullptr);
+    g_fpScope = FpScope{2};
+    g_fpScan(fp, nullptr);
+    int items = 0;
+    for (uint8_t** e = *(uint8_t***)(fp + 0x118); e && items < 1000; e = (uint8_t**)e[0]) ++items;
+    char t[96], sig[200];
+    sprintf_s(sig, "scan: tagged %s, active %d, beacon items %d", fpScopeText(t, sizeof(t)), fp[0x140] & 1, items);
+    g_fpScope.mode = 0;
+    static std::mutex m;
+    static std::unordered_map<uint8_t*, std::string> last;
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if (last.size() > 400 || last[fp] == sig) return;
+        last[fp] = sig;
+    }
+    static volatile LONG lines;
+    if (lockTraceRoom(lines) && lines <= 300) logf("focus point %.60s:%d %s", name, *(int16_t*)(fp + 0x142), sig);
+}
 
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
@@ -3989,6 +4065,9 @@ extern "C" void __stdcall Pentane_Main()
         hook("FocusPoint_Actor update (missiontrace)", 0x015DF390, "6AFF64A10000000068????????50", (void*)&hkFpUpdate, (void**)&g_fpUpdate);
         hook("FocusPointActor Update pin (missiontrace)", 0x01730E80, "8B4424048B40048B486485C9", (void*)&hkFpNodeUpdate,
              (void**)&g_fpNodeUpdate);
+        hook("FocusPointActor tag apply (missiontrace)", 0x0173A3F0, "6AFF68????????64A100000000", (void*)&hkFpApply, (void**)&g_fpApply);
+        hook("FocusPoint_Actor tag scan (missiontrace)", 0x015D5F80, "6AFF68????????64A100000000", (void*)&hkFpScan, (void**)&g_fpScan);
+        hook("handle to actor (missiontrace)", 0x0074B200, "83EC088B44240C8D0C2451", (void*)&hkActorOf, (void**)&g_actorOf);
     }
     if (g_cfg.breakTrace || (g_cfg.audio10 && g_cfg.cineSync10))   // cinesync10: 1.0's audio-sync sound event (audio.hpp)
         hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart, (void**)&g_choStart);
