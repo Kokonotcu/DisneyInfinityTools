@@ -137,7 +137,7 @@ Diagnostics, all off by default and log-only:
 | `breaktrace` | Choreography clocks, clip setup, layout attachments and destructible hits |
 | `missiontrace` | Mission context state changes |
 | `spawntrace10` | Building lots registered, SpawnBuilding nodes firing, lot spawns, the player start lookups |
-| `capsuletrace10` | Capsule SpawnExpendable nodes firing, their spawn requests, and which branch each capsule spawn took |
+| `capsuletrace10` | SpawnExpendable nodes firing, their spawn requests, which branch each 1.0 expendable's spawn took, the async completions, and the actors `shutdown10` keeps drawn |
 | `renderdoc10` | Captures one frame with RenderDoc that many seconds into the world |
 
 The full list, including the per-subsystem switches, is the `Cfg` structure at the top of

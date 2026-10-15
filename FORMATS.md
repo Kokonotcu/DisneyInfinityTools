@@ -867,6 +867,7 @@ Code: `arenapatch.py`, `arenas.py`, `mdmp.py`, `disx.py`, `dispfind.py`
 | `.btm` version word | `C001` | `C007` (`0xc007d00d`) | `btd-info.ps1`, `btdconv.btm` |
 | Expendables packages | named by type | per playset | `expack.py` |
 | Expendable pop-in | no `PopinDistance`/`PopoutDistance` | required (0 = never pops in) | `expack.py` |
+| Actor shutdown (DNA `ActorShutdownEnabled`/`Distance`, same tests and loops in both) | the render component's shutdown call is `ret 4` (0x00D59680): a shut-down actor freezes but stays drawn | FUN_01860b40(1) sets bit 0x80 of the scene node's +0x24d; its draw query FUN_018383e0(1) then answers 0: hidden | `caprt.hpp` (`shutdown10`) |
 | Small DXT textures | 1x1/2x2 single-mip files occur (the only 2 `CreateTexture2D` throws in Metroville) | D3D11 rejects < 4x4 | `conv.copy_texture` |
 
 ---

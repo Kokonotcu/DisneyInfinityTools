@@ -228,7 +228,8 @@ static struct {
     bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
     bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (bldrt.hpp)
     bool spawnTrace10 = false;       // probe: lots registered, SpawnBuilding firing, lot spawns, player start lookups (log only)
-    bool capsuleTrace10 = false;     // probe: capsule spawn requests and the branch each capsule spawn took (caprt.hpp, log only)
+    bool capsuleTrace10 = false;     // probe: 1.0 expendable spawn requests, the branch each spawn took, async completions (caprt.hpp, log only)
+    bool shutdown10 = true;          // a 1.0 expendable's actor stays drawn while shut down, as in 1.0 (caprt.hpp; needs popin10)
 } g_cfg;
 
 static void loadConfig(const char* dir)
@@ -342,6 +343,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "building10")) g_cfg.building10 = atoi(val) != 0;
         else if (!strcmp(key, "spawntrace10")) g_cfg.spawnTrace10 = atoi(val) != 0;
         else if (!strcmp(key, "capsuletrace10")) g_cfg.capsuleTrace10 = atoi(val) != 0;
+        else if (!strcmp(key, "shutdown10")) g_cfg.shutdown10 = atoi(val) != 0;
     }
     fclose(f);
     logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
@@ -350,8 +352,9 @@ static void loadConfig(const char* dir)
          "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
          g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.clip10Ids, g_cfg.choAlias10, g_cfg.banm10,
          g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
-    logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d spawntrace10=%d", g_cfg.playsetMenu10, g_cfg.zones10,
-         g_cfg.realmFile10, g_cfg.building10, g_cfg.spawnTrace10);
+    logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d spawntrace10=%d shutdown10=%d capsuletrace10=%d",
+         g_cfg.playsetMenu10, g_cfg.zones10, g_cfg.realmFile10, g_cfg.building10, g_cfg.spawnTrace10, g_cfg.shutdown10,
+         g_cfg.capsuleTrace10);
     logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
          g_cfg.lockTrace10);
 }
