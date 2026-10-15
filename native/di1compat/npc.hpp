@@ -500,14 +500,32 @@ inline std::string luaQuote(const std::string& s)
     return o + "\"";
 }
 
+// rewards10: 1.0 loads CommonExpendables / ToyBuildingsExpendables / Tools / Enemy_Expendables for every playset from
+// its CoreDataMap's Zone._core_ record, which a 3.0 session never reads (3.0's own Zone._core_ loads its tools.lua, each
+// 3.0 playset its package from its include record, e.g. 'Expendables|expendables_data/dory.lua'). CommonExpendables
+// holds SPARK, the spark every 1.0 economy group spawns. The record's 'Expendables|' entries; the caller keeps those
+// 3.0 does not ship and puts them in the Playset record (playsetText's files), where 3.0 lists a playset's packages.
+inline std::vector<std::string> coreExpendables10(const DataMap& core10)
+{
+    auto r = core10.find({"zone", "_core_"});
+    std::vector<std::string> out;
+    if (r != core10.end())
+        for (auto& f : r->second.files)
+            if (!f.compare(0, 12, "Expendables|")) out.push_back(f);
+    return out;
+}
+
+// files: more entries for the record as they are (rewards10: the 1.0 core expendables packages, coreExpendables10)
 inline std::string playsetText(const std::string& playset, const std::vector<std::pair<std::string, std::string>>& tables,
-                               const DataMap& toybox, const DataMap& other, bool hudMarker = true)
+                               const DataMap& toybox, const DataMap& other, bool hudMarker = true,
+                               const std::vector<std::string>& files = {})
 {
     static const char* const GROUPS[] = {"Playset", "GameMode", "Zone", "Actor", "Toy", "Activity", "ZoneBackgroundLoad",
                                          "Realm", "Munition", "SurfaceImpact", "Costume", "PowerDisc", "Include"};
     DataMap out;
     DmRec& ps = out[{"playset", lower(playset)}];
     for (auto& [t, p] : tables) ps.files.push_back("GameDB|" + p + "|1|" + t);
+    ps.files.insert(ps.files.end(), files.begin(), files.end());
     std::pair<const DataMap*, const char*> std30[] = {{&toybox, "avatar.auto"}, {&toybox, "avatar.btx.auto"},
                                                        {&other, "includeforallnontoyboxplaysets"}, {&toybox, "hudmarker_inc"}};
     for (auto& [m, name] : std30) {
