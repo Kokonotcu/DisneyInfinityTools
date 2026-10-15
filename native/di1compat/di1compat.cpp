@@ -534,6 +534,7 @@ static std::set<std::string> g_indexed10;
 static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1.0 (ui: their images may be too)
 static render::Table g_render;
 static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
+static std::map<uint32_t, gen30::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
 static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
 
@@ -610,6 +611,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
     io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
     io.skinLayout = g_cfg.skinLayout10;
+    io.tails10 = &g_tails10;
     sceneSettingsIO(io);
     render::Result r;
     if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
@@ -3596,7 +3598,7 @@ static uint32_t __cdecl hkCloneRec(uint32_t rec, uint32_t vformat)
     uint32_t r = g_cloneRec(rec, vformat);
     uint32_t* c = (uint32_t*)rt(0x02173A68) + 14 * (r & 0xffff);
     const char* nm = c[6] ? *(const char**)(uintptr_t)c[6] : nullptr;
-    if (!c[7] && nm && nm[0] == 'x') {
+    if (!c[7] && nm) {
         static int told;
         if (told++ < 40) logf("clone without input layout: %s pass %u vformat %u (record %u from %u)", nm, c[0] & 0x3f, vformat & 0xff, r & 0xffff, rec & 0xffff);
     }
@@ -3651,6 +3653,10 @@ static bool linkShader(uint8_t* shd)
         rec[5] = *(uint32_t*)(p + 0x1c);
         rec[6] = (uint32_t)(uintptr_t)shd;
         rec[7] = inputLayout10(p[0x18], vsi);
+        if (!rec[7]) {   // the VS reads an input its pass's vertex format lacks (CreateInputLayout refused)
+            static int told;
+            if (told++ < 40) logf("pass-state record without input layout: %s pass %d vformat %u", *(const char**)shd ? *(const char**)shd : "(built-in)", i, p[0x18]);
+        }
         if (shaderIndex == 0x3ff)
             logf("ours: %s pass %d word %08x stage %u run %u b1c %02x layout %08x", *(const char**)shd, i, word, p[0x14], p[0x15],
                  p[0x1c], rec[7]);
@@ -3741,27 +3747,14 @@ static uint8_t* __cdecl hkShaderByName(const char* name)
     return s;
 }
 
-// vformat.vtxf: 3.0's formats plus every 1.0 format 3.0 lacks, so 1.0 vertex buffers draw as they are.
+// vformat.vtxf: 3.0's formats plus every 1.0 format 3.0 lacks, so 1.0 vertex buffers draw as they are (their
+// trailing vertex colour in a stream of its own: gen30::mergeVtxf). Read once at boot, before any asset transcode.
 static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 {
-    size_t end30 = 0;
-    auto e30 = gen30::ventries(t30, &end30);
-    if (!end30) return t30;
-    std::set<std::string> have;
-    for (auto& e : e30) { std::string g = e.guid; for (char& c : g) c = (char)tolower((unsigned char)c); have.insert(g); }
-    std::string add;
     int n = 0;
-    for (auto& e : gen30::ventries(t10)) {
-        std::string g = e.guid;
-        for (char& c : g) c = (char)tolower((unsigned char)c);
-        if (have.count(g)) continue;
-        std::string block = t10.substr(e.start, e.end - e.start);
-        if (block.back() != ',') block += ",";
-        add += "\t\t" + block + "\n";
-        ++n;
-    }
-    logf("shaders10: vformat.vtxf + %d 1.0 formats", n);
-    return t30.substr(0, end30) + add + t30.substr(end30);
+    std::string m = gen30::mergeVtxf(t30, t10, n, g_tails10);
+    logf("shaders10: vformat.vtxf + %d 1.0 formats, %u with their vertex colour in its own stream", n, (unsigned)g_tails10.size());
+    return m;
 }
 
 #include "vfxrt.hpp"

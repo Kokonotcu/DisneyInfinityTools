@@ -444,6 +444,9 @@ struct IO {
     // kept; without it the transcoded bundle had no scene settings at all (no bloom, fog, grading: cfg scenesettings10)
     const Ssf* ssf10 = nullptr;
     const Ssf* ssf30 = nullptr;
+    // the served vformat.vtxf's re-laid 1.0 formats (gen30::mergeVtxf): a translated primitive in one has its
+    // trailing vertex colour split into a stream of its own, as that layout says
+    const std::map<uint32_t, gen30::ColourTail>* tails10 = nullptr;
 };
 
 struct Result {
@@ -825,13 +828,24 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
             }
             Plan same;                       // a translated material's primitive: every stream copied as it is
             if (dst == src) {
+                const gen30::ColourTail* ct = nullptr;   // its format re-laid: the colour tail to its own stream
+                if (io.tails10)
+                    if (auto t = io.tails10->find(src); t != io.tails10->end()) ct = &t->second;
+                if (ct && (vda[0] != ct->stream + 1 || vda[4 + 3 * ct->stream] != ct->offset + ct->size)) {
+                    r.problems.push_back("vertex colour tail: strides differ from the format");
+                    return false;
+                }
+                auto copy = [&](int dsi, int size, int ssi, int soff) {
+                    Op o{};
+                    o.dsi = dsi; o.doff = 0; o.size = size; o.kind = 'C'; o.ssi = ssi; o.soff = soff;
+                    same.ops.push_back(o);
+                };
                 for (int s = 0; s < vda[0]; ++s) {
                     same.ss.push_back(vda[4 + 3 * s]);
-                    Op o{};
-                    o.dsi = s; o.doff = 0; o.size = vda[4 + 3 * s]; o.kind = 'C'; o.ssi = s; o.soff = 0;
-                    same.ops.push_back(o);
+                    same.ds.push_back(ct && s == ct->stream ? ct->offset : vda[4 + 3 * s]);
+                    copy(s, same.ds.back(), s, 0);
                 }
-                same.ds = same.ss;
+                if (ct) { same.ds.push_back(ct->size); copy(vda[0], ct->size, ct->stream, ct->offset); }
             }
             const Plan& plan = dst == src ? same : skinPlan ? *skinPlan : T.plans.at({src, dst});
             std::vector<uint32_t> order, sub;
