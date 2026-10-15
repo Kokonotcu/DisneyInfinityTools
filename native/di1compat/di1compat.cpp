@@ -1222,10 +1222,28 @@ static uint8_t __fastcall hkFigureOk(void* self, void*, uint32_t player, int sku
 // after a call instruction: E8 rel32 whose target is plausible, or an FF /2 indirect call), static addresses. Logged
 // once, then the exception continues to the game's / CrabeLoader's handlers.
 static volatile LONG g_avLogged;
+// Whether [p, p+n) can be read without a fault. __try is not enough: a first-chance AV reaches the vectored handlers
+// before any __except, and Pentane's ends the game (12:01 boot crash: the profiler's stack walk read an unreadable exe
+// page during boot). ponytail: query-then-read can race a protection change; never seen.
+static bool readable(const void* p, size_t n)
+{
+    const uint8_t* a = (const uint8_t*)p;
+    MEMORY_BASIC_INFORMATION mbi;
+    while (n) {
+        if (!VirtualQuery(a, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))
+            || !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+            return false;
+        size_t room = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize - a;
+        if (room >= n) return true;
+        a += room; n -= room;
+    }
+    return true;
+}
 static bool afterCall(uintptr_t ret)
 {
     if (ret < g_base + 0x1000 + 6 || ret >= g_base + 0x2100000) return false;
     const uint8_t* p = (const uint8_t*)ret;
+    if (!readable(p - 6, 6)) return false;
     if (p[-5] == 0xE8) { uintptr_t t = ret + *(const int32_t*)(p - 4); return t >= g_base && t < g_base + 0x2100000; }
     if (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) return true;   // call [mem32] / [reg+disp32]
     if (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) return true;   // call [reg+disp8]
@@ -1235,7 +1253,10 @@ static bool afterCall(uintptr_t ret)
 // Appends the exe return addresses found on a stack (static VAs, call-site validated) to line.
 static void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max = 24)
 {
-    for (int i = 0, found = 0; i < 2048 && found < max; ++i) {
+    MEMORY_BASIC_INFORMATION mbi;   // stay inside the stack's committed region (see readable)
+    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return;
+    int words = (int)(std::min)((size_t)2048, (size_t)((const uint8_t*)mbi.BaseAddress + mbi.RegionSize - (const uint8_t*)sp) / 4);
+    for (int i = 0, found = 0; i < words && found < max; ++i) {
         uint32_t v;
         __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
         bool ok = false;
