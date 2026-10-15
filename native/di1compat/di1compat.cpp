@@ -176,6 +176,7 @@ static struct {
     bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
     bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
     bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 standard includes) as a DataMap
+    bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
@@ -278,6 +279,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "gamedb30")) g_cfg.gamedb30 = atoi(val) != 0;
         else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
         else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
+        else if (!strcmp(key, "hudmarker10")) g_cfg.hudMarker10 = atoi(val) != 0;
         else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
         else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
         else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
