@@ -259,11 +259,12 @@ static void prepare(void* self, const char* name)
     std::string bo;
     npc::DataMap other;
     if (g_cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && npc::dataMap(bo, other, &why)) {
-        std::string t = npc::playsetText(n, g_db->playset, m30, other);
+        std::string t = npc::playsetText(n, g_db->playset, m30, other, g_cfg.hudMarker10);
         g_psPath = "GameDB/Core/" + std::string(name) + "DataMap30.lua";
         std::lock_guard<std::mutex> l2(g_sessLock);
         g_served[npc::lower(g_psPath)] = t;
-        logf("playset30 %s: Playset record (%u B of Lua) at %s", name, (unsigned)t.size(), g_psPath.c_str());
+        logf("playset30 %s: Playset record (%u B of Lua) at %s, hudmarker10=%d (compass screen %s)", name, (unsigned)t.size(),
+             g_psPath.c_str(), g_cfg.hudMarker10, t.find("\"hudmarker_inc|Include\"") != std::string::npos ? "included" : "absent");
     } else if (g_cfg.playset30) logf("playset30 %s: no Playset record (%s)", name, why.empty() ? "Dory DataMap unreadable" : why.c_str());
 }
 

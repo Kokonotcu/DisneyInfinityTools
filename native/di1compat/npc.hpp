@@ -481,6 +481,14 @@ inline GameDb gamedb30(const DataMap& m10, const DataMap& m30)
 // characters. The record also lists the gamedb30 playset tables. 3.0 reads GameDB Lua text as well as bytecode: it
 // ships its own stats.lua, bitmasks.lua, zonelist.lua as text, and the DataMap loader is the same
 // GameDB::DBFileLoader_Callback (0008.c:28225).
+// hudmarker10: the mission compass. 1.0 drew it as the Cho UI_Player_compass, loaded for every playset by its
+// CoreDataMap (_loadforallplaysets_), which a 3.0 session never reads. 3.0's compass is the hud_Marker screen: the
+// avatar's MissionNavData opens it on CheckCompass (FUN_00be40d0 -> FUN_00be3700, event HudMarker_Event ->
+// hud_Marker in 3.0's eventtoscreenmap.lua) and its update FUN_00c13c50 draws the focus-point arrow + distance only
+// once that screen exists. Screen|hud_Marker is in Include.hudmarker_inc (30 files, identical in the 6 3.0 maps that
+// define it), listed by every mission playset's own include record (Empire, InsideOut, PlaysetX, PlaysetZ,
+// TheCloneWars <playset>playsetincludes; ToyBox inc_tbgamemode_all), which playset30 never copies: no compass in IN.
+// Taken from Toy Box like avatar.auto (Dory, the 'other' map, has none: Dory / Moana / BattleArena don't list it).
 inline std::string luaQuote(const std::string& s)
 {
     std::string o = "\"";
@@ -493,7 +501,7 @@ inline std::string luaQuote(const std::string& s)
 }
 
 inline std::string playsetText(const std::string& playset, const std::vector<std::pair<std::string, std::string>>& tables,
-                               const DataMap& toybox, const DataMap& other)
+                               const DataMap& toybox, const DataMap& other, bool hudMarker = true)
 {
     static const char* const GROUPS[] = {"Playset", "GameMode", "Zone", "Actor", "Toy", "Activity", "ZoneBackgroundLoad",
                                          "Realm", "Munition", "SurfaceImpact", "Costume", "PowerDisc", "Include"};
@@ -501,8 +509,9 @@ inline std::string playsetText(const std::string& playset, const std::vector<std
     DmRec& ps = out[{"playset", lower(playset)}];
     for (auto& [t, p] : tables) ps.files.push_back("GameDB|" + p + "|1|" + t);
     std::pair<const DataMap*, const char*> std30[] = {{&toybox, "avatar.auto"}, {&toybox, "avatar.btx.auto"},
-                                                       {&other, "includeforallnontoyboxplaysets"}};
+                                                       {&other, "includeforallnontoyboxplaysets"}, {&toybox, "hudmarker_inc"}};
     for (auto& [m, name] : std30) {
+        if (!hudMarker && !strcmp(name, "hudmarker_inc")) continue;
         std::set<std::pair<std::string, std::string>> seen;
         reach(*m, {"include", name}, seen);
         if (!seen.empty()) ps.includes.push_back(std::string(name) + "|Include");
