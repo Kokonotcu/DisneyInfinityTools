@@ -902,9 +902,11 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         int k = g_cfg.events10 && m ? mission::luaEvents30(t) : 0, pr = g_cfg.progress10 && m ? mission::progress30(t) : 0;
         if (k) note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
         if (pr) note += "+progress(objective line <MissionName>_Desc) ";
-        if (!k && !pr && actLua.empty()) return nullptr;
+        int tl = g_cfg.progress10 && m ? mission::taskLines30(t) : 0;
+        if (tl) note += "+tasklines(" + std::to_string(tl) + " 1.0 eval lines as ProgressString) ";
+        if (!k && !pr && !tl && actLua.empty()) return nullptr;
         out.swap(t);
-        return k || pr ? "mission" : "activitytasks";
+        return k || pr || tl ? "mission" : "activitytasks";
     }
     if (!actLua.empty()) { out.swap(actLua); return "activitytasks"; }
     if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
