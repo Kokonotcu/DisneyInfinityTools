@@ -369,6 +369,8 @@ struct Play {
     void* fsb;         // a dialog line: the 1.0 bank whose subsound it plays
     DWORD t0 = GetTickCount();   // audiotrace10: started at
     bool stopReq = false;        // audiotrace10: 3.0 asked for its stop (StopPlayingID / action)
+    int sub = -1;                // audiotrace10: a dialog line's subsound
+    const char* endBy = nullptr; // audiotrace10: what else ended it (the next line of its bank, its object's unregister)
 };
 struct V3 { float v[3]; };
 
@@ -701,6 +703,7 @@ struct Host {
                 f.Event_SetCallback(pl.second.ev, nullptr, nullptr);
                 f.Event_Stop(pl.second.ev, 1);
                 pl.second.ev = nullptr;
+                pl.second.endBy = "retired by the next line of its bank";
                 std::lock_guard<std::mutex> d(doneMx);
                 done.push_back(pl.first);
             }
@@ -714,6 +717,7 @@ struct Host {
         place(ev, obj);
         if (f.Event_Start(ev)) { f.Event_SetCallback(ev, nullptr, nullptr); return 0; }
         plays[id] = Play{ev, it->second.proj, obj, eventId, flags, cb, cookie, it->second.ui, tickNo, fsb};
+        plays[id].sub = sub;
         unsigned ms = 0;
         if (!f.Sound_GetLength(s, &ms, 1)) {   // FMOD_TIMEUNIT_MS
             std::lock_guard<std::mutex> d(doneMx);
@@ -760,16 +764,25 @@ struct Host {
     {
         std::lock_guard<std::recursive_mutex> l(mx);
         for (auto& pl : plays)
-            if (pl.second.obj == obj && pl.second.ev) f.Event_Stop(pl.second.ev, 1);
+            if (pl.second.obj == obj && pl.second.ev) { f.Event_Stop(pl.second.ev, 1); pl.second.endBy = "its game object unregistered"; }
         std::lock_guard<std::mutex> p(posMx);
         pos.erase(obj);
     }
 
-    void pause(bool on, bool keepUi)
+    bool pausedNow = false;   // audiotrace10: the last pause / resume 3.0 posted
+    // -> how many events it paused / resumed, and how many of them dialog lines
+    std::pair<int, int> pause(bool on, bool keepUi)
     {
         std::lock_guard<std::recursive_mutex> l(mx);
+        pausedNow = on;
+        std::pair<int, int> n{0, 0};
         for (auto& pl : plays)
-            if (pl.second.ev && !(keepUi && pl.second.ui)) f.Event_SetPaused(pl.second.ev, on ? 1 : 0);
+            if (pl.second.ev && !(keepUi && pl.second.ui)) {
+                f.Event_SetPaused(pl.second.ev, on ? 1 : 0);
+                ++n.first;
+                n.second += pl.second.fsb != nullptr;
+            }
+        return n;
     }
 
     // one tick: listener and positions of live events, FMOD's update (fires the event callbacks), then the finished ids
@@ -1672,7 +1685,10 @@ inline uint32_t __cdecl hkPost(uint32_t ev, uint32_t obj, uint32_t flags, void* 
     uint32_t r = oPost(ev, obj, flags, cb, cookie, ext, pid);
     if (!ready()) return r;
     if (ev == idPauseAll || ev == idPauseExUi || ev == idResumeAll) {   // 3.0 FUN_0073f900
-        g.pause(ev != idResumeAll, ev == idPauseExUi);
+        auto n = g.pause(ev != idResumeAll, ev == idPauseExUi);
+        if (cfg.trace)
+            AUDLOG("audio10: %s: %d 1.0 events %s, %d of them dialog lines", ev == idPauseAll ? "Pause_All" : ev == idPauseExUi ?
+                   "Pause_All_Except_UI" : "Resume_All", n.first, ev == idResumeAll ? "resumed" : "paused", n.second);
         if (ev != idPauseExUi) { std::lock_guard<std::recursive_mutex> l(g.mx); g.f.MusicSystem_SetPaused(g.ms, ev == idPauseAll); }
     }
     if (r || ext) return r;   // a dialog line with external sources is 3.0's own (VO: see vo10)
@@ -1918,6 +1934,21 @@ inline uint32_t __cdecl hkPostExt(uint32_t ev, uint32_t obj, uint32_t flags, voi
         uint32_t id = g.playLine(ev, obj, flags, cb, cookie, b->snd, sub);
         Name10 x = b->idx();
         trace(ev ^ (uint32_t)sub, x.subName(sub), id ? "1.0 FMOD dialog" : "nothing (its 1.0 event is not loaded)");
+        if (cfg.trace) {   // every post (the first 300): the line's event, object and flags, and whether 1.0 sounds are paused
+            static int posts = 0;
+            if (posts++ < 300) {
+                std::string en = "?";
+                bool paused;
+                {
+                    std::lock_guard<std::recursive_mutex> gl(g.mx);
+                    auto e = g.byId.find(ev);
+                    if (e != g.byId.end()) en = e->second.name;
+                    paused = g.pausedNow;
+                }
+                AUDLOG("vo10: line %s posted: event %s, obj %u, flags %x, bank %s -> id %u%s", x.subName(sub), en.c_str(), obj, flags,
+                       b->file.c_str(), id, paused ? " (1.0 sounds paused)" : "");
+            }
+        }
         if (id) vo.onLinePosted(b, sub, obj, id);   // the first line of an armed 1.0 sequence starts the rest
         return id;
     }
@@ -2049,7 +2080,20 @@ inline int tickAndDeliver()
     if (cfg.trace)   // how long each 1.0 sound played and what ended it, first 4 ends of each name (blasts inaudible?)
         for (auto& d : fin) {
             static std::unordered_map<uint32_t, int> seen;
-            if (d.second.fsb || seen[d.second.eventId]++ >= 4) continue;
+            if (d.second.fsb) {   // a dialog line: every one (the first 300), by its subsound name
+                static int lines = 0;
+                if (lines++ >= 300) continue;
+                std::string n = "?";
+                {
+                    std::lock_guard<std::recursive_mutex> l(vo.mx);
+                    for (auto& b : vo.banks)
+                        if (b.second && b.second->snd == d.second.fsb && d.second.sub >= 0) n = b.second->idx().subName(d.second.sub);
+                }
+                AUDLOG("vo10: line %s (id %u) ended after %lu ms (%s)", n.c_str(), d.first, GetTickCount() - d.second.t0,
+                       d.second.stopReq ? "stopped by 3.0" : d.second.endBy ? d.second.endBy : d.second.ev ? "finished or stolen" : "retired");
+                continue;
+            }
+            if (seen[d.second.eventId]++ >= 4) continue;
             std::string n;
             {
                 std::lock_guard<std::recursive_mutex> l(g.mx);

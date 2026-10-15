@@ -2109,6 +2109,103 @@ static int mixerTest(char** argv)
 //        the media record the post hook reads (vocheck.py compares with the .name read by 1.0's rule, FUN_01132360)
 //  PLAY  ED019 through the post hook's path: Edna.fev's dialog_edna with the subsound as programmer sound; AK_Duration
 //        and AK_EndOfEvent as 3.0's callback LAB_01830120 takes them
+// --voplay <1.0 install> <fev[,fev...]> <event> <bank .fsb> <line, e.g. SQ159> [x y z]: one dialog line through the
+// plugin's playLine with no sound device (FMOD NOSOUND), the speaker at (x y z) (default: the listener, at the origin
+// facing +z); prints the event's mode, volume, 3D distances and category chain, then each 250 ms its FMOD_EVENT_INFO
+// (position, length, channels playing, instances, audibility) until it ends or 4 s pass: whether a line is mixed.
+static int voPlay(int argc, char** argv)
+{
+    audio::logfn = stdoutLog;
+    std::string inst = argv[2];
+    if (!audio::g.init(inst, true)) return 1;
+    audio::g.loadTree("Initialize.fev", "Permanent");
+    for (std::string l = argv[3]; !l.empty();) {
+        size_t c = l.find(',');
+        std::string n = audio::g.name10(l.substr(0, c));
+        if (n.empty()) printf("NOFILE %s\n", l.substr(0, c).c_str());
+        else audio::g.loadTree(n, nullptr);
+        l = c == std::string::npos ? "" : l.substr(c + 1);
+    }
+    audio::vo.root10 = inst + "\\assets\\sound\\dialog";
+    audio::vo.pickLanguage();
+    if (!audio::vo.load(argv[5])) { printf("NOBANK %s\n", argv[5]); return 1; }
+    audio::DlgBank* b = audio::vo.banks[audio::lower(argv[5])].get();
+    int sub = -1;
+    for (uint32_t i = 0; i < b->idx().subs() && sub < 0; ++i)
+        if (!_strnicmp(b->idx().subName(i), argv[6], strlen(argv[6]))) sub = (int)i;
+    if (sub < 0) { printf("NOLINE %s\n", argv[6]); return 1; }
+    float lp[3] = {0, 0, 0}, fwd[3] = {0, 0, 1}, up[3] = {0, 1, 0};
+    audio::g.f.EventSystem_Set3DListenerAttributes(audio::g.es, 0, lp, nullptr, fwd, up);
+    uint32_t obj = 7;
+    if (argc > 9) {
+        audio::V3 p;
+        for (int k = 0; k < 3; ++k) p.v[k] = (float)atof(argv[7 + k]);
+        std::lock_guard<std::mutex> l(audio::g.posMx);
+        audio::g.pos[obj] = p;
+    }
+    uint32_t evId = audio::fnv1(argv[4]);
+    auto it = audio::g.byId.find(evId);
+    if (it == audio::g.byId.end()) { printf("NOEVENT %s\n", argv[4]); return 1; }
+    uint32_t id = audio::g.playLine(evId, obj, 0, nullptr, nullptr, b->snd, sub);
+    void* ev = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+        if (audio::g.plays.count(id)) ev = audio::g.plays[id].ev;
+    }
+    printf("PLAYLINE %s %s (sub %d) event %s flags %u -> id %u ev %p\n", argv[5], b->idx().subName(sub), sub, argv[4], it->second.flags, id, ev);
+    if (!ev) return 1;
+    auto& f = audio::g.f;
+    unsigned mode = 0;
+    float vol = -1, mn = -1, mx = -1;
+    int pos3d = -1;
+    f.Event_GetPropertyByIndex(ev, 14, &mode, 0);   // MODE
+    f.Event_GetPropertyByIndex(ev, 1, &vol, 0);     // VOLUME
+    f.Event_GetPropertyByIndex(ev, 17, &mn, 0);     // 3D_MINDISTANCE
+    f.Event_GetPropertyByIndex(ev, 18, &mx, 0);     // 3D_MAXDISTANCE
+    f.Event_GetPropertyByIndex(ev, 19, &pos3d, 0);  // 3D_POSITION
+    int pri = -1, maxpb = -1, beh = -1;
+    f.Event_GetPropertyByIndex(ev, 11, &pri, 0);    // PRIORITY
+    f.Event_GetPropertyByIndex(ev, 12, &maxpb, 0);  // MAX_PLAYBACKS
+    f.Event_GetPropertyByIndex(ev, 13, &beh, 0);    // MAX_PLAYBACKS_BEHAVIOR (1 steal oldest, 2 steal newest, 3 steal quietest, 4 fail, 5 fail if quietest)
+    printf("LIMIT priority %d max playbacks %d behavior %d\n", pri, maxpb, beh);
+    std::string chain;
+    void* c = nullptr;
+    f.Event_GetCategory(ev, &c);
+    for (int d = 0; c && d < 8; ++d) {
+        char* cn = nullptr;
+        float cv = -1;
+        f.EventCategory_GetInfo(c, nullptr, &cn);
+        f.EventCategory_GetVolume(c, &cv);
+        char one[96];
+        sprintf_s(one, "%s%s %.3f", chain.empty() ? "" : " < ", cn ? cn : "?", cv);
+        chain += one;
+        void* parent = nullptr;
+        if (f.EventCategory_GetParentCategory(c, &parent)) break;
+        c = parent;
+    }
+    printf("PROPS mode %x volume %.3f min %.1f max %.1f 3dpos %d categories %s\n", mode, vol, mn, mx, pos3d, chain.c_str());
+    unsigned subMs = 0;   // read before the post: getSubSound on a streamed bank seeks it and ends the line playing
+    {
+        std::lock_guard<std::mutex> d(audio::g.doneMx);   // playLine's AK_Duration record, read before any tick
+        for (auto& x : audio::g.durs) if (x.first == id) subMs = (unsigned)x.second;
+    }
+    printf("SUBSOUND length %u ms (the event ends with it when the subsound is what plays)\n", subMs);
+    for (int t = 0; t <= 15000; t += 250) {
+        uint8_t info[0x80] = {};
+        bool live;
+        {
+            std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+            live = audio::g.plays.count(id) && audio::g.plays[id].ev;
+        }
+        if (!live) { printf("INFO t %d ended\n", t); break; }
+        f.Event_GetInfo(ev, nullptr, nullptr, info);
+        printf("INFO t %d pos %d len %d channels %d instances %d audibility %.3f\n", t, *(int*)(info + 4), *(int*)(info + 8),
+               *(int*)(info + 12), *(int*)(info + 16), *(float*)(info + 36));
+        for (int k = 0; k < 250; k += 16) { Sleep(16); audio::tickAndDeliver(); }
+    }
+    return 0;
+}
+
 static int voTest(char** argv)
 {
     namespace fs = std::filesystem;
@@ -2387,6 +2484,7 @@ int main(int argc, char** argv)
     if (argc > 2 && std::string(argv[1]) == "--fevdeps") return fevDeps(argv);
     if (argc > 2 && std::string(argv[1]) == "--mixer") return mixerTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--vo") return voTest(argv);
+    if (argc > 6 && std::string(argv[1]) == "--voplay") return voPlay(argc, argv);
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--vtxf") return vtxfTest(argv, argc);
     if (argc > 3 && std::string(argv[1]) == "--sxkeys") {   // --sxkeys <names file> <out.tsv>: sx::keyId of every line
