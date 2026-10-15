@@ -2,6 +2,10 @@
 record plus the keys 3.0 needs, and an OrderedPlaysets entry. Only 3.0-side registration data changes; the 1.0
 files are not touched.
 
+SUPERSEDED by di1compat's zones10 (gameplay::playsets10): every 1.0 playset is registered as the zone list loads, with
+the overlay below derived by rule and ids assigned automatically; no file is written. This script stays as that
+code's reference (its Incredibles records come out byte for byte the same) and to --revert a zone list it wrote.
+
 The 1.0 zone list is compiled Lua (startup2/gamedb/core/zonelist.lua), so its records are taken from the running
 chunk (lupa, luabc.to64) and written out as Lua text -- tables that mix an array part and named keys (BeaconMap
 rows) survive, which a JSON detour would not guarantee.

@@ -111,9 +111,10 @@ statically, so no Visual C++ runtime needs to be installed.
    - `di1compat_mer.txt`: run `mertable.py`. Its docstring lists the inputs.
 
    The shader cache `di1compat_shaders\` is created on first use.
-4. Register the zone once with `python zonereg.py`. It writes the loose 3.0 zone list; `--revert` restores the
-   original.
-5. Start the game. The plugin writes `di1compat.log` to the game folder.
+4. Start the game. The plugin writes `di1compat.log` to the game folder. Nothing needs registering: as the zone list
+   loads, di1compat adds every 1.0 playset of the 1.0 install to it (`zones10`) and lists them on the Play Sets menu.
+   A zone list written earlier by `python zonereg.py` still works (its Incredibles records are kept as they are);
+   `python zonereg.py --revert` restores the shipped one.
 
 ## Configuration
 
@@ -219,7 +220,7 @@ Unless dated otherwise, each check was run on the stock Steam 3.0 Gold installat
 |---|---|---|
 | `btdconv.py` | 1.0 to 3.0 collision (`.btd` and its `.btm` block table) | 323 / 330 single-block shipped pairs byte-exact |
 | `btdblocks.py`, `btdscan.py`, `btd-info.ps1` | Collision block tiling, survey, header dump | Block count = shapes in 267 / 267 worlds |
-| `zones.py`, `zonereg.py` | Zone records: inspect, edit, register a 1.0 playset | `zones.py` edits match the retired tools on 6 cases |
+| `zones.py`, `zonereg.py` | Zone records: inspect, edit; register Incredibles offline (superseded by `zones10`, kept as its reference) | `zones.py` edits match the retired tools on 6 cases; `zones10` writes zonereg's Incredibles records byte for byte |
 | `chd.py` | Compiled game-database tables: dump, export, import, compile from Lua | 33 / 33 files round-trip byte-exact |
 | `dct.py` | Localisation dictionaries: list, export, import | 471 / 471 files round-trip; 337,023 keys hash correctly |
 | `expl30.py`, `expack.py`, `luabc.py` | Exploders; expendables packages; Lua 5.1 bytecode re-encoding | 17 / 17 packages re-encoded |

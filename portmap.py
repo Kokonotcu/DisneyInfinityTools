@@ -6,8 +6,10 @@ PortToLocalIndices -> DataNode; 1.0 FUN_005444c0: id -> DataNodeLinks). The temp
 ConnectionMapUsedDataNodes -> DataNode, whose header path without the model's root ('Anchor/Cntrl_Elbow_Right/
 Transform' -> 'cntrl_elbow_right/transform', case-folded) is the name. Per game and template a port is named by the
 majority over every model linking it (a name kept only on its best-voted port). to30[p] = the 3.0 port of 1.0 port
-p's name; a 1.0 name 3.0 has no port for gets a distinct spare 3.0 port (one no 3.0 model links, so 3.0 models skip
-it; a 1.0 model renumbered by the same table keeps that joint); a port no 1.0 model links shares one more spare.
+p's name (or of the one 3.0 name it equals below an extra root level, 'anchor/cntrl_reardoor/transform'); a 1.0 name
+3.0 has no port for gets a distinct spare 3.0 port (one no 3.0 model links, so 3.0 models skip it; a 1.0 model
+renumbered by the same table keeps that joint); a port no 1.0 model links shares one more spare. Without a spare left
+the port is dropped (DROP, table()).
 Evidence (twin clips, the ids never used to build the table): rule.py in wt/_scratch/anim10, octtest --clip-ids.
 
 usage: portmap.py scan <assets> <out.json> [sub ...]   models' port names (default subs: characters choreographies)
@@ -16,9 +18,23 @@ Run scans under capped.ps1."""
 import sys, os, json, collections, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# template -> 3.0 port count (Filter length of the 3.0 .bct, else the longest shipped PortToLocalIndices)
+# template -> 3.0 port count (Filter length of the 3.0 .bct, else the longest shipped PortToLocalIndices; both agree
+# where both exist). Every template 3.0 owns that 1.0 motion clips name, except the ones whose check failed (none on
+# twins) or could not be made: characters/pir_kraken/pir_kraken.ct (no 3.0 twin clip or model; 44 of its 51 1.0 names
+# have no 3.0 port, the 3.0 rig has 18). Per-template evidence: wt/_scratch/general (census, clipids_all, modelcheck).
 TEMPLATES = {'characters/biped/biped.ct': 968, 'characters/_townspeople/_townspeople.ct': 70,
-             'characters/omnidroid/omnidroid.ct': 54}
+             'characters/omnidroid/omnidroid.ct': 54,
+             'characters/car/car.ct': 188, 'characters/ts_bullseye/ts_bullseye.ct': 152, 'characters/ts_zurgbots/ts_zurgbots.ct': 18,
+             'characters/carriable/carriable.ct': 2, 'characters/googrowshrink/googrowshrink.ct': 28,
+             'characters/ts_slinky/ts_slinky.ct': 51, 'characters/helicopter/helicopter.ct': 138,
+             'characters/inc_gliderpack/inc_gliderpack.ct': 15, 'characters/ts_hamm/ts_hamm.ct': 22,
+             'characters/mu_terry_terri/mu_terry_terri.ct': 150, 'characters/cars_animals/cars_animals.ct': 6,
+             'characters/stickyhand/stickyhand.ct': 33, 'characters/inc_townspeople_vehicles/inc_townspeople_vehicles.ct': 5,
+             'characters/avatar_tools/avatar_tools.ct': 76,
+             'characters/tb_dragon/tb_dragon.ct': 31, 'characters/cars_windsock/cars_windsock.ct': 19, 'characters/jetpack/jetpack.ct': 7,
+             'characters/lr_raven/lr_raven.ct': 15, 'characters/lr_flight_totem_backpack/lr_flight_totem_backpack.ct': 3,
+             'characters/ts_rocketpack/ts_rocketpack.ct': 6, 'characters/inc_hoverboard/inc_hoverboard.ct': 6,
+             'characters/ts_rexteleporter/ts_control_device.ct': 5}
 
 
 def _u16s(r):
@@ -133,38 +149,57 @@ def names(d):
     return {q: n for n, q in keep.items()}
 
 
+DROP = 0xffff   # to30 value: the clip output is dropped, the model link skipped (cho.hpp)
+
+
 def table(l10, l30, ct, n30):
-    """to30 list over the 1.0 ports, and counts by kind."""
+    """to30 list over the 1.0 ports, counts by kind, and the shared spare (None if none is used). Spares are taken
+    in port order; when they run out a 1.0-only name, and the unlinked ports, get DROP: 3.0 models skip such an id
+    as they skip a spare, and every 1.0 model skips an unlinked port (DataNodeLinks -1); ids past n30 are not an
+    option (3.0's sampler FUN_005329b0 maps an id through a table at evaluator +0x44 before any bounds check)."""
     a, b = names(l10.get(ct, {})), names(l30.get(ct, {}))
     linked30 = {int(q) for q in l30.get(ct, {})}
     n10 = 1 + max(int(q) for q in l10.get(ct, {}))
     inv = {n: q for q, n in b.items()}
-    spares = [q for q in range(n30) if q not in linked30]
-    to30, c, sp = [], collections.Counter(), iter(spares)
+    sp = iter([q for q in range(n30) if q not in linked30])
+    to30, c = [], collections.Counter()
+
+    def tail(x, y):   # y is x below one or more extra leading levels (a model root deeper than one level)
+        return y.endswith('/' + x) and x.count('/') >= 1
     for p in range(n10):
+        n = a.get(p)
+        alt = [q for m, q in inv.items() if tail(m, n) or tail(n, m)] if n and n not in inv else []
         if p in a and a[p] in inv:
             to30.append(inv[a[p]]); c['same name'] += 1
+        elif len(alt) == 1:
+            to30.append(alt[0]); c['same name below another root level'] += 1
         elif p in a:
-            to30.append(next(sp)); c['1.0-only name -> own spare'] += 1
+            q = next(sp, DROP)
+            to30.append(q); c['1.0-only name -> own spare' if q != DROP else '1.0-only name -> dropped (no spare)'] += 1
         else:
-            to30.append(None); c['unlinked in 1.0 -> shared spare'] += 1
-    sink = next(sp)   # StopIteration = not enough spare ports: the table cannot be built for this template
+            to30.append(None)
+    sink = next(sp, DROP) if None in to30 else None
+    c['unlinked in 1.0 -> shared spare' if sink != DROP else 'unlinked in 1.0 -> dropped (no spare)'] += to30.count(None)
     to30 = [sink if x is None else x for x in to30]
-    assert len(set(to30) - {sink}) == len([x for x in to30 if x != sink]), 'two 1.0 ports on one 3.0 port'
-    return to30, c, sink
+    kept = [x for x in to30 if x not in (sink, DROP)]
+    assert len(set(kept)) == len(kept), 'two 1.0 ports on one 3.0 port'
+    return to30, +c, sink
 
 
 def header(f10, f30, outp):
     l10, l30 = json.load(open(f10)), json.load(open(f30))
     lines = ['// Generated by DI3Tools/portmap.py from the model link scans of both extracts; do not edit.',
-             '// to30[1.0 port] = 3.0 port of the same connection name (portmap.py docstring has the rule).',
+             '// to30[1.0 port] = 3.0 port of the same connection name (portmap.py docstring has the rule);',
+             '// kDropPort: no 3.0 port for it, the clip output is dropped and the model link skipped.',
              '#pragma once', '#include <cstdint>', '#include <cstring>', '', 'namespace cho {', '',
-             'struct PortMap { const char* tmpl; uint32_t n10; const uint16_t* to30; };', '']
+             'struct PortMap { const char* tmpl; uint32_t n10; const uint16_t* to30; };',
+             'static const uint16_t kDropPort = 0x%x;' % DROP, '']
     rows = []
     for k, (ct, n30) in enumerate(TEMPLATES.items()):
         to30, c, sink = table(l10, l30, ct, n30)
-        print('%s: 1.0 ports %d -> 3.0 (%d ports): %s, shared spare %d' % (ct, len(to30), n30, dict(c), sink))
-        lines.append('// %s: %s; shared spare %d' % (ct, ', '.join('%s %d' % kv for kv in c.items()), sink))
+        sk = 'none' if sink is None else 'dropped' if sink == DROP else sink
+        print('%s: 1.0 ports %d -> 3.0 (%d ports): %s, shared spare %s' % (ct, len(to30), n30, dict(c), sk))
+        lines.append('// %s: %s; shared spare %s' % (ct, ', '.join('%s %d' % kv for kv in c.items()), sk))
         lines.append('static const uint16_t kPorts%d[%d] = {' % (k, len(to30)))
         for i in range(0, len(to30), 20):
             lines.append('    ' + ', '.join(str(x) for x in to30[i:i + 20]) + ',')

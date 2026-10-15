@@ -32,7 +32,13 @@
 //   its name; a 1.0-only name gets its own 3.0 port no 3.0 model links, ports no 1.0 model links share one. Prediction on the motion-clip twins, the ids never used to build the table (octtest --clip-ids; rule.py):
 //   same-size tables 105,708 ids at the twin's position, 1,131 not (41 blocks whose outputs 3.0 re-ordered, 10
 //   re-authored); order-free 279,734 of 285,331 ids among the twin block's (ids kept: 1 and 33,553); 403 blocks
-//   byte-identical to the twin (ids kept: 0). Only Type 'Clip' SubNetworks whose LayerBinds all name one mapped
+//   byte-identical to the twin (ids kept: 0). Those were biped / _townspeople / omnidroid; the table now covers all 25
+//   templates 3.0 owns that 1.0 motion clips name but pir_kraken (portmap.py TEMPLATES), each checked on its twins
+//   (twin ids per table among ours >= 95.6%, 521 blocks byte-identical over all) or, with no twin clip, on twin models
+//   (0 ports of another name). With no spare 3.0 port left a 1.0 port is kDropPort: its outputs are dropped (3.0
+//   models skip such an id as they skip a spare; the comps index section data absolutely, FUN_00532050 skips an
+//   unmapped output by its comp words alone) and links30 skips it.
+//   Only Type 'Clip' SubNetworks whose LayerBinds all name one mapped
 //   template: Scene SubNetworks with a LayerBind (inc_helen_swoosh_*) carry ClipProcessor output indices (0..n).
 //   links30 renumbers a served 1.0 model's DataNodeLinks with the same table, so 1.0 models and clips agree.
 //   A 1.0 output with more than 7 comps (3.0 has 3 bits; 4 such in the
@@ -181,6 +187,8 @@ inline bool clipBlock30(const std::string& d, std::string& out, const PortMap* p
             if (c.id >= pm->n10) return false;
             c.id = pm->to30[c.id];
         }
+        // kDropPort: an output every model skips (comps carry absolute data indices, so the rest read the same)
+        v.erase(std::remove_if(v.begin(), v.end(), [](const ClipOut& c) { return c.id == kDropPort; }), v.end());
         return true;
     };
     if (d.size() < 0x14) return false;
@@ -317,10 +325,15 @@ inline int links30(oct::File& f)
         }
         if (!pm || dnl < 0) continue;
         std::vector<int32_t> old = f.ints(f.recs[dnl]), by30;
-        if (old.size() > pm->n10) continue;   // more ports than the 1.0 template has: not this template's numbering
-        for (size_t p = 0; p < old.size(); ++p) {
+        // a port linked past the table: not this template's numbering. Unlinked (-1) ports past it are the 1.0
+        // template's tail no scanned model links (ts_bullseye: every model 116 long, highest linked 111, n10 112)
+        size_t used = 0;
+        for (size_t p = 0; p < old.size(); ++p) if (old[p] >= 0) used = p + 1;
+        if (used > pm->n10) continue;
+        for (size_t p = 0; p < used; ++p) {
             if (old[p] < 0) continue;
             uint16_t q = pm->to30[p];
+            if (q == kDropPort) continue;
             if (by30.size() <= q) by30.resize(q + 1, -1);
             by30[q] = old[p];
         }

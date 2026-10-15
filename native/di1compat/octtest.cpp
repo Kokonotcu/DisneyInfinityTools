@@ -1419,25 +1419,37 @@ static int clipIdsTest(char** a)
             size_t at = k++;
             if (!pm) continue;
             ++c[std::string("blocks on ") + pm->tmpl];
-            if (_stricmp(tmplB.c_str(), pm->tmpl)) { ++c["  twin binds another template"]; continue; }
-            if (at >= blocksB.size()) { ++c["  twin has no block there"]; continue; }
+            // every count twice: over all templates, and under 'pm->tmpl:' for the per-template verdict
+            auto C = [&](const char* key) { ++c[key]; ++c[std::string(pm->tmpl) + ":" + key]; };
+            if (_stricmp(tmplB.c_str(), pm->tmpl)) { C("  twin binds another template"); continue; }
+            if (at >= blocksB.size()) { C("  twin has no block there"); continue; }
             std::string d = A.recs[i].pay.substr(oct::spec(A.recs[i].type).cw), ours, kept;
-            if (!cho::clipBlock30(d, ours, pm) || !cho::clipBlock30(d, kept)) { ++c["  NOT CONVERTED"]; continue; }
+            if (!cho::clipBlock30(d, ours, pm) || !cho::clipBlock30(d, kept)) { C("  NOT CONVERTED"); continue; }
             const std::string& y = blocksB[at];
-            ++c[ours == y ? "  bytes: identical to the twin" : ours.size() == y.size() ? "  bytes: same length" : "  bytes: other length"];
-            if (kept == y) ++c["  (ids kept: identical to the twin)"];
+            C(ours == y ? "  bytes: identical to the twin" : ours.size() == y.size() ? "  bytes: same length" : "  bytes: other length");
+            if (kept == y) C("  (ids kept: identical to the twin)");
             auto to = ids30(ours), tk = ids30(kept), ty = ids30(y);
             std::set<uint32_t> sy;
             for (auto& t : ty) sy.insert(t.begin(), t.end());
-            bool same = to.size() == ty.size();
+            bool same = to.size() == ty.size(), dropped = false;
             for (size_t q = 0; same && q < to.size(); ++q) same = to[q].size() == ty[q].size();
+            for (size_t q = 0; q < to.size(); ++q) {
+                dropped |= to[q].size() != tk[q].size();
+                for (size_t j = to[q].size(); j < tk[q].size(); ++j) C("  outputs dropped (kDropPort)");
+            }
+            // the other way, per table: a wrong number shows as a twin id we lack; a twin that dropped or re-ordered
+            // outputs (3.0 re-exports) does not
+            for (size_t q = 0; to.size() == ty.size() && q < to.size(); ++q) {
+                std::set<uint32_t> so(to[q].begin(), to[q].end());
+                for (uint32_t j : ty[q]) C(so.count(j) ? "  twin ids, per table: among ours" : "  twin ids, per table: NOT among ours");
+            }
             for (size_t q = 0; q < to.size(); ++q)
                 for (size_t j = 0; j < to[q].size(); ++j) {
-                    c[sy.count(to[q][j]) ? "  ids, order-free: ours among the twin's" : "  ids, order-free: ours NOT among the twin's"]++;
-                    c[sy.count(tk[q][j]) ? "  (ids kept, order-free: among the twin's)" : "  (ids kept, order-free: NOT among)"]++;
+                    C(sy.count(to[q][j]) ? "  ids, order-free: ours among the twin's" : "  ids, order-free: ours NOT among the twin's");
+                    if (!dropped) C(sy.count(tk[q][j]) ? "  (ids kept, order-free: among the twin's)" : "  (ids kept, order-free: NOT among)");
                     if (!same) continue;
-                    c[to[q][j] == ty[q][j] ? "  ids, same-size tables: same position" : "  ids, same-size tables: DIFFERENT"]++;
-                    c[tk[q][j] == ty[q][j] ? "  (ids kept, same-size tables: same position)" : "  (ids kept, same-size tables: different)"]++;
+                    C(to[q][j] == ty[q][j] ? "  ids, same-size tables: same position" : "  ids, same-size tables: DIFFERENT");
+                    if (!dropped) C(tk[q][j] == ty[q][j] ? "  (ids kept, same-size tables: same position)" : "  (ids kept, same-size tables: different)");
                 }
         }
     }
@@ -2448,6 +2460,17 @@ int main(int argc, char** argv)
         printf("%zu aliases, %d of %d paths resolved\n", al.map.size(), hit, argc - 3);
         return 0;
     }
+    if (argc > 2 && std::string(argv[1]) == "--dbtriggers") {   // --dbtriggers <1.0 datamap.lua>...: the locks / bitMask triggers
+        for (int i = 2; i < argc; ++i) {
+            std::string in = slurp(argv[i]), out;
+            luachunk::rewrite(in, out, [&](std::string& s) { sys::dbTrigger10Add(s); return datamap::normalise(s); });
+        }
+        for (auto& p : sys::dbTriggers10())
+            if (sys::dbTrigger10(p.c_str(), "locks__lua.lua") || sys::dbTrigger10(p.c_str(), "bitmasks.lua")) printf("%s\n", p.c_str());
+        printf("%s\n", sys::dbTrigger10("GameDB/Incredibles/locks__lua.lua", "locks__lua.lua") && sys::dbTrigger10("GameDB/Incredibles/bitmasks.lua", "bitmasks.lua")
+                           ? "the former Incredibles triggers match" : "the former Incredibles triggers DO NOT match");
+        return 0;
+    }
     if (argc > 4 && std::string(argv[1]) == "--ui") return uiTest(argv, argc);
     if (argc > 3 && std::string(argv[1]) == "--texname") {   // --texname <texture-only .mtb> <out dir/<name>.mtb>: ui::texBundleAs
         std::string o = argv[3], name = o.substr(o.find_last_of("/\\") + 1);
@@ -3053,12 +3076,45 @@ int main(int argc, char** argv)
         printf("%s %zu B\n", r ? "ok" : "FAILED", got.size());
         return r ? 0 : 1;
     }
-    if (argc > 3 && std::string(argv[1]) == "--menu") {   // --menu <out.lua> <chunk file | archive member>: playsetmenu10
-        std::string in;
-        if (argc > 4 ? !arc30::readMember(argv[3], argv[4], in) : (in = slurp(argv[3])).empty()) return 1;
-        std::string s = ui::playsetMenu10(in);
-        std::ofstream(argv[2], std::ios::binary).write(s.data(), (std::streamsize)s.size());
-        printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), s.size());
+    // --zones10 <1.0 install> <3.0 zonelist.lua> <out.lua> [noadd]: the plugin's zone list steps (zones10 from the
+    // install's startup2.zip gamedb/core/zonelist.lua, then zonelist30, beaconMap30); prints the 1.0 playsets.
+    // --menu <out.lua> <1.0 install> <3.0 zonelist.lua> <chunk file | archive member>: playsetmenu10 with those playsets
+    bool menu = argc > 5 && std::string(argv[1]) == "--menu";
+    if (menu || (argc > 4 && std::string(argv[1]) == "--zones10")) {
+        const char *inst = argv[menu ? 3 : 2], *z30 = argv[menu ? 4 : 3];
+        std::string zip = std::string(inst) + "\\assets\\startup2.zip", c10, t = slurp(z30);
+        mz_zip_archive z{};
+        if (!mz_zip_reader_init_file(&z, zip.c_str(), 0)) { printf("no %s\n", zip.c_str()); return 1; }
+        size_t n = 0;
+        int i = mz_zip_reader_locate_file(&z, "gamedb/core/zonelist.lua", nullptr, 0);
+        void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(&z, (mz_uint)i, &n, 0);
+        if (d) { c10.assign((const char*)d, n); mz_free(d); }
+        mz_zip_reader_end(&z);
+        auto world = [&](const std::string& zone) {
+            std::string w = std::string(inst) + "\\assets\\worlds\\" + zone;
+            return GetFileAttributesA((w + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA(w.c_str()) != INVALID_FILE_ATTRIBUTES;
+        };
+        std::string opt = argc > 5 && !menu ? argv[5] : "";   // noadd: zones10 off; only: zones10 without the later steps
+        auto ps = gameplay::playsets10(t, luachunk::eval(c10)["ZoneList"], opt != "noadd", world);
+        std::vector<std::pair<std::string, std::string>> list;
+        for (auto& x : ps) {
+            printf("%-16s %s id %d, start %s, zones %zu\n", x.name.c_str(), x.added ? "added" : "present", x.id, x.start.c_str(), x.zones.size());
+            list.push_back({x.name, x.start});
+        }
+        std::string out;
+        if (menu) {
+            std::string in;
+            if (argc > 6 ? !arc30::readMember(argv[5], argv[6], in) : (in = slurp(argv[5])).empty()) return 1;
+            out = ui::playsetMenu10(in, list);
+            printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
+        } else {
+            if (opt != "only") {
+                int k = gameplay::zonelist30(t), ka = 0, kb = mission::beaconMap30(t, &ka);
+                printf("zonelist30 %d records, beaconMap30 %d rows (+%d)\n", k, kb, ka);
+            }
+            out = t;
+        }
+        std::ofstream(argv[menu ? 2 : 4], std::ios::binary).write(out.data(), (std::streamsize)out.size());
         return 0;
     }
     if (argc > 4 && std::string(argv[1]) == "--arc") {   // --arc <render table> <game dir> <3.0 extract root>
