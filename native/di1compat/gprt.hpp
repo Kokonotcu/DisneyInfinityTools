@@ -86,36 +86,47 @@ static void* __fastcall hkScreenReq(void* ui, void* edx, const char* name, int a
     return ev;
 }
 
-// The Toy Store entry: selectmenu.lua's ExitScreen removes the menu, then adds "Catalog" from it (self:RemoveScreen,
-// self:AddScreen). 3.0 queues adds and processes them on its next UI update (FUN_0156c3b0 -> FUN_0156b200, thiscall
-// (manager, request, a2), ret 8), and drops a request whose parent screen (+0x60) is gone unless that parent is the
-// player's root (0x0156B2B0: FUN_0154fed0(parent) == 0 and parent != manager vtable +0x9c(request +0x84) -> end).
-// So the Catalog never opened, and SelectMenu's pause, which 3.0's Catalog.onExit releases (Pause_UnPauseFromPausedScreen),
-// stayed: dump toystore-freeze.dmp has no Catalog or SelectMenu screen, none of catalog.lua's strings (never loaded),
-// player 0 paused. 1.0's selectmenu offers only these two entries (GetItems: Scn_Pause_MissionLog, Scn_Pause_Catalog
-// outside TS_CombatSim). In a 1.0 zone a Catalog request whose parent is gone goes to the player's root (+0x60 = -1,
-// 3.0's default for a request without parent); if no Catalog screen comes of it, the pause is released.
-typedef void(__fastcall* UiAddFn)(void* mgr, void* edx, uint8_t* req, uint32_t a2);
-typedef void*(__fastcall* ScreenByHandleFn)(void* mgr, void* edx, int handle);
-typedef int(__fastcall* ScreenByNameFn)(void* mgr, void* edx, const char* name, int player);
-typedef void(__cdecl* UnpauseFn)(int player);
-static UiAddFn g_uiAdd;
-static void __fastcall hkUiAdd(void* mgr, void* edx, uint8_t* req, uint32_t a2)
+// The Toy Store entry: selectmenu.lua's ExitScreen does self:RemoveScreen(), then self:AddScreen("Catalog"), leaving
+// SelectMenu's pause to the Catalog (3.0 catalog.lua onExit -> Pause_UnPauseFromPausedScreen). The screen method
+// AddScreen takes its argument in two forms in 1.0 (FUN_0104a600): a table, or a screen name (+ optional data) that it
+// adds by name (UI manager vtable +0x6c). 3.0's (FUN_0156a360, thiscall(screen, L), ret 4) kept only the table:
+// for a name it just reads the string and returns -1 (0x0156AB.. else branch). So no Catalog request was ever queued
+// and the pause stayed (dump toystore-freeze.dmp: no Catalog screen, catalog.lua never loaded, player 0 paused;
+// Crabe's log: no loadbuffer Presentation/Catalog.lua). 3.0's own pause menu opens it as
+// self:AddScreen({screenName = "Catalog"}) (pausemenu.lua ExitScreen, Scn_Pause_Catalog). 1.0's UI scripts use the
+// name form 298 times, 3.0's 23 (dead branches: friends, iOS) -- addscreenform.py. For a screen whose script was
+// served from 1.0 (g_screens10), a name is added the way 3.0 adds one by name itself (FUN_00b670a0, the kiosk ribbon:
+// request ctor FUN_0155a630, name +0x40, player +0x6c, FUN_015699b0 on the manager, dtor FUN_0155c270): no parent
+// (+0x60 = -1), so it opens although the caller is already gone. The player is the caller's (screen +0x50, set from
+// its request +0x6c by FUN_0156b200).
+typedef int(__fastcall* LuaAddScreenFn)(uint8_t* screen, void* edx, void* L);
+typedef int(__cdecl* LuaTypeFn)(void* L, int idx);
+typedef const char*(__cdecl* LuaToStringFn)(void* L, int idx, size_t* len);
+typedef void(__cdecl* LuaPushIntFn)(void* L, int n);
+static LuaAddScreenFn g_luaAddScreen;
+static int __fastcall hkLuaAddScreen(uint8_t* screen, void* edx, void* L)
 {
-    const char* name = req ? *(const char**)(req + 0x40) : nullptr;
-    int parent = req ? *(int*)(req + 0x60) : -1;
-    if (!name || _stricmp(name, "Catalog") || !zonePlayset10()) return g_uiAdd(mgr, edx, req, a2);
-    int player = *(int*)(req + 0x6c);
-    bool orphan = parent != -1 && !((ScreenByHandleFn)rt(0x0154FED0))(mgr, nullptr, parent);
-    if (orphan) *(int*)(req + 0x60) = -1;
-    g_uiAdd(mgr, edx, req, a2);
-    int h = ((ScreenByNameFn)rt(0x01553E30))(mgr, nullptr, "Catalog", player);
-    logf("toy store: Catalog request for player %d, parent screen %d %s -> Catalog screen %d", player, parent,
-         orphan ? "gone (sent to the player's root)" : "present", h);
-    if (orphan && h == -1) {
-        ((UnpauseFn)rt(0x015E9150))(player < 0 ? 0 : player);
-        logf("toy store: no Catalog screen came of it; SelectMenu's pause released");
+    if (screen && ((LuaTypeFn)rt(0x0130D2D0))(L, 2) == 4) {   // LUA_TSTRING
+        char caller[64] = "";
+        safeCopy(caller, sizeof(caller), *(const char**)(screen + 0xc));
+        for (char* c = caller; *c; ++c) *c = (char)tolower((unsigned char)*c);
+        bool from10;
+        { std::lock_guard<std::mutex> lock(g_sessLock); from10 = g_screens10.count(caller) != 0; }
+        const char* name = ((LuaToStringFn)rt(0x0130D5A0))(L, 2, nullptr);
+        if (from10 && name && *name) {
+            int player = *(int*)(screen + 0x50);
+            alignas(8) uint8_t req[0x100] = {};   // the ctor sets 0x00..0x93
+            ((ThisFn)rt(0x0155A630))(req, nullptr);
+            ((StrAssignFn)rt(0x0041A250))(req + 0x40, nullptr, name);
+            *(int*)(req + 0x6C) = player;
+            int h = ((AddScreenFn)rt(0x015699B0))(*(void**)rt(0x02289E88), nullptr, req);
+            ((ThisFn)rt(0x0155C270))(req, nullptr);
+            logf("AddScreen(\"%s\") from 1.0 screen %s, player %d -> screen request %d", name, caller, player, h);
+            ((LuaPushIntFn)rt(0x0130D7E0))(L, h);
+            return 1;
+        }
     }
+    return g_luaAddScreen(screen, edx, L);
 }
 
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
@@ -178,7 +189,8 @@ static void install()
         hook("ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&hkRibbonName, (void**)&g_ribbonName);
         hook("ribbon open (1.0 SelectMenu)", 0x00B68F60, "6AFF68????????64A100000000", (void*)&hkShowRibbon, (void**)&g_showRibbon);
         hook("screen request (ProgressLog)", 0x0156DDE0, "64A1000000006AFF68", (void*)&hkScreenReq, (void**)&g_screenReq);
-        hook("UI process add (Toy Store Catalog)", 0x0156B200, "558BEC83E4F86AFF68????????64A100000000", (void*)&hkUiAdd, (void**)&g_uiAdd);
+        hook("screen AddScreen by name (1.0 scripts)", 0x0156A360, "558BEC83E4F86AFF68????????64A100000000", (void*)&hkLuaAddScreen,
+             (void**)&g_luaAddScreen);
     }
 }
 
