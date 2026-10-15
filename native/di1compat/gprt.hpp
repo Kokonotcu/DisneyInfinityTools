@@ -137,50 +137,53 @@ static int __fastcall hkLuaAddScreen(uint8_t* screen, void* edx, void* L)
     return g_luaAddScreen(screen, edx, L);
 }
 
-// ---- focus10: a 1.0 movie in a 3.0 Screen gets the input focus ----
-// The manager tells the top screen's movie it has the focus (FUN_01559480 gain, FUN_01554590 loss; thiscall on the
-// manager, ret 4) in one of two ways: a screen whose Lua class has HasScreenFSM (3.0's Screen) gets root.GainFocus()
-// / LoseFocus(), any other root.SetHasFocus(true/false) (FUN_01552390, thiscall(screen, bool): invoke when loaded
-// (+0x6d), then +0x60 = the value). 1.0 movies know only SetHasFocus (AvaElement: hasFocus, false until set; their
-// key listeners return unless HasFocus(), storefront.keyDownListener). 3.0 ships catalog.lua (a Screen) but no
-// storefront movie, so the Toy Store's Catalog runs 1.0's storefront.gfx: it never got SetHasFocus and dropped every
-// key (run-mu-0557-store: no Storefront_Up/_Left/_Exit or frontend_cancel post while browsing and pressing back, only
-// the mouse-driven GetItemActionsStates; Esc = CANCEL -> UI_CATALOG_CANCEL, id 134 in both exes and in the movie's
-// KeyMap). A screen whose movie was served from 1.0 (+0x14 = "<dir>/<movie>", in g_movies10) also gets SetHasFocus
-// with the same value, 3.0's +0x60 kept as it set it. Not 1.0 scripts' screens alone: any 3.0 screen on a 1.0 movie.
-typedef void(__fastcall* FocusGainFn)(uint8_t* mgr, void* edx, uint8_t* screen);
-typedef void(__fastcall* FocusLossFn)(uint8_t* mgr, void* edx, uint8_t** holder);
-typedef void(__fastcall* SetHasFocusFn)(uint8_t* screen, void* edx, int focus);
-static FocusGainFn g_focusGain;
-static FocusLossFn g_focusLoss;
+// ---- actionmap10: a 1.0 movie's UsesActionMap sets its screen's action map, as 1.0 did ----
+// A movie receives a controller action only if its screen's action map (screen +0: {vt, ids, count}) holds it.
+// Movies name theirs through ExternalInterface (callback at 0x01564790, cdecl (?, ?, name, args, ..); args[0] = the
+// screen's Lua name, FUN_01550050; Values 0x20 apart, type +0xc, value +0x10): 1.0 (0x01050a3e) handled
+// "UsesActionMap" as map->vt[0](list) = set (3.0 vt[0] FUN_00b3fef0 -> FUN_007f3620: clear, then add each name) and
+// "AppendActionMap" as add; 3.0 adds for AppendActionMap (create via manager vt+0x78, FUN_007f3580) and ignores
+// UsesActionMap (0x01564f7d). 1.0 movies call only UsesActionMap (88 of 249; 3.0's own: 9, which 3.0 ignores).
+// The Toy Store's Catalog (3.0 catalog.lua on 1.0's storefront.gfx; storefront.Init: UsesActionMap
+// 'CATALOG_PURCHASE_OR_PLACE,CATALOG_CANCEL,CATALOG_LEFT,..', then SetHasFocus(true) itself) kept 3.0's default map
+// (dump catalog-input-0649: START, RIGHT, LEFT, DOWN, UP, .._NOREP, RT, LT, RSTICK_*), and its keyDownListener acts
+// only on CATALOG_*: no key, Esc included, did anything. For a screen whose movie was served from 1.0 (+0x14 in
+// g_movies10) the map is set from the list (clear, then 3.0's AppendActionMap; the names have the same ids in both
+// exes: CATALOG_* 133-134 / 171-175, GN_LST_* 143-146).
+typedef void(__cdecl* FlashCallFn)(void* a1, void* a2, const char* name, uint8_t* args, void* a5);
+typedef int(__fastcall* ScreenByNameFn)(void* mgr, void* edx, const char* name);
+typedef uint8_t*(__fastcall* ScreenByHandleFn)(void* mgr, void* edx, int handle);
+typedef void(__fastcall* ActionMapClearFn)(void* map, void* edx);
+static FlashCallFn g_flashCall;
 
-static void movieFocus10(uint8_t* screen, bool focus)
+static bool movie10(const uint8_t* screen)
 {
-    const char* m = screen && screen[0x6d] ? *(const char**)(screen + 0x14) : nullptr;
-    if (!m) return;
-    std::string k = "flash/" + std::string(m);
+    char m[96] = "";
+    safeCopy(m, sizeof(m), screen ? *(const char* const*)(screen + 0x14) : nullptr);
+    if (!*m) return false;
+    std::string k = std::string("flash/") + m;
     for (char& c : k) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    { std::lock_guard<std::mutex> lock(g_sessLock); if (!g_movies10.count(k)) return; }
-    uint8_t keep = screen[0x60];
-    ((SetHasFocusFn)rt(0x01552390))(screen, nullptr, focus ? 1 : 0);
-    screen[0x60] = keep;
-    char name[64] = "";
-    safeCopy(name, sizeof(name), *(const char**)(screen + 0x10));
-    logf("focus10: %s (1.0 movie %s) SetHasFocus(%d)", name, m, focus ? 1 : 0);
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    return g_movies10.count(k) != 0;
 }
 
-static void __fastcall hkFocusGain(uint8_t* mgr, void* edx, uint8_t* screen)
+static void __cdecl hkFlashCall(void* a1, void* a2, const char* name, uint8_t* args, void* a5)
 {
-    g_focusGain(mgr, edx, screen);
-    uint8_t* head = screen ? *(uint8_t**)(mgr + 0x28C + *(int*)(screen + 0x50) * 0x20) : nullptr;   // the top: what 3.0 focused
-    uint8_t** holder = head ? *(uint8_t***)(head + 8) : nullptr;
-    movieFocus10(holder ? holder[0] : nullptr, true);
-}
-
-static void __fastcall hkFocusLoss(uint8_t* mgr, void* edx, uint8_t** holder)
-{
-    g_focusLoss(mgr, edx, holder);
-    movieFocus10(holder ? holder[0] : nullptr, false);
+    if (name && args && !strcmp(name, "UsesActionMap")) {
+        const uint8_t* v = *(const uint8_t* const*)(args + 0x10);   // args[0], the Lua name; type bit 6: one more hop
+        if ((*(const uint32_t*)(args + 0xc) >> 6 & 1) && sys::readable(v, 4)) v = *(const uint8_t* const*)v;
+        char lua[64] = "";
+        safeCopy(lua, sizeof(lua), (const char*)v);
+        void* mgr = *(void**)rt(0x02289E88);
+        int h = *lua && mgr ? ((ScreenByNameFn)rt(0x01550050))(mgr, nullptr, lua) : -1;
+        uint8_t* s = h != -1 ? ((ScreenByHandleFn)rt(0x0154FED0))(mgr, nullptr, h) : nullptr;
+        if (s && movie10(s)) {
+            if (void* map = *(void**)s) (*(ActionMapClearFn**)map)[1](map, nullptr);   // vt[1] FUN_007f3640: empty it
+            logf("actionmap10: %s (1.0 movie) UsesActionMap -> its map is the movie's list", lua);
+            name = "AppendActionMap";
+        }
+    }
+    g_flashCall(a1, a2, name, args, a5);
 }
 
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----
@@ -246,11 +249,9 @@ static void install()
         hook("screen AddScreen by name (1.0 scripts)", 0x0156A360, "558BEC83E4F86AFF68????????64A100000000", (void*)&hkLuaAddScreen,
              (void**)&g_luaAddScreen);
     }
-    if (g_cfg.focus10) {
-        hook("screen focus gain (1.0 movies)", 0x01559480, "568B742408578BF98B4E50C1E105", (void*)&hkFocusGain, (void**)&g_focusGain);
-        hook("screen focus loss (1.0 movies)", 0x01554590, "64A1000000006AFF68????????506489250000000083EC28", (void*)&hkFocusLoss,
-             (void**)&g_focusLoss);
-    }
+    if (g_cfg.actionMap10)
+        hook("movie ExternalInterface call (1.0 UsesActionMap)", 0x01564790, "64A1000000006AFF68????????506489250000000081ECC8000000",
+             (void*)&hkFlashCall, (void**)&g_flashCall);
 }
 
 }   // namespace gprt
