@@ -291,6 +291,11 @@ static int renderTest(char** a)
     }
     gen30::VFormats vf10 = gen30::vformats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
     io.skinned = [&](uint32_t vf) { auto f = vf10.find(vf); return f != vf10.end() && f->second.count("BLENDINDICES0"); };
+    std::map<uint32_t, gen30::ColourTail> tails;   // as the plugin serves vformat.vtxf
+    int added = 0;
+    gen30::mergeVtxf(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"),
+                     slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"), added, tails);
+    io.tails10 = &tails;
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
     auto t0 = std::chrono::steady_clock::now();
     io.read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
@@ -313,6 +318,47 @@ static int renderTest(char** a)
     printf("wrote %s: oct %zu, mtb %zu, vbuf %zu, ibuf %zu, ibuf2 %zu, 1.0 textures %zu\n", out.string().c_str(),
            f.write().size(), r.mtb.size(), r.vbuf.size(), r.ibuf.size(), r.ibuf2.size(), r.textures10.size());
     return 0;
+}
+
+// octtest --vtxf <3.0 extract root> <1.0 extract root> [merged out]
+// The engine's vformat parser gives each element name 8 descriptor slots and 32 names (gen30::mergeVtxf): counts
+// them over the shipped 3.0 file and the served one, which must stay within both.
+static int vtxfTest(char** a, int argc)
+{
+    namespace fs = std::filesystem;
+    std::string t30 = slurp(fs::path(a[2]) / "assets/shaders/shaders/vformat.vtxf"), t10 = slurp(fs::path(a[3]) / "assets/shaders/shaders/vformat.vtxf");
+    std::map<uint32_t, gen30::ColourTail> tails;
+    int added = 0;
+    std::string m = gen30::mergeVtxf(t30, t10, added, tails);
+    if (argc > 4) std::ofstream(a[4], std::ios::binary).write(m.data(), m.size());
+    int fails = 0;
+    for (auto* t : {&t30, &m}) {
+        auto sizes = gen30::typeSizes(*t);
+        std::map<std::string, std::set<std::tuple<int, std::string, std::string, int, int>>> desc;
+        auto ents = gen30::ventries(*t);
+        for (auto& e : ents) {
+            size_t mn = t->find("main", e.start), st = mn < e.end ? t->find("streams", mn) : std::string::npos;
+            if (st == std::string::npos || st > e.end) continue;
+            auto streams = gen30::children(*t, t->find('{', st));
+            for (size_t s = 0; s < streams.size(); ++s) {
+                int off = 0;
+                for (auto [x, y] : gen30::children(*t, streams[s].first)) {
+                    std::string ty = gen30::field(*t, x, y, "type");
+                    desc[gen30::field(*t, x, y, "name")].insert({sizes[ty], ty, gen30::field(*t, x, y, "semantic"), off, (int)s});
+                    off += sizes[ty];
+                }
+            }
+        }
+        int worst = 0;
+        std::string who;
+        for (auto& [n, d] : desc) if ((int)d.size() > worst) { worst = (int)d.size(); who = n; }
+        bool ok = desc.size() <= 32 && worst <= 8;
+        printf("%s: %zu formats, %zu element names (32 max), most descriptors %d (%s; 8 max) -> %s\n", t == &t30 ? "3.0 shipped" : "served",
+               ents.size(), desc.size(), worst, who.c_str(), ok ? "ok" : "OVER");
+        fails += !ok;
+    }
+    printf("%d 1.0 formats appended, %zu with their vertex colour moved to its own stream\n", added, tails.size());
+    return fails;
 }
 
 static bool isCountRecord(const std::string& n)
@@ -2342,6 +2388,7 @@ int main(int argc, char** argv)
     if (argc > 2 && std::string(argv[1]) == "--mixer") return mixerTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--vo") return voTest(argv);
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
+    if (argc > 3 && std::string(argv[1]) == "--vtxf") return vtxfTest(argv, argc);
     if (argc > 3 && std::string(argv[1]) == "--sxkeys") {   // --sxkeys <names file> <out.tsv>: sx::keyId of every line
         std::ifstream in(argv[2]);                          // (keycheck.py recomputes the ids independently)
         std::ofstream o(argv[3]);
