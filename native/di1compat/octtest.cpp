@@ -2225,7 +2225,7 @@ static int voTest(char** argv)
         if (ver != 11) { printf("DLG %s skipped (v%u)\n", file.c_str(), ver); continue; }
         audio::DlgStats st;
         std::string err;
-        bool ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err);
+        bool ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err, nullptr, nullptr, &audio::vo.lineEvents);
         bad += !ok;
         printf("DLG %s %s classes %d lines %d dup %d ranges %d named %d events %d unresolved %d %s\n", file.c_str(), ok ? "ok" : "FAIL",
                st.classes, st.lines, st.dupLines, st.ranges, st.named, st.events, st.unresolved, err.c_str());
@@ -2241,6 +2241,16 @@ static int voTest(char** argv)
             if (ok) std::ofstream(outDir + "\\" + e.path().stem().string() + ".merged.dlg30", std::ios::binary).write((const char*)out.data(), out.size());
         }
     }
+    // a line's 1.0 class event (the post hook's fallback for an event 1.0 lacks): IN_Mumblers' student lines are in its
+    // dialog_default_2d class; Inc's ED047 in dialog_intercom
+    for (auto [pfx, num, want] : {std::tuple<const char*, int, const char*>{"SN", 13, "dialog_default_2d"}, {"SP", 14, "dialog_default_2d"},
+                                  {"ED", 47, "dialog_intercom"}}) {
+        auto le = audio::vo.lineEvents.find(audio::dlgLineKey((uint32_t)(uint8_t)pfx[0] | (uint32_t)(uint8_t)pfx[1] << 8, (uint16_t)num));
+        bool ok = le != audio::vo.lineEvents.end() && le->second == want;
+        bad += !ok;
+        printf("LINEEVENT %s%03d -> %s (%s)\n", pfx, num, le != audio::vo.lineEvents.end() ? le->second.c_str() : "-", ok ? "ok" : "BAD");
+    }
+    printf("LINEEVENTS %zu lines\n", audio::vo.lineEvents.size());
     auto mediaOf = [](const uint8_t* d, uint32_t m) {   // FUN_0182c000 / FUN_0182d2f0's view of media m
         return (const uint32_t*)(d + 0x20 + ((size_t)*(const uint16_t*)(d + 0x14) + (size_t)m * 3) * 4);
     };
