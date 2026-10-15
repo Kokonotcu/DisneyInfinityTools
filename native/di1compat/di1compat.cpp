@@ -39,6 +39,7 @@
 #include "ui.hpp"
 #include "audio.hpp"
 #include "vfx.hpp"
+#include "chan.hpp"
 #include "gameplay.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
@@ -207,6 +208,7 @@ static struct {
     bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
     bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
     bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
+    bool vfxChan10 = true;           // emitter curve channels re-laid for the shader their material is served on (chan.hpp)
     bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
     bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
@@ -307,6 +309,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "mixer10")) g_cfg.mixer10 = atoi(val) != 0;
         else if (!strcmp(key, "vfx10")) g_cfg.vfx10 = atoi(val) != 0;
         else if (!strcmp(key, "vfx_universal10")) g_cfg.vfxUniversal10 = atoi(val) != 0;
+        else if (!strcmp(key, "vfxchan10")) g_cfg.vfxChan10 = atoi(val) != 0;
         else if (!strcmp(key, "vfx_trace")) g_cfg.vfxTrace = atoi(val) != 0;
         else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
         else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
@@ -744,6 +747,36 @@ static int missionGraph30(std::string& t)
     return n;
 }
 
+// The shaders a particle package's materials are served on: its .mtb (beside it, or the overlay member the alias
+// names) through the stand-alone bundle transcode (the .mtb case of transcode(), same donors), kept in the session
+// so the engine's .mtb request right after (log: particledata then mtb, same frame) is served the same bytes.
+// Per 1.0 material: (1.0 shader, served shader); empty if the bundle is missing or does not transcode.
+static std::vector<std::pair<std::string, std::string>> particleShaders(const std::string& pd, std::string& note)
+{
+    if (!g_renderOk) return {};
+    std::string mp = pd.substr(0, pd.size() - 13) + ".mtb", over;
+    {
+        std::lock_guard<std::mutex> lock(g_sessLock);
+        auto o = g_over10.find(mp);
+        if (o != g_over10.end()) over = o->second;
+    }
+    std::string mtb;
+    if (!read10s(over.empty() ? mp : over, mtb) || mtb.size() < 4 || memcmp(mtb.data(), "BNDL", 4)) return {};
+    render::IO io;
+    io.read30 = read30x;
+    io.read10 = read10s;
+    render::Result r;
+    if (!render::transcodeBundle(g_render, io, mtb, "3:" + mp.substr(0, mp.find('/') + 1), r)) {
+        note += "channels: " + mp + " did not transcode ";
+        return {};
+    }
+    note += "(" + mp + ": real " + std::to_string(r.tiers["real"]) + " same-sh " + std::to_string(r.tiers["same-sh"]) + " generic " +
+            std::to_string(r.tiers["generic"]) + ", served from the session) ";
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    g_served.emplace(mp, r.mtb);
+    return r.shaders;
+}
+
 // mtc: for a .mer, also the .mtc built from the same transcoded graph (the engine asks for the .mtc right after,
 // 48/48 pairs in a load: serving it from the session saves reading and transcoding the .mer a second time)
 static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note, std::string* mtc = nullptr)
@@ -936,10 +969,17 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
     // a particle package (trailer v12 -> v47; 3.0's loader rejects 1.0's, so nothing of it registered) and its meshes
     if (g_cfg.vfx10 && endsWith(path, ".particledata")) {
         vfx::Stats st;
-        if (!vfx::transcode(std::string((const char*)data, n), out, &st)) return nullptr;
+        vfx::ChanMap cm;
+        auto shaders = g_cfg.vfxChan10 ? particleShaders(norm(path), note) : std::vector<std::pair<std::string, std::string>>();
+        if (!shaders.empty())
+            cm = [&shaders](uint16_t mat, int n10, std::vector<int>& chans) {
+                return mat < shaders.size() && chan::layout(read10s, read30x, shaders[mat].first, shaders[mat].second, n10, chans);
+            };
+        if (!vfx::transcode(std::string((const char*)data, n), out, &st, &cm)) return nullptr;
         note += "+particles(" + std::to_string(st.emitters) + " emitters, " + std::to_string(st.effects) + " effects, " +
                 std::to_string(st.params) + " params, " + std::to_string(st.keys) + " keys, " + std::to_string(st.meshes) +
-                " mesh emitters) ";
+                " mesh emitters, " + std::to_string(st.rechanneled) + " re-channeled for their 3.0 shader, " +
+                std::to_string(st.constChans) + " constant channels) ";
         return "particledata";
     }
     if (g_cfg.vfx10 && endsWith(path, ".p3d"))

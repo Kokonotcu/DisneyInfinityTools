@@ -25,12 +25,108 @@
 #include "audio.hpp"
 #include <cstdarg>
 #include "vfx.hpp"
+#include "chan.hpp"
 #include "gameplay.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
 {
     std::ifstream in(p, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// --vfxchan <1.0 extract root> <3.0 extract root>: chan::layout against Disney's port. Every emitter hash in a 1.0
+// and a 3.0 particle package whose material shader differs between them: the 3.0 channel count, and the keys our
+// layout gives (1.0 keys, Disney's constant key for -1) against the 3.0 emitter's, per channel and per emitter.
+// The current transcode's layout (1.0 channels as they are) is scored the same way.
+struct PdEmitter { std::vector<std::string> keys; std::string shader; };
+static std::map<uint32_t, PdEmitter> pdEmitters(const std::string& pd, const std::string& mtb, bool is30)
+{
+    std::map<uint32_t, PdEmitter> out;
+    size_t tl = is30 ? 0x18 : 0x14;
+    if (pd.size() < tl) return out;
+    size_t t = pd.size() - tl;
+    uint32_t keys = vfx::rd32(pd, t + 8);
+    uint16_t nkeys = vfx::rd16(pd, t + 0xc), ne = vfx::rd16(pd, t + 0xe), nf = vfx::rd16(pd, t + 0x10), np = vfx::rd16(pd, t + 0x12);
+    size_t extra = is30 ? 8 * (size_t)vfx::rd16(pd, t + 0x16) + 12 * (size_t)vfx::rd16(pd, t + 0x14) : 0;
+    size_t pe = t - extra - 8 * (size_t)np - 8 * (size_t)nf - 16 * (size_t)ne;
+    // material shader names: MATP shader list, then per material a u16 index (matp.Bundle._matp)
+    std::vector<std::string> shaders;
+    for (size_t o = 16, c = 0, nc = mtb.size() >= 16 ? vfx::rd32(mtb, 12) : 0; c < nc && o + 16 <= mtb.size(); ++c) {
+        uint32_t cs = vfx::rd32(mtb, o + 8);
+        if (!mtb.compare(o, 4, "MATP")) {
+            uint32_t nmat = vfx::rd32(mtb, o + 12);
+            size_t p = (o + 16 + 3) & ~(size_t)3;
+            uint32_t nsh = vfx::rd32(mtb, p);
+            p += 4;
+            std::vector<std::string> sh;
+            for (uint32_t i = 0; i < nsh && p < mtb.size(); ++i) { sh.push_back(mtb.c_str() + p); p += sh.back().size() + 1; }
+            p = (p + 3) & ~(size_t)3;
+            p += 4;
+            for (uint32_t i = 0; i < nmat && p < mtb.size(); ++i) p += strlen(mtb.c_str() + p) + 1;
+            p = (p + 1) & ~(size_t)1;
+            for (uint32_t i = 0; i < nmat; ++i) { uint16_t k = vfx::rd16(mtb, p + 2 * i); shaders.push_back(k < sh.size() ? sh[k] : ""); }
+        }
+        if (!cs) break;
+        o += cs;
+    }
+    for (uint16_t i = 0; i < ne; ++i) {
+        size_t e = pe + 16 * (size_t)i;
+        uint32_t off = vfx::rd32(pd, e), h = vfx::rd32(pd, e + 4);
+        uint16_t mat = vfx::rd16(pd, e + 10);
+        PdEmitter m;
+        m.shader = mat < shaders.size() ? shaders[mat] : "";
+        size_t cnt = is30 ? 0x121 : 0x105, at = is30 ? 0x124 : 0x108;
+        for (int k = 0; k < (uint8_t)pd[off + cnt]; ++k) {
+            uint16_t s = vfx::rd16(pd, off + at + 2 * k);
+            m.keys.push_back(s < nkeys ? pd.substr(keys + 8 * (size_t)s, 8) : "");
+        }
+        out.emplace(h, m);
+    }
+    return out;
+}
+
+static int vfxChanTest(char** a)
+{
+    namespace fs = std::filesystem;
+    fs::path e10 = fs::path(a[2]) / "assets", e30 = fs::path(a[3]) / "assets";
+    chan::Read r10 = [&](const std::string& p, std::string& o) { o = slurp(e10 / p); return !o.empty(); };
+    chan::Read r30 = [&](const std::string& p, std::string& o) { o = slurp(e30 / p.substr(2)); return !o.empty(); };
+    auto load = [&](const fs::path& root, bool is30) {
+        std::map<uint32_t, PdEmitter> all;
+        for (auto& d : fs::directory_iterator(root / "particles")) {
+            fs::path pd = d.path() / (d.path().filename().string() + ".particledata"), mtb = d.path() / (d.path().filename().string() + ".mtb");
+            if (!fs::exists(pd) || !fs::exists(mtb)) continue;
+            for (auto& [h, m] : pdEmitters(slurp(pd), slurp(mtb), is30)) all.emplace(h, m);
+        }
+        return all;
+    };
+    auto A = load(e10, false), B = load(e30, true);
+    std::map<std::string, size_t> c;
+    for (auto& [h, x] : A) {
+        auto y = B.find(h);
+        if (y == B.end() || x.shader.empty() || y->second.shader.empty() || x.shader == y->second.shader) continue;
+        const auto& kb = y->second.keys;
+        std::vector<int> ours, verb;
+        for (int i = 0; i < (int)x.keys.size(); ++i) verb.push_back(i);
+        if (!chan::layout(r10, r30, x.shader, y->second.shader, (int)x.keys.size(), ours)) {
+            std::vector<char> ra = chan::shaderRoles(r10, x.shader, false), rb = chan::shaderRoles(r30, y->second.shader, true);
+            if (ra.empty() || rb.empty()) { ++c["  no channel roles (layout kept)"]; continue; }
+            ours = verb;   // same layout
+        }
+        for (auto& [name, m] : {std::make_pair(std::string("roles"), ours), std::make_pair(std::string("1.0 as is"), verb)}) {
+            std::vector<std::string> got;
+            for (int s : m) got.push_back(s >= 0 && s < (int)x.keys.size() ? x.keys[s] : std::string(vfx::constKey(), 8));
+            ++c[name + ": emitters"];
+            c[name + ": count = Disney's"] += got.size() == kb.size();
+            c[name + ": whole emitter = Disney's"] += got == kb;
+            for (size_t j = 0; j < kb.size(); ++j) {
+                ++c[name + ": channels"];
+                c[name + ": channel key = Disney's"] += j < got.size() && got[j] == kb[j];
+            }
+        }
+    }
+    for (auto& [k, v] : c) printf("%7zu %s\n", v, k.c_str());
+    return 0;
 }
 
 // octtest --ui <1.0 extract root> <3.0 extract root> <out dir> [3.0 zone names file, one per line]
@@ -2678,14 +2774,37 @@ int main(int argc, char** argv)
         if (argc > 3) std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
         return 0;
     }
-    // --pd <1.0 .particledata | .p3d> <out>: vfx.hpp's transcode (particles.py writes the oracle's bytes to compare)
+    // --pd <1.0 .particledata | .p3d> <out> [<render table> <3.0 extract root> <1.0 extract root> <engine path of
+    // the package>]: vfx.hpp's transcode (particles.py writes the oracle's bytes to compare); with the extra
+    // arguments, the plugin's vfxchan10 too (the package's .mtb beside it through transcodeBundle, chan::layout)
+    if (argc > 3 && std::string(argv[1]) == "--vfxchan") return vfxChanTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--pd") {
         std::string in = slurp(argv[2]), out;
         vfx::Stats st;
-        bool ok = vfx::isPd10(in) ? vfx::transcode(in, out, &st) : vfx::p3d30(in, out);
+        vfx::ChanMap cm;
+        std::vector<std::pair<std::string, std::string>> shaders;
+        std::string ext30 = argc > 5 ? argv[5] : "", ext10 = argc > 6 ? argv[6] : "";
+        chan::Read r10 = [&](const std::string& p, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / p); return !o.empty(); };
+        chan::Read r30 = [&](const std::string& p, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / p.substr(2)); return !o.empty(); };
+        if (argc > 7 && vfx::isPd10(in)) {
+            render::Table T;
+            if (!T.load(slurp(argv[4]))) { printf("table load failed\n"); return 2; }
+            render::IO io;
+            io.read30 = r30;
+            io.read10 = r10;
+            render::Result r;
+            std::string p = argv[7], mtbFile = std::string(argv[2]).substr(0, strlen(argv[2]) - 13) + ".mtb";
+            if (!render::transcodeBundle(T, io, slurp(mtbFile), "3:" + p.substr(0, p.find('/') + 1), r)) { printf("bundle FAILED\n"); return 1; }
+            shaders = r.shaders;
+            cm = [&](uint16_t mat, int n10, std::vector<int>& chans) {
+                return mat < shaders.size() && chan::layout(r10, r30, shaders[mat].first, shaders[mat].second, n10, chans);
+            };
+        }
+        bool ok = vfx::isPd10(in) ? vfx::transcode(in, out, &st, &cm) : vfx::p3d30(in, out);
         if (!ok) { printf("not a 1.0 particle package or mesh\n"); return 1; }
-        printf("%u -> %u B, %d emitters %d effects %d params %d keys %d mesh emitters\n", (unsigned)in.size(),
-               (unsigned)out.size(), st.emitters, st.effects, st.params, st.keys, st.meshes);
+        printf("%u -> %u B, %d emitters %d effects %d params %d keys %d mesh emitters, %d re-channeled (%d constant channels)\n",
+               (unsigned)in.size(), (unsigned)out.size(), st.emitters, st.effects, st.params, st.keys, st.meshes, st.rechanneled,
+               st.constChans);
         std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
         return 0;
     }
