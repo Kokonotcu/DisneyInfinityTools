@@ -259,7 +259,18 @@ static void prepare(void* self, const char* name)
     std::string bo;
     npc::DataMap other;
     if (g_cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && npc::dataMap(bo, other, &why)) {
-        std::string t = npc::playsetText(n, g_db->playset, m30, other, g_cfg.hudMarker10);
+        std::vector<std::string> pkgs;   // rewards10: the 1.0 core expendables packages 3.0 does not ship
+        std::string c10;
+        npc::DataMap core10;
+        if (g_cfg.rewards10 && read10s("GameDB/Core/CoreDataMap.lua", c10) && npc::dataMap(c10, core10, &why))
+            for (auto& f : npc::coreExpendables10(core10)) {
+                int* s = g_open(f.substr(12).c_str(), 0, 0, 0, nullptr);   // the engine's own open, unhooked
+                if (s) ((void(__fastcall*)(void*, void*, uint32_t))(*(void***)s)[11])(s, nullptr, 1);
+                else pkgs.push_back(f);
+            }
+        if (g_cfg.rewards10) logf("rewards10 %s: 1.0 core expendables packages in the Playset record: %s", name,
+                                  [&] { std::string l; for (auto& f : pkgs) l += f.substr(12) + " "; return l.empty() ? std::string("none") : l; }().c_str());
+        std::string t = npc::playsetText(n, g_db->playset, m30, other, g_cfg.hudMarker10, pkgs);
         g_psPath = "GameDB/Core/" + std::string(name) + "DataMap30.lua";
         std::lock_guard<std::mutex> l2(g_sessLock);
         g_served[npc::lower(g_psPath)] = t;

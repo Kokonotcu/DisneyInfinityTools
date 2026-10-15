@@ -2487,6 +2487,22 @@ int main(int argc, char** argv)
     if (argc > 6 && std::string(argv[1]) == "--voplay") return voPlay(argc, argv);
     if (argc > 6 && std::string(argv[1]) == "--render") return renderTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--vtxf") return vtxfTest(argv, argc);
+    if (argc > 3 && std::string(argv[1]) == "--groups30") {   // --groups30 <out dir> <1.0 package.lua>...: sys::groups30
+        namespace fs = std::filesystem;
+        int groups = 0, over = 0, files = 0;
+        for (int i = 3; i < argc; ++i) {
+            std::string out;
+            int k = 0;
+            try { k = sys::groups30(slurp(argv[i]), out, &over); }
+            catch (std::exception& e) { printf("%s: %s\n", argv[i], e.what()); }
+            if (!k) continue;
+            ++files;
+            groups += k;
+            std::ofstream(fs::path(argv[2]) / fs::path(argv[i]).filename(), std::ios::binary).write(out.data(), out.size());
+        }
+        printf("%d packages with 1.0 groups, %d groups given 3.0 keys, %d spawns past the 4th\n", files, groups, over);
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--sxkeys") {   // --sxkeys <names file> <out.tsv>: sx::keyId of every line
         std::ifstream in(argv[2]);                          // (keycheck.py recomputes the ids independently)
         std::ofstream o(argv[3]);
@@ -2803,13 +2819,15 @@ int main(int argc, char** argv)
         printf("psdna: %d served from the 3.0 base, %d kept\n", ok, no);
         return 0;
     }
-    if (argc > 5 && std::string(argv[1]) == "--playset") {   // --playset <1.0 DM> <ToyBox DM> <other 3.0 DM> <playset>
-        npc::DataMap m10, tb, other;
-        if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), tb) || !npc::dataMap(slurp(argv[4]), other)) {
+    // --playset <1.0 DM> <ToyBox DM> <other 3.0 DM> <playset> [1.0 CoreDataMap: + its core expendables packages]
+    if (argc > 5 && std::string(argv[1]) == "--playset") {
+        npc::DataMap m10, tb, other, core10;
+        if (!npc::dataMap(slurp(argv[2]), m10) || !npc::dataMap(slurp(argv[3]), tb) || !npc::dataMap(slurp(argv[4]), other) ||
+            (argc > 6 && !npc::dataMap(slurp(argv[6]), core10))) {
             printf("DataMap eval failed\n");
             return 1;
         }
-        std::string t = npc::playsetText(argv[5], npc::gamedb30(m10, tb).playset, tb, other);
+        std::string t = npc::playsetText(argv[5], npc::gamedb30(m10, tb).playset, tb, other, true, npc::coreExpendables10(core10));
         fwrite(t.data(), 1, t.size(), stdout);
         return 0;
     }

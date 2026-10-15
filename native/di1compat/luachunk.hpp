@@ -7,6 +7,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -20,7 +21,8 @@ namespace luachunk {
 struct Reader {
     const uint8_t* p;
     size_t n, at = 0;
-    uint32_t u32() { need(4); uint32_t v; memcpy(&v, p + at, 4); at += 4; return v; }
+    bool big = false;   // eval: the expendables packages (both games) are big-endian chunks
+    uint32_t u32() { need(4); uint32_t v; memcpy(&v, p + at, 4); at += 4; return big ? _byteswap_ulong(v) : v; }
     uint8_t u8() { need(1); return p[at++]; }
     void skip(size_t k) { need(k); at += k; }
     void need(size_t k) const { if (at + k > n) throw std::runtime_error("lua chunk truncated"); }
@@ -94,12 +96,13 @@ struct Value {
     std::string str(const std::string& k) const { const Value* v = get(k); return v && v->t == STR ? v->s : ""; }
 };
 
-// The globals a data-only chunk sets. Throws on an opcode a table constructor does not use.
+// The globals a data-only chunk sets (little- or big-endian). Throws on an opcode a table constructor does not use.
 inline std::map<std::string, Value> eval(const std::string& in)
 {
     static const uint8_t HDR[12] = {0x1b, 'L', 'u', 'a', 0x51, 0, 1, 4, 4, 4, 8, 0};
-    if (in.size() < 12 || memcmp(in.data(), HDR, 12)) throw std::runtime_error("not a Lua 5.1 x86 chunk");
-    Reader r{(const uint8_t*)in.data(), in.size(), 12};
+    if (in.size() < 12 || memcmp(in.data(), HDR, 6) || (uint8_t)in[6] > 1 || memcmp(in.data() + 7, HDR + 7, 5))
+        throw std::runtime_error("not a Lua 5.1 chunk with 4-byte ints");
+    Reader r{(const uint8_t*)in.data(), in.size(), 12, in[6] == 0};
     auto str = [&]() { uint32_t len = r.u32(); r.skip(len); return len ? in.substr(r.at - len, len - 1) : std::string(); };
     str();
     r.skip(12);
@@ -109,7 +112,14 @@ inline std::map<std::string, Value> eval(const std::string& in)
     for (auto& k : K) {
         uint8_t t = r.u8();
         if (t == 1) { k.t = Value::BOOL; k.b = r.u8() != 0; }
-        else if (t == 3) { k.t = Value::NUM; r.need(8); memcpy(&k.n, r.p + r.at, 8); r.skip(8); }
+        else if (t == 3) {
+            k.t = Value::NUM;
+            r.need(8);
+            uint8_t d[8];
+            for (int i = 0; i < 8; ++i) d[i] = r.p[r.at + (r.big ? 7 - i : i)];
+            memcpy(&k.n, d, 8);
+            r.skip(8);
+        }
         else if (t == 4) { k.t = Value::STR; k.s = str(); }
         else if (t != 0) throw std::runtime_error("bad constant type");
     }

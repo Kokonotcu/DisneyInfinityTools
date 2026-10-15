@@ -179,6 +179,7 @@ static struct {
     bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
     bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 standard includes) as a DataMap
     bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
+    bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (coins, sparks: sys.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
@@ -287,6 +288,7 @@ static void loadConfig(const char* dir)
         else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
         else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
         else if (!strcmp(key, "hudmarker10")) g_cfg.hudMarker10 = atoi(val) != 0;
+        else if (!strcmp(key, "rewards10")) g_cfg.rewards10 = atoi(val) != 0;
         else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
         else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
         else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
@@ -1009,6 +1011,14 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
     }
     if (g_cfg.vfx10 && endsWith(path, ".p3d"))
         return vfx::p3d30(std::string((const char*)data, n), out) ? "p3d" : nullptr;
+    // an expendables package: its 1.0 groups in the keys 3.0's group reader takes (sys::groups30)
+    if (g_cfg.rewards10 && norm(path).rfind("expendables_data/", 0) == 0 && endsWith(path, ".lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
+        int over = 0, k = sys::groups30(std::string((const char*)data, n), out, &over);
+        if (k) {
+            note += "+groups30(" + std::to_string(k) + " groups" + (over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "") + ") ";
+            return "expgroups";
+        }
+    }
     // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
     if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
         int k = luachunk::rewrite(std::string((const char*)data, n), out, [](std::string& s) {

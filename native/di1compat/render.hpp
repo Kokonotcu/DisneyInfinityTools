@@ -585,21 +585,42 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
                         auto t = T.targets.find(c);
                         need.emplace_back(t == T.targets.end() ? std::set<uint32_t>() : std::set<uint32_t>(t->second.begin(), t->second.end()));
                     }
-                const std::string* bestSh = nullptr;
-                for (auto& [sh, ref] : T.donors) {
-                    auto si = T.shaders.find(sh);
-                    if (si == T.shaders.end() || si->second.slots < 1) continue;
-                    if (ref.extract.compare(0, donorPrefix.size(), donorPrefix)) continue;
-                    bool ok = true;
-                    for (auto& c : need) {
-                        bool any = false;
-                        for (uint32_t x : c) if (si->second.vf.count(x)) { any = true; break; }
-                        if (!any) { ok = false; break; }
-                    }
-                    if (!ok) continue;
-                    auto key = [&](const std::string& s, const Ref& rr) { return std::make_tuple(rr.count, s, rr.extract, rr.idx); };
-                    if (!bestSh || key(sh, ref) > key(*bestSh, *donor)) { bestSh = &sh; donor = &ref; }
+                // A 1.0 shader that reads the scene colour buffer (refraction, distortion: the 'g_colorBuffer_sampler'
+                // slot) keeps a 3.0 shader that reads it, the one sharing most of its slot roles: on the most common
+                // (opaque G-buffer) shader the screen-water drops of ScreenFX_WaterA drew nothing (in-game 2026-10-15).
+                // Skinned meshes reach this tier because their 1.0 shader is not translated.
+                std::set<uint32_t> slots10;
+                {
+                    std::string raw;
+                    gen30::Shd10 s;
+                    if (io.read10("shaders/shaders/" + m10.shader + ".shd", raw) && gen30::parse10(raw, s))
+                        slots10.insert(s.slotsB.begin(), s.slotsB.end());
                 }
+                auto reads = [&](const std::string& role) { return slots10.count(gen30::ehash("g_" + role + "_sampler")) != 0; };
+                const bool colorBuffer = reads("colorBuffer");
+                const std::string* bestSh = nullptr;
+                int bestCommon = 0;
+                for (int pass = colorBuffer ? 0 : 1; pass < 2 && !donor; ++pass)
+                    for (auto& [sh, ref] : T.donors) {
+                        auto si = T.shaders.find(sh);
+                        if (si == T.shaders.end() || si->second.slots < 1) continue;
+                        if (ref.extract.compare(0, donorPrefix.size(), donorPrefix)) continue;
+                        bool ok = true;
+                        for (auto& c : need) {
+                            bool any = false;
+                            for (uint32_t x : c) if (si->second.vf.count(x)) { any = true; break; }
+                            if (!any) { ok = false; break; }
+                        }
+                        if (!ok) continue;
+                        int common = 0;   // pass 0: colour-buffer readers only, most roles in common first
+                        if (pass == 0) {
+                            const auto& rs = si->second.roles;
+                            if (std::find(rs.begin(), rs.end(), "colorBuffer") == rs.end()) continue;
+                            for (auto& role : rs) common += !role.empty() && reads(role);
+                        }
+                        auto key = [&](int cm, const std::string& s, const Ref& rr) { return std::make_tuple(cm, rr.count, s, rr.extract, rr.idx); };
+                        if (!bestSh || key(common, sh, ref) > key(bestCommon, *bestSh, *donor)) { bestSh = &sh; donor = &ref; bestCommon = common; }
+                    }
                 if (!donor) { r.problems.push_back(m10.name + ": no 3.0 shader accepts its vertex format"); continue; }
             }
             if (!bundle30(*donor, bnd)) continue;

@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "luachunk.hpp"
 
 namespace sys {
 
@@ -669,5 +670,45 @@ inline bool applyPopin10(void* def)
     return true;
 }
 inline thread_local int g_pkg10 = -1;   // definitions given the 1.0 pop-in in the 1.0 package loading now; -1: none
+
+// ---- rewards10: 1.0 expendable groups in the keys 3.0's group reader takes ----
+// A breakable's reward is RewardType EXPENDABLE + Data <group> in both games: the group (an expendables package's
+// Groups) spawns its expendables -- Economy2Sparks1 = 2 x ECONOMY1 (gold coin) + 1 x SPARK. 3.0's reader FUN_01603b10
+// reads a group's spawns only as flat keys "Expendables.<1..4>.Expendable" / ".Min" / ".Max" / ".Chance" (defaults
+// 1, 1, 100; the name lower-cased, hashed); 1.0 writes them as ExpendablesSpawned = {{ExpendableName, Min, Max,
+// Chance}, ...} (630 groups in the 1.0 packages), so every 1.0 group spawned nothing: no coins, no sparks from a
+// broken crate (in-game 2026-10-15). Served as Lua text with the 3.0 keys added (3.0 loads Lua text as well as
+// bytecode); a 5th+ spawn has no 3.0 key and is counted in *over. Returns the groups given keys (0: nothing to do).
+inline int groups30(const std::string& chunk, std::string& out, int* over = nullptr)
+{
+    using luachunk::Value;
+    auto G = luachunk::eval(chunk);
+    auto pkg = G.find("ExpendablesPackage");
+    const Value* groups = pkg == G.end() ? nullptr : pkg->second.get("Groups");
+    if (!groups || groups->t != Value::TAB) return 0;
+    auto str = [](const std::string& s) { Value v; v.t = Value::STR; v.s = s; return v; };
+    int n = 0;
+    for (auto& [k, g] : *groups->tab) {
+        const Value* found = g.get("ExpendablesSpawned");
+        if (g.t != Value::TAB || !found || found->t != Value::TAB) continue;
+        const Value sp = *found;   // a copy (shares the table): the pushes below move g's entries
+        for (int i = 1;; ++i) {
+            Value key;
+            key.t = Value::NUM;
+            key.n = i;
+            const Value* e = sp.get(key);
+            if (!e) break;
+            if (i > 4) { if (over) ++*over; continue; }
+            std::string p = "Expendables." + std::to_string(i) + ".";
+            for (auto [from, to] : {std::pair{"ExpendableName", "Expendable"}, {"Min", "Min"}, {"Max", "Max"}, {"Chance", "Chance"}})
+                if (const Value* v = e->get(from)) g.tab->push_back({str(p + to), *v});
+        }
+        ++n;
+    }
+    if (!n) return 0;
+    out.clear();
+    for (auto& [name, v] : G) out += name + " = " + luachunk::text(v) + "\n";
+    return n;
+}
 
 }  // namespace sys
