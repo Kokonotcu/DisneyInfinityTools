@@ -67,10 +67,23 @@ static int __fastcall hkShowRibbon(uint8_t* self, void* edx, int player)
 // ProgressLog screen, 3.0's has no ProgressLog and maps MissionLog to MissionLog; tutorial element 62 is "ProgressLog"
 // in 1.0 (FUN_00ba3950) and "MissionLog" in 3.0 (FUN_00de3a60). selectmenu.lua's Mission Log entry asks for the 1.0
 // event (UI_TriggerEvent -> FUN_0156dde0, the event-template request).
+// The pause: 1.0's SelectMenu pauses in onEnter (Pause_PauseGame) and, for its Mission Log entry, removes itself and
+// leaves the pause to the log. 3.0's MissionLog releases a pause only when its event carries pauseGame (onExit /
+// onHidden -> Pause_UnPauseFromPausedScreenIfPaused), which 3.0's own opener sets for one local player (FUN_00b68f60
+// 0x00B69025: player manager +0x90 == 1 -> FUN_0156c890(event, "pauseGame", 1)). The renamed 1.0 event had none, so
+// closing the log (Guide Me, Esc) left the game paused: dump 2026-10-14 17:25 (guideme-freeze.dmp) has player 0
+// paused (DAT_0225f478[0] = 1), no pausing screen left in the screen manager, selectmenu.lua's strings loaded.
+typedef uint8_t(__fastcall* EventSetBoolFn)(void* ev, void* edx, const char* key, uint32_t v);
 static void* __fastcall hkScreenReq(void* ui, void* edx, const char* name, int a2, int player)
 {
-    if (name && !strcmp(name, "ProgressLog")) name = "MissionLog";
-    return g_screenReq(ui, edx, name, a2, player);
+    bool log10 = name && !strcmp(name, "ProgressLog");
+    void* ev = g_screenReq(ui, edx, log10 ? "MissionLog" : name, a2, player);
+    uint8_t* pm = log10 && ev ? *(uint8_t**)rt(0x0225F540) : nullptr;
+    if (pm && *(int*)(pm + 0x90) == 1) {
+        ((EventSetBoolFn)rt(0x0156C890))(ev, nullptr, "pauseGame", 1);
+        logf("screen request ProgressLog -> MissionLog for player %d, pauseGame (the log releases SelectMenu's pause)", player);
+    }
+    return ev;
 }
 
 // ---- tools10: the 1.0 level lists of the tools and packs (plan TL-1) ----

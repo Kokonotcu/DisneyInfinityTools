@@ -906,7 +906,17 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
             if (!cs) break;
             o += cs;
         }
-        if (!hasMatp) return nullptr;
+        if (!hasMatp) {
+            // the _holo portrait stand-in (below, in hkOpen) carries the asked name (ui::texBundleAs)
+            std::string np = norm(path), stem = np.substr(np.rfind('/') + 1);
+            stem.resize(stem.size() - 4);
+            if (np.rfind("ui/charactericons/", 0) == 0 && endsWith(path, "_holo.mtb") &&
+                !(out = ui::texBundleAs(std::string((const char*)data, n), stem)).empty()) {
+                note += "+texname(" + stem + ") ";
+                return "mtb";
+            }
+            return nullptr;
+        }
         if (!g_renderOk) { note += "render table missing "; return nullptr; }
         std::string p = norm(path);
         render::IO io;
@@ -2615,6 +2625,75 @@ static void __fastcall hkTrack(uint8_t* mgr, void*, uint8_t* mission, int player
     }
 }
 
+// The compass draw: MissionNavData's update FUN_00c13c50 (cdecl, the avatar's component). +0x75 enabled (CheckCompass),
+// +0x68/+0x69 on / hidden, +0xa4 its hud_Marker screen handle (screen manager [0x02289E88], lookup FUN_0154fed0,
+// screen +0x6d movie loaded), +0x78 the target FUN_00be3c20 last drew, +0x10 marker 0 (+0x24 visible, +8 x, +0xc y,
+// +0x20 alpha 0..100: 0 under 10 m of the target, full from 31 m). One line whenever that state changes, plus the
+// pause flag (DAT_0225f478[0], Pause_UnPauseFromPausedScreenIfPaused's test).
+typedef void(__cdecl* NavUpdateFn)(uint8_t* nav);
+static NavUpdateFn g_navUpdate;
+static void __cdecl hkNavUpdate(uint8_t* nav)
+{
+    g_navUpdate(nav);
+    if (!nav || !sys::readable(nav, 0xa8)) return;
+    uint8_t* m0 = *(uint8_t**)(nav + 0x10);
+    bool mOk = m0 && sys::readable(m0, 0x28);
+    int vis = mOk ? m0[0x24] : -1;
+    float alpha = mOk ? *(float*)(m0 + 0x20) : -1.f, *tg = (float*)(nav + 0x78);
+    int h = *(int*)(nav + 0xa4), loaded = -1;
+    void* mgr = *(void**)rt(0x02289E88);
+    if (mgr && h != -1) {
+        uint8_t* scr = ((uint8_t * (__fastcall*)(void*, void*, int)) rt(0x0154FED0))(mgr, nullptr, h);
+        loaded = scr ? scr[0x6d] : -2;
+    }
+    int paused = *(uint8_t*)rt(0x0225F478);
+    static int last[6] = {-9, -9, -9, -9, -9, -9};
+    static float lastT[3];
+    int now[6] = {nav[0x75], nav[0x68] | nav[0x69] << 1, loaded, vis, alpha < 0 ? -1 : alpha < 1 ? 0 : alpha < 99 ? 1 : 2, paused};
+    bool moved = fabsf(tg[0] - lastT[0]) + fabsf(tg[1] - lastT[1]) + fabsf(tg[2] - lastT[2]) > 2.f;
+    if (!memcmp(now, last, sizeof(now)) && !moved) return;
+    memcpy(last, now, sizeof(now));
+    memcpy(lastT, tg, sizeof(lastT));
+    static volatile LONG lines;
+    if (lockTraceRoom(lines) && lines <= 300)
+        logf("compass draw: enabled %d on %d hidden %d, hud_Marker screen %d loaded %d, marker0 visible %d at (%.0f %.0f) alpha %.0f, "
+             "target (%.2f %.2f %.2f), paused %d", nav[0x75], nav[0x68], nav[0x69], h, loaded, vis, mOk ? *(float*)(m0 + 8) : 0.f,
+             mOk ? *(float*)(m0 + 0xc) : 0.f, alpha, tg[0], tg[1], tg[2], paused);
+}
+
+// The Mission Objectives pane: MissionDetailsPanel lists MissionLogData ProgressData[i].ProgressString (empty ones
+// skipped), written for an instantiated mission by FUN_0157cd10 (thiscall on the mission, Lua table ref, ret 4) from
+// its progress entries: pointer array mission+0x2ac, count +0x2b0; entry [0] state 1/2/3, [1] ProgressString,
+// [2] ProgressStringKey, [3] suffix, [4]/[5] current/total (float), byte +0x1c StringIsKey, +0x1d IsOptional.
+// One line per mission and entry count.
+typedef void(__fastcall* MisProgressFn)(uint8_t* mission, void* edx, void* table);
+static MisProgressFn g_misProgress;
+static void __fastcall hkMisProgress(uint8_t* mission, void*, void* table)
+{
+    g_misProgress(mission, nullptr, table);
+    if (!mission || !sys::readable(mission + 0x2ac, 8) || !sys::readable(mission + 0x140, 4)) return;
+    char name[96], a[96], k[96], s[96];
+    uint8_t* ctx = *(uint8_t**)(mission + 0x140);
+    safeCopy(name, sizeof(name), ctx && sys::readable(ctx + 0x10, 4) ? *(const char**)(ctx + 0x10) : "?");
+    uint8_t** arr = *(uint8_t***)(mission + 0x2ac);
+    int n = *(int*)(mission + 0x2b0);
+    static std::mutex m;
+    static std::set<std::string> seen;
+    { std::lock_guard<std::mutex> lock(m); if (seen.size() > 200 || !seen.insert(std::string(name) + "#" + std::to_string(n)).second) return; }
+    static volatile LONG lines;
+    if (!lockTraceRoom(lines) || lines > 400) return;
+    logf("mission progress '%s': %d entries", name, n);
+    for (int i = 0; i < n && i < 12 && arr && sys::readable(arr + i, 4); ++i) {
+        const uint32_t* e = (const uint32_t*)arr[i];
+        if (!e || !sys::readable(e, 0x24)) continue;
+        safeCopy(a, sizeof(a), (const char*)e[1]);
+        safeCopy(k, sizeof(k), (const char*)e[2]);
+        safeCopy(s, sizeof(s), (const char*)e[3]);
+        logf("  [%d] state %u progress '%s' key '%s' suffix '%s' %.0f/%.0f isKey %d optional %d", i, e[0], a, k, s,
+             *(const float*)(e + 4), *(const float*)(e + 5), ((const uint8_t*)e)[0x1c], ((const uint8_t*)e)[0x1d]);
+    }
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -3135,6 +3214,14 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         // table stands in (same strings).
         if (!data && endsWith(p, "_pc_con.dct")) {
             std::string w = std::string(p, strlen(p) - 11) + "_WIN32.dct";
+            data = read10(w.c_str(), &n, &where);
+        }
+        // 3.0's MissionPresentation shows a radio call's giver as <icon>_Holo (missionpresentation.lua GetGiverIcon,
+        // isRadioTransmission); 3.0 ships that variant for 7 givers, 1.0 for none (1.0 showed the portrait itself):
+        // the second Edna window asked for ui/charactericons/inc_edna_full_holo.mtb and fell back to the disc icon.
+        // The 1.0 portrait stands in.
+        if (!data && np.rfind("ui/charactericons/", 0) == 0 && endsWith(p, "_holo.mtb")) {
+            std::string w = std::string(p, strlen(p) - 9) + ".mtb";
             data = read10(w.c_str(), &n, &where);
         }
         std::string annoZip, annoMember;   // a 1.0 dialog line's lipsync (audio.hpp annoSource, vo10)
@@ -3712,6 +3799,9 @@ extern "C" void __stdcall Pentane_Main()
         hook("colvis toggle apply (locktrace10)", 0x01803550, "558B6C2408565733FF8BF1", (void*)&hkColVisApply, (void**)&g_colVisApply);
         hook("beacon map lookup (locktrace10)", 0x01591570, "83EC088B81740100005355", (void*)&hkBeaconLookup, (void**)&g_beaconLookup);
         hook("compass mission track (locktrace10)", 0x015BA4D0, "83EC0C538B5C2414568BF1", (void*)&hkTrack, (void**)&g_track);
+        hook("compass draw (locktrace10)", 0x00C13C50, "558BEC83E4F081ECB4000000", (void*)&hkNavUpdate, (void**)&g_navUpdate);
+        hook("mission progress entries (locktrace10)", 0x0157CD10, "558BEC83E4F86AFF68????????64A100000000", (void*)&hkMisProgress,
+             (void**)&g_misProgress);
     }
     if (g_cfg.opacityLog10)
         hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
