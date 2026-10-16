@@ -37,6 +37,7 @@
 #include "games/di1/config.hpp"
 #include "games/di1/octsteps.hpp"
 #include "games/di1/renderio.hpp"
+#include "games/di1/transcode.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -378,37 +379,6 @@ static di1::OctSteps octSteps10()
     return o;
 }
 
-// -> codec name if out holds transcoded bytes, nullptr to serve the 1.0 bytes unchanged.
-// A 1.0 mission line (<line>__missiongraph.lua, the Unlocks database) in 3.0 terms. 1.0 started a story line's
-// opening mission -- the one with no Unlocks -- by itself, even with its giver far away (IN_City_DockFire: giver
-// IN_Edna, who spawns at HQ ~550 m from the start; Edna's call, the compass and ledge tutorials open the 1.0 game,
-// user screenshots 2026-10-13). 3.0 waits for the player to talk to a named giver unless the record says
-// ForceActivateFirstTime = true (3.0 ships it on its own named-giver openers: MBA_Side_Tutorial_Quest_01,
-// PSX_L1_Main04). Adds that field to story-line records with empty Unlocks. Returns the records changed.
-static int missionGraph30(std::string& t)
-{
-    static const std::string emptyUnlocks = "\t\t\tUnlocks = \n\t\t\t{\n\t\t\t},\n\t\t\tline = \"";
-    int n = 0;
-    for (size_t pos = t.find(emptyUnlocks); pos != std::string::npos; pos = t.find(emptyUnlocks, pos + 1)) {
-        size_t q = pos + emptyUnlocks.size(), e = t.find('"', q);
-        if (e == std::string::npos) break;
-        std::string line = t.substr(q, e - q);
-        for (char& c : line) c = (char)tolower((unsigned char)c);
-        size_t start = t.rfind("\n\t\t{\n", pos);
-        if (start == std::string::npos || line.find("story") == std::string::npos) continue;
-        std::string rec = t.substr(start, pos - start);
-        size_t ar = rec.find("\t\t\t\tAvatarReady = ");
-        if (rec.find("Type = \"MissionContext\"") == std::string::npos || rec.find("ForceActivateFirstTime") != std::string::npos ||
-            ar == std::string::npos)
-            continue;
-        static const std::string add = "\t\t\t\tForceActivateFirstTime = true,\n";
-        t.insert(start + ar, add);
-        pos += add.size();
-        ++n;
-    }
-    return n;
-}
-
 // The shaders a particle package's materials are served on: its .mtb (beside it, or the overlay member the alias
 // names) through the stand-alone bundle transcode (the .mtb case of transcode(), same donors), kept in the session
 // so the engine's .mtb request right after (log: particledata then mtb, same frame) is served the same bytes.
@@ -467,266 +437,65 @@ static bool isSpark10(const std::string& dnaFile)
     return memo[p] = spark;
 }
 
+// The cfg keys the transcode dispatch reads (games/di1/transcode.hpp)
+static di1::TranscodeOptions transcodeOptions10()
+{
+    di1::TranscodeOptions o;
+    o.challenge = g_cfg.challenge10;
+    o.behaviour = g_cfg.behav10;
+    o.events = g_cfg.events10;
+    o.progress = g_cfg.progress10;
+    o.text = g_cfg.text10;
+    o.banm = g_cfg.banm10;
+    o.psdna = g_cfg.psdna30;
+    o.vfx = g_cfg.vfx10;
+    o.rewards = g_cfg.rewards10;
+    o.sx = g_cfg.sx10;
+    o.bmx = g_cfg.bmx10;
+    o.btx = g_cfg.btx10;
+    return o;
+}
+
+static void keepBundle(const std::string& path, const std::string& bytes)
+{
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    g_served[path] = bytes;
+}
+
+// A DataMap entry, before it is normalised: Cho aliases (choalias10) and the playset's GameDB tables (sys.hpp)
+static void dataMapEntry10(const std::string& s)
+{
+    if (g_cfg.choAlias10) g_choAlias.add(s);
+    sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
+}
+
+// The plugin's readers, tables and session for the transcode dispatch
+static di1::TranscodeIO transcodeIO10()
+{
+    di1::TranscodeIO io;
+    io.read10 = read10s;
+    io.read30x = read30x;
+    io.read30 = read30;
+    io.oct = octSteps10();
+    io.mer = g_merOk ? &g_mer : nullptr;
+    io.render = g_renderOk ? &g_render : nullptr;
+    io.lang30 = lang30;
+    io.keep = keepBundle;
+    io.renderProblem = [](const std::string& p, const std::string& pr) {
+        logf("render problem %s: %s", p.c_str(), pr.c_str());
+    };
+    if (g_cfg.vfxChan10) io.particleShaders = particleShaders;
+    if (g_cfg.currency10) io.isSpark = isSpark10;
+    io.dataMapEntry = dataMapEntry10;
+    return io;
+}
+
+// -> codec name if out holds transcoded bytes, nullptr to serve the 1.0 bytes unchanged (games/di1/transcode.hpp).
 // mtc: for a .mer, also the .mtc built from the same transcoded graph (the engine asks for the .mtc right after,
 // 48/48 pairs in a load: serving it from the session saves reading and transcoding the .mer a second time)
 static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note, std::string* mtc = nullptr)
 {
-    // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp): type data, giver sections, giver DNA
-    std::string np = norm(path);
-    bool types = !gameplay::challengeTypePath(np).empty(), ap = endsWith(path, ".ap"), dna = endsWith(path, ".dnax");
-    bool mlua = endsWith(path, ".lua") && np.rfind("mission_data/", 0) == 0 && !endsWith(path, "__missiongraph.lua");
-    std::string actLua;   // a mission table activityTasks30 changed
-    if (g_cfg.challenge10 && n && (types || ap || dna || mlua)) {
-        std::string t((const char*)data, n);
-        int k = 0;
-        const char* codec = nullptr;
-        if (types && t[0] != 0x1b) { k = gameplay::challengeTypes30(t); codec = "challengetypes"; }
-        else if (mlua && t[0] != 0x1b) { k = gameplay::activityTasks30(t); codec = "activitytasks"; }
-        else if (ap && t.find("\nActivityIcon=") != std::string::npos) {   // givers of the missions activityTasks30
-            std::string graph, dir = np.substr(0, np.rfind('/') + 1);                // converts (the missiongraph beside
-            std::set<std::string> ok;                                                 // the .ap names them)
-            if (read10s(np.substr(0, np.size() - 3) + ".lua", graph))
-                ok = gameplay::activityGivers(graph, [&](const std::string& name, std::string& o) {
-                    std::string m = dir + name + ".lua";
-                    for (char& c : m) c = (char)tolower((unsigned char)c);
-                    return read10s(m, o);
-                });
-            k = gameplay::apGivers30(t, &ok);
-            codec = "apgivers";
-        }
-        else if (dna && t[0] == 0x1b) {
-            std::string o;
-            try { k = gameplay::dnaGadgets30(t, o); } catch (std::exception&) { k = 0; }
-            if (k) t.swap(o);
-            codec = "dnagadgets";
-        }
-        if (k) {
-            note += std::string("+") + codec + "(" + std::to_string(k) + ") ";
-            if (mlua) actLua.swap(t);   // integration: mis's events10 still applies to it (below; disjoint keys)
-            else { out.swap(t); return codec; }
-        }
-    }
-    if (endsWith(path, "__missiongraph.lua") && n && ((const char*)data)[0] != 0x1b) {
-        std::string t((const char*)data, n);
-        int k = missionGraph30(t), b = g_cfg.behav10 ? mission::behaviour30(t) : 0;
-        if (!k && !b) return nullptr;
-        note += "+missiongraph(" + std::to_string(k) + " opening missions force-activated, " + std::to_string(b) +
-                " behaviours 2 -> story/side) ";
-        out.swap(t);
-        return "missiongraph";
-    }
-    // a mission (Mission_Data/<playset>/<line>/<name>.lua): presentation events in the 3.0 enum, the 1.0
-    // mission-generated objective line as 3.0's ProgressString "<default>" (mission.hpp)
-    if ((g_cfg.events10 || g_cfg.progress10 || !actLua.empty()) && endsWith(path, ".lua") && n &&
-        ((const char*)data)[0] != 0x1b && norm(path).rfind("mission_data/", 0) == 0 && !strstr(path, "__")) {
-        std::string t = actLua.empty() ? std::string((const char*)data, n) : actLua;
-        bool m = t.compare(0, 9, "Mission =") == 0;
-        int k = g_cfg.events10 && m ? mission::luaEvents30(t) : 0, pr = g_cfg.progress10 && m ? mission::progress30(t) : 0;
-        if (k) note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
-        if (pr) note += "+progress(objective line <MissionName>_Desc) ";
-        int tl = g_cfg.progress10 && m ? mission::taskLines30(t) : 0;
-        if (tl) note += "+tasklines(" + std::to_string(tl) + " 1.0 eval lines as ProgressString) ";
-        if (!k && !pr && !tl && actLua.empty()) return nullptr;
-        out.swap(t);
-        return k || pr || tl ? "mission" : "activitytasks";
-    }
-    if (!actLua.empty()) { out.swap(actLua); return "activitytasks"; }
-    if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
-        try {
-            oct::File f = oct::File::parse(data, n);
-            if (!di1::transcodeOct(norm(path), f, octSteps10(), note)) return nullptr;
-            out = f.write();
-            return "oct";
-        } catch (std::exception& e) {
-            note = std::string("oct parse failed: ") + e.what();
-            return nullptr;
-        }
-    }
-    // a Meridian graph (.mer, mer.hpp, MER-2/4) and its type manifest (.mtc, rebuilt from the transcoded graph, since
-    // stand-ins change the class counts)
-    bool isMtc = endsWith(path, ".mtc");
-    if ((endsWith(path, ".mer") || isMtc) && g_merOk) {
-        std::string graph, why;
-        if (isMtc) {
-            std::string p = norm(path);
-            if (!read10s(p.substr(0, p.size() - 4) + ".mer", graph)) return nullptr;
-        } else graph.assign((const char*)data, n);
-        if (graph.size() < 4 || oct::u((const uint8_t*)graph.data(), 4) != oct::MAGIC) return nullptr;
-        oct::File f = oct::File::parse(graph.data(), graph.size());
-        int actRe = 0, actDrop = 0, act = g_cfg.challenge10 ? gameplay::activityGraph30(f, &actRe, &actDrop) : 0;   // gp
-        if (act) note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) + " participant links, " +
-                         std::to_string(actDrop) + " dropped) ";
-        mer::Stats st;
-        if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
-        char buf[300];
-        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches, "
-                  "%d net-sync links, %d toggle types) ", st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped,
-                  st.events, st.fetches, st.netSync, st.typed);
-        note += buf;
-        out = isMtc ? mer::mtc(f) : f.write();
-        if (!isMtc && mtc) *mtc = mer::mtc(f);
-        return isMtc ? "mtc" : "mer";
-    }
-    // a localisation table: keys re-hashed under 3.0's one seed (dct.hpp), names from the stringids table beside it
-    if (endsWith(path, ".dct") && n >= 4 && !memcmp(data, "DICT", 4)) {
-        std::string p = norm(path), ids;
-        size_t us = p.rfind('_'), sl = p.rfind('/');
-        if (us == std::string::npos || sl == std::string::npos || us < sl) return nullptr;
-        std::string plat = endsWith(path, "_pc_con.dct") ? "_win32.dct" : p.substr(us);   // its stand-in (hkOpen)
-        if (!read10s(p.substr(0, sl + 1) + "stringids" + plat, ids)) { note += "dct: no stringids beside it "; return nullptr; }
-        std::string t((const char*)data, n);
-        int dropped = 0, kept = dct::reseed(t, ids, dct::SEED30, &dropped);
-        if (kept < 0) return nullptr;
-        note += "+dct(" + std::to_string(kept) + " keys re-hashed, " + std::to_string(dropped) + " unnamed dropped) ";
-        std::string m10, mids, lang = p.substr(sl + 1, (endsWith(path, "_pc_con.dct") ? p.size() - 11 : us) - sl - 1);
-        if (g_cfg.text10 && read10s("lang/main/" + lang + "_win32.dct", m10) && read10s("lang/main/stringids_win32.dct", mids)) {
-            int k = dct::supplement(t, m10, mids, lang30(lang));
-            note += "+text10(" + std::to_string(k) + " 1.0 lang/main keys no 3.0 table has) ";
-        }
-        out.swap(t);
-        return "dct";
-    }
-    // collision (.btd blocks in the 3.0 layout, btd.hpp) and its block table (.btm, rebuilt from the converted
-    // sibling .btd); raw 1.0 collision gave a world without ground (in-game 2026-10-13: the avatar fell, respawned)
-    bool isBtm = endsWith(path, ".btm");
-    if (endsWith(path, ".btd") || isBtm) {
-        std::string src, conv;
-        if (isBtm) {
-            std::string p = norm(path);
-            if (!read10s(p.substr(0, p.size() - 4) + ".btd", src)) return nullptr;
-        } else src.assign((const char*)data, n);
-        if (!btd::convert(src, conv)) { note += "btd: not the 1.0 block layout "; return nullptr; }
-        char buf[64];
-        sprintf_s(buf, "+btd(%u blocks) ", (unsigned)btd::blocks(conv, 3).size());
-        note += buf;
-        out = isBtm ? btd::btm(conv) : conv;
-        return isBtm ? "btm" : "btd";
-    }
-    // an entity description (.bent 4.1 -> 4.1f, bent.hpp, NPC-4): characters, playset avatars, choreographies
-    if (endsWith(path, ".bent") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
-        oct::File f = oct::File::parse(data, n);
-        std::string why;
-        if (!bent::transcode(f, norm(path), &why)) { note += "bent: " + why + " "; return nullptr; }
-        out = f.write();
-        return "bent";
-    }
-    // a blended animation (.banm 1.0f -> 1.0g, cho.hpp, NPC-5): 3.0 dropped every 1.0 one at its version gate
-    if (g_cfg.banm10 && endsWith(path, ".banm") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
-        oct::File f = oct::File::parse(data, n);
-        if (!cho::banm30(f, norm(path))) { note += "banm: not 1.0f "; return nullptr; }
-        out = f.write();
-        return "banm";
-    }
-    // a material bundle outside any asset session (particles/<x>.mtb): its materials onto 3.0 shaders, generic donors
-    // from the same 3.0 asset family (in-game 2026-10-12: raw particles/IN_City.mtb -> int3 in Shader_LookupCrc)
-    if (endsWith(path, ".mtb") && n >= 4 && !memcmp(data, "BNDL", 4)) {
-        // texture-only bundles (UI images: ui/charactericons, flash/<screen>/*_iN.mtb) hold a named TEXB laid out as
-        // in 3.0 (count, name length, name, hash) and no materials: served as they are. The material path read them
-        // as unnamed TEXB and wrote garbage (in-game 2026-10-13: Edna's dialog icon fell back to the IN badge).
-        bool hasMatp = false;
-        const size_t nc = n >= 16 ? oct::u((const uint8_t*)data + 12, 4) : 0;
-        for (size_t o = 16, c = 0; c < nc && bytes::fits(n, o, 16); ++c) {
-            if (!memcmp((const char*)data + o, "MATP", 4)) hasMatp = true;
-            uint32_t cs = oct::u((const uint8_t*)data + o + 8, 4);
-            if (!cs || cs > n - o) break;   // a chunk past the end ends the walk; o never wraps (A-26)
-            o += cs;
-        }
-        if (!hasMatp) {
-            // the _holo portrait stand-in (below, in hkOpen) carries the asked name (ui::texBundleAs)
-            std::string np = norm(path), stem = np.substr(np.rfind('/') + 1);
-            stem.resize(stem.size() - 4);
-            if (np.rfind("ui/charactericons/", 0) == 0 && endsWith(path, "_holo.mtb") &&
-                !(out = ui::texBundleAs(std::string((const char*)data, n), stem)).empty()) {
-                note += "+texname(" + stem + ") ";
-                return "mtb";
-            }
-            return nullptr;
-        }
-        if (!g_renderOk) { note += "render table missing "; return nullptr; }
-        std::string p = norm(path);
-        render::IO io = di1::bundleIO(read10s, read30x);
-        render::Result r;
-        if (!render::transcodeBundle(g_render, io, std::string((const char*)data, n), "3:" + p.substr(0, p.find('/') + 1), r)) {
-            for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
-            note += "render FAILED ";
-            return nullptr;
-        }
-        {
-            std::lock_guard<std::mutex> lock(g_sessLock);
-            g_served[p] = r.mtb;   // the engine reopens bundles; transcode once
-        }
-        char buf[160];
-        sprintf_s(buf, "+materials(real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["real"], r.tiers["same-sh"],
-                  r.tiers["generic"], (unsigned)r.textures10.size());
-        note += buf;
-        out = r.mtb;
-        return "mtb";
-    }
-    // a 1.0 playset avatar DNA that 3.0 ships only as its base DNA: the base, naming the 1.0 _PS model (npc::psDna30)
-    if (g_cfg.psdna30 && endsWith(path, "_ps.dnax")) {
-        std::string p = norm(path), base, why;
-        if (!read30(p.substr(0, p.size() - 8) + ".dnax", base)) return nullptr;
-        if (!npc::psDna30(std::string((const char*)data, n), base, out, &why)) { note += "psdna30: " + why + " "; return nullptr; }
-        note += "+psdna30(3.0 base, " + why + ") ";
-        return "psdna30";
-    }
-    // a particle package (trailer v12 -> v47; 3.0's loader rejects 1.0's, so nothing of it registered) and its meshes
-    if (g_cfg.vfx10 && endsWith(path, ".particledata")) {
-        vfx::Stats st;
-        vfx::ChanMap cm;
-        auto shaders = g_cfg.vfxChan10 ? particleShaders(norm(path), note) : std::vector<std::pair<std::string, std::string>>();
-        if (!shaders.empty())
-            cm = [&shaders](uint16_t mat, int n10, std::vector<int>& chans) {
-                return mat < shaders.size() && chan::layout(read10s, read30x, shaders[mat].first, shaders[mat].second, n10, chans);
-            };
-        if (!vfx::transcode(std::string((const char*)data, n), out, &st, &cm)) return nullptr;
-        note += "+particles(" + std::to_string(st.emitters) + " emitters, " + std::to_string(st.effects) + " effects, " +
-                std::to_string(st.params) + " params, " + std::to_string(st.keys) + " keys, " + std::to_string(st.meshes) +
-                " mesh emitters, " + std::to_string(st.rechanneled) + " re-channeled for their 3.0 shader, " +
-                std::to_string(st.constChans) + " constant channels) ";
-        return "particledata";
-    }
-    if (g_cfg.vfx10 && endsWith(path, ".p3d"))
-        return vfx::p3d30(std::string((const char*)data, n), out) ? "p3d" : nullptr;
-    // an expendables package: its 1.0 groups in the keys 3.0's group reader takes (sys::groups30)
-    if (g_cfg.rewards10 && norm(path).rfind("expendables_data/", 0) == 0 && endsWith(path, ".lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        int over = 0, sparks = 0;
-        int k = sys::groups30(std::string((const char*)data, n), out, &over, g_cfg.currency10 ? std::function<bool(const std::string&)>(isSpark10) : nullptr, &sparks);
-        if (k) {
-            note += "+groups30(" + std::to_string(k - sparks) + " groups" + (over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "") +
-                    (sparks ? ", " + std::to_string(sparks) + " spark pickups paying INV_SPARKS" : "") + ") ";
-            return "expgroups";
-        }
-    }
-    // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
-    if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        int k = luachunk::rewrite(std::string((const char*)data, n), out, [](std::string& s) {
-            if (g_cfg.choAlias10) g_choAlias.add(s);
-            sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
-            return datamap::normalise(s);
-        });
-        note += std::to_string(k) + " entries normalised ";
-        return k ? "datamap" : nullptr;
-    }
-    // a 1.0 Slang script (sx.hpp SX-1): 3.0's fix-up FUN_007366f0 takes only 0x100d containers
-    if (g_cfg.sx10 && endsWith(path, ".sx") && sx::is10(data, n)) {
-        std::string why;
-        int k = sx::transcode(data, n, norm(path), out, &why);
-        if (k < 0) { note += "sx: " + why + " "; return nullptr; }
-        note += "+sx(" + std::to_string(k) + " imports) ";
-        return "sx";
-    }
-    // a 1.0 behavior map / behavior tree (sx.hpp BMX-1 / BTX-1): 3.0's loaders drop tables without Version 763
-    bool isBmx = g_cfg.bmx10 && endsWith(path, ".bmx"), isBtx = g_cfg.btx10 && endsWith(path, ".btx");
-    if ((isBmx || isBtx) && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        std::string why;
-        auto exists = [](const std::string& p) { std::string s; return read10s(p, s); };
-        int k = isBmx ? sx::ai::bmx(data, n, exists, out, &why) : sx::ai::btx(data, n, exists, out, &why);
-        if (k < 0) { note += std::string(isBmx ? "bmx: " : "btx: ") + why + " "; return nullptr; }
-        note += (isBmx ? "+bmx(" : "+btx(") + std::to_string(k) + (isBmx ? " behaviors) " : " tables) ");
-        return isBmx ? "bmx" : "btx";
-    }
-    return nullptr;
+    return di1::transcode(path, data, n, out, note, mtc, transcodeOptions10(), transcodeIO10());
 }
 
 static bool memtestMatch(const char* p)
