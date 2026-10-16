@@ -3,8 +3,7 @@
 // zips and handed to the engine as Genie::MemFile streams through its asset open, FUN_0041cb10 (worlds,
 // textures, Lua ... all go through it, archive members included).
 // Log: <game dir>\di1compat.log (Pentane's own log function is not used: its calling convention is unverified).
-// Config: <plugin dir>\di1compat.cfg  install10 = <1.0 install> | serve10 = 0|1 | trace = 0|1 |
-//         memtest = <path substring>[,...]  (serve those 3.0 files from a memory copy: proves the MemFile path)
+// Config: <plugin dir>\di1compat.cfg, "key = value" lines; every key and its default in games/di1/config.hpp.
 #include <windows.h>
 #include <tlhelp32.h>
 #include <intrin.h>
@@ -29,6 +28,7 @@
 #include "core/veh.hpp"
 #include "core/zip.hpp"
 #include "games/di1/archives.hpp"
+#include "games/di1/config.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -87,245 +87,7 @@ using core::copyToMemFile;
 using core::memFile;
 using core::readStream;
 
-// ---- config: <plugin dir>\di1compat.cfg, lines "key = value" ----
-static struct {
-    char install10[MAX_PATH] = "";   // the 1.0 install (its assets\ holds plain zips)
-    bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
-    bool trace = false;              // diagnostic: log every open, 26 probe hooks (incl. hkInst, hide_ps, DR0 watch)
-    bool missionTrace = false;       // log 1.0 playset mission context state changes (one cheap hook; trace's cost frames)
-    bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
-    bool breakTrace = false;         // probe: clip evaluation clocks, exploder hits and explodes (log only)
-    bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
-    bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
-    bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
-    bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 format's 'skin' layout, bones kept
-    bool skinTr10 = true;            // skinned materials take their translated 1.0 shader too (identity bones; gen30)
-    bool sceneSettings10 = true;     // a 1.0 bundle's scene settings (SSET: fog, bloom, exposure, grading) re-laid into 3.0's
-    bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
-    int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
-    int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
-    bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
-    int fadeProbe10 = 0;             // test: 1 log the inputs of every faded object's fade (visibility test FUN_0044b8f0); 2 also draw it unfaded
-    bool fpsLog10 = false;           // test: once a second, frame time and how much of it the main thread waits on rendering
-    bool loadProf10 = false;         // diagnostic: per-open timings + a sampling profile of the frame/open/busiest threads
-    char memtest[600] = "";          // comma list of path substrings served from a memory copy
-    bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
-    char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
-    bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
-    bool progress10 = true;          // mission .lua: 1.0's mission-generated objective line -> ProgressString "<default>"
-    bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
-    bool lockTrace10 = false;        // diagnostic: log control locks, contexts, choreography play/end, messages
-    bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
-    bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them (Table::ports10)
-    bool pins10 = true;              // .mer: complete pin tables on every instance (Table::pins10)
-    bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (Table::gate10)
-    bool toggleType10 = true;        // .mer: Collision/VisibilityToggle keep their 1.0 mode in 3.0 (Table::toggleType10)
-    bool beacon10 = true;            // zonelist.lua: 1.0 MissionParams.BeaconMap rows in 3.0's row form (mission::beaconMap30)
-    bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
-    bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
-    bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
-    bool sxNatives10 = true;         // sx10's imports bound to 1.0-semantics natives by a linker hook (SX-3/4)
-    bool sxPorts10 = true;           // sxNatives10 with the ported natives (0: stack-balanced stubs only)
-    bool sxBeh10 = true;             // sxPorts10 + 1.0 behavior-type numbers into 1.0 scripts' SetInitialParams
-    bool bmx10 = true;               // 1.0 behavior maps in 3.0's form (sx.hpp BMX-1; 0: raw, 3.0 drops them)
-    bool btx10 = true;               // 1.0 behavior trees in 3.0's form (sx.hpp BTX-1; 0: raw, 3.0 drops them)
-    bool root10 = true;              // sys: read10 also searches the 1.0 root archives (startup*.zip)
-    bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
-    bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)
-    bool chest10 = true;             // sys: 1.0 ChestInfo.bin through 3.0's chestInfo loader (GLB-1)
-    bool bits10 = true;              // sys: the 1.0 core bitmasks after the playset's (PS-5)
-    bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
-    bool perc10 = true;              // sys: the 1.0 perceptions 3.0 lacks through 3.0's perceptions loader (GLB-1)
-    bool deliv10 = true;             // sys: 1.0 RewardType Delivery registered with 3.0's Multi reward (SYS-12)
-    bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
-    bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
-    bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 standard includes) as a DataMap
-    bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
-    bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (coins, sparks: sys.hpp)
-    bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType: coins, Toy Store (gameplay.hpp)
-    bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
-    bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
-    bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
-    bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory has no case for type 10 (npcrt.hpp)
-    bool choTime10 = true;           // cho.hpp: SubNetwork MinTime/MaxTime (choreography play range)
-    bool choAnim10 = true;           // cho.hpp: Float 'Global.Time' clip/event input -> AnimState 'AnimState' (3.0 clock + slot type)
-    bool choScene10 = true;          // cho.hpp: SceneTreeNodeRef on PlacementNode Associations (Layout holds the scene node)
-    bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
-    bool choConst10 = true;          // cho.hpp: Static nodes of choreography graphs stay Static under constant headers
-    bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
-    bool realmFile10 = true;         // octx.hpp: a 1.0 realm file's RealmDataPool as 3.0's RealmData node (realm30.py rule)
-    bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
-    bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
-    bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
-    bool clip10Ids = true;           // cho.hpp: motion clips on templates 3.0 owns (ports10.hpp) with 3.0 port ids; 1.0 model links too
-    bool choAlias10 = true;          // cho.hpp: Cho DataMap paths outside choreographies/<n>/<n> (vault bolts, door)
-    bool banm10 = true;              // cho.hpp: .banm 1.0f -> 1.0g (version gate, full track paths)
-    bool loadScreen10 = true;        // ui: 1.0's loading-screen choice for zones with 1.0's LoadingScreen key
-    bool uiScope10 = true;           // ui: a flash image is served from 1.0 only to a movie served from 1.0
-    bool fmv10 = true;               // ui: FMVs 3.0 lacks play from the 1.0 install's fmv\PC1
-    bool text10 = true;              // ui: a 1.0 playset table also carries 1.0 lang/main keys no 3.0 table has
-    bool tips10 = true;              // ui: 3.0's data/tips.lua + the 1.0 tip records it lacks
-    bool resident10 = true;          // the 1.0 startup*.zip members are served by their full paths (1.0 loads them resident)
-    bool tutorial10 = true;          // ui: tutorial element 61 (1.0's SelectMenu ribbon) is answered by 3.0's ribbon
-    bool context10 = true;           // ui: a 1.0 controller-context list keeps 3.0's extra gates of the actions it keeps
-    bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (audio.hpp)
-    bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
-    bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
-    bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
-    bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
-    bool cineSync10 = true;          // audio10: an audio-synced choreography also starts the 1.0 sound event of its name
-    bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
-    bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
-    bool vfxChan10 = true;           // emitter curve channels re-laid for the shader their material is served on (chan.hpp)
-    bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
-    bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
-    bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
-    bool assetBufs10 = true;         // gp+npc: read10 finds a <stem>_<n>.* member (buffers) in its per-asset archive <dir>/<stem>.zip
-    bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
-    bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
-    bool actionMap10 = true;         // ui: a 1.0 movie's UsesActionMap sets its screen's action map, as in 1.0 (gprt.hpp)
-    bool focus10 = true;             // ui: a 3.0 Screen on a 1.0 movie gets 3.0's non-FSM focus (SetHasFocus, +0x60) (gprt.hpp)
-    bool keys10 = true;              // ui: a 3.0 script on a 1.0 movie: its mapped actions also reach the movie as key events, as in 1.0 (gprt.hpp)
-    bool accept10 = true;            // gp: a 1.0 mission activated in a 1.0 zone posts the tutorial 'mission accepted' event (gprt.hpp)
-    bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
-    bool playsetMenu10 = true;       // menu: one Play Sets entry per registered 1.0 playset, opening its start zone (ui::playsetMenu10)
-    bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
-    bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (bldrt.hpp)
-    bool spawnTrace10 = false;       // probe: lots registered, SpawnBuilding firing, lot spawns, player start lookups (log only)
-    bool capsuleTrace10 = false;     // probe: 1.0 expendable spawn requests, the branch each spawn took, async completions (caprt.hpp, log only)
-    bool shutdown10 = true;          // a 1.0 expendable's actor stays drawn while shut down, as in 1.0 (caprt.hpp; needs popin10)
-} g_cfg;
-
-static void loadConfig(const char* dir)
-{
-    char path[MAX_PATH];
-    sprintf_s(path, "%s\\di1compat.cfg", dir);
-    FILE* f = nullptr;
-    if (fopen_s(&f, path, "r") || !f) { logf("no %s: defaults (serve10 off)", path); return; }
-    char line[600];
-    while (fgets(line, sizeof(line), f)) {
-        char key[64], val[MAX_PATH];
-        if (line[0] == '#' || sscanf_s(line, " %63[^= ] = %259[^\r\n]", key, (unsigned)sizeof(key), val, (unsigned)sizeof(val)) != 2)
-            continue;
-        if (!strcmp(key, "install10")) strcpy_s(g_cfg.install10, val);
-        else if (!strcmp(key, "serve10")) g_cfg.serve10 = atoi(val) != 0;
-        else if (!strcmp(key, "trace")) g_cfg.trace = atoi(val) != 0;
-        else if (!strcmp(key, "missiontrace")) g_cfg.missionTrace = atoi(val) != 0;
-        else if (!strcmp(key, "teardowntrace")) g_cfg.teardownTrace = atoi(val) != 0;
-        else if (!strcmp(key, "breaktrace")) g_cfg.breakTrace = atoi(val) != 0;
-        else if (!strcmp(key, "shaders10")) g_cfg.shaders10 = atoi(val) != 0;
-        else if (!strcmp(key, "translate10")) g_cfg.translate10 = atoi(val) != 0;
-        else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
-        else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
-        else if (!strcmp(key, "skinlayout10")) g_cfg.skinLayout10 = atoi(val) != 0;
-        else if (!strcmp(key, "skintr10")) g_cfg.skinTr10 = atoi(val) != 0;
-        else if (!strcmp(key, "scenesettings10")) g_cfg.sceneSettings10 = atoi(val) != 0;
-        else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
-        else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
-        else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
-        else if (!strcmp(key, "fadeprobe10")) g_cfg.fadeProbe10 = atoi(val);
-        else if (!strcmp(key, "fpslog10")) g_cfg.fpsLog10 = atoi(val) != 0;
-        else if (!strcmp(key, "loadprof10")) g_cfg.loadProf10 = atoi(val) != 0;
-        else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
-        else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
-        else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
-        else if (!strcmp(key, "events10")) g_cfg.events10 = atoi(val) != 0;
-        else if (!strcmp(key, "progress10")) g_cfg.progress10 = atoi(val) != 0;
-        else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
-        else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
-        else if (!strcmp(key, "ports10")) g_cfg.ports10 = atoi(val) != 0;
-        else if (!strcmp(key, "pins10")) g_cfg.pins10 = atoi(val) != 0;
-        else if (!strcmp(key, "gate10")) g_cfg.gate10 = atoi(val) != 0;
-        else if (!strcmp(key, "toggletype10")) g_cfg.toggleType10 = atoi(val) != 0;
-        else if (!strcmp(key, "beacon10")) g_cfg.beacon10 = atoi(val) != 0;
-        else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
-        else if (!strcmp(key, "native10")) g_cfg.native10 = atoi(val) != 0;
-        else if (!strcmp(key, "sx10")) g_cfg.sx10 = atoi(val) != 0;
-        else if (!strcmp(key, "sxnatives10")) g_cfg.sxNatives10 = atoi(val) != 0;
-        else if (!strcmp(key, "sxports10")) g_cfg.sxPorts10 = atoi(val) != 0;
-        else if (!strcmp(key, "sxbeh10")) g_cfg.sxBeh10 = atoi(val) != 0;
-        else if (!strcmp(key, "bmx10")) g_cfg.bmx10 = atoi(val) != 0;
-        else if (!strcmp(key, "btx10")) g_cfg.btx10 = atoi(val) != 0;
-        else if (!strcmp(key, "root10")) g_cfg.root10 = atoi(val) != 0;
-        else if (!strcmp(key, "locks10")) g_cfg.locks10 = atoi(val) != 0;
-        else if (!strcmp(key, "popin10")) g_cfg.popin10 = atoi(val) != 0;
-        else if (!strcmp(key, "chest10")) g_cfg.chest10 = atoi(val) != 0;
-        else if (!strcmp(key, "bits10")) g_cfg.bits10 = atoi(val) != 0;
-        else if (!strcmp(key, "econ10")) g_cfg.econ10 = atoi(val) != 0;
-        else if (!strcmp(key, "perc10")) g_cfg.perc10 = atoi(val) != 0;
-        else if (!strcmp(key, "deliv10")) g_cfg.deliv10 = atoi(val) != 0;
-        else if (!strcmp(key, "navmesh10")) g_cfg.navmesh10 = atoi(val) != 0;
-        else if (!strcmp(key, "gamedb30")) g_cfg.gamedb30 = atoi(val) != 0;
-        else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
-        else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
-        else if (!strcmp(key, "hudmarker10")) g_cfg.hudMarker10 = atoi(val) != 0;
-        else if (!strcmp(key, "rewards10")) g_cfg.rewards10 = atoi(val) != 0;
-        else if (!strcmp(key, "currency10")) g_cfg.currency10 = atoi(val) != 0;
-        else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
-        else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
-        else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
-        else if (!strcmp(key, "chotime10")) g_cfg.choTime10 = atoi(val) != 0;
-        else if (!strcmp(key, "choanim10")) g_cfg.choAnim10 = atoi(val) != 0;
-        else if (!strcmp(key, "choscene10")) g_cfg.choScene10 = atoi(val) != 0;
-        else if (!strcmp(key, "variant10")) g_cfg.variant10 = atoi(val) != 0;
-        else if (!strcmp(key, "choconst10")) g_cfg.choConst10 = atoi(val) != 0;
-        else if (!strcmp(key, "camworld10")) g_cfg.camWorld10 = atoi(val) != 0;
-        else if (!strcmp(key, "realmfile10")) g_cfg.realmFile10 = atoi(val) != 0;
-        else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
-        else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
-        else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
-        else if (!strcmp(key, "clip10ids")) g_cfg.clip10Ids = atoi(val) != 0;
-        else if (!strcmp(key, "choalias10")) g_cfg.choAlias10 = atoi(val) != 0;
-        else if (!strcmp(key, "banm10")) g_cfg.banm10 = atoi(val) != 0;
-        else if (!strcmp(key, "loadscreen10")) g_cfg.loadScreen10 = atoi(val) != 0;
-        else if (!strcmp(key, "uiscope10")) g_cfg.uiScope10 = atoi(val) != 0;
-        else if (!strcmp(key, "fmv10")) g_cfg.fmv10 = atoi(val) != 0;
-        else if (!strcmp(key, "text10")) g_cfg.text10 = atoi(val) != 0;
-        else if (!strcmp(key, "tips10")) g_cfg.tips10 = atoi(val) != 0;
-        else if (!strcmp(key, "resident10")) g_cfg.resident10 = atoi(val) != 0;
-        else if (!strcmp(key, "tutorial10")) g_cfg.tutorial10 = atoi(val) != 0;
-        else if (!strcmp(key, "context10")) g_cfg.context10 = atoi(val) != 0;
-        else if (!strcmp(key, "audio10")) g_cfg.audio10 = atoi(val) != 0;
-        else if (!strcmp(key, "music10")) g_cfg.music10 = atoi(val) != 0;
-        else if (!strcmp(key, "vo10")) g_cfg.vo10 = atoi(val) != 0;
-        else if (!strcmp(key, "audiotrace10")) g_cfg.audioTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "cinesync10")) g_cfg.cineSync10 = atoi(val) != 0;
-        else if (!strcmp(key, "mixer10")) g_cfg.mixer10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfx10")) g_cfg.vfx10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfx_universal10")) g_cfg.vfxUniversal10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfxchan10")) g_cfg.vfxChan10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfx_trace")) g_cfg.vfxTrace = atoi(val) != 0;
-        else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
-        else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
-        else if (!strcmp(key, "assetbufs10")) g_cfg.assetBufs10 = atoi(val) != 0;
-        else if (!strcmp(key, "challenge10")) g_cfg.challenge10 = atoi(val) != 0;
-        else if (!strcmp(key, "selectmenu10")) g_cfg.selectMenu10 = atoi(val) != 0;
-        else if (!strcmp(key, "actionmap10")) g_cfg.actionMap10 = atoi(val) != 0;
-        else if (!strcmp(key, "focus10")) g_cfg.focus10 = atoi(val) != 0;
-        else if (!strcmp(key, "keys10")) g_cfg.keys10 = atoi(val) != 0;
-        else if (!strcmp(key, "accept10")) g_cfg.accept10 = atoi(val) != 0;
-        else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
-        else if (!strcmp(key, "playsetmenu10")) g_cfg.playsetMenu10 = atoi(val) != 0;
-        else if (!strcmp(key, "zones10")) g_cfg.zones10 = atoi(val) != 0;
-        else if (!strcmp(key, "building10")) g_cfg.building10 = atoi(val) != 0;
-        else if (!strcmp(key, "spawntrace10")) g_cfg.spawnTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "capsuletrace10")) g_cfg.capsuleTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "shutdown10")) g_cfg.shutdown10 = atoi(val) != 0;
-    }
-    fclose(f);
-    logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
-         g_cfg.memtest, g_cfg.fpsLog10, g_cfg.loadProf10);
-    logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d clip10ids=%d choalias10=%d "
-         "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
-         g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.clip10Ids, g_cfg.choAlias10, g_cfg.banm10,
-         g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
-    logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d spawntrace10=%d shutdown10=%d capsuletrace10=%d",
-         g_cfg.playsetMenu10, g_cfg.zones10, g_cfg.realmFile10, g_cfg.building10, g_cfg.spawnTrace10, g_cfg.shutdown10,
-         g_cfg.capsuleTrace10);
-    logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
-         g_cfg.lockTrace10);
-}
+static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set once in Pentane_Main, before any hook
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
 // An engine path <dir>/<name>/<rest> lives in assets\<dir>\<name>.zip as member <rest> (the layout extract.py
@@ -3875,7 +3637,7 @@ extern "C" void __stdcall Pentane_Main()
                        (LPCSTR)&Pentane_Main, &self);
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
-    loadConfig(dir);
+    di1::loadConfig(dir, g_cfg);
     if (g_cfg.renderdoc10 > 0) {   // before the renderer creates its device, so RenderDoc's hooks see it
         HMODULE rd = LoadLibraryExA("C:\\Program Files\\RenderDoc\\x86\\renderdoc.dll", nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         auto get = rd ? (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI") : nullptr;
