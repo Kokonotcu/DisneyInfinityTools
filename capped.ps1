@@ -1,7 +1,7 @@
 # Runs a command and kills its WHOLE process tree if their combined memory passes -MaxGB.
 # (The 'python' on PATH is a launcher stub that starts the real interpreter as a child, so
 #  watching only the started process sees ~13 MB while the child grows unbounded.)
-#   powershell -File capped.ps1 -MaxGB 6 -Log out.txt -Exe python -ArgLine "native30.py --source ..."
+#   powershell -File capped.ps1 -MaxGB 6 -Log out.txt -Exe python -ArgLine "portmap.py scan <assets> <out.json>"
 param([double]$MaxGB = 6, [string]$Log = "$env:TEMP\capped.log",
       [Parameter(Mandatory)][string]$Exe, [string]$ArgLine = '')
 $p = Start-Process -FilePath $Exe -ArgumentList $ArgLine -NoNewWindow -PassThru `

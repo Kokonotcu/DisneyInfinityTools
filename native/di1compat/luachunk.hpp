@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "base/bytes.hpp"
 
 namespace luachunk {
 
@@ -25,7 +26,14 @@ struct Reader {
     uint32_t u32() { need(4); uint32_t v; memcpy(&v, p + at, 4); at += 4; return big ? _byteswap_ulong(v) : v; }
     uint8_t u8() { need(1); return p[at++]; }
     void skip(size_t k) { need(k); at += k; }
-    void need(size_t k) const { if (at + k > n) throw std::runtime_error("lua chunk truncated"); }
+    void need(size_t k) const { if (!bytes::fits(n, at, k)) throw std::runtime_error("lua chunk truncated"); }
+    // A u32 count of items of at least `each` bytes, checked against the bytes left before allocating (CO-26).
+    uint32_t count(size_t each)
+    {
+        const uint32_t c = u32();
+        if (c > (n - at) / each) throw std::runtime_error("lua chunk truncated");
+        return c;
+    }
 };
 
 // fn(s) -> true if it changed s (s without the trailing NUL). Returns how many constants changed.
@@ -96,6 +104,22 @@ struct Value {
     std::string str(const std::string& k) const { const Value* v = get(k); return v && v->t == STR ? v->s : ""; }
 };
 
+namespace detail {
+// Register x of eval's frame; a damaged b, c or a + k reaches 766 of 306 (CO-26, NP-N1).
+inline Value& reg(std::vector<Value>& frame, uint32_t x)
+{
+    if (x >= frame.size()) throw std::runtime_error("lua chunk: register " + std::to_string(x) + " out of range");
+    return frame[x];
+}
+inline Value num(double n)
+{
+    Value v;
+    v.t = Value::NUM;
+    v.n = n;
+    return v;
+}
+}  // namespace detail
+
 // The globals a data-only chunk sets (little- or big-endian). Throws on an opcode a table constructor does not use.
 inline std::map<std::string, Value> eval(const std::string& in)
 {
@@ -106,9 +130,9 @@ inline std::map<std::string, Value> eval(const std::string& in)
     auto str = [&]() { uint32_t len = r.u32(); r.skip(len); return len ? in.substr(r.at - len, len - 1) : std::string(); };
     str();
     r.skip(12);
-    std::vector<uint32_t> code(r.u32());
+    std::vector<uint32_t> code(r.count(4));
     for (auto& c : code) c = r.u32();
-    std::vector<Value> K(r.u32());
+    std::vector<Value> K(r.count(1));
     for (auto& k : K) {
         uint8_t t = r.u8();
         if (t == 1) { k.t = Value::BOOL; k.b = r.u8() != 0; }
@@ -137,10 +161,10 @@ inline std::map<std::string, Value> eval(const std::string& in)
     for (size_t pc = 0; pc < code.size(); ++pc) {
         uint32_t i = code[pc], op = i & 0x3f, a = i >> 6 & 0xff, c = i >> 14 & 0x1ff, b = i >> 23 & 0x1ff, bx = i >> 14;
         switch (op) {
-        case 0: R[a] = R[b]; break;                                                       // MOVE
+        case 0: R[a] = detail::reg(R, b); break;                                          // MOVE
         case 1: R[a] = K.at(bx); break;                                                   // LOADK
         case 2: R[a] = Value(); R[a].t = Value::BOOL; R[a].b = b != 0; pc += c ? 1 : 0; break;   // LOADBOOL
-        case 3: for (uint32_t k = a; k <= b; ++k) R[k] = Value(); break;                  // LOADNIL
+        case 3: for (uint32_t k = a; k <= b; ++k) detail::reg(R, k) = Value(); break;     // LOADNIL
         case 5: { auto g = G.find(K.at(bx).s); R[a] = g == G.end() ? Value() : g->second; break; }   // GETGLOBAL
         case 7: G[K.at(bx).s] = R[a]; break;                                              // SETGLOBAL
         case 9: set(R[a], rk(b), rk(c)); break;                                           // SETTABLE
@@ -148,7 +172,7 @@ inline std::map<std::string, Value> eval(const std::string& in)
         case 34: {                                                                        // SETLIST, 50 per batch
             if (!c) c = code.at(++pc);
             if (!b) throw std::runtime_error("SETLIST to top");
-            for (uint32_t k = 1; k <= b; ++k) { Value n; n.t = Value::NUM; n.n = (c - 1) * 50.0 + k; set(R[a], n, R[a + k]); }
+            for (uint32_t k = 1; k <= b; ++k) set(R[a], detail::num((c - 1) * 50.0 + k), detail::reg(R, a + k));
             break;
         }
         case 30: return G;                                                                // RETURN
@@ -182,7 +206,9 @@ inline bool ident(const std::string& k)   // usable as a bare key: a name that i
     for (auto w : kw) if (k == w) return false;
     return true;
 }
-inline std::string text(const Value& v)
+// Lua 5.1 nests constructors at most 200 deep (LUAI_MAXCCALLS); a damaged SETTABLE can make a table hold itself.
+inline constexpr int kMaxTableNesting = 200;
+inline std::string text(const Value& v, int depth = 0)
 {
     switch (v.t) {
     case Value::NIL: return "nil";
@@ -191,18 +217,29 @@ inline std::string text(const Value& v)
     case Value::STR: return quote(v.s);
     default: break;
     }
+    if (depth >= kMaxTableNesting)
+        throw std::runtime_error("lua chunk: tables nested more than " + std::to_string(kMaxTableNesting) + " deep");
     size_t n = 0;   // the array part: keys 1..n
     for (;; ++n) { Value k; k.t = Value::NUM; k.n = (double)(n + 1); if (!v.get(k)) break; }
     std::string o = "{ ";
-    for (size_t i = 1; i <= n; ++i) { Value k; k.t = Value::NUM; k.n = (double)i; o += text(*v.get(k)) + ", "; }
+    for (size_t i = 1; i <= n; ++i) {
+        Value k;
+        k.t = Value::NUM;
+        k.n = (double)i;
+        o += text(*v.get(k), depth + 1) + ", ";
+    }
     std::vector<const std::pair<Value, Value>*> rest;
     for (auto& e : *v.tab)
         if (!(e.first.t == Value::NUM && e.first.n >= 1 && e.first.n <= n && e.first.n == std::floor(e.first.n))) rest.push_back(&e);
-    auto order = [](const Value& k) { return std::make_pair(k.t == Value::BOOL ? 0 : k.t == Value::NUM ? 1 : 2,
-                                                            k.t == Value::STR ? k.s : k.t == Value::NUM ? numText(k.n) : text(k)); };
+    auto order = [depth](const Value& k) {
+        return std::make_pair(k.t == Value::BOOL ? 0 : k.t == Value::NUM ? 1 : 2,
+                              k.t == Value::STR ? k.s : k.t == Value::NUM ? numText(k.n) : text(k, depth + 1));
+    };
     std::sort(rest.begin(), rest.end(), [&](auto* a, auto* b) { return order(a->first) < order(b->first); });
-    for (auto* e : rest)
-        o += (e->first.t == Value::STR && ident(e->first.s) ? e->first.s : "[" + text(e->first) + "]") + " = " + text(e->second) + ", ";
+    for (auto* e : rest) {
+        const bool bare = e->first.t == Value::STR && ident(e->first.s);
+        o += (bare ? e->first.s : "[" + text(e->first, depth + 1) + "]") + " = " + text(e->second, depth + 1) + ", ";
+    }
     return o + "}";
 }
 

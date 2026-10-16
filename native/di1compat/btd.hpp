@@ -22,10 +22,11 @@ inline std::vector<std::pair<size_t, size_t>> blocks(const std::string& b, int g
     size_t oa = game == 1 ? 0x28 : 48, oc = game == 1 ? 0x2c : 52, o = 0;
     std::vector<std::pair<size_t, size_t>> out;
     while (o + 64 <= b.size()) {   // a block header is 64 bytes; anything shorter is tail padding
-        size_t end = o + u32(b, o + oa) + 4ull * u32(b, o + oc);
+        // 64-bit: as size_t, a damaged offset or count wraps to an end that passes the check (CO-07)
+        const uint64_t end = (uint64_t)o + u32(b, o + oa) + 4ull * u32(b, o + oc);
         if (!(o < end && end <= b.size())) return {};
-        out.push_back({o, end});
-        o = (end + 15) & ~(size_t)15;
+        out.push_back({o, (size_t)end});
+        o = ((size_t)end + 15) & ~(size_t)15;
     }
     return out;
 }
@@ -42,7 +43,9 @@ inline bool convertBlock(const std::string& src, std::string& out)
     if (src.size() < 64) return false;
     uint32_t aoff = u32(src, 0), alen = u32(src, 4), boff = u32(src, 8), blen = u32(src, 12);
     uint32_t voff = u32(src, 16), vcnt = u32(src, 20), ioff = u32(src, 24), tcnt = u32(src, 28);
-    if (voff + 12ull * vcnt != ioff || aoff + alen != boff || boff + blen != voff || ioff + 6ull * tcnt > src.size()) return false;
+    // 64-bit sums: in 32 bits a wrapped sum passes, and the copies below run gigabytes past src (CO-07).
+    const bool tiled = voff + 12ull * vcnt == ioff && (uint64_t)aoff + alen == boff && (uint64_t)boff + blen == voff;
+    if (!tiled || ioff + 6ull * tcnt > src.size()) return false;
     if (aoff + 188ull > src.size() || src.size() < 108) return false;
     uint32_t aNew = alen + 16, bNew = blen + 16, A = 64, B = A + aNew, V = B + bNew, I = V + vcnt * 12;
     uint32_t IE = (I + tcnt * 6 + 3) & ~3u, P = IE + 8;   // index end rounded up to 4, then an 8-byte gap

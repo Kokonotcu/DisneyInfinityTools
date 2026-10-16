@@ -7,7 +7,9 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+#include "base/bytes.hpp"
 
 namespace oct {
 
@@ -31,7 +33,7 @@ inline Spec spec(int t)
 
 inline uint32_t u(const uint8_t* p, int w) { uint32_t v = 0; for (int i = 0; i < w; ++i) v |= (uint32_t)p[i] << (8 * i); return v; }
 
-// Payload length of a record whose payload starts at p (end = data end), or -1.
+// Payload length of record at p, or -1 if bad or past end. 64-bit, so huge counts cannot wrap (CO-15).
 inline long paylen(int t, const uint8_t* p, const uint8_t* end)
 {
     Spec s = spec(t);
@@ -39,8 +41,10 @@ inline long paylen(int t, const uint8_t* p, const uint8_t* end)
     long pre = 2 * s.keyed;
     if (s.shape == NODE) return pre;
     if (!s.cw) return pre + s.ew;
-    if (p + pre + s.cw > end) return -1;
-    return pre + s.cw + (long)u(p + pre, s.cw) * s.ew;
+    const size_t room = (size_t)(end - p);
+    if (!bytes::fits(room, (size_t)pre, (size_t)s.cw)) return -1;
+    const uint64_t len = (uint64_t)pre + (uint64_t)s.cw + (uint64_t)u(p + pre, s.cw) * (uint64_t)s.ew;
+    return len <= room ? (long)len : -1;
 }
 
 struct Rec {
@@ -63,8 +67,10 @@ struct File {
         f.hdr.assign((const char*)b, HDR);
         uint32_t nb = u(b + 12, 4), db = u(b + 16, 4);
         f.f14 = u(b + 20, 4);
+        // fits() before summing: in 32 bits HDR + nb + db can wrap below n (CO-15)
+        if (!bytes::fits(n, HDR, nb) || !bytes::fits(n, HDR + nb, db))
+            throw std::runtime_error("size invariant broken");
         size_t ds = HDR + nb, de = ds + db;
-        if (de > n) throw std::runtime_error("size invariant broken");
         for (size_t p = HDR, q = HDR; q < ds; ++q)
             if (b[q] == 0) { f.names.emplace_back((const char*)b + p, q - p); p = q + 1; }
         size_t p = ds;
@@ -75,7 +81,8 @@ struct File {
             r.level = flag >> 10;
             r.name = (uint16_t)u(b + p + 2, 2);
             long len = paylen(r.type, b + p + 4, b + de);
-            if (len < 0 || p + 4 + len > de) throw std::runtime_error("unknown type at +" + std::to_string(p - ds));
+            if (len < 0 || !bytes::fits(de, p + 4, (size_t)len))
+                throw std::runtime_error("unknown type at +" + std::to_string(p - ds));
             r.pay.assign((const char*)b + p + 4, len);
             f.recs.push_back(std::move(r));
             p += 4 + len;
@@ -174,6 +181,19 @@ struct File {
         if (s.kind == NAME)
             for (int32_t i : ints(r)) out.push_back(name((uint16_t)i));
         return out;
+    }
+    // ints(r)[0] / nameValues(r)[0], but throw when a damaged record has none: [0] of empty is an AV (CO-05).
+    int32_t int0(const Rec& r) const
+    {
+        std::vector<int32_t> v = ints(r);
+        if (v.empty()) throw std::runtime_error("oct: record '" + name(r) + "' has no int value");
+        return v[0];
+    }
+    std::string name0(const Rec& r) const
+    {
+        std::vector<std::string> v = nameValues(r);
+        if (v.empty()) throw std::runtime_error("oct: record '" + name(r) + "' has no name value");
+        return std::move(v[0]);
     }
 
     // ---- record construction (the exporter's encodings: narrowest signed int width) ----

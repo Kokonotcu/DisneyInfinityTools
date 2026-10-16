@@ -6,14 +6,26 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include "oct.hpp"
 #include "gen30.hpp"
 #include "luachunk.hpp"
+#include "base/bytes.hpp"
 
 namespace npc {
+
+namespace detail {
+// A primitive's vertex format CRC; an empty record is damaged input: hkOpen's catch logs it, serves the raw .oct.
+inline int32_t vformatCrc(const oct::File& f, const oct::Rec& r)
+{
+    std::vector<int32_t> v = f.ints(r);
+    if (v.empty()) throw std::runtime_error("skin10: vformatCRC record without a value");
+    return v[0];
+}
+}  // namespace detail
 
 // ---- NavigationMesh 'Data' blob, 1.0 -> 3.0 layout (OCT-8) ----
 // Both readers are deserializers of the same runtime graph (regions, their vertices with corner links, region edges
@@ -225,7 +237,7 @@ inline int skinRemap(oct::File& f, std::string& vbuf, const std::string& ibuf, c
             const std::string& nm = f.name(f.recs[j]);
             if (nm == "InfluenceRemapInfluenceRefs") refs = f.ints(f.recs[j]);
             else if (nm == "InfluenceRemapPrimitiveData") pd = f.ints(f.recs[j]);
-            else if (nm == "vformatCRC") prims.push_back({f.ints(f.recs[j]).at(0)});
+            else if (nm == "vformatCRC") prims.push_back({detail::vformatCrc(f, f.recs[j])});
             else if (nm == "Vdata" && !prims.empty()) prims.back().vdata = j;
             else if (nm == "Idata" && !prims.empty()) prims.back().idata = j;
         }
@@ -235,7 +247,7 @@ inline int skinRemap(oct::File& f, std::string& vbuf, const std::string& ibuf, c
             if (lay == L.end() || !prims[k].vdata || !prims[k].idata) continue;
             std::vector<int32_t> vd = f.ints(f.recs[prims[k].vdata]), id = f.ints(f.recs[prims[k].idata]);
             int s = lay->second.first, off = lay->second.second;
-            if (vd.size() < 2 || vd[0] <= s || vd.size() < (size_t)(2 + 3 * vd[0]) || vd[2 + 3 * s] != 0 ||   // [2+3s]: buffer file
+            if (vd.size() < 2 || vd[0] <= s || vd.size() < 2 + 3 * (uint64_t)vd[0] || vd[2 + 3 * s] != 0 ||   // [2+3s]: buffer file
                 id.size() < 4 || id[0] != 0 || id[2] != 0) { ++skipped; continue; }
             int32_t start = pd[2 * k], cnt = pd[2 * k + 1];
             if (start < 0 || cnt < 0 || (size_t)start + cnt > refs.size()) { ++skipped; continue; }
@@ -243,6 +255,7 @@ inline int skinRemap(oct::File& f, std::string& vbuf, const std::string& ibuf, c
             int pid = 0;
             while (pid < (int)pals.size() && pals[pid] != pal) ++pid;
             if (pid == (int)pals.size()) pals.push_back(pal);
+            if (id[1] < 0 || id[3] < 0) { ++skipped; continue; }   // a negative first index or count
             uint32_t base = (uint32_t)vd[3 + 3 * s], stride = (uint32_t)vd[4 + 3 * s], count = (uint32_t)vd[1];
             if ((uint64_t)base + (uint64_t)stride * count > vbuf.size() || stride < (uint32_t)off + 4 ||
                 (uint64_t)2 * ((uint64_t)id[1] + id[3]) > ibuf.size()) { ++skipped; continue; }
@@ -299,11 +312,11 @@ inline bool luaEval(const std::string& b, std::vector<LTab>& tabs, std::vector<s
     size_t at = 12;
     auto u32 = [&](uint32_t& v) { if (at + 4 > b.size()) return false; memcpy(&v, b.data() + at, 4); at += 4; return true; };
     uint32_t n, code0, ncode;
-    if (!u32(n) || at + n + 12 > b.size()) return fail("header");
+    if (!u32(n) || !bytes::fits(b.size(), at, n) || !bytes::fits(b.size(), at + n, 12)) return fail("header");
     at += n + 8;
     uint8_t maxstack = (uint8_t)b[at + 3];
     at += 4;
-    if (!u32(ncode) || at + (size_t)ncode * 4 > b.size()) return fail("code");
+    if (!u32(ncode) || ncode > b.size() / 4 || !bytes::fits(b.size(), at, (size_t)ncode * 4)) return fail("code");
     code0 = (uint32_t)at;
     at += (size_t)ncode * 4;
     std::vector<LVal> K;
@@ -317,7 +330,7 @@ inline bool luaEval(const std::string& b, std::vector<LTab>& tabs, std::vector<s
         else if (t == 3) { v.t = 'n'; if (at + 8 > b.size()) return fail("number"); memcpy(&v.n, b.data() + at, 8); at += 8; }
         else if (t == 4) {
             uint32_t len;
-            if (!u32(len) || at + len > b.size()) return fail("string");
+            if (!u32(len) || !bytes::fits(b.size(), at, len)) return fail("string");
             v.t = 's';
             v.s.assign(b, at, len ? len - 1 : 0);
             at += len;
@@ -566,7 +579,9 @@ inline bool luaStrings(const std::string& b, std::vector<std::string>& ks, std::
     size_t at = 12;
     auto u32 = [&](uint32_t& v) { if (at + 4 > b.size()) return false; memcpy(&v, b.data() + at, 4); at += 4; return true; };
     uint32_t n, ncode, nk;
-    if (!u32(n) || (at += n + 12) > b.size() || !u32(ncode) || at + (size_t)ncode * 4 > b.size()) return false;
+    if (!u32(n) || !bytes::fits(b.size(), at, n) || !bytes::fits(b.size(), at + n, 12)) return false;
+    at += n + 12;
+    if (!u32(ncode) || ncode > b.size() / 4 || !bytes::fits(b.size(), at, (size_t)ncode * 4)) return false;
     size_t code = at;
     at += (size_t)ncode * 4;
     if (!u32(nk)) return false;
@@ -579,7 +594,7 @@ inline bool luaStrings(const std::string& b, std::vector<std::string>& ks, std::
         else if (t == 3) at += 8;
         else if (t == 4) {
             uint32_t len;
-            if (!u32(len) || at + len > b.size()) return false;
+            if (!u32(len) || !bytes::fits(b.size(), at, len)) return false;
             kidx.back() = (int)ks.size();
             ks.emplace_back(b, at, len ? len - 1 : 0);
             at += len;

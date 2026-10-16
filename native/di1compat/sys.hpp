@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 #include "luachunk.hpp"
+#include "base/bytes.hpp"
 
 namespace sys {
 
@@ -391,7 +392,7 @@ inline bool perceptionInfoLua(const std::string& b, const Perc30& p30, std::stri
         return true;
     };
     auto word = [&](size_t i, uint32_t& v) {
-        if (lw + 4 * i + 4 > lwEnd) { ok = false; return false; }
+        if (!bytes::fits((lwEnd - lw) / 4, i, 1)) { ok = false; return false; }   // word i inside the list pool
         return u32(lw + 4 * i, v);
     };
     auto words = [&](uint32_t i, std::vector<uint32_t>& w) {

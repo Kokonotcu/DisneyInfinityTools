@@ -29,6 +29,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "base/bytes.hpp"
 
 namespace sx {
 
@@ -735,7 +736,7 @@ inline bool eval(const uint8_t* b, size_t n, const char* global, std::vector<Tab
     if (!u32(ncode) || at + 4ull * ncode > n) return fail("truncated");
     const uint8_t* code = b + at;
     at += 4ull * ncode;
-    if (!u32(nk)) return fail("truncated");
+    if (!u32(nk) || !bytes::fits(n, at, nk)) return fail("truncated");   // every constant takes at least one byte
     std::vector<Val> K(nk);
     for (Val& k : K) {
         if (at >= n) return fail("truncated");

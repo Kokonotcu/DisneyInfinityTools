@@ -37,10 +37,72 @@ inline Operand srcOf(uint32_t t)
     Operand o; o.type = rtype(t); o.num = t & 0x7ff; o.swz = (t >> 16) & 0xff; o.mod = (t >> 24) & 0xf; o.rel = (t >> 13) & 1; return o;
 }
 
+namespace detail {
+
+// token i of the program (the caller keeps i below b.size() / 4)
+inline uint32_t token(const std::string& b, size_t i)
+{
+    uint32_t v;
+    memcpy(&v, b.data() + 4 * i, 4);
+    return v;
+}
+
+// tokens after the opcode that parse reads for dcl (31), def (81), defi (48), defb (47)
+inline size_t tokensRead(int op)
+{
+    switch (op) {
+    case 31: return 2;
+    case 81: return 5;
+    case 47: case 48: return 1;
+    default: return 0;
+    }
+}
+
+// Source operands of the instruction at token i (len tokens follow it), from its token k on. A relative-address
+// token follows its operand and must lie inside the instruction (RE-21).
+inline void readSources(const std::string& b, size_t i, size_t len, size_t k, Op& o)
+{
+    while (k < len) {
+        Operand s = srcOf(token(b, i + 1 + k));
+        ++k;
+        if (s.rel) {
+            if (k >= len) throw std::runtime_error("truncated instruction");
+            Operand a = srcOf(token(b, i + 1 + k));
+            ++k;
+            s.relType = a.type;
+            s.relNum = a.num;
+            s.relSwz = a.swz;
+        }
+        o.src.push_back(s);
+    }
+}
+
+// source operands toHlsl reads for each opcode it translates (S[0..2]); 0 for the rest
+inline size_t sourcesRead(int op)
+{
+    switch (op) {
+    case 4: case 88: case 90: return 3;
+    case 2: case 3: case 5: case 8: case 9: case 10: case 11: case 12: case 13: return 2;
+    case 32: case 41: case 66: case 95: return 2;
+    case 1: case 6: case 7: case 14: case 15: case 19: case 35: case 36: case 37: case 40: case 46: return 1;
+    default: return 0;
+    }
+}
+
+// toHlsl refuses a predicated instruction, or one with fewer source operands than it reads (RE-21)
+inline void checkOp(const Op& o)
+{
+    if (o.pred) throw std::runtime_error("predication");
+    if (o.src.size() < sourcesRead(o.op))
+        throw std::runtime_error("opcode " + std::to_string(o.op) + ": too few operands");
+}
+
+}  // namespace detail
+
 inline Program parse(const std::string& b)
 {
     size_t n = b.size() / 4;
-    auto tok = [&](size_t i) { uint32_t v; memcpy(&v, b.data() + 4 * i, 4); return v; };
+    auto tok = [&](size_t i) { return detail::token(b, i); };
     if (!n) throw std::runtime_error("empty program");
     uint32_t ver = tok(0);
     if ((ver & 0xffff) != 0x0300) throw std::runtime_error("not shader model 3");
@@ -52,7 +114,7 @@ inline Program parse(const std::string& b)
         if (op == 0xffff) break;
         if (op == 0xfffe) { i += 1 + ((t >> 16) & 0x7fff); continue; }
         size_t len = (t >> 24) & 0xf;
-        if (i + 1 + len > n) throw std::runtime_error("truncated instruction");
+        if (i + 1 + len > n || len < detail::tokensRead(op)) throw std::runtime_error("truncated instruction");
         Op o; o.op = op; o.ctl = (t >> 16) & 0xff; o.pred = (t >> 28) & 1;
         size_t k = 0;
         if (op == 31) { o.decl = tok(i + 1); o.dst = dstOf(tok(i + 2)); o.hasDst = true; }
@@ -62,11 +124,7 @@ inline Program parse(const std::string& b)
         } else {
             static const std::set<int> noDst = {25, 26, 27, 28, 29, 30, 38, 39, 40, 41, 42, 43, 44, 45, 96};
             if (!noDst.count(op) && len) { o.dst = dstOf(tok(i + 1)); o.hasDst = true; k = 1; }
-            while (k < len) {
-                Operand s = srcOf(tok(i + 1 + k)); ++k;
-                if (s.rel) { Operand a = srcOf(tok(i + 1 + k)); ++k; s.relType = a.type; s.relNum = a.num; s.relSwz = a.swz; }
-                o.src.push_back(s);
-            }
+            detail::readSources(b, i, len, k, o);
         }
         p.ops.push_back(o);
         i += 1 + len;
@@ -222,7 +280,7 @@ inline std::string toHlsl(const Program& P, Binding& B)
         switch (o.op) {
         case 31: case 81: case 48: case 47: case 0: continue;
         }
-        if (o.pred) throw std::runtime_error("predication");
+        detail::checkOp(o);
         switch (o.op) {
         case 1: case 46: store(o, s(S[0])); break;
         case 2: store(o, s(S[0]) + " + " + s(S[1])); break;

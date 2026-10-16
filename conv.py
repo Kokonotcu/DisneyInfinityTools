@@ -1,5 +1,5 @@
-"""Proven 1.0 -> 3.0 conversion primitives (extracted from the retired world30.py; used by native30, realm30
-and expl30).
+"""Proven 1.0 -> 3.0 conversion primitives (extracted from the retired world30.py; used by realm30, and by the removed
+native30/expl30 converters).
 
 Pipeline every converter shares: prepare() (materials, dropped pools, geometry, RenderCaps), then the tool's own
 record surgery, then rename_files() / check_foreign() / copy_textures().

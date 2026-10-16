@@ -32,6 +32,8 @@
 #include <unordered_set>
 #include <vector>
 #include "third_party/miniz/miniz.h"
+#include "base/bytes.hpp"
+#include "core/hooks.hpp"
 
 namespace audio {
 
@@ -1068,10 +1070,14 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
                          std::unordered_map<uint32_t, std::string>* lineEvents = nullptr)
 {
     auto fail = [&](const char* why) { if (err) *err = why; return false; };
-    auto rd32 = [&](size_t o) { return o + 4 <= in.size() ? *(const uint32_t*)(in.data() + o) : 0u; };
+    auto rd32 = [&](size_t o) {
+        uint32_t v = 0;
+        if (bytes::fits(in.size(), o, 4)) memcpy(&v, in.data() + o, 4);
+        return v;
+    };
     if (in.size() < 0x10 || rd32(0) != 11) return fail("not a v11 dlg");
     uint32_t n = rd32(4);
-    if (0x10 + (size_t)n * 8 > in.size()) return fail("entry table past the end");
+    if (n > in.size() / 8 || !bytes::fits(in.size(), 0x10, (size_t)n * 8)) return fail("entry table past the end");
     DlgStats s;
     std::vector<std::string> events{"dialog_unassigned"};   // index 0: 3.0 'use the range default'; never used here
     std::map<std::string, uint8_t> evIdx;
@@ -1095,12 +1101,12 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
     std::map<uint32_t, std::map<uint16_t, uint8_t>> ranges;   // packed prefix -> number -> class index
     for (uint32_t i = 0; i < n; ++i) {
         uint32_t hash = rd32(0x10 + (size_t)i * 8), off = rd32(0x14 + (size_t)i * 8);
-        if (off + 0x10 > in.size()) return fail("entry past the end");
+        if (!bytes::fits(in.size(), off, 0x10)) return fail("entry past the end");
         const uint8_t* e = in.data() + off;
         Ent o{hash, {}, {}};
         if (e[0] == 0) {
             uint32_t cnt = *(const uint16_t*)(e + 8);
-            if (off + 0xc + (size_t)cnt * 4 > in.size()) return fail("class past the end");
+            if (!bytes::fits(in.size(), off + 0xc, (size_t)cnt * 4)) return fail("class past the end");
             if (classes.size() >= 255) return fail("more than 255 line classes");
             uint8_t ci = (uint8_t)classes.size();
             o.bytes = {0, (uint8_t)(e[1] >> 1), e[2], 0, ev(rd32(off + 4)), 0, 0, 0};
@@ -1133,8 +1139,11 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
             for (uint8_t k = 0; k < cnt; ++k) {
                 const uint8_t* sp = e + 0x10 + k * 12;
                 uint8_t c = sp[6];
-                size_t lo = lists + *(const uint32_t*)(sp + 8);
-                if (lo + (size_t)c * 2 > in.size()) return fail("speaker list past the end");
+                uint32_t rel;
+                memcpy(&rel, sp + 8, 4);
+                size_t lo = lists + rel;
+                // the list relative to 'lists' (lists <= in.size() above): no 32-bit wrap of lists + rel
+                if (!bytes::fits(in.size() - lists, rel, (size_t)c * 2)) return fail("speaker list past the end");
                 uint8_t sub[16] = {0, 0, 0, 0, 0, 0, 0, 0, sp[4], sp[5], 0, 0, ev(*(const uint32_t*)sp), c, 0, 0};
                 o.lists.emplace_back(o.bytes.size(), std::vector<uint8_t>(in.data() + lo, in.data() + lo + (size_t)c * 2));
                 o.bytes.insert(o.bytes.end(), sub, sub + 16);
@@ -1166,12 +1175,22 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
     }
     if (base30 && base30->size() >= 0x30 && !memcmp(base30->data(), "DLG\0\x15", 5)) {
         const std::vector<uint8_t>& t = *base30;
-        auto t32 = [&](size_t o) { return o + 4 <= t.size() ? *(const uint32_t*)(t.data() + o) : 0u; };
-        auto t16 = [&](size_t o) { return o + 2 <= t.size() ? *(const uint16_t*)(t.data() + o) : (uint16_t)0; };
+        auto t32 = [&](size_t o) {
+            uint32_t v = 0;
+            if (bytes::fits(t.size(), o, 4)) memcpy(&v, t.data() + o, 4);
+            return v;
+        };
+        auto t16 = [&](size_t o) {
+            uint16_t v = 0;
+            if (bytes::fits(t.size(), o, 2)) memcpy(&v, t.data() + o, 2);
+            return v;
+        };
         auto tstr = [&](size_t o) { return o < t.size() && memchr(t.data() + o, 0, t.size() - o) ? std::string((const char*)t.data() + o) : std::string(); };
         uint16_t ne3 = t16(6), nn3 = t16(8), nr3 = t16(10);
         uint32_t te = t32(0x10), tn = t32(0x18), tr = t32(0x20);
-        if (te + ne3 * 8u > t.size() || tn + nn3 * 8u > t.size() || tr + nr3 * 8u > t.size()) return fail("3.0 script tables past the end");
+        const bool tablesIn = bytes::fits(t.size(), te, ne3 * 8u) && bytes::fits(t.size(), tn, nn3 * 8u) &&
+                              bytes::fits(t.size(), tr, nr3 * 8u);
+        if (!tablesIn) return fail("3.0 script tables past the end");
         auto ev3 = [&](uint8_t i) { return i < ne3 ? evName(tstr(t32(te + i * 8u))) : (uint8_t)0; };
         std::unordered_set<uint32_t> named10;
         for (auto& e : named) named10.insert(e.hash);
@@ -1179,14 +1198,15 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
         for (uint16_t r = 0; r < nr3; ++r) {
             uint32_t pfx = t32(tr + r * 8u), ro = t32(tr + r * 8u + 4);
             uint16_t lo = t16(ro), hi = t16(ro + 2);
-            if (hi < lo || ro + 5u + (hi - lo) >= t.size()) return fail("3.0 range past the end");
+            // a range: 5 header bytes, then one class byte per line
+            if (hi < lo || !bytes::fits(t.size(), ro, 6u + (hi - lo))) return fail("3.0 range past the end");
             auto& slot = ranges[pfx];
             for (uint32_t num = lo; num <= hi; ++num) {
                 uint8_t c = t[ro + 5 + (num - lo)];
                 if (c == 0xff || slot.count((uint16_t)num)) continue;   // none, or 1.0 defines the line
                 if (c >= nn3) return fail("3.0 range class past the entries");
                 uint32_t co = t32(tn + c * 8u + 4);
-                if (co + 8 > t.size() || t[co] != 0) return fail("3.0 range class is no class");
+                if (!bytes::fits(t.size(), co, 8) || t[co] != 0) return fail("3.0 range class is no class");
                 uint8_t def = t[ro + 4];
                 auto key = std::make_pair((uint32_t)c, t[co + 4] ? (uint8_t)0 : def);
                 auto it = classOf.find(key);
@@ -1204,28 +1224,28 @@ inline bool dlgTranscode(const std::vector<uint8_t>& in, const std::unordered_ma
         }
         for (uint16_t i = 0; i < nn3; ++i) {
             uint32_t h = t32(tn + i * 8u), o = t32(tn + i * 8u + 4);
-            if (o + 8 > t.size()) return fail("3.0 entry past the end");
+            if (!bytes::fits(t.size(), o, 8)) return fail("3.0 entry past the end");
             uint8_t type = t[o];
             if (type == 0 || named10.count(h)) continue;
             Ent e{h, {}, {}};
             if (type == 1 || type == 2) {
-                uint8_t cnt = o + 0x10 <= t.size() ? t[o + 0xc] : 0;
+                uint8_t cnt = bytes::fits(t.size(), o, 0x10) ? t[o + 0xc] : 0;
                 size_t len = 0x10 + (size_t)cnt * (type == 1 ? 8 : 16);
-                if (o + len > t.size()) return fail("3.0 entry past the end");
+                if (!bytes::fits(t.size(), o, len)) return fail("3.0 entry past the end");
                 e.bytes.assign(t.data() + o, t.data() + o + len);
                 for (uint8_t k = 0; k < cnt; ++k) {
                     if (type == 1) { e.bytes[0x10 + k * 8 + 6] = ev3(t[o + 0x10 + k * 8 + 6]); continue; }
                     size_t so = 0x10 + (size_t)k * 16;
                     uint32_t lp = t32(o + so);
                     uint8_t c = t[o + so + 0xd];
-                    if (lp + c * 2u > t.size()) return fail("3.0 speaker list past the end");
+                    if (!bytes::fits(t.size(), lp, c * 2u)) return fail("3.0 speaker list past the end");
                     e.bytes[so + 0xc] = ev3(t[o + so + 0xc]);
                     e.lists.emplace_back(so, std::vector<uint8_t>(t.data() + lp, t.data() + lp + c * 2u));
                 }
             } else if (type == 3) {
                 uint8_t cnt = t[o + 4];
                 size_t len = 8 + (size_t)cnt * 16;
-                if (o + len > t.size()) return fail("3.0 entry past the end");
+                if (!bytes::fits(t.size(), o, len)) return fail("3.0 entry past the end");
                 e.bytes.assign(t.data() + o, t.data() + o + len);
                 for (uint8_t k = 0; k < cnt; ++k) {
                     std::string nm = tstr(t32(o + 8 + k * 16u + 8));
@@ -1527,11 +1547,14 @@ struct Vo {
                 if (memcmp(d.data() + i, "STRR", 4)) continue;
                 uint32_t len = *(uint32_t*)(d.data() + i + 4);
                 const uint8_t* s = d.data() + i + 8;
-                if (i + 8 + (size_t)len > d.size() || len < 4) break;
+                if (!bytes::fits(d.size(), i + 8, len) || len < 4) break;
                 uint32_t cnt = *(const uint32_t*)s;
-                if (4 + (size_t)cnt * 4 > len) break;
+                if (cnt > len / 4 || !bytes::fits(len, 4, (size_t)cnt * 4)) break;
                 for (uint32_t k = 0; k < cnt; ++k) {
-                    uint32_t o = 4 + cnt * 4 + ((const uint32_t*)(s + 4))[k];
+                    uint32_t rel;
+                    memcpy(&rel, s + 4 + (size_t)k * 4, 4);
+                    if (!bytes::fits(len, 4 + (size_t)cnt * 4, rel)) continue;   // no 32-bit wrap of the string offset
+                    uint32_t o = 4 + cnt * 4 + rel;
                     if (o >= len || !memchr(s + o, 0, len - o)) continue;
                     evNames.emplace(h131((const char*)s + o, false), (const char*)s + o);
                 }
@@ -2190,9 +2213,9 @@ inline bool ready()
     return hostState > 0;
 }
 
-typedef bool (*HookFn)(const char* name, uint32_t staticVa, const char* prologue, void* detour, void** original);
-
-inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& install10, const std::string& game30)
+// Returns false only when the FMOD host thread could not start; refused hooks are logged by installFeature.
+inline bool install(core::InstallFeatureFn installFeature, uintptr_t (*rt)(uint32_t), const std::string& install10,
+                    const std::string& game30)
 {
     sound30 = game30 + "\\assets\\sound";
     g.idCounter = (volatile LONG*)rt(0x022AFBE8);
@@ -2204,21 +2227,33 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
     idPauseAll = fnv1("Pause_All");
     idPauseExUi = fnv1("Pause_All_Except_UI");
     idResumeAll = fnv1("Resume_All");
-    hook("sound bank request (audio10)", 0x0182DB30, "568B711C5785F6", (void*)&hkBankReq, (void**)&oBankReq);
-    hook("Wwise PostEvent (audio10)", 0x01948A10, "558BEC8B45088B0D????????", (void*)&hkPost, (void**)&oPost);
-    hook("Wwise SetPosition (audio10)", 0x01947A50, "558BEC8B450885C07507", (void*)&hkSetPos, (void**)&oSetPos);
-    hook("Wwise SetListenerPosition (audio10)", 0x01947150, "558BEC535657E8", (void*)&hkListener, (void**)&oListener);
-    hook("Wwise StopPlayingID (audio10)", 0x019478D0, "558BEC568B750885F6", (void*)&hkStop, (void**)&oStop);
-    hook("Wwise GetSourcePlayPosition (audio10)", 0x019475A0, "558BEC8B450C85C07507", (void*)&hkSrcPos, (void**)&oSrcPos);
-    hook("Wwise UnregisterGameObj (audio10)", 0x01947640, "558BEC568B750885F67506", (void*)&hkUnreg, (void**)&oUnreg);
-    hook("Wwise ExecuteActionOnEvent (audio10)", 0x01948C20, "558BEC8B450850E8", (void*)&hkAction, (void**)&oAction);
-    hook("volume fader (audio10)", 0x0182C460, "8B4424048B4C240883EC30", (void*)&hkFader, (void**)&oFader);
+    // music10, vo10 and audiotrace10 build on these hooks, so they install only with them
+    bool base = installFeature("audio10", {
+            {"sound bank request (audio10)", 0x0182DB30, "568B711C5785F6", (void*)&hkBankReq, (void**)&oBankReq},
+            {"Wwise PostEvent (audio10)", 0x01948A10, "558BEC8B45088B0D????????", (void*)&hkPost, (void**)&oPost},
+            {"Wwise SetPosition (audio10)", 0x01947A50, "558BEC8B450885C07507", (void*)&hkSetPos, (void**)&oSetPos},
+            {"Wwise SetListenerPosition (audio10)", 0x01947150, "558BEC535657E8", (void*)&hkListener,
+             (void**)&oListener},
+            {"Wwise StopPlayingID (audio10)", 0x019478D0, "558BEC568B750885F6", (void*)&hkStop, (void**)&oStop},
+            {"Wwise GetSourcePlayPosition (audio10)", 0x019475A0, "558BEC8B450C85C07507", (void*)&hkSrcPos,
+             (void**)&oSrcPos},
+            {"Wwise UnregisterGameObj (audio10)", 0x01947640, "558BEC568B750885F67506", (void*)&hkUnreg,
+             (void**)&oUnreg},
+            {"Wwise ExecuteActionOnEvent (audio10)", 0x01948C20, "558BEC8B450850E8", (void*)&hkAction,
+             (void**)&oAction},
+            {"volume fader (audio10)", 0x0182C460, "8B4424048B4C240883EC30", (void*)&hkFader, (void**)&oFader},
+        });
+    if (!base) return true;
     if (cfg.music) {
         stackPop = (StackPopFn)rt(0x0073B2C0);
-        hook("MusicStates cue check (music10)", 0x007397B0, "578BF9837F1400", (void*)&hkMusicState, (void**)&oMusicState);
-        hook("Wwise SetState (music10)", 0x01947BD0, "558BEC8B450856", (void*)&hkSetState, (void**)&oSetState);
-        hook("MusicStack tick (music10)", 0x0073EDE0, "A1????????DB05????????81EC04010000", (void*)&hkStackTick, (void**)&oStackTick);
-        hook("music cue once (music10)", 0x0073ED10, "8B44240883EC08535657", (void*)&hkMusicOnce, (void**)&oMusicOnce);
+        installFeature("music10", {
+            {"MusicStates cue check (music10)", 0x007397B0, "578BF9837F1400", (void*)&hkMusicState,
+             (void**)&oMusicState},
+            {"Wwise SetState (music10)", 0x01947BD0, "558BEC8B450856", (void*)&hkSetState, (void**)&oSetState},
+            {"MusicStack tick (music10)", 0x0073EDE0, "A1????????DB05????????81EC04010000", (void*)&hkStackTick,
+             (void**)&oStackTick},
+            {"music cue once (music10)", 0x0073ED10, "8B44240883EC08535657", (void*)&hkMusicOnce, (void**)&oMusicOnce},
+        });
     }
     if (cfg.vo) {
         vo.root10 = install10 + "\\assets\\sound\\dialog";
@@ -2230,11 +2265,18 @@ inline bool install(HookFn hook, uintptr_t (*rt)(uint32_t), const std::string& i
         dialogMgr = (uint8_t*)rt(0x02204128);
         engineAlloc = (AllocFn)rt(0x00409E90);
         engineFree = (FreeFn)rt(0x00409ED0);
-        hook("dialog line post (vo10)", 0x01948D80, "558BEC83EC105356578B7D1C", (void*)&hkPostExt, (void**)&oPostExt);
-        hook("sound file read (vo10)", 0x0182F570, "8B44240485C0741F803800741A", (void*)&hkLoadFile, (void**)&oLoadFile);
-        hook("dialog request (vo10)", 0x0073BF50, "53568BF1E8????????8D4618", (void*)&hkDlgReq, (void**)&oDlgReq);
+        installFeature("vo10", {
+            {"dialog line post (vo10)", 0x01948D80, "558BEC83EC105356578B7D1C", (void*)&hkPostExt, (void**)&oPostExt},
+            {"sound file read (vo10)", 0x0182F570, "8B44240485C0741F803800741A", (void*)&hkLoadFile,
+             (void**)&oLoadFile},
+            {"dialog request (vo10)", 0x0073BF50, "53568BF1E8????????8D4618", (void*)&hkDlgReq, (void**)&oDlgReq},
+        });
     }
-    if (cfg.trace) hook("queued sound post (audiotrace10)", 0x01830270, "83EC44538B5C244C", (void*)&hkQueuedPost, (void**)&oQueuedPost);
+    if (cfg.trace)
+        installFeature("audiotrace10", {
+            {"queued sound post (audiotrace10)", 0x01830270, "83EC44538B5C244C", (void*)&hkQueuedPost,
+             (void**)&oQueuedPost},
+        });
     return true;
 }
 

@@ -123,6 +123,21 @@ inline std::string param30(const std::string& a)
 
 struct Stats { int emitters = 0, effects = 0, params = 0, keys = 0, meshes = 0, rechanneled = 0, constChans = 0; };
 
+// the 3.0 trailer (FUN_00656bd0): 0x123, version 0x2f, keys offset twice, then the four counts
+inline std::string trailer30(uint32_t keys30, uint16_t nkeys30, uint16_t ne, uint16_t nf, uint16_t np)
+{
+    std::string tr(0x18, '\0');
+    wr16(tr, 0, 0x123);
+    wr16(tr, 2, 0x2f);
+    wr32(tr, 4, keys30);
+    wr32(tr, 8, keys30);
+    wr16(tr, 0xc, nkeys30);
+    wr16(tr, 0xe, ne);
+    wr16(tr, 0x10, nf);
+    wr16(tr, 0x12, np);
+    return tr;
+}
+
 // 1.0 package -> 3.0 package; false (out untouched) if in is not a well-formed 1.0 package. chanMap: channel
 // re-layout per emitter material (null: the 1.0 channels as they are)
 inline bool transcode(const std::string& in, std::string& out, Stats* st = nullptr, const ChanMap* chanMap = nullptr)
@@ -132,7 +147,7 @@ inline bool transcode(const std::string& in, std::string& out, Stats* st = nullp
     uint32_t keys = rd32(in, t + 8);
     uint16_t nkeys = rd16(in, t + 0xc), ne = rd16(in, t + 0xe), nf = rd16(in, t + 0x10), np = rd16(in, t + 0x12);
     size_t tabs = t - (size_t)np * 8 - (size_t)nf * 8 - (size_t)ne * 16;
-    if (tabs > t || (size_t)keys + 8u * nkeys != tabs) return false;
+    if (tabs > t || keys > tabs || tabs - keys != 8u * nkeys) return false;
     size_t pe = tabs, pf = pe + (size_t)ne * 16, pp = pf + (size_t)nf * 8;
     struct Rec { uint32_t off; int kind; size_t entry; };   // kind 0 emitter, 1 effect, 2 param
     std::vector<Rec> recs;
@@ -140,6 +155,8 @@ inline bool transcode(const std::string& in, std::string& out, Stats* st = nullp
     for (uint16_t i = 0; i < nf; ++i) recs.push_back({rd32(in, pf + 8 * i), 1, pf + 8 * (size_t)i});
     for (uint16_t i = 0; i < np; ++i) recs.push_back({rd32(in, pp + 8 * i), 2, pp + 8 * (size_t)i});
     std::stable_sort(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) { return x.off < y.off; });
+    // every record lies before the keys, so each one's span ends inside in (RE-22)
+    if (!recs.empty() && recs.back().off > keys) return false;
     std::string body;
     std::vector<uint32_t> newOff(recs.size());
     Stats s;
@@ -183,10 +200,7 @@ inline bool transcode(const std::string& in, std::string& out, Stats* st = nullp
             wr32(tab, 8 * j + 4, rd32(in, e + 4));
         }
     }
-    std::string tr(0x18, '\0');
-    wr16(tr, 0, 0x123); wr16(tr, 2, 0x2f);
-    wr32(tr, 4, keys30); wr32(tr, 8, keys30);
-    wr16(tr, 0xc, nkeys30); wr16(tr, 0xe, ne); wr16(tr, 0x10, nf); wr16(tr, 0x12, np);
+    const std::string tr = trailer30(keys30, nkeys30, ne, nf, np);
     out = body + emit + eff + par + tr;
     s.keys = nkeys30;
     if (st) *st = s;

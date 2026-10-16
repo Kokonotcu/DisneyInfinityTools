@@ -53,9 +53,9 @@ inline bool transcode(oct::File& f, const std::string& path, std::string* why = 
         else if (r.level == 4 && n == "File") {   // FileSets/FileSet/Files/File
             bool isModel = false;
             for (size_t j = i + 1; j < f.blockEnd(i); ++j)
-                if (f.recs[j].level == 5 && f.name(f.recs[j]) == "Type") isModel = f.nameValues(f.recs[j])[0] == "Model";
+                if (f.recs[j].level == 5 && f.name(f.recs[j]) == "Type") isModel = f.name0(f.recs[j]) == "Model";
             if (isModel) model = (long)i;
-            else files.emplace_back(f.nameValues(r)[0], i);
+            else files.emplace_back(f.name0(r), i);
         }
     }
     if (version < 0 || f.nameValues(f.recs[version]) != std::vector<std::string>{"4.1"}) { if (why) *why = "not 4.1"; return false; }
@@ -69,8 +69,8 @@ inline bool transcode(oct::File& f, const std::string& path, std::string* why = 
         std::string ch, cm;
         for (size_t k = j + 1; k < f.blockEnd(j); ++k) {
             const std::string& n = f.name(f.recs[k]);
-            if (n == "Channel") ch = f.nameValues(f.recs[k])[0];
-            else if (n == "ConnectionMap") cm = f.nameValues(f.recs[k])[0];
+            if (n == "Channel") ch = f.name0(f.recs[k]);
+            else if (n == "ConnectionMap") cm = f.name0(f.recs[k]);
         }
         if (!ch.empty() && !cm.empty() && cm != "Anchor-Main") cmaps[ch] = cm;
     }
@@ -85,7 +85,7 @@ inline bool transcode(oct::File& f, const std::string& path, std::string* why = 
             const oct::Rec& r = f.recs[k];
             const std::string& n = f.name(r);
             if (n == "Type" || n == "Bases") continue;
-            if (n == "Filename") out.push_back(f.nameScalar((uint16_t)(r.level + shift), r.name, resolve(dir, f.nameValues(r)[0])));
+            if (n == "Filename") out.push_back(f.nameScalar((uint16_t)(r.level + shift), r.name, resolve(dir, f.name0(r))));
             else copy(k, f.blockEnd(k), shift);
         }
     };
@@ -102,7 +102,7 @@ inline bool transcode(oct::File& f, const std::string& path, std::string* why = 
         out.back().level = 2;
         for (size_t k = channels + 1; k < f.blockEnd(channels); k = f.blockEnd(k)) {
             copy(k, f.blockEnd(k), 1);
-            auto cm = cmaps.find(f.nameValues(f.recs[k])[0]);
+            auto cm = cmaps.find(f.name0(f.recs[k]));
             if (cm != cmaps.end()) out.push_back(f.nameScalar((uint16_t)(f.recs[k].level + 2), f.addName("ConnectionMap"), cm->second));
         }
         out.insert(out.end(), rest.begin(), rest.end());

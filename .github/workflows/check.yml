@@ -21,7 +21,7 @@ jobs:
         run: |
           python - <<'EOF'
           import importlib, pathlib
-          scripts = {'nodedump', 'slotcheck', 'streamlayout', 'disx', 'variant', 'selftest'}   # run on import
+          scripts = {'nodedump', 'slotcheck', 'streamlayout', 'disx', 'selftest'}   # run on import
           mods = [p.stem for p in sorted(pathlib.Path('.').glob('*.py')) if p.stem not in scripts]
           for m in mods:
               importlib.import_module(m)

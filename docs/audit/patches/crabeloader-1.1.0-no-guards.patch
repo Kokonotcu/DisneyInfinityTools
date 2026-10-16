@@ -1,0 +1,17 @@
+diff --git a/src/application/loader.cpp b/src/application/loader.cpp
+index 60d4820..c0caeaa 100644
+--- a/src/application/loader.cpp
++++ b/src/application/loader.cpp
+@@ -651,8 +651,10 @@ bool Loader::initialize()
+     crabe::infrastructure::MessageHook::get().initialize();
+     crabe::infrastructure::EngineFreeCamera::get().initialize();
+     crabe::infrastructure::EngineGateway::get().initialize();
+-    crabe::infrastructure::EngineMeridian::get().initialize();
+-    crabe::infrastructure::EngineShaders::get().initialize();
++    // DI3Tools build: the DynArray sanitizer and the fallback shader are off, so a world that loads here
++    // also loads in vanilla 3.0 (they hid int3 on unknown shaders and corrupt Meridian arrays).
++    // crabe::infrastructure::EngineMeridian::get().initialize();
++    // crabe::infrastructure::EngineShaders::get().initialize();
+     crabe::infrastructure::VfsOverrideManager::get().initialize(std::filesystem::current_path());
+     crabe::infrastructure::VfsHook::get().initialize();
+     crabe::infrastructure::EngineAssetLoader::get().initialize();

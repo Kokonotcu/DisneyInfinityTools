@@ -7,6 +7,7 @@ Conventions:
 - "Shipped" means the stock Steam 3.0 Gold install, or its extract, unless a section says otherwise.
 - Counts like `5,079/5,079` are self-test results, quoted with the corpus they were measured on.
 - Exe addresses are static Ghidra addresses (image base `0x400000`; `mdmp.Dump.read_static`). Runtime addresses differ by the ASLR'd load base (see [section 13](#13-executable-facts-disneyinfinity3exe)).
+- Some facts cite tools that have since been removed: `native30.py`, `expl30.py`, `expack.py`, `variant.py`, `crabemod.py`, `mtb-retex.py`, `btd-info.ps1`, `subnet.py`, `btdscan.py`, `arenapatch.py`. The facts still hold. The tools remain in git history up to commit `684539b`. The SubNetwork count rules `subnet.py` searched for now live in `octx::addCounts`, checked by `octtest --counts`.
 
 Contents:
 1. [Overview](#1-overview)

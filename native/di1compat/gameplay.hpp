@@ -8,10 +8,24 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include "octx.hpp"
 #include "luachunk.hpp"
+#include "base/bytes.hpp"
 
 namespace gameplay {
+
+namespace detail {
+// A record's first value; an empty record is damaged input: hkOpen's catch logs it, serves the raw file.
+template <class T>
+T first(std::vector<T> v, const oct::File& f, const oct::Rec& r)
+{
+    if (v.empty()) throw std::runtime_error("gameplay: " + f.name(r) + " record without a value");
+    return std::move(v[0]);
+}
+inline int32_t firstInt(const oct::File& f, const oct::Rec& r) { return first(f.ints(r), f, r); }
+inline std::string firstName(const oct::File& f, const oct::Rec& r) { return first(f.nameValues(r), f, r); }
+}  // namespace detail
 
 // Ledges and rails (plan OCT-4). in_city.oct's CurvesPool holds 3,164 LH_* ledge-hang and 42 rail curves; every one
 // of its 3,207 curves is bound by a Curve association {NodeName, SubNetworkRef, CurveIndices} to a scene node, and
@@ -93,7 +107,7 @@ inline int surfaces30(oct::File& f, const std::vector<std::string>& names30)
     for (size_t i = cp + 1, end = f.blockEnd(cp); i < end; ++i) {
         oct::Rec& r = f.recs[i];
         if (r.level != 3 || f.name(r) != "SurfaceType") continue;
-        int v = f.ints(r)[0];
+        int v = detail::firstInt(f, r);
         if (v >= 0 && v < (int)map.size() && map[v] >= 0 && map[v] != v) { f.setInt(r, map[v]); ++n; }
     }
     return n;
@@ -511,8 +525,11 @@ inline int activityGraph30(oct::File& f, int* rerouted = nullptr, int* dropped =
     for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; i = f.blockEnd(i)) {
         if (f.recs[i].level != nl) continue;
         N n{i, f.blockEnd(i), ""};
-        for (size_t j = i + 1; j < n.end; ++j)
-            if (f.recs[j].level == fl && f.name(f.recs[j]) == "Type") { n.type = f.nameValues(f.recs[j])[0]; break; }
+        for (size_t j = i + 1; j < n.end; ++j) {
+            if (f.recs[j].level != fl || f.name(f.recs[j]) != "Type") continue;
+            n.type = detail::firstName(f, f.recs[j]);
+            break;
+        }
         nodes.push_back(n);
     }
     int begins = 0, mapped = 0;
@@ -542,8 +559,11 @@ inline int activityGraph30(oct::File& f, int* rerouted = nullptr, int* dropped =
         oct::Rec& r = f.recs[i];
         if (f.name(r) != "Data") continue;
         bool isBuf = false;
-        for (size_t j = i; j-- > lpool + 1 && f.recs[j].level >= r.level;)
-            if (f.recs[j].level == r.level && f.name(f.recs[j]) == "Type") { isBuf = f.nameValues(f.recs[j])[0] == "LinksBuffer"; break; }
+        for (size_t j = i; j-- > (size_t)lpool + 1 && f.recs[j].level >= r.level;) {
+            if (f.recs[j].level != r.level || f.name(f.recs[j]) != "Type") continue;
+            isBuf = detail::firstName(f, f.recs[j]) == "LinksBuffer";
+            break;
+        }
         if (!isBuf) continue;
         oct::Spec sp = oct::spec(r.type);
         std::string d = r.pay.substr(sp.cw);
@@ -619,8 +639,8 @@ inline int activityGraph30(oct::File& f, int* rerouted = nullptr, int* dropped =
         for (size_t j = n.at + 1; j < n.end; ++j) {
             oct::Rec r = f.recs[j];
             const std::string nm = r.level == fl ? f.name(r) : std::string();
-            if (r.level == fl && nm == "NumInLinks" && dIn.count(k)) f.setInt(r, f.ints(r)[0] - dIn[k]);
-            if (r.level == fl && nm == "NumOutLinks" && dOut.count(k)) f.setInt(r, f.ints(r)[0] - dOut[k]);
+            if (r.level == fl && nm == "NumInLinks" && dIn.count(k)) f.setInt(r, detail::firstInt(f, r) - dIn[k]);
+            if (r.level == fl && nm == "NumOutLinks" && dOut.count(k)) f.setInt(r, detail::firstInt(f, r) - dOut[k]);
             if (c && r.level == fl) {
                 if (nm == "Type") { setName(r, firstType ? c->cls30 : c->eval30); firstType = false; }
                 else if (nm == "Uuid" && smUuid.empty() && std::string(c->cls10) == "MissionTask_ActivityStateMachine") smUuid = r.pay;
@@ -712,22 +732,23 @@ inline std::map<std::string, std::vector<std::string>> toolLevels10(const uint8_
 {
     std::map<std::string, std::vector<std::string>> out;
     std::vector<std::pair<size_t, size_t>> secs;
-    for (size_t o = 0; o + 8 <= n;) {
+    for (size_t o = 0; bytes::fits(n, o, 8);) {
         uint32_t sz = oct::u(d + o, 4);
-        if (sz < 4 || o + sz > n) return out;
+        if (sz < 4 || !bytes::fits(n, o, sz)) return out;
         secs.push_back({o, sz});
         o += sz;
     }
     if (secs.size() < 12) return out;
     const char* pool = (const char*)d + 4;
     size_t poolN = secs[0].second - 4, lists = secs[1].first + 4, listsEnd = secs[1].first + secs[1].second;
+    const size_t listWords = (listsEnd - lists) / 4;   // u32 words in section 1
     auto str = [&](int32_t off) { return off >= 0 && (size_t)off < poolN ? std::string(pool + off, strnlen(pool + off, poolN - off)) : std::string(); };
     size_t so = secs[11].first, sz = secs[11].second, cnt = oct::u(d + so + 4, 4);
     if (sz < 8 || (sz - 8) % 76 || cnt != (sz - 8) / 76) return out;   // (no 32-bit wrap of cnt * 76)
     for (size_t r = 0; r < cnt; ++r) {
         const uint8_t* rec = d + so + 8 + r * 76;
         std::vector<std::string>& lv = out[str((int32_t)oct::u(rec, 4))];
-        for (int32_t i = (int32_t)oct::u(rec + 0x10, 4); i >= 0 && lists + 4 * (size_t)i + 4 <= listsEnd; ++i) {
+        for (int32_t i = (int32_t)oct::u(rec + 0x10, 4); i >= 0 && bytes::fits(listWords, (size_t)i, 1); ++i) {
             int32_t w = (int32_t)oct::u(d + lists + 4 * i, 4);
             if (w == -1) break;
             lv.push_back(str(w));

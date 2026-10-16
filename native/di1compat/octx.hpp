@@ -4,6 +4,8 @@
 #include <cmath>
 #include <map>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include "oct.hpp"
 
 namespace octx {
@@ -123,7 +125,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     int chc = -1;
     for (size_t i = sn + 1; i < end; ++i)
         if (f.recs[i].level == 3 && f.name(f.recs[i]) == "ConstantHeaderCount") {
-            chc = (int)f.ints(f.recs[i])[0];
+            chc = (int)f.int0(f.recs[i]);
             f.recs.erase(f.recs.begin() + i);
             break;
         }
@@ -178,7 +180,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
                 if (a < 0) sized = false;
                 s32 += a;
                 s64 += b;
-            } else if (pool == "DataNodePool" && n == "Static" && f.ints(r)[0]) ++statics;
+            } else if (pool == "DataNodePool" && n == "Static" && f.int0(r)) ++statics;
             else if (pool == "ComponentFamilyPool" && n == "ComponentNameIndices") cmem += (int)f.ints(r).size();
         }
     }
@@ -194,7 +196,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
     bool constSection = chc > 0 && !allStatic && statics;
     if (!allStatic && statics && !constSection) {
         for (size_t i = sn + 1, e = f.blockEnd(sn); i < e; ++i)
-            if (f.recs[i].level == 5 && f.name(f.recs[i]) == "Static" && f.ints(f.recs[i])[0]) f.setInt(f.recs[i], 0);
+            if (f.recs[i].level == 5 && f.name(f.recs[i]) == "Static" && f.int0(f.recs[i])) f.setInt(f.recs[i], 0);
         statics = 0;
     }
     int clc = 0;   // ConstantLayoutCount: the layout ints that number headers 1..chc
@@ -312,10 +314,10 @@ inline bool addAssetPool(oct::File& f)
         int32_t sn = -1, stn = -1;
         for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
             const std::string& n = f.name(f.recs[j]);
-            if (n == "Type") type = f.nameValues(f.recs[j])[0];
-            else if (n == "NodeName") node = f.nameValues(f.recs[j])[0];
-            else if (n == "SubNetworkRef") sn = f.ints(f.recs[j])[0];
-            else if (n == "SceneTreeNodeRef") stn = f.ints(f.recs[j])[0];
+            if (n == "Type") type = f.name0(f.recs[j]);
+            else if (n == "NodeName") node = f.name0(f.recs[j]);
+            else if (n == "SubNetworkRef") sn = f.int0(f.recs[j]);
+            else if (n == "SceneTreeNodeRef") stn = f.int0(f.recs[j]);
         }
         if (type == "PrimaryAsset") assets.insert(assets.begin(), A{"Root", sn, stn});
         else if (type == "Asset" && sn >= 0) assets.push_back(A{node, sn, stn});   // pieces without a SubNetwork: not
@@ -421,16 +423,16 @@ struct SnEdit {
             } else if (r.level == 4) {
                 if (pool == "DataNodePool" && n == "DataNode") dns.emplace_back();
                 else if (pool == "ProcessorNodePool" && n == "ProcessorNode") ++npn;
-                else if (pool == "BasisPool") basis = std::stoi(f.nameValues(r)[0]);
+                else if (pool == "BasisPool") basis = std::stoi(f.name0(r));
                 else if (pool == "BasisConversionPool") c.clear();
             } else if (r.level == 5) {
                 if (pool == "DataNodePool" && !dns.empty()) {
-                    if (n == "Header") dns.back().header = f.ints(r)[0];
-                    else if (n == "BasisRef") dns.back().basis = f.ints(r)[0];
-                    else if (n == "Type") dns.back().type = f.nameValues(r)[0];
-                } else if (pool == "BasisPool" && n == "ParentRef") basisParent[basis] = f.ints(r)[0];
+                    if (n == "Header") dns.back().header = f.int0(r);
+                    else if (n == "BasisRef") dns.back().basis = f.int0(r);
+                    else if (n == "Type") dns.back().type = f.name0(r);
+                } else if (pool == "BasisPool" && n == "ParentRef") basisParent[basis] = f.int0(r);
                 else if (pool == "BasisConversionPool") {
-                    c[n] = f.ints(r)[0];
+                    c[n] = f.int0(r);
                     if (c.count("FromBasisRef") && c.count("ToBasisRef") && c.count("DataNodeRef"))
                         conv[{c["FromBasisRef"], c["ToBasisRef"]}] = c["DataNodeRef"];
                 }
@@ -628,9 +630,9 @@ template <class Fn> inline void eachAssociation(oct::File& f, const std::string&
         int sn = -1;
         for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
             const std::string& n = f.name(f.recs[j]);
-            if (n == "Type") t = f.nameValues(f.recs[j])[0];
+            if (n == "Type") t = f.name0(f.recs[j]);
             else if (n == "NodeName") nn = (long)j;
-            else if (n == "SubNetworkRef") sn = f.ints(f.recs[j])[0];
+            else if (n == "SubNetworkRef") sn = f.int0(f.recs[j]);
         }
         if (t == type && nn >= 0 && sn >= 0) fn(f.recs[nn], sn);
     }
@@ -646,7 +648,7 @@ template <class Edit> inline int redirectAssociations(oct::File& f, const std::s
     for (size_t i = sp + 1, end = f.blockEnd(sp); i < end; i = f.blockEnd(i))
         if (f.recs[i].level == 2) sns.push_back(i);
     std::map<int, std::vector<std::string>> want;
-    eachAssociation(f, type, [&](oct::Rec& r, int sn) { if (sn < (int)sns.size()) want[sn].push_back(f.nameValues(r)[0]); });
+    eachAssociation(f, type, [&](oct::Rec& r, int sn) { if (sn < (int)sns.size()) want[sn].push_back(f.name0(r)); });
     std::map<std::pair<int, std::string>, std::string> renamed;
     std::vector<size_t> order;   // last to first, the order the names were always added in
     for (auto it = want.rbegin(); it != want.rend(); ++it) order.push_back((size_t)it->first);
@@ -663,7 +665,7 @@ template <class Edit> inline int redirectAssociations(oct::File& f, const std::s
     });
     int n = 0;
     eachAssociation(f, type, [&](oct::Rec& r, int sn) {
-        auto k = renamed.find({sn, f.nameValues(r)[0]});
+        auto k = renamed.find({sn, f.name0(r)});
         if (k == renamed.end()) return;
         r.pay.clear();
         oct::File::put(r.pay, f.addName(k->second), 2);
@@ -725,6 +727,10 @@ inline int worldChain(SnEdit& e, int xf, int src, bool lastExternal)
     auto steps = e.toWorld(e.dns[src].basis, found);
     if (!found) return -1;   // a root-basis src: no step, src itself
     for (auto& s : steps) {
+        // the converter is a BasisConversion's DataNodeRef from the file: a damaged one can name no DataNode (CO-16)
+        if (s.first < 0 || s.first >= (int)e.dns.size())
+            throw std::runtime_error("octx: a BasisConversion names DataNode " + std::to_string(s.first) +
+                                     ", which is not there");
         const std::string& ct = e.dns[s.first].type;
         if (ct != "Transform" && ct != "Dilation" && ct != "Matrix4x4") return -1;
     }
@@ -809,7 +815,7 @@ inline int collision30(oct::File& f)
         aggAt.push_back(-1);
         for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
             const std::string& n = f.name(f.recs[j]);
-            if (n == "SubNetworkRef" && !assetOf.count(f.ints(f.recs[j])[0])) assetOf[f.ints(f.recs[j])[0]] = (int)k;
+            if (n == "SubNetworkRef" && !assetOf.count(f.int0(f.recs[j]))) assetOf[f.int0(f.recs[j])] = (int)k;
             else if (n == "AggregateCount") aggAt.back() = (long)j;
         }
     }
@@ -820,11 +826,11 @@ inline int collision30(oct::File& f)
         for (size_t j = i + 1; j < a.end; ++j) {
             const oct::Rec& r = f.recs[j];
             const std::string& n = f.name(r);
-            if (n == "Type") a.type = f.nameValues(r)[0];
-            else if (n == "NodeName") a.node = f.nameValues(r)[0];
-            else if (n == "SubNetworkRef") a.sn = f.ints(r)[0];
-            else if (n == "CollisionInstanceRef") a.inst = f.ints(r)[0];
-            else if (n == "SceneTreeNodeRef") a.stn = f.ints(r)[0];
+            if (n == "Type") a.type = f.name0(r);
+            else if (n == "NodeName") a.node = f.name0(r);
+            else if (n == "SubNetworkRef") a.sn = f.int0(r);
+            else if (n == "CollisionInstanceRef") a.inst = f.int0(r);
+            else if (n == "SceneTreeNodeRef") a.stn = f.int0(r);
             else if (n == "AssetIndex") a.hasIndex = true;
         }
         if (a.type == "CollisionAggregate") return 0;   // already 3.0 form
@@ -933,7 +939,7 @@ inline int realm30w(oct::File& f, bool realmFile = false)
     auto rds = entries("RealmDataPool"), rvs = entries("RealmVolumePool");
     std::map<size_t, std::vector<oct::Rec>> blocks;   // node index -> its new record block
     std::set<std::string> volumeRealms;
-    for (auto& v : rvs) if (auto r = field(v, "RealmName")) volumeRealms.insert(f.nameValues(*r)[0]);
+    for (auto& v : rvs) if (auto r = field(v, "RealmName")) volumeRealms.insert(f.name0(*r));
     auto nodeField = [&](size_t n, const char* name) -> const oct::Rec* {
         for (size_t j = nodes[n] + 1, e = f.blockEnd(nodes[n]); j < e; ++j)
             if (f.recs[j].level == 3 && f.name(f.recs[j]) == name) return &f.recs[j];
@@ -948,17 +954,17 @@ inline int realm30w(oct::File& f, bool realmFile = false)
     auto tail = [&](size_t n, std::vector<oct::Rec>& b) {
         for (const char* k : {"ParentNodeReferences", "LocalToParentMatrix"}) if (auto r = nodeField(n, k)) b.push_back(*r);
     };
-    auto typeOf = [&](size_t n) { auto r = nodeField(n, "Type"); return r ? f.nameValues(*r)[0] : std::string(); };
+    auto typeOf = [&](size_t n) { auto r = nodeField(n, "Type"); return r ? f.name0(*r) : std::string(); };
     int done = 0;
     bool worldRealms = false;
     for (auto& e : rds) {
         auto ref = field(e, "NodeRef");
-        int n = ref ? f.ints(*ref)[0] : -1;
+        int n = ref ? f.int0(*ref) : -1;
         if (n <= 0 || n >= (int)nodes.size() || typeOf(n) != "Transform") continue;
         worldRealms = true;
         auto b = head(n, "RealmData");
         tail(n, b);
-        std::string name = field(e, "Name") ? f.nameValues(*field(e, "Name"))[0] : "";
+        std::string name = field(e, "Name") ? f.name0(*field(e, "Name")) : "";
         if (auto r = field(e, "Name")) b.push_back(*r);
         b.push_back(f.intScalar(3, "NodeRef", n));
         b.push_back(f.intScalar(3, "SkyNodeRef", n));
@@ -974,11 +980,11 @@ inline int realm30w(oct::File& f, bool realmFile = false)
     if (!worldRealms && rds.size() && !realmFile) return 0;   // a realm file without realmFile: left as it is
     for (auto& e : rvs) {
         auto ref = field(e, "NodeRef");
-        int n = ref ? f.ints(*ref)[0] : -1;
+        int n = ref ? f.int0(*ref) : -1;
         if (n <= 0 || n >= (int)nodes.size()) continue;
         auto b = head(n, "RealmVolume");
         b.push_back(f.intScalar(3, "NumRealmNames", 1));
-        if (auto r = field(e, "RealmName")) b.push_back(nameList(f, 3, "RealmNames", {f.nameValues(*r)[0]}));
+        if (auto r = field(e, "RealmName")) b.push_back(nameList(f, 3, "RealmNames", {f.name0(*r)}));
         for (const char* k : {"ZoneName", "InsideSize", "VolumeExtents"}) if (auto r = field(e, k)) b.push_back(*r);
         if (auto ve = field(e, "VolumeExtents"); ve && ve->pay.size() >= 13) {
             float x[3], m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -999,7 +1005,7 @@ inline int realm30w(oct::File& f, bool realmFile = false)
         if (blocks.count(n) || typeOf(n) != "Light") continue;
         auto lt = nodeField(n, "LightType");
         if (!lt || oct::spec(lt->type).kind != oct::NAME) continue;   // already 3.0 (int)
-        std::string kind = f.nameValues(*lt)[0];
+        std::string kind = f.name0(*lt);
         auto flt = [&](const char* name, float d) {   // a float scalar field of the node
             auto r = nodeField(n, name);
             float v = d;
@@ -1075,7 +1081,7 @@ inline int realm30w(oct::File& f, bool realmFile = false)
     // a realm file's name seeds its Uuids, so a world and the realms loaded beside it never share one
     std::string realmName;
     if (realmFile)
-        if (auto r = field(rds[0], "Name")) realmName = f.nameValues(*r)[0];
+        if (auto r = field(rds[0], "Name")) realmName = f.name0(*r);
     auto uuid = [&](const std::string& seed, int k) {   // FNV-1a of seed + ordinal (empty seed: the world form)
         std::string id(16, '\0');
         uint64_t h1 = 1469598103934665603ull, h2 = 0x9e3779b97f4a7c15ull;
@@ -1126,7 +1132,7 @@ inline int realm30w(oct::File& f, bool realmFile = false)
         if (auto r = field(e, "Name")) b.push_back(*r);
         b.push_back(f.intScalar(3, "NodeRef", 1));
         b.push_back(f.intScalar(3, "SkyNodeRef", 0));
-        if (auto r = field(e, "SunLightRef")) { oct::Rec s = *r; f.setInt(s, f.ints(s)[0] + 1); b.push_back(s); }
+        if (auto r = field(e, "SunLightRef")) { oct::Rec s = *r; f.setInt(s, f.int0(s) + 1); b.push_back(s); }
         for (const char* k : {"AmbientRigRef", "SunRigRef", "SceneSettingsRef", "SettingsName", "ZoneName", "RigBlendType", "SettingsNonDefault",
                               "SunNoDirection", "SunNoColor", "StartWeight", "FollowsCamera", "ParallaxFactor", "GlobalOverride"})
             if (auto r = field(e, k)) b.push_back(*r);
@@ -1144,7 +1150,7 @@ inline int realm30w(oct::File& f, bool realmFile = false)
             for (size_t i = ap + 1; i < end; i = f.blockEnd(i)) {
                 bool primary = false;
                 for (size_t j = i + 1; j < f.blockEnd(i); ++j)
-                    if (f.name(f.recs[j]) == "Type" && f.nameValues(f.recs[j])[0] == "PrimaryAsset") primary = true;
+                    if (f.name(f.recs[j]) == "Type" && f.name0(f.recs[j]) == "PrimaryAsset") primary = true;
                 if (primary) continue;
                 size_t first = out.size();
                 out.insert(out.end(), f.recs.begin() + i, f.recs.begin() + f.blockEnd(i));

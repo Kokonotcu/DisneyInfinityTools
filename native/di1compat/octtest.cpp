@@ -2424,7 +2424,7 @@ static int hostTest(char** argv)
     if (!lock || !unlock) { printf("HOST no LdrLockLoaderLock\n"); return 1; }
     static uint8_t dummy[64];
     static int hooks = 0;
-    auto hook = [](const char*, uint32_t, const char*, void*, void**) { ++hooks; return true; };
+    auto hook = [](const char*, const std::vector<core::HookSpec>& feature) { hooks += (int)feature.size(); return true; };
     auto rt = [](uint32_t) { return (uintptr_t)dummy; };
     audio::hostStart.nosound = true;
     ULONG state = 0;

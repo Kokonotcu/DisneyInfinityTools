@@ -26,6 +26,7 @@
 //   ToggleType  Collision/Visibility/ColVisToggle describe 'Type' = their class, 3.0's mode switch (Table::toggleType10)
 #pragma once
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include "oct.hpp"
@@ -156,9 +157,120 @@ inline int typeOf(const oct::File& f, const oct::Rec& r)
 
 struct Stats { int nodes = 0, params = 0, pinsCopied = 0, stubs = 0, links = 0, linksDropped = 0, namespaces = 0, events = 0, fetches = 0, netSync = 0, typed = 0; };
 
-// False (f unchanged) if the file is not a 1.0 graph (already has descriptions, or no node pool).
+// transcode's graph parsing. Every check here runs before transcode changes f (its "false means f unchanged").
+namespace detail {
+
+struct Node { size_t at, end; std::string type; int ns = -1; bool stub = false; };
+struct NS { size_t begin, end; std::string name; };
+struct Out { size_t at; std::string data; };   // a LinksBuffer Data record (index in f) and its 3.0 bytes
+
+inline bool fail(std::string* why, const char* reason)
+{
+    if (why) *why = reason;
+    return false;
+}
+
+// nameValues(r)[0], a keyed record's key; nullopt when the record holds no name (GR-16)
+inline std::optional<std::string> firstName(const oct::File& f, const oct::Rec& r)
+{
+    std::vector<std::string> v = f.nameValues(r);
+    if (v.empty()) return std::nullopt;
+    return std::move(v[0]);
+}
+
+// A node's first field (record at level fl) of this name, -1 if none
+inline long field(const oct::File& f, const Node& n, uint16_t fl, const char* name)
+{
+    for (size_t j = n.at + 1; j < n.end; ++j) if (f.recs[j].level == fl && f.name(f.recs[j]) == name) return (long)j;
+    return -1;
+}
+
+// The pool's child nodes with their first Type field; false (nodes partly filled) if that Type holds no name
+inline bool collectNodes(const oct::File& f, size_t pool, std::vector<Node>& nodes, std::string* why)
+{
+    const size_t poolEnd = f.blockEnd(pool);
+    const uint16_t nodeLevel = (uint16_t)(f.recs[pool].level + 1), fl = (uint16_t)(nodeLevel + 1);
+    for (size_t i = pool + 1; i < poolEnd; i = f.blockEnd(i)) {
+        if (f.recs[i].level != nodeLevel) continue;
+        Node n{i, f.blockEnd(i), ""};
+        const long type = field(f, n, fl, "Type");
+        const std::optional<std::string> name = type < 0 ? std::optional<std::string>("") : firstName(f, f.recs[type]);
+        if (!name) return fail(why, "node Type holds no name");
+        n.type = *name;
+        nodes.push_back(n);
+    }
+    return true;
+}
+
+// A NameSpaceBegin's name: its last Name record at any level ("" if none); nullopt if one holds no name
+inline std::optional<std::string> beginName(const oct::File& f, const Node& b)
+{
+    std::string name;
+    for (size_t j = b.at + 1; j < b.end; ++j) {
+        if (f.name(f.recs[j]) != "Name") continue;
+        const std::optional<std::string> v = firstName(f, f.recs[j]);
+        if (!v) return std::nullopt;
+        name = *v;
+    }
+    return name;
+}
+
+// False when transcode would copy a ReferenceEmbeddedNamespace that holds no name to MergedLayoutPath
+inline bool mergedPathReadable(const oct::File& f, const Node& b, uint16_t fl)
+{
+    const long ref = field(f, b, fl, "ReferenceEmbeddedNamespace");
+    const bool copied = ref >= 0 && field(f, b, fl, "MergedLayoutPath") < 0;
+    return !copied || firstName(f, f.recs[ref]).has_value();
+}
+
+// Namespaces by node index, each node's one (-1 before any Begin); false (nss partial) if none (GR-07) or unreadable
+inline bool collectNamespaces(const oct::File& f, uint16_t fl, std::vector<Node>& nodes, std::vector<NS>& nss,
+                              std::string* why)
+{
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        if (nodes[k].type == "NameSpaceBegin") {
+            const std::optional<std::string> name = beginName(f, nodes[k]);
+            if (!name) return fail(why, "NameSpaceBegin Name holds no name");
+            if (!mergedPathReadable(f, nodes[k], fl)) return fail(why, "ReferenceEmbeddedNamespace holds no name");
+            nss.push_back({k, k, *name});
+        } else if (nodes[k].type == "NameSpaceEnd" && !nss.empty()) nss.back().end = k;
+        if (!nss.empty()) nodes[k].ns = (int)nss.size() - 1;
+    }
+    return nss.empty() ? fail(why, "no NameSpaceBegin") : true;
+}
+
+// False if a name field (NumInLinks / NumOutLinks) the rebuild lowers by drops holds no int (GR-16)
+inline bool dropsReadable(const oct::File& f, const std::vector<Node>& nodes, uint16_t fl,
+                          const std::map<size_t, int>& drops, const char* name)
+{
+    for (const auto& d : drops) {
+        if (d.first >= nodes.size()) continue;
+        const Node& n = nodes[d.first];
+        const bool rebuilt = !n.stub && n.type != "NameSpaceBegin" && n.type != "NameSpaceEnd";
+        for (size_t j = n.at + 1; rebuilt && j < n.end; ++j) {
+            const bool lowered = f.recs[j].level == fl && f.name(f.recs[j]) == name;
+            if (lowered && f.ints(f.recs[j]).empty()) return false;
+        }
+    }
+    return true;
+}
+
+// Record i of f; a LinksBuffer's Data as its 3.0 blob, wherever the link pool lies (GR-39)
+inline oct::Rec relinked(oct::File& f, size_t i, const std::vector<Out>& newLinks)
+{
+    oct::Rec r = f.recs[i];
+    for (auto& L : newLinks)
+        if (L.at == i) { oct::Rec b = blob(f, r.level, "Data", L.data); b.name = r.name; r = b; }
+    return r;
+}
+
+}  // namespace detail
+
+// False (f unchanged) if the file is not a 1.0 graph (already 3.0, no node pool) or is damaged.
 inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::string* why = nullptr)
 {
+    using detail::Node;
+    using detail::NS;
     Stats s;
     long pool = f.pool("MeridianNodePool");
     if (pool < 0) { if (why) *why = "no MeridianNodePool"; return false; }
@@ -166,33 +278,13 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
     size_t poolEnd = f.blockEnd(pool);
     uint16_t nodeLevel = (uint16_t)(f.recs[pool].level + 1), fl = (uint16_t)(nodeLevel + 1);
 
-    struct Node { size_t at, end; std::string type; int ns = -1; bool stub = false; };
     std::vector<Node> nodes;
-    for (size_t i = pool + 1; i < poolEnd; i = f.blockEnd(i)) {
-        if (f.recs[i].level != nodeLevel) continue;
-        Node n{i, f.blockEnd(i), ""};
-        for (size_t j = i + 1; j < n.end; ++j)
-            if (f.recs[j].level == fl && f.name(f.recs[j]) == "Type") { n.type = f.nameValues(f.recs[j])[0]; break; }
-        nodes.push_back(n);
-    }
-    struct NS { size_t begin, end; std::string name; };
     std::vector<NS> nss;
-    for (size_t k = 0; k < nodes.size(); ++k) {
-        if (nodes[k].type == "NameSpaceBegin") {
-            std::string name;
-            for (size_t j = nodes[k].at + 1; j < nodes[k].end; ++j)
-                if (f.name(f.recs[j]) == "Name") name = f.nameValues(f.recs[j])[0];
-            nss.push_back({k, k, name});
-        } else if (nodes[k].type == "NameSpaceEnd" && !nss.empty()) nss.back().end = k;
-        if (!nss.empty()) nodes[k].ns = (int)nss.size() - 1;
-    }
+    if (!detail::collectNodes(f, pool, nodes, why) || !detail::collectNamespaces(f, fl, nodes, nss, why)) return false;
     for (auto& n : nodes)
         n.stub = n.type != "NameSpaceBegin" && n.type != "NameSpaceEnd" && !T.registered.count(n.type);
 
-    auto field = [&](const Node& n, const char* name) -> long {
-        for (size_t j = n.at + 1; j < n.end; ++j) if (f.recs[j].level == fl && f.name(f.recs[j]) == name) return (long)j;
-        return -1;
-    };
+    auto field = [&](const Node& n, const char* name) { return detail::field(f, n, fl, name); };
     auto isInt = [&](const oct::Rec& r) { oct::Spec sp = oct::spec(r.type); return sp.shape == oct::SCALAR && sp.kind == oct::INT && !sp.keyed; };
 
     // port names: a sub-node's LeafName, else the owner field naming it (1.0 camera/LuaNode/EventSurge ports carry no
@@ -269,8 +361,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
 
     // links first: dropped ones change NumInLinks / NumOutLinks
     std::map<size_t, int> dIn, dOut;   // node index -> links dropped
-    struct Out { size_t at; std::string data; };
-    std::vector<Out> newLinks;
+    std::vector<detail::Out> newLinks;
     long lpool = f.pool("MeridianLinkPool");
     if (lpool >= 0) {
         std::map<std::string, int> seen;   // namespace name -> times matched
@@ -281,9 +372,11 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             long data = -1;
             for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
                 const std::string& n = f.name(f.recs[j]);
-                if (n == "Type") type = f.nameValues(f.recs[j])[0];
-                else if (n == "Name") name = f.nameValues(f.recs[j])[0];
-                else if (n == "Data") data = (long)j;
+                if (n == "Data") data = (long)j;
+                if (n != "Type" && n != "Name") continue;
+                const std::optional<std::string> v = detail::firstName(f, f.recs[j]);
+                if (!v) return detail::fail(why, "link record holds no name");
+                (n == "Type" ? type : name) = *v;
             }
             if (type == "NameSpaceBegin") {
                 int want = seen[name]++, k = 0;
@@ -297,7 +390,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
                 if (len < 5) continue;
                 uint32_t n = oct::u(d, 4);
                 bool uu = d[4] != 0;
-                if (len != 5 + n * (uu ? 34u : 6u)) { if (why) *why = "LinksBuffer size"; return false; }
+                if ((uint64_t)len != 5 + (uint64_t)n * (uu ? 34u : 6u)) return detail::fail(why, "LinksBuffer size");
                 std::map<std::string, size_t> byUuid;
                 if (uu)
                     for (size_t k = 0; k < nodes.size(); ++k) {
@@ -337,8 +430,13 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         }
     }
 
+    const bool countsReadable = detail::dropsReadable(f, nodes, fl, dIn, "NumInLinks") &&
+                                detail::dropsReadable(f, nodes, fl, dOut, "NumOutLinks");
+    if (!countsReadable) return detail::fail(why, "NumInLinks / NumOutLinks holds no int");
+
     // rebuild the node pool
-    std::vector<oct::Rec> outRecs(f.recs.begin(), f.recs.begin() + pool + 1);
+    std::vector<oct::Rec> outRecs;
+    for (size_t i = 0; i <= (size_t)pool; ++i) outRecs.push_back(detail::relinked(f, i, newLinks));
     std::vector<std::string> values(nss.size()), strs(nss.size());
     std::vector<size_t> beginAt(nss.size());   // position of each Begin's last record in outRecs
     for (size_t k = 0; k < nodes.size(); ++k) {
@@ -372,8 +470,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
             oct::Rec r = f.recs[j];
             std::string nm = f.name(r);
             if (n.stub && r.level == fl && nm == "Type" && firstType) {   // pinless stand-in, links dropped
-                r.pay.clear();
-                oct::File::put(r.pay, f.addName("NodeGroup"), 2);
+                r = f.nameScalar(r.level, r.name, "NodeGroup");   // a plain name scalar whatever the 1.0 Type's form
                 ++s.stubs;
             }
             if (n.stub && r.level == fl && (nm == "NumInLinks" || nm == "NumOutLinks")) f.setInt(r, 0);
@@ -465,12 +562,7 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
         outRecs.insert(outRecs.begin() + beginAt[q], add.begin(), add.end());
     }
     // the rest of the file, links rewritten
-    for (size_t i = poolEnd; i < f.recs.size(); ++i) {
-        oct::Rec r = f.recs[i];
-        for (auto& L : newLinks)
-            if (L.at == i) { oct::Rec b = blob(f, r.level, "Data", L.data); b.name = r.name; r = b; }
-        outRecs.push_back(r);
-    }
+    for (size_t i = poolEnd; i < f.recs.size(); ++i) outRecs.push_back(detail::relinked(f, i, newLinks));
     f.recs = std::move(outRecs);
     if (st) *st = s;
     return true;
@@ -487,8 +579,12 @@ inline std::string mtc(const oct::File& f)
         long p = f.pool(poolName);
         for (size_t i = p + 1; p >= 0 && i < f.blockEnd(p); i = f.blockEnd(i)) {
             if (f.recs[i].level != f.recs[p].level + 1) continue;
-            for (size_t j = i + 1; j < f.blockEnd(i); ++j)
-                if (f.name(f.recs[j]) == "Type") { c[f.nameValues(f.recs[j])[0]]++; break; }
+            for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
+                if (f.name(f.recs[j]) != "Type") continue;
+                const std::optional<std::string> type = detail::firstName(f, f.recs[j]);
+                if (type) c[*type]++;   // one holding no name counts nothing (GR-16)
+                break;
+            }
         }
         c.erase("NameSpaceBegin");
         c.erase("NameSpaceEnd");

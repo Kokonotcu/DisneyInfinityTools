@@ -12,6 +12,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "base/bytes.hpp"
 #include "sm3.hpp"
 
 namespace gen30 {
@@ -39,8 +40,8 @@ struct Tables {
     std::map<std::pair<uint32_t, uint32_t>, int> passByte;                // (technique, 3.0 word) -> +0x1c
 };
 
-inline uint32_t u32(const std::string& b, size_t o) { uint32_t v = 0; if (o + 4 <= b.size()) memcpy(&v, b.data() + o, 4); return v; }
-inline uint16_t u16(const std::string& b, size_t o) { uint16_t v = 0; if (o + 2 <= b.size()) memcpy(&v, b.data() + o, 2); return v; }
+inline uint32_t u32(const std::string& b, size_t o) { uint32_t v = 0; if (bytes::fits(b.size(), o, 4)) memcpy(&v, b.data() + o, 4); return v; }
+inline uint16_t u16(const std::string& b, size_t o) { uint16_t v = 0; if (bytes::fits(b.size(), o, 2)) memcpy(&v, b.data() + o, 2); return v; }
 
 struct Param { uint32_t hash; bool A; int offset, type; };
 struct Pass { uint32_t word, vf, vs, ps; };
@@ -94,6 +95,12 @@ inline bool parseA30(const std::string& b, ShdA30& s)
 
 // A D3D9 program's constant table: (name, set 'b'/'i'/'f'/'s', register, count).
 struct Const { std::string name; char set; int reg, count; };
+
+// CTAB entry k starts inside b (its fields are read checked); the file's count may be any u32
+inline bool entryStarts(const std::string& b, size_t base, uint32_t info, uint32_t k)
+{
+    return (uint64_t)base + info + 20ull * k < b.size();
+}
 inline std::vector<Const> ctab(const std::string& b)
 {
     std::vector<Const> out;
@@ -101,7 +108,7 @@ inline std::vector<Const> ctab(const std::string& b)
     if (i == std::string::npos) return out;
     size_t base = i + 4;
     uint32_t n = u32(b, base + 12), info = u32(b, base + 16);
-    for (uint32_t k = 0; k < n; ++k) {
+    for (uint32_t k = 0; k < n && entryStarts(b, base, info, k); ++k) {
         size_t e = base + info + 20 * k;
         uint32_t nm = u32(b, e);
         uint16_t rs = u16(b, e + 4), reg = u16(b, e + 6), cnt = u16(b, e + 8);
@@ -133,9 +140,12 @@ inline std::vector<VEntry> ventries(const std::string& t, size_t* tableEnd = nul
         size_t start = i;
         std::string guid;
         if (t[i] == '[') {
-            size_t q = t.find('"', i), e = t.find('"', q + 1);
+            // a truncated key ends the scan; npos + 1 would restart it at the first entry forever (RE-48)
+            size_t q = t.find('"', i), e = q == std::string::npos ? q : t.find('"', q + 1);
+            size_t close = e == std::string::npos ? e : t.find(']', e);
+            if (close == std::string::npos) break;
             guid = t.substr(q + 1, e - q - 1);
-            i = t.find(']', e) + 1;
+            i = close + 1;
         } else {
             size_t e = i;
             while (e < t.size() && (isalnum((unsigned char)t[e]) || t[e] == '_')) ++e;
@@ -221,6 +231,7 @@ inline std::map<std::string, int> typeSizes(const std::string& t)   // 'types' t
     if (ty == std::string::npos) return out;
     for (auto [a, b] : children(t, t.find('{', ty))) {
         size_t s = t.rfind('=', a);
+        if (s == std::string::npos) continue;   // t[npos - 1] below
         while (s > 0 && isspace((unsigned char)t[s - 1])) --s;
         size_t n0 = s;
         while (n0 > 0 && (isalnum((unsigned char)t[n0 - 1]) || t[n0 - 1] == '_')) --n0;
@@ -333,6 +344,9 @@ static const char* GBUFFER_EPILOGUE =
     "        o.o2 = float4(1, 1, 1, 0);\n"
     "    }";
 
+// cbuffer registers b0..b4 Binding30 declares, one name each (perFrame .. perInstance); the table's V lines name one
+constexpr int kConstantBuffers = 5;
+
 struct Binding30 : sm3::Binding {
     const Tables& T;
     const Layout& L;
@@ -409,7 +423,7 @@ struct Binding30 : sm3::Binding {
     std::string boolean(int) override { return "false"; }
     std::string cbuffers() override
     {
-        static const char* names[] = {"perFrame", "perView", "perDraw", "perMaterial", "perInstance"};
+        static const char* names[kConstantBuffers] = {"perFrame", "perView", "perDraw", "perMaterial", "perInstance"};
         std::string s;
         for (auto& [k, n] : used)
             if (n) s += (s.empty() ? "" : "\n") + std::string("cbuffer ") + names[k] + " : register(b" + std::to_string(k) + ") { float4 CB" +

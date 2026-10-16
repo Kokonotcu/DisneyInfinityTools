@@ -115,15 +115,19 @@
 #include <mutex>
 #include <map>
 #include <set>
+#include "base/bytes.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "ports10.hpp"
 
 namespace cho {
 
+inline constexpr size_t kU16Max = 0xffff;   // largest value of the clip format's u16 counts and offsets
+
+// LE value of w bytes at o, 0xffffffff past the end; overflow-safe for any o (GR-06)
 inline uint32_t rd(const std::string& s, size_t o, int w)
 {
-    return o + w <= s.size() ? oct::u((const uint8_t*)s.data() + o, w) : 0xffffffffu;
+    return bytes::fits(s.size(), o, (size_t)w) ? oct::u((const uint8_t*)s.data() + o, w) : 0xffffffffu;
 }
 inline void wr(std::string& s, uint32_t v, int w) { oct::File::put(s, v, w); }
 // first int of a record, def if it has none (a node or an empty list)
@@ -170,6 +174,7 @@ inline bool table30(const std::vector<ClipOut>& outs, std::string& t)
         size_t k = 0;
         do { heads.push_back({c.id, (std::min<size_t>)(7, c.comps.size() - k)}); k += 7; } while (k < c.comps.size());
     }
+    if (heads.size() > kU16Max) return false;   // GR-33
     wr(t, (uint32_t)heads.size(), 2);
     for (auto& h : heads) wr(t, (uint32_t)(h.second << 13 | h.first), 2);
     for (auto& c : outs)
@@ -201,6 +206,7 @@ inline bool clipBlock30(const std::string& d, std::string& out, const PortMap* p
     std::set<uint32_t> starts(desc.begin(), desc.end());
     if (*starts.begin() != hdrEnd) return false;
     uint32_t last = *starts.rbegin(), areaEnd = (uint32_t)d.size();
+    if (last >= areaEnd) return false;   // a descriptor past the payload: the padding scan below would read past d
     for (uint32_t e : sec) if (e > last && e < areaEnd) areaEnd = e;
     if (constOff > last && constOff < areaEnd) areaEnd = constOff;
     // an offset into the middle of the re-packed area would go stale
@@ -221,6 +227,7 @@ inline bool clipBlock30(const std::string& d, std::string& out, const PortMap* p
         std::string st, ct;
         if (!table30(samp, st) || !table30(cnst, ct)) return false;
         std::string t = d.substr(s, 4 + 2 * (size_t)n);
+        if (t.size() + 2 + st.size() > kU16Max) return false;   // X, the constant table's u16 offset (GR-33)
         wr(t, (uint32_t)(t.size() + 2 + st.size()), 2);
         t += st + ct;
         while (t.size() % 4) t.push_back((char)0xee);
@@ -491,8 +498,8 @@ inline int anim30(oct::File& f, int* subnets = nullptr)
                     add(a);
                     add(z);
                 } else {
-                    long o = kid(dns[src], "NetworkBufferOffset");
-                    uint32_t off = (uint32_t)(o < 0 ? -1 : first(f, f.recs[o], -1)), cnt = rd(nb, off, 4);
+                    long o = kid(dns[src], "NetworkBufferOffset"), at = o < 0 ? -1 : first(f, f.recs[o], -1);
+                    uint32_t off = (uint32_t)at, cnt = at < 0 ? 0xffffffffu : rd(nb, off, 4);   // as time30's off >= 0
                     for (uint32_t k2 = 0; cnt != 0xffffffffu && k2 < cnt && off + 8 + 8 * (size_t)k2 <= nb.size(); ++k2) {
                         float t;
                         memcpy(&t, &nb[off + 4 + 8 * k2], 4);
@@ -512,15 +519,15 @@ inline int anim30(oct::File& f, int* subnets = nullptr)
                       floatRec(f, "RangeMin", t0, 6), floatRec(f, "RangeMax", t1, 6)};
             ++here;
         }
+        if (!here) continue;
+        uint16_t a = f.addName("AnimState");
+        memcpy(&f.recs[hs].pay[ss.cw + 2 * (size_t)s], &a, 2);   // before the edits: they shift a later hs (GR-N1)
         for (size_t d = dns.size(); d-- > 0;) {   // last first: edits keep earlier indices
             if (rep[d].empty()) continue;
             size_t i = dns[d];
             f.recs.erase(f.recs.begin() + i + 1, f.recs.begin() + f.blockEnd(i));
             f.recs.insert(f.recs.begin() + i + 1, rep[d].begin(), rep[d].end());
         }
-        if (!here) continue;
-        uint16_t a = f.addName("AnimState");
-        memcpy(&f.recs[hs].pay[ss.cw + 2 * (size_t)s], &a, 2);
         n += here;
         ++touched;
     }

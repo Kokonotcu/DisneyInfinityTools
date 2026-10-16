@@ -13,6 +13,7 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+#include "base/bytes.hpp"
 #include "oct.hpp"
 #include "gen30.hpp"
 
@@ -36,7 +37,15 @@ inline bool vtype(const std::string& t, VType& v)
 
 // ---- the table ----
 struct Shader { int A = 0, B = 0, slots = 0; std::set<uint32_t> vf; std::vector<std::string> roles; };
-struct Op { int dsi, doff, size; char kind; int ssi = 0, soff = 0; std::string st, dt; VType sv{}, dv{}; std::vector<double> dflt; std::string bytes; };
+struct Op {
+    int dsi = 0, doff = 0, size = 0;
+    char kind = 0;
+    int ssi = 0, soff = 0;
+    std::string st, dt;
+    VType sv{}, dv{};
+    std::vector<double> dflt;
+    std::string bytes;
+};
 struct Plan { std::vector<int> ss, ds; std::vector<Op> ops; };
 struct Ref { std::string engine, extract; int idx = 0, count = 0; };
 
@@ -51,63 +60,227 @@ struct Table {
     std::map<std::pair<uint32_t, uint32_t>, Plan> skinPlans;   // R lines: into the target's 'skin' layout (bones kept)
     gen30::Tables shaders10;                           // real 1.0 shaders: V / W / Q lines (gen30)
 
-    bool load(const std::string& text)
-    {
+    // false: no shaders or plans, or a corrupt line (later lines unread, earlier ones kept)
+    bool load(const std::string& text);
+};
+
+namespace detail {
+
+// A count in a table line: never negative, never more than the line has characters (RE-20)
+inline bool countOk(int n, size_t limit) { return n >= 0 && (size_t)n <= limit; }
+
+inline bool loadShader(Table& T, std::istringstream& t, size_t limit)
+{
+    std::string name;
+    Shader s;
+    int n = 0;
+    t >> name >> s.A >> s.B >> s.slots >> n;
+    if (!countOk(n, limit)) return false;
+    for (int i = 0; i < n; ++i) {
+        std::string h;
+        t >> h;
+        s.vf.insert((uint32_t)std::stoul(h, nullptr, 16));
+    }
+    t >> n;
+    if (!countOk(n, limit)) return false;
+    for (int i = 0; i < n; ++i) {
+        std::string r;
+        t >> r;
+        s.roles.push_back(r == "-" ? "" : r);
+    }
+    T.shaders[name] = s;
+    return true;
+}
+
+// D and M lines: a malformed line is dropped, never half-read (extract paths are read with substr(2))
+inline bool loadDonor(Table& T, std::istringstream& t)
+{
+    std::string sh;
+    Ref r;
+    t >> sh >> r.engine >> r.idx >> r.count >> r.extract;
+    if (!t.fail() && r.extract.size() > 2) T.donors[sh] = r;
+    return true;
+}
+
+inline bool loadMaterialRef(Table& T, std::istringstream& t)
+{
+    std::string g;
+    Ref r;
+    t >> g >> r.engine >> r.idx >> r.extract;
+    if (!t.fail() && r.extract.size() > 2) T.matindex[g] = r;
+    return true;
+}
+
+inline bool loadName(std::istringstream& t, std::set<std::string>& into)
+{
+    std::string s;
+    t >> s;
+    into.insert(s);
+    return true;
+}
+
+inline bool loadGlobal(Table& T, std::istringstream& t)
+{
+    std::string n;
+    int cb = 0, off = 0, sz = 0;
+    t >> n >> cb >> off >> sz;
+    if (cb < 0 || cb >= gen30::kConstantBuffers) return false;
+    T.shaders10.globals[n] = {cb, off, sz};
+    return true;
+}
+
+inline bool loadWordRule(Table& T, std::istringstream& t)
+{
+    std::string th, bits;
+    int kind = 0, x = 0;
+    t >> th >> kind >> x >> bits;
+    T.shaders10.wordRules[{(uint32_t)std::stoul(th, nullptr, 16), kind, x}] = (uint32_t)std::stoul(bits, nullptr, 16);
+    return true;
+}
+
+inline bool loadPassByte(Table& T, std::istringstream& t)
+{
+    std::string th, w;
+    int v = 0;
+    t >> th >> w >> v;
+    T.shaders10.passByte[{(uint32_t)std::stoul(th, nullptr, 16), (uint32_t)std::stoul(w, nullptr, 16)}] = v;
+    return true;
+}
+
+// slot indices: transcodeMaterials indexes the material's slots with them
+inline bool loadGenericSlots(Table& T, std::istringstream& t)
+{
+    std::string sh;
+    int i = 0;
+    t >> sh;
+    while (t >> i) {
+        if (i < 0) return false;
+        T.genericSlots[sh].push_back(i);
+    }
+    return true;
+}
+
+inline bool loadTargets(Table& T, std::istringstream& t)
+{
+    std::string a, b;
+    t >> a;
+    auto& v = T.targets[(uint32_t)std::stoul(a, nullptr, 16)];
+    while (t >> b) v.push_back((uint32_t)std::stoul(b, nullptr, 16));
+    return true;
+}
+
+inline bool loadStrides(std::istringstream& t, size_t limit, std::vector<int>& v)
+{
+    int n = 0;
+    t >> n;
+    if (!countOk(n, limit)) return false;
+    v.resize(n);
+    for (auto& x : v) t >> x;
+    return true;
+}
+
+inline bool loadOp(std::istringstream& t, size_t limit, Op& o)
+{
+    t >> o.dsi >> o.doff >> o.size >> o.kind;
+    if (o.kind == 'C') {
+        t >> o.ssi >> o.soff;
+        return true;
+    }
+    if (o.kind == 'X') {
+        int m = 0;
+        t >> o.ssi >> o.soff >> o.st >> o.dt >> m;
+        if (!countOk(m, limit)) return false;
+        o.dflt.resize(m);
+        for (auto& d : o.dflt) t >> d;
+        const bool types = vtype(o.st, o.sv) && vtype(o.dt, o.dv);
+        return types && o.sv.n <= 4 && o.dv.n <= 4;
+    }
+    std::string hex;
+    t >> hex;
+    if (hex == "-") return true;
+    for (size_t j = 0; j + 1 < hex.size(); j += 2) o.bytes.push_back((char)std::stoi(hex.substr(j, 2), nullptr, 16));
+    return true;
+}
+
+// convertVertex writes [doff, doff+size) of stream dsi and reads inside source stream ssi (vtxf.plan builds them so)
+inline bool opOk(const Plan& p, const Op& o)
+{
+    const bool stream = o.dsi >= 0 && (size_t)o.dsi < p.ds.size();
+    const bool span = o.doff >= 0 && o.size >= 0;
+    if (!stream || !span || o.doff + (int64_t)o.size > p.ds[o.dsi]) return false;
+    if (o.kind == 'K') return true;
+    if (o.kind != 'C' && o.kind != 'X') return false;
+    const int64_t read = o.kind == 'C' ? o.size : (int64_t)o.sv.n * o.sv.csize;
+    const bool from = o.ssi >= 0 && (size_t)o.ssi < p.ss.size() && o.soff >= 0;
+    return from && o.soff + read <= p.ss[o.ssi];
+}
+
+inline bool planOk(const Plan& p)
+{
+    const auto negative = [](int s) { return s < 0; };
+    if (std::any_of(p.ss.begin(), p.ss.end(), negative) || std::any_of(p.ds.begin(), p.ds.end(), negative)) return false;
+    return std::all_of(p.ops.begin(), p.ops.end(), [&](const Op& o) { return opOk(p, o); });
+}
+
+// P and R lines: source strides, destination strides, ops; a plan outside its streams rejects the table
+inline bool loadPlan(Table& T, std::istringstream& t, size_t limit, char kind)
+{
+    std::string a, b;
+    Plan p;
+    int n = 0;
+    t >> a >> b;
+    if (!loadStrides(t, limit, p.ss) || !loadStrides(t, limit, p.ds)) return false;
+    t >> n;
+    if (!countOk(n, limit)) return false;
+    for (int i = 0; i < n; ++i) {
+        Op o;
+        if (!loadOp(t, limit, o)) return false;
+        p.ops.push_back(o);
+    }
+    if (!planOk(p)) return false;
+    auto& into = kind == 'R' ? T.skinPlans : T.plans;
+    into[{(uint32_t)std::stoul(a, nullptr, 16), (uint32_t)std::stoul(b, nullptr, 16)}] = p;
+    return true;
+}
+
+// one line by its tag; any other first word is not a table line
+inline bool loadLine(Table& T, const std::string& line)
+{
+    std::istringstream t(line);
+    std::string k;
+    t >> k;
+    if (k.size() != 1) return true;
+    switch (k[0]) {
+    case 'S': return loadShader(T, t, line.size());
+    case 'D': return loadDonor(T, t);
+    case 'M': return loadMaterialRef(T, t);
+    case 'F': return loadName(t, T.filled);
+    case 'N': return loadName(t, T.notReal);
+    case 'V': return loadGlobal(T, t);
+    case 'W': return loadWordRule(T, t);
+    case 'Q': return loadPassByte(T, t);
+    case 'G': return loadGenericSlots(T, t);
+    case 'T': return loadTargets(T, t);
+    case 'P': case 'R': return loadPlan(T, t, line.size(), k[0]);
+    default: return true;
+    }
+}
+
+}  // namespace detail
+
+// Runs at boot outside any try: a corrupt number (std::stoul) or count is a load failure, never a throw.
+inline bool Table::load(const std::string& text)
+{
+    try {
         std::istringstream in(text);
         std::string line;
-        while (std::getline(in, line)) {
-            std::istringstream t(line);
-            std::string k;
-            t >> k;
-            if (k == "S") {
-                std::string name; Shader s; int n;
-                t >> name >> s.A >> s.B >> s.slots >> n;
-                for (int i = 0; i < n; ++i) { std::string h; t >> h; s.vf.insert((uint32_t)std::stoul(h, nullptr, 16)); }
-                t >> n;
-                for (int i = 0; i < n; ++i) { std::string r; t >> r; s.roles.push_back(r == "-" ? "" : r); }
-                shaders[name] = s;
-            } else if (k == "D") {   // a malformed line is dropped, never half-read (extract paths are read with substr(2))
-                std::string sh; Ref r; t >> sh >> r.engine >> r.idx >> r.count >> r.extract;
-                if (!t.fail() && r.extract.size() > 2) donors[sh] = r;
-            } else if (k == "M") {
-                std::string g; Ref r; t >> g >> r.engine >> r.idx >> r.extract;
-                if (!t.fail() && r.extract.size() > 2) matindex[g] = r;
-            } else if (k == "F") { std::string r; t >> r; filled.insert(r); }
-            else if (k == "N") { std::string g; t >> g; notReal.insert(g); }
-            else if (k == "V") { std::string n; int cb, off, sz; t >> n >> cb >> off >> sz; shaders10.globals[n] = {cb, off, sz}; }
-            else if (k == "W") {
-                std::string th, bits; int kind, x; t >> th >> kind >> x >> bits;
-                shaders10.wordRules[{(uint32_t)std::stoul(th, nullptr, 16), kind, x}] = (uint32_t)std::stoul(bits, nullptr, 16);
-            } else if (k == "Q") {
-                std::string th, w; int v; t >> th >> w >> v;
-                shaders10.passByte[{(uint32_t)std::stoul(th, nullptr, 16), (uint32_t)std::stoul(w, nullptr, 16)}] = v;
-            }
-            else if (k == "G") { std::string sh; int i; t >> sh; while (t >> i) genericSlots[sh].push_back(i); }
-            else if (k == "T") {
-                std::string a, b; t >> a;
-                auto& v = targets[(uint32_t)std::stoul(a, nullptr, 16)];
-                while (t >> b) v.push_back((uint32_t)std::stoul(b, nullptr, 16));
-            } else if (k == "P" || k == "R") {
-                std::string a, b; Plan p; int n;
-                t >> a >> b >> n; p.ss.resize(n); for (auto& x : p.ss) t >> x;
-                t >> n; p.ds.resize(n); for (auto& x : p.ds) t >> x;
-                t >> n;
-                for (int i = 0; i < n; ++i) {
-                    Op o; t >> o.dsi >> o.doff >> o.size >> o.kind;
-                    if (o.kind == 'C') t >> o.ssi >> o.soff;
-                    else if (o.kind == 'X') {
-                        int m; t >> o.ssi >> o.soff >> o.st >> o.dt >> m; o.dflt.resize(m); for (auto& d : o.dflt) t >> d;
-                        if (!vtype(o.st, o.sv) || !vtype(o.dt, o.dv) || o.sv.n > 4 || o.dv.n > 4) return false;
-                    }
-                    else { std::string hex; t >> hex; if (hex != "-") for (size_t j = 0; j + 1 < hex.size(); j += 2) o.bytes.push_back((char)std::stoi(hex.substr(j, 2), nullptr, 16)); }
-                    p.ops.push_back(o);
-                }
-                (k == "R" ? skinPlans : plans)[{(uint32_t)std::stoul(a, nullptr, 16), (uint32_t)std::stoul(b, nullptr, 16)}] = p;
-            }
-        }
-        return !shaders.empty() && !plans.empty();
+        while (std::getline(in, line))
+            if (!detail::loadLine(*this, line)) return false;
+    } catch (const std::exception&) {
+        return false;
     }
-};
+    return !shaders.empty() && !plans.empty();
+}
 
 inline double halfToDouble(uint16_t h)
 {
@@ -223,6 +396,36 @@ struct Ssf {
     std::vector<std::pair<uint32_t, SsfPart>> parts;   // key: 1 = global A, 2 = global B, else the pass name hash
     const SsfPart* find(uint32_t k) const { for (auto& p : parts) if (p.first == k) return &p.second; return nullptr; }
 };
+
+namespace detail {
+
+// One part's tables in an .ssf: parameter names and words [from, to), slot names
+struct SsfTables { const uint8_t *names, *words, *slots; int from, to, nslots; };
+
+// One part: params (name hash, offset) sized up to the next one, slot names, the default block. false: a slot or
+// parameter outside the block (RE-23: ssfBlock30 writes and reads by them)
+inline bool addSsfPart(const std::string& s, Ssf& f, uint32_t key, int size, const SsfTables& t, size_t def)
+{
+    SsfPart p;
+    p.size = size;
+    std::vector<std::pair<int, uint32_t>> ps;
+    for (int i = t.from; i < t.to; ++i)
+        ps.push_back({(int)(oct::u(t.words + 4 * i, 4) >> 16), (uint32_t)oct::u(t.names + 4 * i, 4)});
+    std::sort(ps.begin(), ps.end());
+    const bool paramsIn = ps.empty() || ps.back().first <= size;
+    if (!paramsIn || (size_t)t.nslots * ((size_t)f.stride + 1) > (size_t)size) return false;
+    for (size_t i = 0; i < ps.size(); ++i)
+        p.params[ps[i].second] = {ps[i].first, (i + 1 < ps.size() ? ps[i + 1].first : size) - ps[i].first};
+    for (int i = 0; i < t.nslots; ++i) p.slots.push_back((uint32_t)oct::u(t.slots + 4 * i, 4));
+    p.def = s.substr((std::min)(def, s.size()), size);
+    p.off = f.size;
+    f.size = (int)al((size_t)f.size + size, 16);
+    f.parts.push_back({key, p});
+    return true;
+}
+
+}  // namespace detail
+
 inline bool parseSsf(const std::string& s, bool is30, Ssf& f)
 {
     const uint8_t* b = (const uint8_t*)s.data();
@@ -234,27 +437,13 @@ inline bool parseSsf(const std::string& s, bool is30, Ssf& f)
     int npar = b[0], npass = b[1], nA = b[ha];
     size_t o = hsize;
     auto ok = [&](size_t need) { return need <= n; };
-    if (!ok(o + 8 * (size_t)npar + 4 * ((size_t)b[ha + 1] + b[hb + 1]))) return false;
-    // one part: params (name hash, offset) sized up to the next one, slot names, the default block
-    auto part = [&](uint32_t key, int size, const uint8_t* names, const uint8_t* words, int from, int to, const uint8_t* slots, int nslots, size_t def) {
-        SsfPart p;
-        p.size = size;
-        std::vector<std::pair<int, uint32_t>> ps;
-        for (int i = from; i < to; ++i) ps.push_back({(int)(oct::u(words + 4 * i, 4) >> 16), (uint32_t)oct::u(names + 4 * i, 4)});
-        std::sort(ps.begin(), ps.end());
-        for (size_t i = 0; i < ps.size(); ++i) p.params[ps[i].second] = {ps[i].first, (i + 1 < ps.size() ? ps[i + 1].first : size) - ps[i].first};
-        for (int i = 0; i < nslots; ++i) p.slots.push_back((uint32_t)oct::u(slots + 4 * i, 4));
-        p.def = s.substr((std::min)(def, n), size);
-        p.off = f.size;
-        f.size = (int)al((size_t)f.size + size, 16);
-        f.parts.push_back({key, p});
-    };
+    if (nA > npar || !ok(o + 8 * (size_t)npar + 4 * ((size_t)b[ha + 1] + b[hb + 1]))) return false;
     const uint8_t *names = b + o, *words = b + o + 4 * npar, *snA = words + 4 * npar, *snB = snA + 4 * b[ha + 1];
     int sizeA = (int)oct::u(b + ha + 2, 2), sizeB = (int)oct::u(b + hb + 2, 2);
     o += 8 * (size_t)npar + 4 * ((size_t)b[ha + 1] + b[hb + 1]);
     size_t defA = al(o, 16), defB = al(defA + sizeA, 16);
-    part(1, sizeA, names, words, 0, nA, snA, b[ha + 1], defA);
-    part(2, sizeB, names, words, nA, npar, snB, b[hb + 1], defB);
+    if (!detail::addSsfPart(s, f, 1, sizeA, {names, words, snA, 0, nA, b[ha + 1]}, defA)) return false;
+    if (!detail::addSsfPart(s, f, 2, sizeB, {names, words, snB, nA, npar, b[hb + 1]}, defB)) return false;
     o = defB + sizeB;
     if (!ok(o + 4 * (size_t)npass + ptr * (size_t)npass)) return false;
     const uint8_t* pnames = b + o;
@@ -270,7 +459,8 @@ inline bool parseSsf(const std::string& s, bool is30, Ssf& f)
         const uint8_t *pnm = b + q, *pw = b + q + 4 * pn + 4 * pt, *pslots = pw + 4 * pn + 4 * psA;   // block B slot names
         o = q + 8 * (size_t)pn + 4 * (size_t)pt + 4 * ((size_t)psA + psB);
         size_t pdA = al(o, 16), pdB = al(pdA + pSizeA, 16);
-        part((uint32_t)oct::u(pnames + 4 * i, 4), pSizeB, pnm, pw, pnA, pn, pslots, psB, pdB);
+        if (!detail::addSsfPart(s, f, (uint32_t)oct::u(pnames + 4 * i, 4), pSizeB, {pnm, pw, pslots, pnA, pn, psB}, pdB))
+            return false;
         o = pdB + pSizeB;
         if (!is30) { while (o < n && b[o]) ++o; ++o; }   // 1.0 names the pass's shader after its blocks
         if (o > n) return false;
@@ -311,59 +501,139 @@ inline std::string ssfBlock30(const Ssf& f10, const Ssf& f30, const std::string&
     return out;
 }
 
-// sizes(shader, A, B, slots) -> false if unknown. stride: 8 (3.0) or 4 (1.0).
-inline bool parseBundle(const std::string& raw, Bundle& out, int stride,
-                        const std::function<bool(const std::string&, int&, int&, int&)>& sizes, std::string* err)
+using BlockSizes = std::function<bool(const std::string&, int&, int&, int&)>;
+
+namespace detail {
+
+// The NUL-terminated string at p, which must end inside raw (RE-23); p moves past its NUL
+inline bool cstrAt(const std::string& raw, size_t& p, std::string& out)
+{
+    const size_t e = p < raw.size() ? raw.find('\0', p) : std::string::npos;
+    if (e == std::string::npos) return false;
+    out.assign(raw, p, e - p);
+    p = e + 1;
+    return true;
+}
+
+// count elements of elem bytes at off lie inside size bytes
+inline bool fitsArray(size_t size, size_t off, size_t count, size_t elem)
+{
+    return count <= size / elem && bytes::fits(size, off, count * elem);
+}
+
+inline bool fail(std::string& err, const std::string& why)
+{
+    err = why;
+    return false;
+}
+
+// TEXB at o: 8-byte texture name hashes, 12 bytes apart; each must lie inside raw
+inline bool parseTexb(const std::string& raw, size_t o, Bundle& out, std::string& err)
+{
+    const uint32_t cnt = oct::u((const uint8_t*)raw.data() + o + 12, 4);
+    if (cnt == 0) return true;
+    if (cnt - 1 > raw.size() / 12 || !bytes::fits(raw.size(), o + 20, 12 * (size_t)(cnt - 1) + 8))
+        return fail(err, "TEXB overrun");
+    for (uint32_t i = 0; i < cnt; ++i) out.textures.emplace_back(raw, o + 20 + 12 * (size_t)i, 8);
+    return true;
+}
+
+// MATP name tables at p: count, then count strings; p moves past them
+inline bool matpNames(const std::string& raw, size_t& p, std::vector<std::string>& out)
+{
+    if (!bytes::fits(raw.size(), p, 4)) return false;
+    const uint32_t n = oct::u((const uint8_t*)raw.data() + p, 4);
+    p += 4;
+    for (uint32_t i = 0; i < n; ++i) {
+        out.emplace_back();
+        if (!cstrAt(raw, p, out.back())) return false;
+    }
+    return true;
+}
+
+// a material's blocks, sized by its shader; its slots (m.stride bytes each) lie inside block B (Bundle::slot)
+inline bool matpBlocks(const std::string& raw, size_t& p, const BlockSizes& sizes, Material& m, std::string& err)
+{
+    int A = 0, B = 0, slots = 0;
+    if (!sizes(m.shader, A, B, slots)) return fail(err, "unknown shader " + m.shader);
+    if (A < 0 || B < 0 || slots < 0) return fail(err, "MATP block sizes of shader " + m.shader);
+    if (!bytes::fits(raw.size(), p, (size_t)A + (size_t)B)) return fail(err, "MATP overrun");
+    if ((size_t)slots * (size_t)m.stride > (size_t)B) return fail(err, "MATP slots past block B of shader " + m.shader);
+    m.A = raw.substr(p, A);
+    m.B = raw.substr(p + A, B);
+    m.slots = slots;
+    p += (size_t)A + (size_t)B;
+    return true;
+}
+
+// MATP at o: shader names, material names, shader indices, hashes, then each material's blocks A and B
+inline bool parseMatp(const std::string& raw, size_t o, int stride, const BlockSizes& sizes, Bundle& out, std::string& err)
+{
+    const uint8_t* b = (const uint8_t*)raw.data();
+    const uint32_t nmat = oct::u(b + o + 12, 4);
+    size_t p = al(o + 16, 4);
+    std::vector<std::string> shaders, names;
+    if (!matpNames(raw, p, shaders)) return fail(err, "MATP overrun");
+    p = al(p, 4);
+    if (!bytes::fits(raw.size(), p, 4)) return fail(err, "MATP overrun");
+    if (oct::u(b + p, 4) != nmat) return fail(err, "MATP count");
+    if (!matpNames(raw, p, names)) return fail(err, "MATP overrun");
+    const size_t pIdx = al(p, 2), pHash = al(pIdx + 2 * (size_t)nmat, 4);
+    if (!fitsArray(raw.size(), pIdx, nmat, 2) || !fitsArray(raw.size(), pHash, nmat, 4)) return fail(err, "MATP overrun");
+    p = al(pHash + 4 * (size_t)nmat, 16);
+    for (uint32_t i = 0; i < nmat; ++i) {
+        Material m;
+        const uint32_t sidx = oct::u(b + pIdx + 2 * (size_t)i, 2);
+        if (sidx >= shaders.size()) return fail(err, "MATP shader index");
+        m.name = names[i];
+        m.shader = shaders[sidx];
+        m.hash = oct::u(b + pHash + 4 * (size_t)i, 4);
+        m.stride = stride;
+        if (!matpBlocks(raw, p, sizes, m, err)) return false;
+        out.mats.push_back(m);
+    }
+    return true;
+}
+
+// SSET at o (csize bytes): u32 count twice, names, 16-aligned blocks
+inline void parseSset(const std::string& raw, size_t o, size_t csize, Bundle& out)
+{
+    const uint32_t cnt = oct::u((const uint8_t*)raw.data() + o + 12, 4);
+    size_t p = o + 20;
+    const size_t end = csize <= raw.size() - o ? o + csize : raw.size();
+    for (uint32_t i = 0; i < cnt && p < end; ++i) {
+        const size_t e = raw.find('\0', p);
+        out.ssetNames.push_back(raw.substr(p, e == std::string::npos ? std::string::npos : e - p));
+        p += out.ssetNames.back().size() + 1;
+    }
+    p = al(p, 16);
+    const size_t sz = cnt && end > p ? (end - p) / cnt : 0;
+    for (uint32_t i = 0; i < cnt && sz; ++i) out.ssetBlocks.push_back(raw.substr(p + i * sz, sz));
+}
+
+}  // namespace detail
+
+// sizes(shader, A, B, slots) -> false if unknown. stride: 8 (3.0) or 4 (1.0). false: err says why.
+inline bool parseBundle(const std::string& raw, Bundle& out, int stride, const BlockSizes& sizes, std::string* err)
 {
     const uint8_t* b = (const uint8_t*)raw.data();
     if (raw.size() < 16 || memcmp(b, "BNDL", 4)) { if (err) *err = "not a BNDL"; return false; }
     uint32_t n = oct::u(b + 12, 4);
     size_t o = 16;
-    for (uint32_t c = 0; c < n && o + 16 <= raw.size(); ++c) {
+    std::string why;
+    for (uint32_t c = 0; c < n && bytes::fits(raw.size(), o, 16); ++c) {
         uint32_t csize = oct::u(b + o + 8, 4);
-        if (!memcmp(b + o, "TEXB", 4)) {
-            uint32_t cnt = oct::u(b + o + 12, 4);
-            for (uint32_t i = 0; i < cnt; ++i) out.textures.emplace_back(raw, o + 20 + 12 * i, 8);
-        } else if (!memcmp(b + o, "MATP", 4)) {
-            uint32_t nmat = oct::u(b + o + 12, 4);
-            size_t p = al(o + 16, 4);
-            uint32_t nsh = oct::u(b + p, 4); p += 4;
-            std::vector<std::string> shaders;
-            for (uint32_t i = 0; i < nsh; ++i) { shaders.emplace_back((const char*)b + p); p += shaders.back().size() + 1; }
-            p = al(p, 4);
-            if (oct::u(b + p, 4) != nmat) { if (err) *err = "MATP count"; return false; }
-            p += 4;
-            std::vector<std::string> names;
-            for (uint32_t i = 0; i < nmat; ++i) { names.emplace_back((const char*)b + p); p += names.back().size() + 1; }
-            p = al(p, 2);
-            std::vector<int> sidx;
-            for (uint32_t i = 0; i < nmat; ++i) { sidx.push_back((int)oct::u(b + p, 2)); p += 2; }
-            p = al(p, 4);
-            std::vector<uint32_t> hashes;
-            for (uint32_t i = 0; i < nmat; ++i) { hashes.push_back(oct::u(b + p, 4)); p += 4; }
-            p = al(p, 16);
-            for (uint32_t i = 0; i < nmat; ++i) {
-                Material m;
-                m.name = names[i];
-                m.shader = shaders[sidx[i]];
-                m.hash = hashes[i];
-                m.stride = stride;
-                int A, B, slots;
-                if (!sizes(m.shader, A, B, slots)) { if (err) *err = "unknown shader " + m.shader; return false; }
-                if (p + A + B > raw.size()) { if (err) *err = "MATP overrun"; return false; }
-                m.A = raw.substr(p, A); m.B = raw.substr(p + A, B); m.slots = slots;
-                p += A + B;
-                out.mats.push_back(m);
-            }
-        } else if (!memcmp(b + o, "SSET", 4) && o + 20 <= raw.size()) {   // u32 count twice, names, 16-aligned blocks
-            uint32_t cnt = oct::u(b + o + 12, 4);
-            size_t p = o + 20, end = (std::min)((size_t)o + csize, raw.size());
-            for (uint32_t i = 0; i < cnt && p < end; ++i) { out.ssetNames.emplace_back((const char*)b + p); p += out.ssetNames.back().size() + 1; }
-            p = al(p, 16);
-            size_t sz = cnt && end > p ? (end - p) / cnt : 0;
-            for (uint32_t i = 0; i < cnt && sz; ++i) out.ssetBlocks.push_back(raw.substr(p + i * sz, sz));
+        const bool sset = !memcmp(b + o, "SSET", 4) && bytes::fits(raw.size(), o, 20);
+        bool ok = true;
+        if (!memcmp(b + o, "TEXB", 4)) ok = detail::parseTexb(raw, o, out, why);
+        else if (!memcmp(b + o, "MATP", 4)) ok = detail::parseMatp(raw, o, stride, sizes, out, why);
+        else if (sset) detail::parseSset(raw, o, csize, out);
+        if (!ok) {
+            if (err) *err = why;
+            return false;
         }
-        if (!csize) break;
+        // a chunk past the end ends the walk, as the next bounds check would; o never wraps (A-26 form)
+        if (!csize || csize > raw.size() - o) break;
         o += csize;
     }
     return true;
@@ -477,6 +747,33 @@ struct Result {
 
 struct Src { Bundle b; int i; };   // one material of a source bundle (merge input)
 
+namespace detail {
+
+// The table's material index inside the bundle read from the install; another 3.0 build moves it (RE-18)
+inline bool hasMaterial(const Bundle& b, const Ref& ref, std::vector<std::string>& problems)
+{
+    if (ref.idx >= 0 && (size_t)ref.idx < b.mats.size()) return true;
+    problems.push_back("3.0 bundle " + ref.extract + ": no material " + std::to_string(ref.idx));
+    return false;
+}
+
+// Every slot's texture index lies inside its bundle's TEXB; a material block may name any index (RE-18)
+inline bool texturesInRange(const std::vector<Src>& srcs, std::vector<std::string>& problems)
+{
+    for (const Src& s : srcs) {
+        const Material& m = s.b.mats[s.i];
+        for (int k = 0; k < m.slots; ++k) {
+            const uint32_t t = s.b.slot(m, k);
+            if (t == UNSET || t < s.b.textures.size()) continue;
+            problems.push_back(m.name + ": texture index " + std::to_string(t) + " past the bundle's TEXB");
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace detail
+
 inline std::string hex8(const std::string& h)
 {
     static const char* d = "0123456789abcdef";
@@ -583,7 +880,7 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
         }
         auto mi = T.matindex.find(m10.name);
         if (!m10.name.empty() && mi != T.matindex.end() && !T.notReal.count(m10.name)) {
-            if (!bundle30(mi->second, bnd)) continue;
+            if (!bundle30(mi->second, bnd) || !detail::hasMaterial(*bnd, mi->second, r.problems)) continue;
             if (io.verbose) {   // the 1.0 material's textures vs the 3.0 material's (a GUID 3.0 reused shows as a mismatch)
                 const Material& m3 = bnd->mats[mi->second.idx];
                 std::string l = "real " + m10.name + " " + mi->second.extract + " 1.0:";
@@ -648,7 +945,7 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
                     }
                 if (!donor) { r.problems.push_back(m10.name + ": no 3.0 shader accepts its vertex format"); continue; }
             }
-            if (!bundle30(*donor, bnd)) continue;
+            if (!bundle30(*donor, bnd) || !detail::hasMaterial(*bnd, *donor, r.problems)) continue;
             // autobundle._substitute: the donor's blocks + the 1.0 material's own textures
             Material dm = bnd->mats[donor->idx];
             std::vector<uint32_t> used;
@@ -718,7 +1015,7 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& 
         r.shaders.push_back({m10.shader, fin.shader});
         shaderVf[(int)k] = &T.shaders.at(fin.shader).vf;
     }
-    if (!r.problems.empty()) return false;
+    if (!r.problems.empty() || !detail::texturesInRange(srcs, r.problems)) return false;
 
     // matp.merge: union TEXB in first-use order, slot indices rebased (index word only)
     std::vector<std::string> tex;
@@ -760,26 +1057,269 @@ inline bool transcodeBundle(const Table& T, const IO& io, const std::string& mtb
     return transcodeMaterials(T, io, mtb10, {}, donorPrefix, r, vf);
 }
 
+namespace detail {
+
+// (MaterialReference, vformatCRC) per primitive in record order (autobundle.prim_pairs). -> nullptr or the problem
+inline const char* primPairs(const oct::File& f, std::map<uint32_t, std::set<int>>& users,
+                             std::map<int, std::set<uint32_t>>& drawn)
+{
+    int ref = -1;
+    for (auto& rec : f.recs) {
+        const std::string& n = f.name(rec);
+        const bool isRef = n == "MaterialReference";
+        if (!isRef && n != "vformatCRC") continue;
+        const std::vector<int32_t> v = f.ints(rec);
+        if (v.empty()) return isRef ? "MaterialReference without a value" : "vformatCRC without a value";
+        if (isRef) {
+            ref = v[0];
+            continue;
+        }
+        users[(uint32_t)v[0]].insert(ref);
+        drawn[ref].insert((uint32_t)v[0]);
+    }
+    return nullptr;
+}
+
+// A primitive's records by name: the last of each in its subtree; RenderCaps is optional
+inline constexpr const char* kPrimFields[] = {"Idata", "Vdata", "vformatCRC", "MaterialReference", "RenderCaps"};
+constexpr size_t kIdata = 0, kVdata = 1, kCrc = 2, kMatRef = 3, kCaps = 4, kPrimFieldCount = 5;
+struct PrimRecs { size_t at[kPrimFieldCount] = {}; bool has[kPrimFieldCount] = {}; };
+
+// index of nm in kPrimFields, or kPrimFieldCount
+inline size_t primField(const std::string& nm)
+{
+    for (size_t k = 0; k < kPrimFieldCount; ++k)
+        if (nm == kPrimFields[k]) return k;
+    return kPrimFieldCount;
+}
+
+// false: Idata, Vdata, vformatCRC or MaterialReference missing (RE-19: record 0 stood in for it)
+inline bool primRecords(const oct::File& f, size_t prim, PrimRecs& p)
+{
+    for (size_t j = prim + 1, pe = f.blockEnd(prim); j < pe; ++j) {
+        const size_t k = primField(f.name(f.recs[j]));
+        if (k == kPrimFieldCount) continue;
+        p.at[k] = j;
+        p.has[k] = true;
+    }
+    const bool buffers = p.has[kIdata] && p.has[kVdata];
+    return buffers && p.has[kCrc] && p.has[kMatRef];
+}
+
+// Idata: [width, first index, base, count]; Vdata: [streams, vertices, (0, offset, stride) per stream]
+struct PrimData { std::vector<int32_t> ida, vda; uint32_t src = 0; int ref = 0; };
+
+// vda holds the (0, offset, stride) triples of its first `streams` streams
+inline bool vdataHolds(const std::vector<int32_t>& vda, size_t streams)
+{
+    return vda.size() >= 2 && streams <= (vda.size() - 2) / 3;
+}
+
+// -> nullptr, or the problem: a value missing, or a list shorter than its counts (RE-19)
+inline const char* readPrim(const oct::File& f, const PrimRecs& p, PrimData& d)
+{
+    const std::vector<int32_t> crc = f.ints(f.recs[p.at[kCrc]]), ref = f.ints(f.recs[p.at[kMatRef]]);
+    if (crc.empty() || ref.empty()) return "primitive without a vformatCRC or MaterialReference value";
+    d.ida = f.ints(f.recs[p.at[kIdata]]);
+    d.vda = f.ints(f.recs[p.at[kVdata]]);
+    d.src = (uint32_t)crc[0];
+    d.ref = ref[0];
+    if (d.ida.size() < 4) return "Idata too short";
+    const bool counted = !d.vda.empty() && d.vda[0] >= 0;
+    if (!counted || !vdataHolds(d.vda, (size_t)d.vda[0])) return "Vdata too short";
+    return nullptr;
+}
+
+inline Op copyOp(int dsi, int size, int ssi, int soff)
+{
+    Op o{};
+    o.dsi = dsi;
+    o.doff = 0;
+    o.size = size;
+    o.kind = 'C';
+    o.ssi = ssi;
+    o.soff = soff;
+    return o;
+}
+
+// the primitive's last stream ends in the re-laid format's colour tail
+inline bool tailFits(const gen30::ColourTail& ct, const std::vector<int32_t>& vda)
+{
+    return vda[0] == ct.stream + 1 && vda[4 + 3 * ct.stream] == ct.offset + ct.size;
+}
+
+// A translated material's primitive: every stream copied as it is; a re-laid format's colour tail to its own stream
+inline const char* samePlan(const IO& io, uint32_t src, const std::vector<int32_t>& vda, Plan& same)
+{
+    const gen30::ColourTail* ct = nullptr;
+    if (io.tails10)
+        if (auto t = io.tails10->find(src); t != io.tails10->end()) ct = &t->second;
+    if (ct && !tailFits(*ct, vda)) return "vertex colour tail: strides differ from the format";
+    for (int s = 0; s < vda[0]; ++s) {
+        same.ss.push_back(vda[4 + 3 * s]);
+        same.ds.push_back(ct && s == ct->stream ? ct->offset : vda[4 + 3 * s]);
+        same.ops.push_back(copyOp(s, same.ds.back(), s, 0));
+    }
+    if (ct) {
+        same.ds.push_back(ct->size);
+        same.ops.push_back(copyOp(vda[0], ct->size, ct->stream, ct->offset));
+    }
+    return nullptr;
+}
+
+// 16-bit index -> local index, stamped per primitive: a flat table, not a hash map per index (in_city: ~4M indices)
+struct Remap { std::vector<uint32_t> stamp, to; uint32_t gen = 0; };
+
+// The primitive's indices made local: order = the vertices it uses, first use first; sub = its local indices
+inline const char* remapIndices(const std::vector<int32_t>& ida, const std::string& ibuf10, Remap& m,
+                                std::vector<uint32_t>& order, std::vector<uint32_t>& sub)
+{
+    const int32_t first = ida[1], count = ida[3];
+    const bool inside = first >= 0 && bytes::fits(ibuf10.size(), 2 * (size_t)first, 2 * (size_t)count);
+    if (count > 0 && !inside) return "index past the ibuf";
+    const uint8_t* ib = (const uint8_t*)ibuf10.data();
+    sub.reserve(count > 0 ? (size_t)count : 0);
+    ++m.gen;
+    for (int32_t q = 0; q < count; ++q) {
+        const size_t at = 2 * ((size_t)first + q);
+        const uint32_t v = (uint32_t)(ib[at] | ib[at + 1] << 8);
+        if (m.stamp[v] != m.gen) {
+            m.stamp[v] = m.gen;
+            m.to[v] = (uint32_t)order.size();
+            order.push_back(v);
+        }
+        sub.push_back(m.to[v]);
+    }
+    return nullptr;
+}
+
+// [off, off + (last + 1) * stride) lies inside the vbuf: every vertex up to index last
+inline bool vertexFits(int32_t off, int32_t stride, uint32_t last, size_t size)
+{
+    if (off < 0 || stride < 0) return false;
+    const uint64_t span = ((uint64_t)last + 1) * (uint32_t)stride;
+    return span <= size && bytes::fits(size, (size_t)off, (size_t)span);
+}
+
+// Every vertex of order through plan into per (one string per destination stream); strides and ranges checked first
+inline const char* convertPrim(const Plan& plan, const std::vector<int32_t>& vda, const std::vector<uint32_t>& order,
+                               const std::string& vbuf10, std::vector<std::string>& per)
+{
+    for (int s = 0; s < vda[0]; ++s)
+        if (s >= (int)plan.ss.size() || vda[4 + 3 * s] != plan.ss[s]) return "stride mismatch";
+    if (!vdataHolds(vda, plan.ss.size())) return "Vdata shorter than the plan";
+    const uint32_t last = order.empty() ? 0 : *std::max_element(order.begin(), order.end());
+    for (size_t s = 0; s < plan.ss.size() && !order.empty(); ++s)
+        if (!vertexFits(vda[3 + 3 * s], plan.ss[s], last, vbuf10.size())) return "vertex past the vbuf";
+    per.assign(plan.ds.size(), std::string());
+    for (size_t s = 0; s < plan.ds.size(); ++s) per[s].reserve(order.size() * (size_t)plan.ds[s]);
+    std::vector<const uint8_t*> srcp(plan.ss.size());
+    const uint8_t* vb = (const uint8_t*)vbuf10.data();
+    for (uint32_t v : order) {
+        for (size_t s = 0; s < plan.ss.size(); ++s) srcp[s] = vb + (size_t)vda[3 + 3 * s] + (size_t)v * plan.ss[s];
+        convertVertex(srcp, plan, per);
+    }
+    return nullptr;
+}
+
+// Record edits held until every check passed, so a false return leaves f as it was (RE-05)
+struct RecEdits {
+    std::map<size_t, oct::Rec> recs;   // record index -> its edited copy
+    const oct::Rec& get(const oct::File& f, size_t i) const
+    {
+        auto it = recs.find(i);
+        return it != recs.end() ? it->second : f.recs[i];
+    }
+    void setInts(oct::File& f, size_t i, const std::vector<int32_t>& v)
+    {
+        oct::Rec r = get(f, i);
+        f.setInts(r, v);
+        recs[i] = std::move(r);
+    }
+    void setInt(oct::File& f, size_t i, int64_t v)
+    {
+        oct::Rec r = get(f, i);
+        f.setInt(r, v);
+        recs[i] = std::move(r);
+    }
+    void commit(oct::File& f)
+    {
+        for (auto& [i, r] : recs) f.recs[i] = std::move(r);
+        recs.clear();
+    }
+};
+
+// RenderCaps 1.0 -> 3.0; false: the record has no value
+inline bool caps30(oct::File& f, RecEdits& e, size_t rec)
+{
+    const std::vector<int32_t> v = f.ints(e.get(f, rec));
+    if (v.empty()) return false;
+    e.setInt(f, rec, rendercaps30(v[0]));
+    return true;
+}
+
+// the first record named nm in block blk's subtree, or -1
+inline long fieldOf(const oct::File& f, size_t blk, const char* nm)
+{
+    for (size_t j = blk + 1, end = f.blockEnd(blk); j < end; ++j)
+        if (f.name(f.recs[j]) == nm) return (long)j;
+    return -1;
+}
+
+// VertexBufferPool: its first non-zero Size becomes the new vbuf size. false: a Size without a value
+inline bool vertexPoolSize(oct::File& f, RecEdits& e, size_t size)
+{
+    const long vbp = f.pool("VertexBufferPool");
+    const size_t end = vbp >= 0 ? f.blockEnd(vbp) : 0;
+    for (size_t j = vbp + 1; vbp >= 0 && j < end; ++j) {
+        if (f.name(f.recs[j]) != "Size") continue;
+        const std::vector<int32_t> v = f.ints(e.get(f, j));
+        if (v.empty()) return false;
+        if (!v[0]) continue;
+        e.setInt(f, j, (int64_t)size);
+        break;
+    }
+    return true;
+}
+
+// Buffer sizes into the pools; IndexBuffer 2 gets its own file. Commits e once every pool record is found.
+inline const char* patchBufferPools(oct::File& f, RecEdits& e, const std::string& stem, const Result& r)
+{
+    if (!vertexPoolSize(f, e, r.vbuf.size())) return "VertexBufferPool Size without a value";
+    const long ibp = f.pool("IndexBufferPool");
+    const size_t ibEnd = ibp >= 0 ? f.blockEnd(ibp) : 0;
+    std::vector<size_t> ibs;
+    for (size_t j = ibp + 1; ibp >= 0 && j < ibEnd; ++j)
+        if (f.recs[j].level == 2 && f.name(f.recs[j]) == "IndexBuffer") ibs.push_back(j);
+    if (ibs.size() < 3) return "IndexBufferPool shape";
+    const long size0 = fieldOf(f, ibs[0], "Size"), size2 = fieldOf(f, ibs[2], "Size");
+    const bool ownFile = !r.ibuf2.empty() && fieldOf(f, ibs[2], "FileName") < 0;
+    const long name0 = ownFile ? fieldOf(f, ibs[0], "FileName") : 0;
+    if (size0 < 0 || size2 < 0 || name0 < 0) return "IndexBufferPool shape";
+    e.commit(f);
+    f.setInt(f.recs[size0], (int64_t)r.ibuf.size());
+    f.setInt(f.recs[size2], (int64_t)r.ibuf2.size());
+    if (!ownFile) return nullptr;
+    const oct::Rec& fn = f.recs[name0];
+    f.recs.insert(f.recs.begin() + f.blockEnd(ibs[2]), f.nameScalar(fn.level, fn.name, stem + "_2.ibuf"));
+    return nullptr;
+}
+
+}  // namespace detail
+
 // Materials, vertices and the .oct primitive records of one 1.0 world. stem = 'in_city'; f = the 1.0 .oct (edited
-// in place); mtb10/vbuf10/ibuf10 = the 1.0 files. Returns false with r.problems if a material cannot be placed.
+// in place); mtb10/vbuf10/ibuf10 = the 1.0 files. Returns false with r.problems (f then unchanged) if a material
+// cannot be placed or the geometry does not convert.
 inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std::string& stem, const std::string& mtb10,
                            const std::string& vbuf10, const std::string& ibuf10, Result& r)
 {
-    // primitives: (MaterialReference, vformatCRC) per primitive in record order (autobundle.prim_pairs)
+    const auto fail = [&r](const std::string& why) {
+        r.problems.push_back(why);
+        return false;
+    };
     std::map<uint32_t, std::set<int>> users;
     std::map<int, std::set<uint32_t>> drawn;
-    {
-        int ref = -1;
-        for (auto& rec : f.recs) {
-            const std::string& n = f.name(rec);
-            if (n == "MaterialReference") ref = f.ints(rec)[0];
-            else if (n == "vformatCRC") {
-                uint32_t crc = (uint32_t)f.ints(rec)[0];
-                users[crc].insert(ref);
-                drawn[ref].insert(crc);
-            }
-        }
-    }
+    if (const char* why = detail::primPairs(f, users, drawn)) return fail(why);
     std::map<int, const std::set<uint32_t>*> shaderVf;   // material -> vformats its final shader declares
     if (!transcodeMaterials(T, io, mtb10, drawn, "", r, shaderVf)) return false;
 
@@ -822,15 +1362,15 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
 
     // ---- geometry (conv.convert_geometry + build_buffers); assets without buffers (most mission graphs) skip it ----
     const bool geometry = !vbuf10.empty() && !ibuf10.empty();
-    const uint8_t* vb = (const uint8_t*)vbuf10.data();
-    const uint8_t* ib = (const uint8_t*)ibuf10.data();
     std::string& nv = r.vbuf;
     std::string& ni = r.ibuf;
     std::string& ni2 = r.ibuf2;
     long stp = geometry ? f.pool("SceneTreeNodePool") : -1;
-    const size_t stpEnd = stp >= 0 ? f.blockEnd(stp) : 0;   // the loop edits records in place, never adds
-    std::vector<uint32_t> remapStamp(geometry ? 0x10000 : 0, 0), remapTo(geometry ? 0x10000 : 0);
-    uint32_t remapGen = 0;
+    const size_t stpEnd = stp >= 0 ? f.blockEnd(stp) : 0;   // the loop only reads records: edits wait in `edits`
+    detail::Remap remap;
+    remap.stamp.assign(geometry ? 0x10000 : 0, 0);
+    remap.to.assign(geometry ? 0x10000 : 0, 0);
+    detail::RecEdits edits;   // only with geometry; committed by patchBufferPools
     for (size_t n = stp + 1; stp >= 0 && n < stpEnd; n = f.blockEnd(n)) {
         if (f.recs[n].level != 2 || f.name(f.recs[n]) != "Node") continue;
         size_t end = f.blockEnd(n);
@@ -843,31 +1383,23 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
             if (nm == "Primitive") prims.push_back(j);
         }
         if (!geo || prims.empty()) continue;
-        struct P { size_t idata, vdata, crc, caps = 0, matref; bool hasCaps = false; };
-        std::vector<P> ps;
-        for (size_t pi : prims) {
-            P p{};
-            for (size_t j = pi + 1, pe = f.blockEnd(pi); j < pe; ++j) {
-                const std::string& nm = f.name(f.recs[j]);
-                if (nm == "Idata") p.idata = j;
-                else if (nm == "Vdata") p.vdata = j;
-                else if (nm == "vformatCRC") p.crc = j;
-                else if (nm == "MaterialReference") p.matref = j;
-                else if (nm == "RenderCaps") { p.caps = j; p.hasCaps = true; }
-            }
-            ps.push_back(p);
-        }
+        std::vector<detail::PrimRecs> ps(prims.size());
+        for (size_t i = 0; i < prims.size(); ++i)
+            if (!detail::primRecords(f, prims[i], ps[i]))
+                return fail("primitive without Idata, Vdata, vformatCRC or MaterialReference");
         // per primitive: dst streams, strides, local indices, vertex count
         std::vector<std::vector<std::string>> streams;
         std::vector<std::vector<int>> strides;
         std::vector<std::vector<uint32_t>> subs;
         std::vector<uint32_t> counts, dsts;
         for (auto& p : ps) {
-            auto ida = f.ints(f.recs[p.idata]);
-            auto vda = f.ints(f.recs[p.vdata]);
-            uint32_t src = (uint32_t)f.ints(f.recs[p.crc])[0];
-            int ref = f.ints(f.recs[p.matref])[0];
+            detail::PrimData d;
+            if (const char* why = detail::readPrim(f, p, d)) return fail(why);
+            const uint32_t src = d.src;
+            const int ref = d.ref;
             auto vm = vmap.find({ref, src});
+            const bool noTarget = vm == vmap.end() && T.targets.at(src).empty();
+            if (noTarget) return fail("vformat " + std::to_string(src) + ": no 3.0 target");
             uint32_t dst = vm != vmap.end() ? vm->second : T.targets.at(src)[0];
             const Plan* skinPlan = nullptr;
             if (auto s = smap.find({ref, src}); skinned && dst != src && s != smap.end()) {
@@ -875,49 +1407,14 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
                 skinPlan = &T.skinPlans.at({src, dst});
                 ++r.skinned;
             }
-            Plan same;                       // a translated material's primitive: every stream copied as it is
-            if (dst == src) {
-                const gen30::ColourTail* ct = nullptr;   // its format re-laid: the colour tail to its own stream
-                if (io.tails10)
-                    if (auto t = io.tails10->find(src); t != io.tails10->end()) ct = &t->second;
-                if (ct && (vda[0] != ct->stream + 1 || vda[4 + 3 * ct->stream] != ct->offset + ct->size)) {
-                    r.problems.push_back("vertex colour tail: strides differ from the format");
-                    return false;
-                }
-                auto copy = [&](int dsi, int size, int ssi, int soff) {
-                    Op o{};
-                    o.dsi = dsi; o.doff = 0; o.size = size; o.kind = 'C'; o.ssi = ssi; o.soff = soff;
-                    same.ops.push_back(o);
-                };
-                for (int s = 0; s < vda[0]; ++s) {
-                    same.ss.push_back(vda[4 + 3 * s]);
-                    same.ds.push_back(ct && s == ct->stream ? ct->offset : vda[4 + 3 * s]);
-                    copy(s, same.ds.back(), s, 0);
-                }
-                if (ct) { same.ds.push_back(ct->size); copy(vda[0], ct->size, ct->stream, ct->offset); }
-            }
+            Plan same;   // a translated material's primitive keeps its 1.0 format
+            const char* sameWhy = dst == src ? detail::samePlan(io, src, d.vda, same) : nullptr;
+            if (sameWhy) return fail(sameWhy);
             const Plan& plan = dst == src ? same : skinPlan ? *skinPlan : T.plans.at({src, dst});
             std::vector<uint32_t> order, sub;
-            sub.reserve(ida[3] > 0 ? (size_t)ida[3] : 0);
-            ++remapGen;   // 16-bit indices: a flat stamped table instead of a hash map per index (in_city: ~4M indices)
-            for (int32_t q = 0; q < ida[3]; ++q) {
-                uint32_t v = (uint32_t)(ib[2 * (ida[1] + q)] | ib[2 * (ida[1] + q) + 1] << 8);
-                if (remapStamp[v] != remapGen) { remapStamp[v] = remapGen; remapTo[v] = (uint32_t)order.size(); order.push_back(v); }
-                sub.push_back(remapTo[v]);
-            }
-            for (int s = 0; s < vda[0]; ++s)
-                if (s >= (int)plan.ss.size() || vda[4 + 3 * s] != plan.ss[s]) { r.problems.push_back("stride mismatch"); return false; }
-            std::vector<std::string> per(plan.ds.size());
-            for (size_t s = 0; s < plan.ds.size(); ++s) per[s].reserve(order.size() * (size_t)plan.ds[s]);
-            std::vector<const uint8_t*> srcp(plan.ss.size());
-            for (uint32_t v : order) {
-                for (size_t s = 0; s < plan.ss.size(); ++s) {
-                    size_t lo = (size_t)vda[3 + 3 * s] + (size_t)v * plan.ss[s];
-                    if (lo + plan.ss[s] > vbuf10.size()) { r.problems.push_back("vertex past the vbuf"); return false; }
-                    srcp[s] = vb + lo;
-                }
-                convertVertex(srcp, plan, per);
-            }
+            if (const char* why = detail::remapIndices(d.ida, ibuf10, remap, order, sub)) return fail(why);
+            std::vector<std::string> per;
+            if (const char* why = detail::convertPrim(plan, d.vda, order, vbuf10, per)) return fail(why);
             streams.push_back(std::move(per)); strides.push_back(plan.ds); subs.push_back(std::move(sub));
             counts.push_back((uint32_t)order.size()); dsts.push_back(dst);
         }
@@ -942,35 +1439,19 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std
             }
             std::vector<int32_t> vdata = {(int32_t)strides[i].size(), (int32_t)counts[i]};
             for (size_t s = 0; s < strides[i].size(); ++s) { vdata.push_back(0); vdata.push_back((int32_t)nodeOff[i][s]); vdata.push_back(strides[i][s]); }
-            f.setInts(f.recs[ps[i].idata], {wide ? 2 : 0, (int32_t)ioff, (int32_t)vbase, (int32_t)subs[i].size()});
-            f.setInts(f.recs[ps[i].vdata], vdata);
-            f.setInt(f.recs[ps[i].crc], dsts[i]);
-            if (ps[i].hasCaps) f.setInt(f.recs[ps[i].caps], rendercaps30(f.ints(f.recs[ps[i].caps])[0]));
+            const std::vector<int32_t> idata = {wide ? 2 : 0, (int32_t)ioff, (int32_t)vbase, (int32_t)subs[i].size()};
+            edits.setInts(f, ps[i].at[detail::kIdata], idata);
+            edits.setInts(f, ps[i].at[detail::kVdata], vdata);
+            edits.setInt(f, ps[i].at[detail::kCrc], dsts[i]);
+            const bool caps = ps[i].has[detail::kCaps];
+            if (caps && !detail::caps30(f, edits, ps[i].at[detail::kCaps])) return fail("RenderCaps without a value");
             vbase += counts[i];
         }
     }
 
     // buffer sizes; the 32-bit index buffer gets its own file (IndexBuffer 2)
-    if (geometry) {
-        long vbp = f.pool("VertexBufferPool");
-        for (size_t j = vbp + 1; vbp >= 0 && j < f.blockEnd(vbp); ++j)
-            if (f.name(f.recs[j]) == "Size" && f.ints(f.recs[j])[0]) { f.setInt(f.recs[j], (int64_t)nv.size()); break; }
-        long ibp = f.pool("IndexBufferPool");
-        std::vector<size_t> ibs;
-        for (size_t j = ibp + 1; ibp >= 0 && j < f.blockEnd(ibp); ++j)
-            if (f.recs[j].level == 2 && f.name(f.recs[j]) == "IndexBuffer") ibs.push_back(j);
-        if (ibs.size() < 3) { r.problems.push_back("IndexBufferPool shape"); return false; }
-        auto field = [&](size_t blk, const char* nm) -> long {
-            for (size_t j = blk + 1; j < f.blockEnd(blk); ++j) if (f.name(f.recs[j]) == nm) return (long)j;
-            return -1;
-        };
-        f.setInt(f.recs[field(ibs[0], "Size")], (int64_t)ni.size());
-        f.setInt(f.recs[field(ibs[2], "Size")], (int64_t)ni2.size());
-        if (!ni2.empty() && field(ibs[2], "FileName") < 0) {
-            const oct::Rec& fn = f.recs[field(ibs[0], "FileName")];
-            f.recs.insert(f.recs.begin() + f.blockEnd(ibs[2]), f.nameScalar(fn.level, fn.name, stem + "_2.ibuf"));
-        }
-    }
+    if (geometry)
+        if (const char* why = detail::patchBufferPools(f, edits, stem, r)) return fail(why);
     // 1.0-only Material RenderCaps removed (conv.prepare)
     if (long mp = f.pool("MaterialPool"); mp >= 0) {
         auto b = f.recs.begin() + mp + 1, e = f.recs.begin() + f.blockEnd(mp);

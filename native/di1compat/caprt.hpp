@@ -95,7 +95,7 @@ static void keep(uint32_t h, const uint8_t* def)
     uint8_t* a = actorOf(h);
     if (a && (a[0x10c] & 8)) {
         void* comp = ((CompFn)rt(0x0069ECD0))(h, *(uint16_t*)rt(0x0228E56C));
-        if (comp) g_renderShut(comp, nullptr, 0);
+        if (comp && g_renderShut) g_renderShut(comp, nullptr, 0);   // null while the shutdown10 feature is off
     }
     if (g_cfg.capsuleTrace10 && InterlockedIncrement(&g_keptLogged) <= 300) {
         char d[96], mo[96];
@@ -203,19 +203,29 @@ static void install()
 {
     if (g_cfg.shutdown10 && !g_cfg.popin10) logf("shutdown10: off, it finds 1.0 definitions by popin10's stamp");
     bool keep10 = g_cfg.shutdown10 && g_cfg.popin10;
-    if (keep10) {
-        hook("actor shutdown apply (shutdown10)", 0x007534C0, "568B7424088B4604578BF9", (void*)&hkShut, (void**)&g_shut);
-        hook("render component shutdown (shutdown10)", 0x01860B40, "83EC08E8????????85C0745C", (void*)&hkRenderShut, (void**)&g_renderShut);
-    }
-    if (keep10 || g_cfg.capsuleTrace10) {
-        hook("expendable base spawn (shutdown10)", 0x0160A3E0, "558BEC83E4F06AFF68????????64A1", (void*)&hkBase, (void**)&g_base);
-        hook("expendable async spawn done (shutdown10)", 0x0160A270, "8B0D????????568B74240C", (void*)&hkDone, (void**)&g_done);
-    }
+    const core::HookSpec spawn = {"expendable base spawn (shutdown10)", 0x0160A3E0, "558BEC83E4F06AFF68????????64A1",
+                                  (void*)&hkBase, (void**)&g_base};
+    const core::HookSpec done = {"expendable async spawn done (shutdown10)", 0x0160A270, "8B0D????????568B74240C",
+                                 (void*)&hkDone, (void**)&g_done};
+    bool spawnsHooked = keep10 && installFeature("shutdown10", {
+        {"actor shutdown apply (shutdown10)", 0x007534C0, "568B7424088B4604578BF9", (void*)&hkShut, (void**)&g_shut},
+        {"render component shutdown (shutdown10)", 0x01860B40, "83EC08E8????????85C0745C", (void*)&hkRenderShut,
+         (void**)&g_renderShut},
+        spawn,
+        done,
+    });
     if (!g_cfg.capsuleTrace10) return;
-    hook("SpawnExpendable Link_In (capsuletrace10)", 0x017BF050, "6AFF68????????64A100000000", (void*)&hkNode, (void**)&g_node);
-    hook("expendable spawn request (capsuletrace10)", 0x0160EBD0, "6AFF68????????64A100000000", (void*)&hkReq, (void**)&g_req);
-    hook("Customization reward spawn (capsuletrace10)", 0x00CBC5C0, "6AFF68????????64A100000000", (void*)&hkCust, (void**)&g_cust);
-    hook("expendable spawn by name (capsuletrace10)", 0x0160F370, "6AFF68????????64A100000000", (void*)&hkByName, (void**)&g_byName);
+    if (!spawnsHooked) installFeature("capsuletrace10 spawns", {spawn, done});
+    installFeature("capsuletrace10", {
+        {"SpawnExpendable Link_In (capsuletrace10)", 0x017BF050, "6AFF68????????64A100000000", (void*)&hkNode,
+         (void**)&g_node},
+        {"expendable spawn request (capsuletrace10)", 0x0160EBD0, "6AFF68????????64A100000000", (void*)&hkReq,
+         (void**)&g_req},
+        {"Customization reward spawn (capsuletrace10)", 0x00CBC5C0, "6AFF68????????64A100000000", (void*)&hkCust,
+         (void**)&g_cust},
+        {"expendable spawn by name (capsuletrace10)", 0x0160F370, "6AFF68????????64A100000000", (void*)&hkByName,
+         (void**)&g_byName},
+    });
 }
 
 }   // namespace caprt

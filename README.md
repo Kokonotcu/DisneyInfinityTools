@@ -125,12 +125,13 @@ statically, so no Visual C++ runtime needs to be installed.
 | `install10` | (none) | Path of the 1.0 installation |
 | `serve10` | `0` | Serve the files 3.0 lacks from the 1.0 archives. Set to `1` |
 | `shaders10` | `0` | Translate the original 1.0 shaders instead of using 3.0 substitutes. Recommended: `1` |
-| `trace` | `1` | Log every file open (verbose). Set to `0` for play |
+| `trace` | `0` | Log every file open (verbose) and install the playset-flow probes. It also enables the `hkInst` guard against a dead SubNetwork root and the `hide_ps` experiment |
 
 Diagnostics, all off by default and log-only:
 
 | Key | Logs |
 |---|---|
+| `locktrace10` | Control locks, controller contexts, choreography play and events, messages, mission monitors, load screens, compass, beacons, mission progress |
 | `fpslog10` | Frame time once a second, and how much of it the main thread waits on rendering |
 | `loadprof10` | Per-file load timings and a sampling profile of the busiest threads (`di1compat_prof.tsv`) |
 | `audiotrace10` | Each sound posted and the backend that played it, its position, its mix and its lifetime |
@@ -167,7 +168,7 @@ python extract.py "<3.0 install>" <3.0 extract folder>
 python extract.py "<1.0 install>" <1.0 extract folder>
 ```
 
-`lupa` is needed only for Lua packages (`luabc.run_package`, `expack.py`, `expl30.py --package`). No tool assumes a
+`lupa` is needed only for Lua packages (`luabc.run_package`) and `zonereg.py`. No tool assumes a
 machine. It resolves three roots from the command line, else from the environment (`paths.py`):
 
 | Root | Flag | Environment | What |
@@ -201,7 +202,7 @@ Unless dated otherwise, each check was run on the stock Steam 3.0 Gold installat
 | `mer.py` | Meridian graphs: `show`, `catalogue`, `mtc` (class manifest) | 428,387 parameters and 117,117 links over 584 graphs; 584 / 584 `.mtc` byte-exact |
 | `graph.py` | Meridian graph sizing per geometry node | All 1,367 shipped SubNetworks of the generated shape |
 | `portmap.py` | 1.0 to 3.0 port numbering for the skeleton templates both games own; writes `ports10.hpp` | 105,708 motion-clip ids at the 3.0 twin's position; 5,963 / 5,963 model ports |
-| `nodedump.py`, `streamlayout.py`, `subnet.py` | One node's records; vertex-buffer stream layout; SubNetwork count fitting | 4,915 / 4,915 multi-primitive nodes stream-major |
+| `nodedump.py`, `streamlayout.py` | One node's records; vertex-buffer stream layout | 4,915 / 4,915 multi-primitive nodes stream-major |
 
 **Materials, shaders and geometry**
 
@@ -221,23 +222,23 @@ Unless dated otherwise, each check was run on the stock Steam 3.0 Gold installat
 | Tool | Purpose | Verified by |
 |---|---|---|
 | `btdconv.py` | 1.0 to 3.0 collision (`.btd` and its `.btm` block table) | 323 / 330 single-block shipped pairs byte-exact |
-| `btdblocks.py`, `btdscan.py`, `btd-info.ps1` | Collision block tiling, survey, header dump | Block count = shapes in 267 / 267 worlds |
+| `btdblocks.py` | Collision block tiling | Block count = shapes in 267 / 267 worlds |
 | `zones.py`, `zonereg.py` | Zone records: inspect, edit; register Incredibles offline (superseded by `zones10`, kept as its reference) | `zones.py` edits match the retired tools on 6 cases; `zones10` writes zonereg's Incredibles records byte for byte |
 | `chd.py` | Compiled game-database tables: dump, export, import, compile from Lua | 33 / 33 files round-trip byte-exact |
 | `dct.py` | Localisation dictionaries: list, export, import | 471 / 471 files round-trip; 337,023 keys hash correctly |
-| `expl30.py`, `expack.py`, `luabc.py` | Exploders; expendables packages; Lua 5.1 bytecode re-encoding | 17 / 17 packages re-encoded |
+| `luabc.py` | Lua 5.1 bytecode re-encoding; runs expendables packages | 17 / 17 packages re-encoded |
 | `savegame.py` | PC saves: show, export, import, checksums recomputed | 16 / 16 saves decoded and round-tripped |
 
-**Offline world conversion (superseded by di1compat)**
+**Conversion references and comparisons**
 
-These tools copy converted 1.0 data into the 3.0 installation. di1compat now covers the same ground at load time,
-without copying.
+di1compat converts at load time. These tools stay because the plugin's code is checked against them, or because they
+show how 1.0 and 3.0 files differ. The offline converters that wrote into the installation (`native30.py`, `expl30.py`,
+`expack.py`, `variant.py`, `crabemod.py`) were removed; they remain in git history up to commit `684539b`.
 
 | Tool | Purpose |
 |---|---|
-| `native30.py`, `conv.py`, `realm30.py` | 1.0 world, realm and shared conversion pipeline |
-| `variant.py`, `diffworld.py`, `foreign.py`, `ranges.py` | One-variable world variants for bisection; field-by-field world diff; record kinds and values 3.0 never ships |
-| `crabemod.py` | Converter output packaged as a CrabeLoader mod |
+| `conv.py`, `realm30.py` | Shared conversion primitives; offline realm conversion (the reference for di1compat's `realmFile10`) |
+| `diffworld.py`, `foreign.py`, `ranges.py` | Field-by-field file diff; record kinds 3.0 never ships; values above the shipped 3.0 maximum |
 
 **Debugging and analysis**
 
@@ -245,7 +246,7 @@ without copying.
 |---|---|
 | `harness.ps1`, `lua.ps1` | Unattended in-game test: boot, enter a zone, run Lua probes, screenshot, quit (needs CrabeLoader with `crabe/crabeloader-no-guards.patch`) |
 | `crabe/di3tools/` | CrabeLoader mod: log the player position, dump zone records, force travel, spawn a model |
-| `arenapatch.py`, `arenas.py`, `mdmp.py` | Render frame-arena patch; arena sizes and static addresses from a minidump |
+| `arenas.py`, `mdmp.py` | Render frame-arena sizes and static addresses from a minidump |
 | `dispfind.py`, `disx.py` | Find operands or immediates in the executable; disassemble at runtime addresses |
 
 ## Repository layout
