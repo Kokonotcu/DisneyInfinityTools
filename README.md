@@ -268,7 +268,7 @@ Each reads the 1.0 files on its own and checks one `octtest` mode's output. They
 
 | Tool | Purpose |
 |---|---|
-| `harness.ps1`, `lua.ps1` | Unattended in-game test: boot, enter a zone, run Lua probes, screenshot, quit (needs CrabeLoader with `crabe/crabeloader-no-guards.patch`) |
+| `harness.ps1`, `lua.ps1` | Unattended in-game test: boot, enter a zone, run Lua probes, screenshot, quit (needs CrabeLoader built from tag v1.1.0 with `crabe/crabeloader-no-guards.patch`) |
 | `crabe/di3tools/` | CrabeLoader mod: log the player position, dump zone records, force travel, spawn a model |
 | `arenas.py`, `mdmp.py` | Render frame-arena sizes and static addresses from a minidump |
 | `dispfind.py`, `disx.py` | Find operands or immediates in the executable; disassemble at runtime addresses |

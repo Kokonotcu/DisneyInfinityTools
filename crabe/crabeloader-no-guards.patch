@@ -1,11 +1,14 @@
+DI3Tools build of CrabeLoader. Applies to tag v1.1.0 (96f866b): in that checkout, git apply crabeloader-no-guards.patch.
+EngineMeridian and EngineShaders stay off, so a world that loads with CrabeLoader also loads in vanilla 3.0.
+
 diff --git a/src/application/loader.cpp b/src/application/loader.cpp
-index 479288b..4db5f32 100644
+index b0a9c42..06f5c12 100644
 --- a/src/application/loader.cpp
 +++ b/src/application/loader.cpp
-@@ -635,8 +635,10 @@ bool Loader::initialize()
-     crabe::presentation::InputHook::get().initialize();
+@@ -655,8 +655,10 @@ bool Loader::initialize()
      crabe::infrastructure::MessageHook::get().initialize();
      crabe::infrastructure::EngineFreeCamera::get().initialize();
+     crabe::infrastructure::EngineGateway::get().initialize();
 -    crabe::infrastructure::EngineMeridian::get().initialize();
 -    crabe::infrastructure::EngineShaders::get().initialize();
 +    // DI3Tools build: the DynArray sanitizer and the fallback shader are off, so a world that loads here
@@ -14,4 +17,4 @@ index 479288b..4db5f32 100644
 +    // crabe::infrastructure::EngineShaders::get().initialize();
      crabe::infrastructure::VfsOverrideManager::get().initialize(std::filesystem::current_path());
      crabe::infrastructure::VfsHook::get().initialize();
- 
+     crabe::infrastructure::EngineAssetLoader::get().initialize();
