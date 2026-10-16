@@ -2527,6 +2527,10 @@ static int readableTest()
 
 int main(int argc, char** argv)
 {
+    // OCTX_SLACK=<n>: octx's arena slack; the plugin ships 4096 (Pentane_Main). Unset keeps the header's 0 (OT-08)
+    char slack[16];
+    DWORD slackLen = GetEnvironmentVariableA("OCTX_SLACK", slack, sizeof(slack));
+    if (slackLen && slackLen < sizeof(slack)) octx::g_slack = atoi(slack);
     if (argc > 1 && std::string(argv[1]) == "--readable") return readableTest();
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
