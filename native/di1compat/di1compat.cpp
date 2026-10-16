@@ -2582,8 +2582,8 @@ static std::string currency10(const char* filter, const char* who)
     std::lock_guard<std::mutex> l(g_currency10Lock);
     auto it = g_currency10.find(filter);
     if (it == g_currency10.end()) return {};
-    static std::set<std::string> told;
-    if (told.insert(std::string(who) + filter).second) logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
+    static core::LogOnce<std::string> told;
+    if (told.first(std::string(who) + filter)) logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
     return it->second;
 }
 // The zone's: the zone manager's (*0x0225f548) string field inventoryFilter of its zone (+0x19c), read through
@@ -2876,10 +2876,8 @@ static void __fastcall hkLoadTick(uint8_t* self, void*, uint32_t a1)
 {
     uint8_t on = self[0x24], init = self[0xc];
     g_loadTick(self, nullptr, a1);
-    static std::mutex m;
-    static std::set<uint8_t*> seen;
-    bool first;
-    { std::lock_guard<std::mutex> lock(m); first = seen.size() < 64 && seen.insert(self).second; }
+    static core::LogOnce<uint8_t*> seen(64);
+    bool first = seen.first(self);
     bool fired = self[0x24] != on || (init && !self[0xc]);
     if ((first || fired) && lockTraceRoom(g_gateLines))
         logf("load screen node %p: %s (IsOn %d -> %d%s)", self - 0x14, fired ? (self[0x24] ? "fires Started" : "fires Stopped") : "first tick, no fire",
@@ -2938,10 +2936,8 @@ static uint8_t* __fastcall hkBeaconLookup(void* self, void*, const char* name, c
     safeCopy(n, sizeof(n), name);   // copies first: the callee releases its by-value CStrings
     safeCopy(fb, sizeof(fb), fallback);
     uint8_t* e = g_beaconLookup(self, nullptr, name, fallback);
-    static std::mutex m;
-    static std::set<std::string> seen;
-    bool first;
-    { std::lock_guard<std::mutex> lock(m); first = seen.size() < 300 && seen.insert(n).second; }
+    static core::LogOnce<std::string> seen(300);
+    bool first = seen.first(n);
     static volatile LONG lines;
     if (first && lockTraceRoom(lines)) {
         char c[96], pl[96];
@@ -3026,9 +3022,8 @@ static void __fastcall hkMisProgress(uint8_t* mission, void*, void* table)
     safeCopy(name, sizeof(name), ctx && sys::readable(ctx + 0x10, 4) ? *(const char**)(ctx + 0x10) : "?");
     uint8_t** arr = *(uint8_t***)(mission + 0x2ac);
     int n = *(int*)(mission + 0x2b0);
-    static std::mutex m;
-    static std::set<std::string> seen;
-    { std::lock_guard<std::mutex> lock(m); if (seen.size() > 200 || !seen.insert(std::string(name) + "#" + std::to_string(n)).second) return; }
+    static core::LogOnce<std::string> seen(201);   // at most 201 (mission, entry count) pairs
+    if (!seen.first(std::string(name) + "#" + std::to_string(n))) return;
     static volatile LONG lines;
     if (!lockTraceRoom(lines) || lines > 400) return;
     logf("mission progress '%s': %d entries", name, n);

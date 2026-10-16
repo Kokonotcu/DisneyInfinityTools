@@ -1,11 +1,14 @@
-// The plugin log, <game dir>\di1compat.log: logf writes one timestamped, flushed line under one lock.
-// Windows and the C runtime only. Any thread, the vectored exception handlers too: after the file's first line logf
-// never allocates. The log lock is the last lock (core/locks.hpp).
+// The plugin log, <game dir>\di1compat.log: logf writes one timestamped, flushed line under one lock; LogOnce
+// keeps "log this once per key" sets. Windows and the standard library only. Any thread, the vectored exception
+// handlers too: after the file's first line logf never allocates. The log lock is the last lock (core/locks.hpp).
 #pragma once
 #include <windows.h>
 #include <share.h>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
+#include <mutex>
+#include <set>
 
 namespace core {
 
@@ -41,5 +44,22 @@ inline void logf(const char* fmt, ...)
     fflush(s.file);
     LeaveCriticalSection(&s.lock);
 }
+
+// The keys already logged (CLAUDE.md L6): first(key) is true once per key, for at most cap keys. Its lock is a leaf.
+template <class Key>
+class LogOnce {
+public:
+    explicit LogOnce(size_t maxKeys = SIZE_MAX) : cap(maxKeys) {}
+    bool first(const Key& key)
+    {
+        std::lock_guard<std::mutex> lock(mx);
+        return seen.size() < cap && seen.insert(key).second;
+    }
+
+private:
+    std::mutex mx;         // guards seen
+    std::set<Key> seen;
+    const size_t cap;      // set once
+};
 
 }  // namespace core
