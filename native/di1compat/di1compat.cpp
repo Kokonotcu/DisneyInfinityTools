@@ -23,6 +23,7 @@
 #include "minhook/MinHook.h"
 #include "core/hooks.hpp"
 #include "core/log.hpp"
+#include "core/memcheck.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -71,24 +72,8 @@ using core::hook;
 using core::installFeature;
 using core::logf;
 using core::rt;
-
-// Copies a C string the engine handed us without trusting the pointer.
-static void safeCopy(char* out, size_t cap, const char* src)
-{
-    // trace hooks pass values that may not be pointers; check first, so no first-chance AV reaches the vectored
-    // handlers (CrabeLoader writes a dump per AV even when the __try below handles it)
-    if (!sys::readable(src, 1)) {
-        if (cap) out[0] = 0;
-        return;
-    }
-    __try {
-        size_t i = 0;
-        for (; src && i + 1 < cap && src[i]; ++i) out[i] = src[i];
-        out[i] = 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        strcpy_s(out, cap, "<unreadable>");
-    }
-}
+using core::cstr;
+using core::safeCopy;
 
 // ---- config: <plugin dir>\di1compat.cfg, lines "key = value" ----
 static struct {
@@ -1186,27 +1171,11 @@ static uint8_t __fastcall hkFigureOk(void* self, void*, uint32_t player, int sku
 // after a call instruction: E8 rel32 whose target is plausible, or an FF /2 indirect call), static addresses. Logged
 // once, then the exception continues to the game's / CrabeLoader's handlers.
 static volatile LONG g_avLogged;
-// Whether [p, p+n) is readable. Pre-check, don't fault: every fault reaches Pentane's and CrabeLoader's handlers.
-// ponytail: query-then-read can race a protection change; never seen.
-static bool readable(const void* p, size_t n)
-{
-    const uint8_t* a = (const uint8_t*)p;
-    MEMORY_BASIC_INFORMATION mbi;
-    while (n) {
-        if (!VirtualQuery(a, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))
-            || !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-            return false;
-        size_t room = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize - a;
-        if (room >= n) return true;
-        a += room; n -= room;
-    }
-    return true;
-}
 static bool afterCall(uintptr_t ret)
 {
     if (ret < g_base + 0x1000 + 6 || ret >= g_base + 0x2100000) return false;
     const uint8_t* p = (const uint8_t*)ret;
-    if (!readable(p - 6, 6)) return false;
+    if (!core::vqReadable(p - 6, 6)) return false;
     if (p[-5] == 0xE8) { uintptr_t t = ret + *(const int32_t*)(p - 4); return t >= g_base && t < g_base + 0x2100000; }
     if (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) return true;   // call [mem32] / [reg+disp32]
     if (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) return true;   // call [reg+disp8]
@@ -1243,18 +1212,6 @@ static LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
 // Trace only: DR0 write watchpoint on one address in every thread; logs the writer's EIP and stack (first 10 hits).
 static volatile uintptr_t g_watchAddr;
 static volatile LONG g_watchHits;
-// Readable words from sp, at most max. Stops exactly where an unchecked walk would fault; a VEH must never fault.
-static int readableWords(const uint32_t* sp, int max)
-{
-    int words = 0;
-    MEMORY_BASIC_INFORMATION mbi;
-    while (words < max && readable(sp + words, 4) && VirtualQuery(sp + words, &mbi, sizeof(mbi))) {
-        size_t room = (size_t)((const uint8_t*)mbi.BaseAddress + mbi.RegionSize - (const uint8_t*)(sp + words)) / 4;
-        if (!room) break;   // an unaligned sp in the last 3 bytes of a region
-        words += (int)(std::min)(room, (size_t)(max - words));
-    }
-    return words;
-}
 static LONG CALLBACK watchHandler(EXCEPTION_POINTERS* e)
 {
     if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
@@ -1265,7 +1222,7 @@ static LONG CALLBACK watchHandler(EXCEPTION_POINTERS* e)
         int len = sprintf_s(line, "watch hit: value now %d, eip %08X, stack:", *(int*)g_watchAddr,
                             (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip));
         const uint32_t* sp = (const uint32_t*)e->ContextRecord->Esp;
-        int words = readableWords(sp, 400);
+        int words = core::readableWords(sp, 400);
         for (int i = 0, found = 0; i < words && found < 14; ++i) {
             uint32_t v = sp[i];
             if (v >= g_base && v < g_base + 0x2100000) { len += sprintf_s(line + len, sizeof(line) - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
@@ -2707,13 +2664,6 @@ static void __cdecl hkMerRegistry()
 //   Choreography node play (Link_In -> FUN_017e91b0; resolved path CString at node+0x8c, FUN_017e8680) and its
 //     event handler at node+0x30 (FUN_017e5890: events 0/2 turn 'Playing' on, 1/3 off through FUN_017deef0)
 //   MessageSender send (Link_In -> FUN_018120b0; MessageName/Target/Data CStrings at node+0x1c/+0x28/+0x34)
-static const char* cstr(const void* at, char* buf, size_t cap)   // the char* a CString member at 'at' holds
-{
-    const char* p = nullptr;
-    if (sys::readable(at, sizeof(p))) p = *(const char* const*)at;
-    safeCopy(buf, cap, p);
-    return buf;
-}
 static uint32_t callerVa(void* ret) { return (uint32_t)((uintptr_t)ret - g_base + 0x400000u); }
 // lock/unlock/context lines (rare, they name the holder) have their own budget: choreography and message lines
 // cannot use it up before the control loss
