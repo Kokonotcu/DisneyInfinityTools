@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
+#include "base/text.hpp"
 #include "core/engine_file.hpp"
 #include "core/hooks.hpp"
 #include "core/log.hpp"
@@ -90,6 +91,8 @@ using core::watch;
 using core::copyToMemFile;
 using core::memFile;
 using core::readStream;
+using text::endsWith;
+using text::norm;
 
 static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set once in Pentane_Main, before any hook
 
@@ -110,14 +113,6 @@ static mz_zip_archive* zipFor(const std::string& rel)
 }
 
 static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
-
-static std::string norm(const char* path)
-{
-    std::string p = path;
-    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
-    return p;
-}
 
 // -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
 static void* read10z(const std::string& p, size_t* size, std::string* where);
@@ -151,12 +146,6 @@ static void* read10z(const std::string& p, size_t* size, std::string* where)
 }
 
 // ---- load-time transcodes: 1.0 bytes in, the form the 3.0 reader takes out (the 1.0 file is never rewritten) ----
-static bool endsWith(const char* s, const char* suffix)
-{
-    size_t a = strlen(s), b = strlen(suffix);
-    return a >= b && _stricmp(s + a - b, suffix) == 0;
-}
-
 static bool read10s(const std::string& path, std::string& out)
 {
     size_t n = 0;
