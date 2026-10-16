@@ -19,7 +19,7 @@ Names hash with ehash (engine FUN_0044a9f0, case-sensitive). 1.0 programs are D3
 python shd.py <shader> [...]          both games' descriptions of a shader, names resolved
 python shd.py --pairs                 every shader shipped in both games: params / techniques / passes compared
 """
-import os, struct, sys
+import os, struct
 from functools import lru_cache
 import paths
 
@@ -189,8 +189,14 @@ def pairs():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--pairs']:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('shader', nargs='*')
+    ap.add_argument('--pairs', action='store_true')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    if a.pairs:
         pairs()
     else:
-        for a in sys.argv[1:]:
-            show(a)
+        for s in a.shader:
+            show(s)

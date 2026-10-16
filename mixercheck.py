@@ -43,8 +43,7 @@ def parse(ts, i):
 
 def clamp(v, lo, hi): return lo if v < lo else hi if v > hi else v
 
-def main():
-    inst, out = sys.argv[1], sys.argv[2]
+def main(inst, out):
     core = root_file(inst, 'GameDB/Core/CoreDataMap.lua')
     paths = re.findall(r'Mixer\|([ -{}~]+)', core)
     src = root_file(inst, paths[0])
@@ -86,4 +85,9 @@ def main():
     return 1 if bad else 0
 
 if __name__ == '__main__':
-    sys.exit(main())
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('inst', help='the 1.0 install folder')
+    ap.add_argument('out', help='octtest --mixer output')
+    a = ap.parse_args()
+    sys.exit(main(a.inst, a.out))

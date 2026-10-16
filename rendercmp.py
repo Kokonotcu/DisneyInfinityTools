@@ -5,7 +5,7 @@ discards -- tallied per pass kind (technique / pass index / word) over all share
 
 python rendercmp.py [--kind <tech/idx>] [--top N]
 """
-import os, re, sys
+import os, re
 from collections import Counter, defaultdict
 import shd, sm3, gen30
 
@@ -37,9 +37,7 @@ def summary(dxbc):
     return frozenset('%s=%s' % kv for kv in sorted(last.items())), frozenset(tex), disc
 
 
-def main(argv):
-    top = int(argv[argv.index('--top') + 1]) if '--top' in argv else 6
-    only = argv[argv.index('--kind') + 1] if '--kind' in argv else None
+def main(only=None, top=6):
     d1, d3 = shd.shader_dir('1.0'), shd.shader_dir('3.0')
     both = sorted(set(f[:-4] for f in os.listdir(d1) if f.endswith('.shd')) & set(f[:-4] for f in os.listdir(d3) if f.endswith('.shd')))
     per = defaultdict(lambda: {'n': 0, 'ours': Counter(), 'ref': Counter(), 'otex': Counter(), 'rtex': Counter(), 'odisc': 0, 'rdisc': 0, 'ex': []})
@@ -82,4 +80,10 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    import argparse, paths
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--kind', metavar='TECH/IDX')
+    ap.add_argument('--top', type=int, default=6, metavar='N')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    main(a.kind, a.top)

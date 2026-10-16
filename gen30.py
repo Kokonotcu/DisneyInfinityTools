@@ -25,7 +25,7 @@ that ship in both games (shd.py has the formats):
 python gen30.py <1.0 shader> [...]     generate, compile, print the 3.0 description
 python gen30.py --all                   every 1.0 shader: generate + compile counts
 """
-import os, struct, sys, zlib
+import os, struct, zlib
 from collections import Counter, defaultdict
 from functools import lru_cache
 import shd, sm3, vtxf
@@ -361,8 +361,14 @@ def all_():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--all']:
+    import argparse, paths
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('shader', nargs='*')
+    ap.add_argument('--all', action='store_true')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    if a.all:
         all_()
     else:
-        for a in sys.argv[1:]:
-            show(a)
+        for s in a.shader:
+            show(s)

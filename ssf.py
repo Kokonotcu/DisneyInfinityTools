@@ -180,7 +180,6 @@ def dump(raw, game):
 
 if __name__ == '__main__':
     if '--dump' in sys.argv:
-        import paths
         a = sys.argv[sys.argv.index('--dump') + 1:]
         dump(open(a[0], 'rb').read(), a[1] if len(a) > 1 else '3.0')
         sys.exit(0)

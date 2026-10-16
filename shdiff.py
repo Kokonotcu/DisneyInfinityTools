@@ -5,7 +5,7 @@ show up as counts instead of guesses.
 
 python shdiff.py [--only <shader>] [--examples N]
 """
-import os, struct, sys
+import os, struct
 from collections import Counter, defaultdict
 import shd, gen30
 
@@ -50,12 +50,11 @@ class Tally:
             self.ex[key].append(example)
 
 
-def main(argv):
-    cap = int(argv[argv.index('--examples') + 1]) if '--examples' in argv else 3
+def main(only=None, cap=3):
     d1, d3 = shd.shader_dir('1.0'), shd.shader_dir('3.0')
     both = sorted(set(f[:-4] for f in os.listdir(d1) if f.endswith('.shd')) & set(f[:-4] for f in os.listdir(d3) if f.endswith('.shd')))
-    if '--only' in argv:
-        both = [argv[argv.index('--only') + 1]]
+    if only:
+        both = [only]
     T = Tally()
     stats = Counter()
     for sh in both:
@@ -123,7 +122,7 @@ def main(argv):
                     if pa[:4] != b'DXBC':
                         T.add('%s not compiled' % kind, where, cap)
                         continue
-                    (ta, sa, ca), (tc, sc, cc) = binds(pa), binds(pc)
+                    (ta, _, ca), (tc, _, cc) = binds(pa), binds(pc)
                     if ta != tc:
                         T.add('%s textures differ' % kind, '%s ours t%s ref t%s' % (where, ta, tc), cap)
                     if ca != cc:
@@ -150,4 +149,10 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    import argparse, paths
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--only', metavar='SHADER')
+    ap.add_argument('--examples', type=int, default=3, metavar='N')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    main(a.only, a.examples)

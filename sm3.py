@@ -14,8 +14,10 @@ Token stream (D3D9 'Shader Model 3' tokens, little-endian u32):
 
 python sm3.py <prog> [...]          disassemble (a bare 8-hex id is looked up in the 1.0 extract)
 python sm3.py --survey              opcode coverage over every 1.0 program
+python sm3.py --hlsl <prog> [...]   the HLSL translation
+python sm3.py --compile             every 1.0 program translated and compiled (needs d3dcompiler_47.dll: Windows)
 """
-import os, struct, sys
+import os, struct
 from collections import Counter
 
 OPS = {0: 'nop', 1: 'mov', 2: 'add', 3: 'sub', 4: 'mad', 5: 'mul', 6: 'rcp', 7: 'rsq', 8: 'dp3', 9: 'dp4', 10: 'min',
@@ -338,27 +340,42 @@ def to_hlsl(kind, prog, binding=None):
     return '\n'.join(out)
 
 
+def _blob(p):
+    """An ID3DBlob's bytes (GetBufferPointer, GetBufferSize), then Release; b'' for a null blob."""
+    import ctypes
+    from ctypes import c_void_p, c_size_t, c_uint, POINTER
+    if not p.value:
+        return b''
+    vt = ctypes.cast(ctypes.cast(p, POINTER(c_void_p))[0], POINTER(c_void_p))
+    ptr = ctypes.WINFUNCTYPE(c_void_p, c_void_p)(vt[3])(p)
+    size = ctypes.WINFUNCTYPE(c_size_t, c_void_p)(vt[4])(p)
+    b = ctypes.string_at(ptr, size)
+    ctypes.WINFUNCTYPE(c_uint, c_void_p)(vt[2])(p)
+    return b
+
+
 def d3dcompile(src, target):
     """(DXBC bytes or None, messages) through the system d3dcompiler_47 (64-bit here; the plugin uses the 32-bit)."""
     import ctypes
-    from ctypes import c_void_p, c_char_p, c_size_t, c_uint, POINTER, byref
+    from ctypes import c_void_p, c_char_p, c_size_t, c_uint, byref
     dll = ctypes.WinDLL('d3dcompiler_47.dll')
     code, err = c_void_p(), c_void_p()
     data = src.encode()
     hr = dll.D3DCompile(c_char_p(data), c_size_t(len(data)), c_char_p(b'sm3'), None, None, c_char_p(b'main'),
                         c_char_p(target.encode()), c_uint(0), c_uint(0), byref(code), byref(err))
-
-    def blob(p):
-        if not p.value:
-            return b''
-        vt = ctypes.cast(ctypes.cast(p, POINTER(c_void_p))[0], POINTER(c_void_p))
-        ptr = ctypes.WINFUNCTYPE(c_void_p, c_void_p)(vt[3])(p)
-        size = ctypes.WINFUNCTYPE(c_size_t, c_void_p)(vt[4])(p)
-        b = ctypes.string_at(ptr, size)
-        ctypes.WINFUNCTYPE(c_uint, c_void_p)(vt[2])(p)
-        return b
-    c, e = blob(code), blob(err)
+    c, e = _blob(code), _blob(err)
     return (c if hr == 0 else None), e.decode(errors='replace')
+
+
+def d3ddisasm(dxbc):
+    """Text disassembly of a DXBC program (system d3dcompiler_47)."""
+    import ctypes
+    from ctypes import c_void_p, c_size_t, c_uint, byref
+    dll = ctypes.WinDLL('d3dcompiler_47.dll')
+    out = c_void_p()
+    if dll.D3DDisassemble(ctypes.c_char_p(dxbc), c_size_t(len(dxbc)), c_uint(0), None, byref(out)):
+        return None
+    return _blob(out).decode(errors='replace')
 
 
 def compile_all(target_vs='vs_4_0', target_ps='ps_4_0'):
@@ -418,35 +435,28 @@ def survey():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--survey']:
+    import argparse, paths
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('prog', nargs='*')
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument('--survey', action='store_true')
+    mode.add_argument('--compile', action='store_true', help='every 1.0 program translated and compiled')
+    mode.add_argument('--hlsl', action='store_true', help='print the HLSL translation of each program')
+    paths.add_args(ap, 'ext10')
+    a = paths.use(ap.parse_args())
+    if a.survey:
         survey()
-    elif sys.argv[1:] == ['--compile']:
+    elif a.compile:
         compile_all()
-    elif sys.argv[1:2] == ['--hlsl']:
-        for a in sys.argv[2:]:
-            kind, prog, _ = parse(open(program_path(a), 'rb').read())
+    elif a.hlsl:
+        for p in a.prog:
+            kind, prog, _ = parse(open(program_path(p), 'rb').read())
             print(to_hlsl(kind, prog))
     else:
-        for a in sys.argv[1:]:
-            kind, prog, _ = parse(open(program_path(a), 'rb').read())
-            print('==', a, kind)
+        for p in a.prog:
+            kind, prog, _ = parse(open(program_path(p), 'rb').read())
+            print('==', p, kind)
             for o in prog:
                 d = fmt_reg(o.dst) if o.dst else ''
                 print('  %-8s %-10s %s%s' % (o.name, d, ', '.join(fmt_reg(s) for s in o.src),
                                              (' ' + str(o.lit)) if o.lit else ''))
-
-
-def d3ddisasm(dxbc):
-    """Text disassembly of a DXBC program (system d3dcompiler_47)."""
-    import ctypes
-    from ctypes import c_void_p, c_size_t, c_uint, POINTER, byref
-    dll = ctypes.WinDLL('d3dcompiler_47.dll')
-    out = c_void_p()
-    if dll.D3DDisassemble(ctypes.c_char_p(dxbc), c_size_t(len(dxbc)), c_uint(0), None, byref(out)):
-        return None
-    vt = ctypes.cast(ctypes.cast(out, POINTER(c_void_p))[0], POINTER(c_void_p))
-    ptr = ctypes.WINFUNCTYPE(c_void_p, c_void_p)(vt[3])(out)
-    size = ctypes.WINFUNCTYPE(c_size_t, c_void_p)(vt[4])(out)
-    s = ctypes.string_at(ptr, size).decode(errors='replace')
-    ctypes.WINFUNCTYPE(c_uint, c_void_p)(vt[2])(out)
-    return s
