@@ -38,6 +38,7 @@
 #include "games/di1/octsteps.hpp"
 #include "games/di1/renderio.hpp"
 #include "games/di1/transcode.hpp"
+#include "games/di1/zones.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -1864,43 +1865,39 @@ static uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
     if (info.L) ((ReleaseFn)rt(0x0130E4D0))(info.L, info.idx);
     return changed;
 }
+static bool world10(const std::string& zone) { return di1::worldInstalled(g_cfg.install10, zone); }
 static int zones10(std::string& t, const char* p)
 {
     if (norm(p) != "gamedb/core/zonelist.lua") return 0;
     std::string c10;
     if (!read10s("gamedb/core/zonelist.lua", c10)) { logf("zones10: no 1.0 zone list in the 1.0 install"); return 0; }
-    std::vector<gameplay::Playset10> ps;
+    di1::Zones10Options o;
+    o.add = g_cfg.zones10;
+    o.currencies = g_cfg.currency10;
+    o.world = world10;
+    di1::Zones10 z;
     try {
-        auto g = luachunk::eval(c10);
-        auto world = [](const std::string& zone) {   // the start world is in the 1.0 install: worlds\<zone>[.zip]
-            std::string w = std::string(g_cfg.install10) + "\\assets\\worlds\\" + zone;
-            return GetFileAttributesA((w + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA(w.c_str()) != INVALID_FILE_ATTRIBUTES;
-        };
-        ps = gameplay::playsets10(t, g["ZoneList"], g_cfg.zones10, world);
+        z = di1::zones10(t, c10, o);
         if (g_cfg.currency10) {
-            auto cur = gameplay::currencies10(g["ZoneList"]);
             std::string l;
-            for (auto& [f, c] : cur) l += " " + f + "=" + c;
+            for (auto& [f, c] : z.currencies) l += " " + f + "=" + c;
             logf("currency10: 1.0 playset currencies:%s", l.c_str());
             std::lock_guard<std::mutex> lk(g_currency10Lock);
-            g_currency10 = std::move(cur);
+            g_currency10 = std::move(z.currencies);
         }
     } catch (std::exception& e) {
         logf("zones10: 1.0 zone list not read (%s)", e.what());
         return 0;
     }
     int added = 0;
-    std::vector<std::string> pre;
-    for (auto& x : ps) {
+    std::vector<std::string> pre = di1::zonePrefixes(z.playsets);
+    for (auto& x : z.playsets) {
         added += x.added;
-        for (auto& z : x.zones)
-            if (z.find('_') != std::string::npos && std::find(pre.begin(), pre.end(), z.substr(0, z.find('_') + 1)) == pre.end())
-                pre.push_back(z.substr(0, z.find('_') + 1));
         if (x.added) logf("zones10: %s registered, PlaysetUniqueID %d, %u zones, start %s", x.name.c_str(), x.id, (unsigned)x.zones.size(), x.start.c_str());
         else logf("zones10: %s already in the 3.0 zone list (start %s)", x.name.c_str(), x.start.c_str());
     }
     std::lock_guard<std::mutex> l(g_playsets10Lock);
-    g_playsets10 = ps;
+    g_playsets10 = z.playsets;
     g_missionPrefix10 = pre;
     return added;
 }
