@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
+#include "core/engine_file.hpp"
 #include "core/hooks.hpp"
 #include "core/log.hpp"
 #include "core/memcheck.hpp"
@@ -80,6 +81,9 @@ using core::afterCall;
 using core::avHandler;
 using core::stackOf;
 using core::watch;
+using core::copyToMemFile;
+using core::memFile;
+using core::readStream;
 
 // ---- config: <plugin dir>\di1compat.cfg, lines "key = value" ----
 static struct {
@@ -402,24 +406,6 @@ static void* read10z(const std::string& p, size_t* size, std::string* where)
             if (data) { *where = std::string(zr) + ":" + p; return data; }
         }
     return nullptr;
-}
-
-// A Genie::MemFile holding a copy of data, built the way the engine builds one (0x0041d... reader path):
-// new(0x20), ctor FUN_012ec100(0x400), vtable+0x0c setSize(n, 0), fill data (+0x18), vtable+0x08 seek(0, 0, 0).
-static int* memFile(const void* data, size_t n)
-{
-    typedef void*(__cdecl * NewFn)(size_t);
-    typedef void(__fastcall * CtorFn)(void* self, void* edx, uint32_t grow);
-    typedef void(__fastcall * SetSizeFn)(void* self, void* edx, uint32_t size, uint32_t force);
-    typedef uint32_t(__fastcall * SeekFn)(void* self, void* edx, uint32_t off, uint32_t hi, uint32_t whence);
-    void* f = ((NewFn)rt(0x00406E80))(0x20);
-    if (!f) return nullptr;
-    ((CtorFn)rt(0x012EC100))(f, nullptr, 0x400);
-    void** vt = *(void***)f;
-    ((SetSizeFn)vt[3])(f, nullptr, (uint32_t)n, 0);
-    memcpy(((void**)f)[6], data, n);
-    ((SeekFn)vt[2])(f, nullptr, 0, 0, 0);
-    return (int*)f;
 }
 
 // ---- load-time transcodes: 1.0 bytes in, the form the 3.0 reader takes out (the 1.0 file is never rewritten) ----
@@ -1074,31 +1060,6 @@ static bool memtestMatch(const char* p)
     for (char* t = strtok_s(list, ",", &ctx); t; t = strtok_s(nullptr, ",", &ctx))
         if (*t && strstr(p, t)) return true;
     return false;
-}
-
-// Reads a whole engine stream through the Genie::File interface (+0x10 size, +0x14 read, +0x2c destroy); the
-// stream is destroyed. False if the read came up short.
-static bool readStream(int* s, std::string& buf)
-{
-    typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
-    typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
-    typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
-    void** vt = *(void***)s;
-    uint32_t n = ((SizeFn)vt[4])(s, nullptr);
-    buf.assign(n, '\0');
-    uint32_t got = ((ReadFn)vt[5])(s, nullptr, &buf[0], n);
-    ((DtorFn)vt[11])(s, nullptr, 1);
-    buf.resize(got);
-    return got == n;
-}
-
-// ... and returns a MemFile copy of it.
-static int* copyToMemFile(int* s, size_t* outSize)
-{
-    std::string buf;
-    bool ok = readStream(s, buf);
-    *outSize = buf.size();
-    return ok ? memFile(buf.data(), buf.size()) : nullptr;
 }
 
 // GameDB CHD-only callback loaders (DBFileLoader_Callback_CHD::load, FUN_018db450 -- RumpusData, FUN_00f63e70) given
