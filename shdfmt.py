@@ -13,19 +13,8 @@ python shdfmt.py <shd> [<shd> ...] [--ext30 DIR]   passes vs VS inputs, and slot
                                                    (a bare shader name is looked up in the 3.0 extract)
 """
 import struct, os
+from shd import chunk
 from vtxf import formats, name_hash, elements
-
-
-def _chunk(b, tag):
-    """(bytes, start) of a DXBC chunk's payload, or None."""
-    d = b.find(b'DXBC')
-    if d < 0:
-        return None
-    for i in range(struct.unpack_from('<I', b, d + 28)[0]):
-        co = d + struct.unpack_from('<I', b, d + 32 + 4 * i)[0]
-        if b[co:co + 4] == tag:
-            return b, co + 8
-    return None
 
 
 def _cstr(b, o):
@@ -34,10 +23,10 @@ def _cstr(b, o):
 
 def isgn(path):
     """-> [(semantic+index, sysval)] from the DXBC ISGN chunk."""
-    c = _chunk(open(path, 'rb').read(), b'ISGN')
-    if not c:
+    b = open(path, 'rb').read()
+    base = chunk(b, b'ISGN')
+    if base is None:
         raise ValueError('no ISGN in ' + str(path))
-    b, base = c
     out = []
     for e in range(struct.unpack_from('<I', b, base)[0]):
         no, idx, sv = struct.unpack_from('<III', b, base + 8 + 24 * e)
@@ -47,10 +36,10 @@ def isgn(path):
 
 def textures(path):
     """{t-register: name} of the textures a DXBC shader binds (RDEF; resource type 2 = texture)."""
-    c = _chunk(open(path, 'rb').read(), b'RDEF')
-    if not c:
+    b = open(path, 'rb').read()
+    base = chunk(b, b'RDEF')
+    if base is None:
         return {}
-    b, base = c
     n, off = struct.unpack_from('<II', b, base + 8)
     out = {}
     for r in range(n):

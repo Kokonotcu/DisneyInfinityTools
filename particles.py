@@ -27,11 +27,8 @@ twin check = the same hash in a 1.0 and a 3.0 package, 1,431 emitters, Disney's 
   0xf8 char[8] mesh name (FUN_006e9270 'particles/<name>') -> 0x11c x131 hash (FUN_00670760 'particles/%08x')
   0x3.0 0xc8/0xcc = 1.0f, 0x120 = 0 (3.0-only, every twin)
 """
-import os, struct, sys
+import struct, sys
 from pathlib import Path
-
-E10 = Path(os.environ.get('DI_EXT10', r'D:\DI-Extract\1.0')) / 'assets' / 'particles'
-E30 = Path(os.environ.get('DI_EXT30', r'D:\DI-Extract\3.0')) / 'assets' / 'particles'
 
 # 1.0 entry u32 x (0..63) -> 3.0 entry u32 c: Disney's conversion as the twins show it (x: c, twin count >= 1 each);
 # x absent from the twins takes its lower neighbour's c.
@@ -171,6 +168,12 @@ def validate30(d):
 
 
 if __name__ == '__main__':
+    import argparse, paths
+    ap = argparse.ArgumentParser(description='every 1.0 package converted and checked, every 3.0 package checked')
+    ap.add_argument('out', nargs='?', help='also write the converted packages here')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    E10, E30 = paths.ext10('particles'), paths.ext30('particles')
     # whole corpus: every 1.0 package converts to a valid 3.0 package that keeps every record, hash and key
     total = 0
     for p in sorted(E10.iterdir()):
@@ -185,7 +188,7 @@ if __name__ == '__main__':
         total += len(probs)
         print('%-20s %7d -> %7d B  emitters %4d effects %4d params %4d  %s' % (p.name, len(d), len(c), len(r1['ent']['emit']),
               len(r1['ent']['effect']), len(r1['ent']['param']), 'ok' if not probs else probs[:3]))
-        if len(sys.argv) > 1: Path(sys.argv[1], p.name + '.particledata').write_bytes(c)
+        if a.out: Path(a.out, p.name + '.particledata').write_bytes(c)
     # 3.0 packages must pass the same validator (it encodes the loader's rules, not ours)
     for p in sorted(E30.iterdir()):
         f = p / (p.name + '.particledata')

@@ -2,3 +2,4 @@ pycryptodome>=3.15
 capstone>=5.0
 pefile>=2023.2.7
 lupa>=2.0        # luabc.run_package, zonereg.py
+pillow>=9.0      # meshexport.py --textures

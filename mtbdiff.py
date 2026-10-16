@@ -5,7 +5,7 @@ same shader show up as counts.
 
 python mtbdiff.py [--examples N] [--limit N]
 """
-import os, struct, sys
+import os, struct
 from collections import Counter, defaultdict
 import paths, shd, matp, gen30
 
@@ -30,9 +30,7 @@ def close(a, b):
     return all(x == y or (x == x and y == y and abs(x - y) <= 1e-4 * max(1.0, abs(x), abs(y))) for x, y in zip(a, b))
 
 
-def main(argv):
-    cap = int(argv[argv.index('--examples') + 1]) if '--examples' in argv else 3
-    limit = int(argv[argv.index('--limit') + 1]) if '--limit' in argv else 0
+def main(cap=3, limit=0):
     r10, r30 = str(paths.ext10()), str(paths.ext30())
     m10s, m30s = mtbs(r10), mtbs(r30)
     common = sorted(set(m10s) & set(m30s))
@@ -52,7 +50,7 @@ def main(argv):
         try:
             a = matp.Bundle(open(m10s[rel], 'rb').read(), game=1)
             c = matp.Bundle(open(m30s[rel], 'rb').read(), game=3)
-        except Exception as e:
+        except Exception:
             stats['bundle unreadable'] += 1
             continue
         stats['bundles'] += 1
@@ -117,4 +115,10 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--examples', type=int, default=3, metavar='N')
+    ap.add_argument('--limit', type=int, default=0, metavar='N', help='only the first N common bundles')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    main(a.examples, a.limit)

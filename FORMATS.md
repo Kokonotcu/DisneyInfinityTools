@@ -75,6 +75,7 @@ The textures live in the global pool or in the asset's own `textures/` folder, n
 - Loose files are used in place of an archive's members once that archive is disabled. The README describes `expendables_data.zip` renamed to `.disabled` with its 17 packages loose. `zones.py` reads a loose `gamedb/core/zonelist.lua` when `startup2.zip` is "disabled and unpacked".
 - A world's `.mer` is read only when its `.oct` lists it in `ExternalFilePool` (0x77ca30; [5.5](#55-the-start-chain)).
 - CrabeLoader's VFS (`--assets <game>/mods/<id>`) serves whole files keyed on the path after `assets/`, when the game opens that path through the OS (`crabemod.py`). It cannot replace a member inside an archive, and loose files under a path that a shipped zip covers stay invisible (README, Next 3). `crabemod --check` lists them.
+- Exception since CrabeLoader 1.1.0: a `.tbody` in a mod's VFS folder wins over the archive member. `EngineAssetLoader` hooks `Asset_LoadFile` (0x0041FAF0) and serves the mod's file without calling the original (`src/infrastructure/engine_asset_loader.cpp:214-265` at tag v1.1.0). `crabe_disable_asset_override.txt` in the game folder turns it off.
 - How loose world and exploder folders written by `native30`/`expl30` relate to these rules is not settled ([15](#15-open-questions)).
 
 ### 1.4 The three tool roots

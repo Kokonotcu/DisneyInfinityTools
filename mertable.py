@@ -19,7 +19,7 @@ MissionTask_Customization_Blockhead TestSpecificActors, OmnidroidParms bools, ..
     node RTTI of its definition when no other registered class uses that definition: classdefs_30.json).
 Without them the output is byte-identical to the 4-argument table.
 python mertable.py <catalogue.json> <regclasses_30.json> <pins10_all.json> <out.txt> [defs30.json classdefs_30.json]"""
-import json, sys
+import argparse, json
 from collections import Counter, defaultdict
 
 TYPES = ('bool', 'int', 'float', 'string', 'vec3')
@@ -93,4 +93,10 @@ def main(cat_path, reg_path, pins10_path, out_path, d30_path=None, cdefs_path=No
 
 
 if __name__ == '__main__':
-    main(*sys.argv[1:7])
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    for n in ('catalogue', 'regclasses', 'pins10', 'out'):
+        ap.add_argument(n)
+    ap.add_argument('defs30', nargs='?')
+    ap.add_argument('classdefs', nargs='?')
+    a = ap.parse_args()
+    main(a.catalogue, a.regclasses, a.pins10, a.out, a.defs30, a.classdefs)

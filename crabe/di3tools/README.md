@@ -18,7 +18,8 @@ category to the `Crabe.Menu` registry:
 
 ## Install
 
-1. CrabeLoader installed (`bink2w32.dll` proxy plus `bink2w32_orig.dll`, and a `mods\` folder).
+1. CrabeLoader 1.1.0 installed (`dinput8.dll` and `CrabeLoader.asi` next to `DisneyInfinity3.exe`, and a
+   `mods\` folder). The harness uses a build of tag v1.1.0 with `crabe/crabeloader-no-guards.patch`.
 2. Copy this folder to `<game>\mods\di3tools\` (`mod.json` and `main.lua`; the README is optional).
 3. Install **CrabeMenu** as well (`<game>\mods\crabemenu\`). The loader keeps the `Crabe.Menu` registry,
    but in this CrabeLoader source nothing in its C++ overlay draws it. CrabeMenu does, under
@@ -47,9 +48,9 @@ SPAWN_FORWARD = 2.0, SPAWN_UP = 2.0,
 Each action sets the menu's status line. The full lines go to two places:
 
 - **`<game>\logs\mods\di3tools.log`**, always. This uses `Crabe._fileLog`, written relative to the
-  game's working directory (`src/application/lua_natives.cpp:680-701`).
+  game's working directory (`src/application/lua_natives.cpp:833-854`).
 - **`loader.log` and the `Insert` console, only when `logLevel = "debug"`**. `Crabe.write` lines are
-  passed to the loader's logger at DEBUG (`src/application/loader.cpp:463`), and the default level is
+  passed to the loader's logger at DEBUG (`src/application/loader.cpp:481`), and the default level is
   `"info"`. Set it in `<game>\Crabe\crabe.toml` under `[general]`.
 
 ## Notes per feature
@@ -101,30 +102,33 @@ hitch.
 
 **Logging every Lua chunk name** is left out, because the Lua API does not expose it:
 - `Crabe.Events` has no chunk event. The only events emitted are `init`, `tick`, `update`, `keyDown`,
-  `reload` and `playerDeath`.
+  `reload`, `playerDeath`, `portalFigurePlaced`, `portalFigureRemoved` and `gatewayTagWrite`.
 - `Crabe.Hooks.patchChunk` and `patchNamedChunk` need a non-empty match key. An empty key is dropped
-  (`src/application/loader_content.cpp:43`, `:60`), so there is no catch-all. A patch runs fixed
+  (`src/application/loader_content.cpp:31`, `:48`), so there is no catch-all. A patch runs fixed
   source and is not given the chunk's name.
 
 The loader logs every chunk itself, though: `Lua: loadbuffer <name> (<n> bytes)` and
-`Lua: loadfile <name>` at DEBUG (`src/infrastructure/lua_call.cpp:139`, `:129`). Set
+`Lua: loadfile <name>` at DEBUG (`src/infrastructure/lua_call.cpp:132`, `:124`). Set
 `logLevel = "debug"` in `crabe.toml` and read `loader.log`.
 
 Also not used: `Crabe.Menu.registerCategory`, `addItem`, `addToggle`, `addSlider`, `setStatus`,
 `Crabe.Sandbox.import` and `Crabe.log`. They appear in `docs/crabe_api.def.lua` (and the
 `mods/_template`), but `src/api` does not implement them. The menu uses `Crabe.Menu.register`
-(`src/api/15_menu.lua:55`) instead.
+(`src/api/15_menu.lua:31`) instead.
 
 ## Crash bisection: do it WITHOUT CrabeLoader
 
-CrabeLoader always installs engine hooks that change how bad assets fail. No setting in
-`crabe.toml` turns them off (`src/application/loader.cpp:638-639`):
-- `:639` `EngineShaders::initialize()` hooks **`Shader_LookupCrc`**, which swaps in a fallback shader
+Stock CrabeLoader always installs engine hooks that change how bad assets fail. No setting in
+`crabe.toml` turns them off (`src/application/loader.cpp:658-659`):
+- `:659` `EngineShaders::initialize()` hooks **`Shader_LookupCrc`**, which swaps in a fallback shader
   for an unknown CRC instead of the engine's `int 3`, and **`Shader_ParseBindings`**, a material
-  binding guard (`src/infrastructure/engine_shaders.cpp:96-114`).
-- `:638` `EngineMeridian::initialize()` guards `DynArray16::Append` against bad graph buffers.
+  binding guard (`src/infrastructure/engine_shaders.cpp:92-110`).
+- `:658` `EngineMeridian::initialize()` guards `DynArray16::Append` against bad graph buffers.
 
-A ported world that loads with CrabeLoader can therefore still crash vanilla 3.0, and a crash seen
-with CrabeLoader may differ from the vanilla one. To bisect crashes, uninstall CrabeLoader: delete
-`bink2w32.dll` and rename `bink2w32_orig.dll` back to `bink2w32.dll`. Do not use Steam's *Verify
-integrity* for this, because it also reverts the installed port.
+A ported world that loads with stock CrabeLoader can therefore still crash vanilla 3.0, and a crash
+seen with CrabeLoader may differ from the vanilla one. `crabe/crabeloader-no-guards.patch` turns both
+guards off. 1.1.0 also serves a mod's `.tbody` textures over archive members (`EngineAssetLoader`); a
+`crabe_disable_asset_override.txt` in the game folder turns that off
+(`src/infrastructure/engine_asset_loader.cpp:30`, `:140-144`). To bisect crashes, uninstall
+CrabeLoader: delete `dinput8.dll` and `CrabeLoader.asi` (the install changes no game file). Do not
+use Steam's *Verify integrity* for this, because it also reverts the installed port.

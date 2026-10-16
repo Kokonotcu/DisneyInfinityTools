@@ -1,7 +1,8 @@
 # Unattended in-game test: boot 3.0, travel to a zone with a character, run Lua probes, screenshot, quit.
 #   powershell -File harness.ps1 [-Zone OUT_Intro2] [-Sku 1000206] [-Probe a.lua,b.lua] [-Keep] [-Attach]
 #                                [-MenuProbe m.lua] [-MenuOnly]   (probes in the main menu; MenuOnly stops there)
-# Needs CrabeLoader (bink2w32.dll proxy, built from source with its engine guards off): it runs
+# Needs CrabeLoader 1.1.0 (dinput8.dll + CrabeLoader.asi next to the exe), built from tag v1.1.0 with
+# crabe\crabeloader-no-guards.patch (engine guards off): it runs
 # <game>\crabe_remote_cmd.txt in the game Lua state and logs the result to loader.log as '= ...' / '! ...'.
 # Commands only run while the game itself calls Lua (CrabeLoader ticks from its lua_pcall hook): an idle menu
 # such as the title screen never does, so screens that wait for a press are pressed from their own MovieLoaded.

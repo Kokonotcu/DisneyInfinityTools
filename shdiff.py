@@ -5,7 +5,7 @@ show up as counts instead of guesses.
 
 python shdiff.py [--only <shader>] [--examples N]
 """
-import os, struct, sys
+import os, struct
 from collections import Counter, defaultdict
 import shd, gen30
 
@@ -14,21 +14,14 @@ SKIP_PASS = set(range(0x18, 0x1c)) | set(range(0x28, 0x2c)) | set(range(0x30, 0x
 
 def sig(b, tag):
     """[(semantic, index, register, mask, rw)] from a DXBC ISGN / OSGN chunk."""
-    d = b.find(b'DXBC') if b else -1
-    if d < 0:
+    base = shd.chunk(b, tag.encode()) if b else None
+    if base is None:
         return []
-    for i in range(struct.unpack_from('<I', b, d + 28)[0]):
-        co = d + struct.unpack_from('<I', b, d + 32 + 4 * i)[0]
-        if b[co:co + 4] != tag.encode():
-            continue
-        base = co + 8
-        n = struct.unpack_from('<I', b, base)[0]
-        out = []
-        for k in range(n):
-            no, idx, sv, ct, reg, mask, rw = struct.unpack_from('<5IBB', b, base + 8 + 24 * k)
-            out.append((b[base + no:b.index(b'\0', base + no)].decode('latin-1'), idx, reg, mask, rw))
-        return out
-    return []
+    out = []
+    for k in range(struct.unpack_from('<I', b, base)[0]):
+        no, idx, sv, ct, reg, mask, rw = struct.unpack_from('<5IBB', b, base + 8 + 24 * k)
+        out.append((b[base + no:b.index(b'\0', base + no)].decode('latin-1'), idx, reg, mask, rw))
+    return out
 
 
 def binds(b):
@@ -50,12 +43,11 @@ class Tally:
             self.ex[key].append(example)
 
 
-def main(argv):
-    cap = int(argv[argv.index('--examples') + 1]) if '--examples' in argv else 3
+def main(only=None, cap=3):
     d1, d3 = shd.shader_dir('1.0'), shd.shader_dir('3.0')
     both = sorted(set(f[:-4] for f in os.listdir(d1) if f.endswith('.shd')) & set(f[:-4] for f in os.listdir(d3) if f.endswith('.shd')))
-    if '--only' in argv:
-        both = [argv[argv.index('--only') + 1]]
+    if only:
+        both = [only]
     T = Tally()
     stats = Counter()
     for sh in both:
@@ -123,7 +115,7 @@ def main(argv):
                     if pa[:4] != b'DXBC':
                         T.add('%s not compiled' % kind, where, cap)
                         continue
-                    (ta, sa, ca), (tc, sc, cc) = binds(pa), binds(pc)
+                    (ta, _, ca), (tc, _, cc) = binds(pa), binds(pc)
                     if ta != tc:
                         T.add('%s textures differ' % kind, '%s ours t%s ref t%s' % (where, ta, tc), cap)
                     if ca != cc:
@@ -150,4 +142,10 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    import argparse, paths
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--only', metavar='SHADER')
+    ap.add_argument('--examples', type=int, default=3, metavar='N')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    main(a.only, a.examples)

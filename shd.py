@@ -19,7 +19,7 @@ Names hash with ehash (engine FUN_0044a9f0, case-sensitive). 1.0 programs are D3
 python shd.py <shader> [...]          both games' descriptions of a shader, names resolved
 python shd.py --pairs                 every shader shipped in both games: params / techniques / passes compared
 """
-import os, struct, sys
+import os, struct
 from functools import lru_cache
 import paths
 
@@ -98,28 +98,34 @@ def ctab(b):
     return out
 
 
-def rdef(b):
-    """{'res': [(name, type, bind)], 'cb': [(cbuffer, size, [(var, offset, size)])]} from a DXBC program."""
+def chunk(b, tag):
+    """Offset of the payload of the first <tag> chunk of the first DXBC container in b, or None."""
     d = b.find(b'DXBC')
     if d < 0:
-        return {'res': [], 'cb': []}
+        return None
     for i in range(struct.unpack_from('<I', b, d + 28)[0]):
         co = d + struct.unpack_from('<I', b, d + 32 + 4 * i)[0]
-        if b[co:co + 4] != b'RDEF':
-            continue
-        base = co + 8
-        ncb, cboff, nres, resoff, ver = struct.unpack_from('<5I', b, base)
-        vsz = 40 if (ver & 0xff00) >= 0x500 else 24
-        s = lambda o: b[base + o:b.index(b'\0', base + o)].decode('latin-1')
-        res = [(s(struct.unpack_from('<I', b, base + resoff + 32 * r)[0]),) + struct.unpack_from('<I12xI', b, base + resoff + 32 * r + 4)
-               for r in range(nres)]
-        cbs = []
-        for c in range(ncb):
-            no, nv, voff, size = struct.unpack_from('<4I', b, base + cboff + 24 * c)
-            cbs.append((s(no), size, [(s(struct.unpack_from('<I', b, base + voff + vsz * v)[0]),) +
-                                      struct.unpack_from('<II', b, base + voff + vsz * v + 4) for v in range(nv)]))
-        return {'res': res, 'cb': cbs}
-    return {'res': [], 'cb': []}
+        if b[co:co + 4] == tag:
+            return co + 8
+    return None
+
+
+def rdef(b):
+    """{'res': [(name, type, bind)], 'cb': [(cbuffer, size, [(var, offset, size)])]} from a DXBC program."""
+    base = chunk(b, b'RDEF')
+    if base is None:
+        return {'res': [], 'cb': []}
+    ncb, cboff, nres, resoff, ver = struct.unpack_from('<5I', b, base)
+    vsz = 40 if (ver & 0xff00) >= 0x500 else 24
+    s = lambda o: b[base + o:b.index(b'\0', base + o)].decode('latin-1')
+    res = [(s(struct.unpack_from('<I', b, base + resoff + 32 * r)[0]),) + struct.unpack_from('<I12xI', b, base + resoff + 32 * r + 4)
+           for r in range(nres)]
+    cbs = []
+    for c in range(ncb):
+        no, nv, voff, size = struct.unpack_from('<4I', b, base + cboff + 24 * c)
+        cbs.append((s(no), size, [(s(struct.unpack_from('<I', b, base + voff + vsz * v)[0]),) +
+                                  struct.unpack_from('<II', b, base + voff + vsz * v + 4) for v in range(nv)]))
+    return {'res': res, 'cb': cbs}
 
 
 def program(game, pid, kind):
@@ -189,8 +195,14 @@ def pairs():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--pairs']:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('shader', nargs='*')
+    ap.add_argument('--pairs', action='store_true')
+    paths.add_args(ap, 'ext10', 'ext30')
+    a = paths.use(ap.parse_args())
+    if a.pairs:
         pairs()
     else:
-        for a in sys.argv[1:]:
-            show(a)
+        for s in a.shader:
+            show(s)

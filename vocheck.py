@@ -1,5 +1,5 @@
-"""vocheck.py <octtest --vo output> <dir with .dlg30> [<dir of decrypted 3.0 scripts>]  -- vo10 oracle; reads the
-source files on its own:
+"""vocheck.py <1.0 install> <octtest --vo output> <dir with .dlg30> [<dir of decrypted 3.0 scripts>]  -- vo10 oracle;
+reads the source files on its own:
  DLG:  every 1.0 v11 script vs its transcode (and vs the merge with 3.0's own script of that name, when given). The 3.0
        file is walked as 3.0 walks it (FUN_0073fb90 header checks and tables; FUN_0073daf0 range path: packed upper
        prefix -> range -> class byte -> entry, event 0 = the range default; named path: entry by hash). Every 1.0 line
@@ -8,8 +8,7 @@ source files on its own:
        priority (1.0 >> 1) and flags; in a merge, every 3.0 named entry and range line 1.0 does not define must give
        what 3.0's own file gives.
  NAME: every NAME line of octtest (3.0-layout bank resolved by 3.0's reader) vs the .name read by 1.0 FUN_01132360."""
-import struct, sys, os, glob, collections
-D = r'D:\SteamLibrary\steamapps\common\Disney Infinity Gold Edition\assets\sound\dialog'
+import argparse, struct, os, glob, collections
 def h131(s):
     h = 0
     for c in s: h = (h * 131 + c) & 0xffffffff
@@ -114,50 +113,65 @@ def check10(b, T, name):
             check(good, 'once ' + name)
     return set(lines), {h for h, _ in nm}
 
-for p in sorted(glob.glob(D + r'\*.dlg')):
-    b = open(p, 'rb').read()
-    if struct.unpack_from('<I', b, 0)[0] != 11: continue
-    name = os.path.splitext(os.path.basename(p))[0]
-    check10(b, read3(open(os.path.join(sys.argv[2], name + '.dlg30'), 'rb').read(), name), name)
-    mp = os.path.join(sys.argv[2], name + '.merged.dlg30')
-    src3 = os.path.join(sys.argv[3], '3.0_assets_sound_dialog_' + name.lower() + '.dlg') if len(sys.argv) > 3 else ''
-    if not (os.path.exists(mp) and os.path.exists(src3)): continue
-    M = read3(open(mp, 'rb').read(), name + ' merged')
-    lines10, named10 = check10(b, M, name + ' merged')
-    S = read3(open(src3, 'rb').read(), name + ' 3.0')
-    for key, num in S['lines']():
-        if (key, num) in lines10: continue
-        check(M['line'](key, num) == S['line'](key, num), '3.0 line kept ' + name)
-    for h in S['byhash']:
-        if h in named10: continue
-        check(M['named'](h) == S['named'](h), '3.0 named kept ' + name)
+def main(inst, out, dlg30, scripts30=None):
+    D = os.path.join(inst, 'assets', 'sound', 'dialog')
+    dlgs = sorted(glob.glob(os.path.join(D, '*.dlg')))
+    if not dlgs:
+        raise SystemExit('no .dlg files in %s: pass the 1.0 install folder' % D)
+    for p in dlgs:
+        b = open(p, 'rb').read()
+        if struct.unpack_from('<I', b, 0)[0] != 11: continue
+        name = os.path.splitext(os.path.basename(p))[0]
+        check10(b, read3(open(os.path.join(dlg30, name + '.dlg30'), 'rb').read(), name), name)
+        mp = os.path.join(dlg30, name + '.merged.dlg30')
+        src3 = os.path.join(scripts30, '3.0_assets_sound_dialog_' + name.lower() + '.dlg') if scripts30 is not None else ''
+        if not (os.path.exists(mp) and os.path.exists(src3)): continue
+        M = read3(open(mp, 'rb').read(), name + ' merged')
+        lines10, named10 = check10(b, M, name + ' merged')
+        S = read3(open(src3, 'rb').read(), name + ' 3.0')
+        for key, num in S['lines']():
+            if (key, num) in lines10: continue
+            check(M['line'](key, num) == S['line'](key, num), '3.0 line kept ' + name)
+        for h in S['byhash']:
+            if h in named10: continue
+            check(M['named'](h) == S['named'](h), '3.0 named kept ' + name)
 
-# NAME lines vs 1.0 FUN_01132360
-names = {}
-for line in open(sys.argv[1], encoding='latin-1'):
-    if not line.startswith('NAME '): continue
-    _, f, lid, v, nm, sub, verdict = line.split()
-    names[(f, int(lid[2:]), int(v))] = (nm, int(sub), verdict)
-seen = 0
-for p in sorted(glob.glob(D + r'\ENU\*.fsb')):
-    f = os.path.basename(p)
-    nb = open(p[:-4] + '.name', 'rb').read()
-    ver, pfx, tl, lo, hi, subs = struct.unpack_from('<H2sHHHH', nb, 0)
-    for l in range(lo, hi + 1):
-        v = struct.unpack_from('<H', nb, 0x10 + 2 * (l - lo))[0]
-        if v == 0xffff: continue
-        cnt = v >> 12 if v >> 12 > 1 else 1
-        for k in range(cnt):
-            idx = (v & 0xfff) + k
-            so = struct.unpack_from('<H', nb, 0x10 + 2 * (tl + idx))[0]
-            exp = nb[so:nb.index(b'\0', so)].decode('latin-1')
-            got = names.get((f, l, k))
-            seen += 1
-            check(got is not None and got[0] == exp and got[1] == idx and got[2] == 'ok', 'name ' + f)
-check(seen == len(names), 'NAME line count (octtest %d, .name %d)' % (len(names), seen))
-tot = collections.Counter()
-for k, v in ok.items():
-    w = k.split()
-    tot[' '.join(w[:3]) if k.startswith('3.0') else w[0] + (' merged' if 'merged' in k else '')] += v
-print('ok', dict(tot))
-print('bad', dict(bad) or 0)
+    # NAME lines vs 1.0 FUN_01132360
+    names = {}
+    for line in open(out, encoding='latin-1'):
+        if not line.startswith('NAME '): continue
+        _, f, lid, v, nm, sub, verdict = line.split()
+        names[(f, int(lid[2:]), int(v))] = (nm, int(sub), verdict)
+    seen = 0
+    for p in sorted(glob.glob(os.path.join(D, 'ENU', '*.fsb'))):
+        f = os.path.basename(p)
+        nb = open(p[:-4] + '.name', 'rb').read()
+        ver, pfx, tl, lo, hi, subs = struct.unpack_from('<H2sHHHH', nb, 0)
+        for l in range(lo, hi + 1):
+            v = struct.unpack_from('<H', nb, 0x10 + 2 * (l - lo))[0]
+            if v == 0xffff: continue
+            cnt = v >> 12 if v >> 12 > 1 else 1
+            for k in range(cnt):
+                idx = (v & 0xfff) + k
+                so = struct.unpack_from('<H', nb, 0x10 + 2 * (tl + idx))[0]
+                exp = nb[so:nb.index(b'\0', so)].decode('latin-1')
+                got = names.get((f, l, k))
+                seen += 1
+                check(got is not None and got[0] == exp and got[1] == idx and got[2] == 'ok', 'name ' + f)
+    check(seen == len(names), 'NAME line count (octtest %d, .name %d)' % (len(names), seen))
+    tot = collections.Counter()
+    for k, v in ok.items():
+        w = k.split()
+        tot[' '.join(w[:3]) if k.startswith('3.0') else w[0] + (' merged' if 'merged' in k else '')] += v
+    print('ok', dict(tot))
+    print('bad', dict(bad) or 0)
+
+
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('inst', help='the 1.0 install folder (the one octtest --vo was given)')
+    ap.add_argument('out', help='octtest --vo output')
+    ap.add_argument('dlg30', help="octtest --vo's out dir (.dlg30, .merged.dlg30)")
+    ap.add_argument('scripts30', nargs='?', help='decrypted 3.0 dialog scripts (3.0_assets_sound_dialog_<name>.dlg)')
+    a = ap.parse_args()
+    main(a.inst, a.out, a.dlg30, a.scripts30)

@@ -8,3 +8,4 @@ shippedpools.json
 filledroles.json
 shippedassociations.json
 native/**/build/
+/build/

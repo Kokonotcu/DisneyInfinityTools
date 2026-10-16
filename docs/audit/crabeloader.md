@@ -1,5 +1,7 @@
 # CrabeLoader: what changed, and what it means for this repository
 
+> 2026-10-16: the owner moved to CrabeLoader v1.1.0 (tag `96f866b`) with the no-guards patch, now `crabe/crabeloader-no-guards.patch`.
+
 Scope: CrabeLoader upstream ([LucasLhomme/CrabeLoader](https://github.com/LucasLhomme/CrabeLoader)) against every
 place this repository depends on it:
 - `native/di1compat` comments and design,

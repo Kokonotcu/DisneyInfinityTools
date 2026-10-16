@@ -4,7 +4,7 @@ Shipped 3.0 exploders + choreographies (19,841 files, 2026-10-14): rigid 75,895/
 'skin', in six formats (rentable.SKINNED_SHIPPED). di1compat writes skinned converted primitives the same way
 (render.hpp, R plans, cfg skinlayout10); run it on octtest --render output to check.
 
-python skinlayout.py <dir> [...] [--assert]   walks *.oct; --assert: exit 1 if any primitive breaks the rule
+python skinlayout.py <dir> [...] [--assert] [--ext30 DIR]   walks *.oct; --assert: exit 1 if any primitive breaks the rule
 """
 import os, sys
 from collections import Counter
@@ -57,6 +57,11 @@ def main(dirs):
 
 
 if __name__ == '__main__':
-    args = [a for a in sys.argv[1:] if a != '--assert']
-    bad = main(args)
-    sys.exit(1 if bad and '--assert' in sys.argv else 0)
+    import argparse, paths
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('dirs', nargs='+', metavar='dir')
+    ap.add_argument('--assert', dest='strict', action='store_true', help='exit 1 if any primitive breaks the rule')
+    paths.add_args(ap, 'ext30')
+    a = paths.use(ap.parse_args())
+    bad = main(a.dirs)
+    sys.exit(1 if bad and a.strict else 0)
