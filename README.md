@@ -154,6 +154,19 @@ Game data cannot be published, so the data tests run locally against your own ex
   - `--render`: the material and geometry translation, compared with `renderoracle.py`;
   - `--fmod`: loading and playing 1.0 sound projects;
   - `--readable`: a self-test of the plugin's pointer checks.
+- `python golden.py` is the refactor's safety net ([docs/audit](docs/audit/README.md) X-13). `record <label>` runs
+  every deterministic octtest mode on your data (with the environment and argument variants, and with the plugin's
+  arena slack through `OCTX_SLACK=4096`) plus three source checks that need no octtest (`static/*`: the logf format
+  strings, the hook rows in install order, the config keys with their defaults). It stores exit codes, normalised
+  output and every written file with its sha256 under the golden root. `check` re-runs them and exits 1 on any
+  difference, with a short diff per case:
+
+  ```powershell
+  python golden.py check --golden <golden root> --octtest build\Release\octtest.exe [--quick] [case globs]
+  ```
+
+  `--quick` runs the fast subset; `python golden.py list` names the cases. The roots a baseline was recorded with are
+  stored with it, so `check` needs no `--ext10`/`--ext30`/`--game`/`--inst10`.
 - `python selftest.py` runs the toolkit's self-tests against the configured extracts.
 - [CI](.github/workflows/check.yml) checks everything that needs no game data: lint, that every module imports with
   no roots set, and that every tool answers `--help`.
