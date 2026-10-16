@@ -14,7 +14,11 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
+#include <memory>
+#include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <mutex>
