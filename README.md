@@ -96,14 +96,16 @@ cmake -S native/di1compat -B build -G "Visual Studio 17 2022" -A Win32
 cmake --build build --config Release
 ```
 
-The build produces `di1compat.dll` (the plugin) and `octtest.exe` (the offline test driver). The CRT is linked
-statically, so no Visual C++ runtime needs to be installed.
+The build produces `di1compat.dll` (the plugin) and `octtest.exe` (the offline test driver). The plugin links the CRT
+statically, so the game needs no Visual C++ runtime; `octtest.exe` uses the runtime DLL (Visual C++ Redistributable,
+x86). Configuring for any architecture other than Win32 stops with an error. Our C++ compiles at `/W4`, as warnings.
 
 ## Installing
 
 1. Install Pentane with `python pentane_install.py`. It patches the executable (with a backup), copies Pentane and
    its config, and enables di1compat ([details and Pentane's options](third_party/pentane/README.md)). Then copy
-   `di1compat.dll` to `<3.0 install>\Pentane\Plugins\`.
+   `di1compat.dll` to `<3.0 install>\Pentane\Plugins\`, or run
+   `cmake --install build --config Release --prefix "<3.0 install>"`.
 2. Create `di1compat.cfg` next to it, starting from
    [`di1compat.cfg.example`](native/di1compat/di1compat.cfg.example), and set `install10` to your 1.0 installation.
 3. Generate the 3.0-side tables next to the DLL:
@@ -156,7 +158,8 @@ Game data cannot be published, so the data tests run locally against your own ex
   - `--readable`: a self-test of the plugin's pointer checks.
 - `python selftest.py` runs the toolkit's self-tests against the configured extracts.
 - [CI](.github/workflows/check.yml) checks everything that needs no game data: lint, that every module imports with
-  no roots set, and that every tool answers `--help`.
+  no roots set, that every tool answers `--help`, and that both native targets build (Win32 Release, on a Windows
+  runner).
 
 ## Python toolkit
 
@@ -168,7 +171,9 @@ python extract.py "<3.0 install>" <3.0 extract folder>
 python extract.py "<1.0 install>" <1.0 extract folder>
 ```
 
-`lupa` is needed only for Lua packages (`luabc.run_package`) and `zonereg.py`. No tool assumes a
+`lupa` is needed only for Lua packages (`luabc.run_package`) and `zonereg.py`, Pillow only for
+`meshexport.py --textures`. `sm3.py`, `gen30.py` (except `--dump`), `shdiff.py` and `rendercmp.py` compile or
+disassemble through the system's `d3dcompiler_47.dll`, so they run on Windows only. No tool assumes a
 machine. It resolves three roots from the command line, else from the environment (`paths.py`):
 
 | Root | Flag | Environment | What |
@@ -215,6 +220,11 @@ Unless dated otherwise, each check was run on the stock Steam 3.0 Gold installat
 | `shdfmt.py` | Shader passes, input signatures, and what each material texture slot feeds | 834 / 836 shaders name each slot unambiguously |
 | `slotcheck.py` | Per-material texture-binder check | Flagged the 122 malformed Metroville slots; 0 after the fix |
 | `meshexport.py` | World, exploder or realm geometry to OBJ, optionally with textures | Every primitive within its buffers (57,978); textured exports match the levels |
+| `shd.py` | Shader descriptions (`.shd`) of both games, with names resolved | 208 shaders shipped in both games |
+| `sm3.py` | 1.0 D3D9 SM3 programs: disassemble, translate to HLSL (the reference for `sm3.hpp`) | 1,773 / 1,773 programs translate and compile |
+| `gen30.py` | 1.0 shader to 3.0 `.shd` and HLSL (the reference for `gen30.hpp`); `--dump` writes what `octtest --gen30` compares | 1,245 / 1,248 shaders clean (2026-10-16) |
+| `ssf.py` | Scene-settings format (`.ssf`) and a bundle's SSET chunk, both games | |
+| `particles.py`, `particles_val30.py` | Particle packages: both layouts and the 1.0 to 3.0 conversion (the reference for `vfx.hpp`); an independent check of a 3.0 package as 3.0's loader reads it | Every 1.0 package converts with 0 problems; every 3.0 package passes |
 | `rentable.py`, `mertable.py` | Generate the plugin's 3.0-side tables | |
 
 **Collision, game data and saves**
@@ -239,6 +249,20 @@ show how 1.0 and 3.0 files differ. The offline converters that wrote into the in
 |---|---|
 | `conv.py`, `realm30.py` | Shared conversion primitives; offline realm conversion (the reference for di1compat's `realmFile10`) |
 | `diffworld.py`, `foreign.py`, `ranges.py` | Field-by-field file diff; record kinds 3.0 never ships; values above the shipped 3.0 maximum |
+| `shdiff.py`, `rendercmp.py`, `mtbdiff.py` | Every shader and material shipped in both games: `gen30`'s translation of the 1.0 copy against the shipped 3.0 copy, field by field; what each pixel program writes; parameter values and texture slots |
+
+**Oracles for octtest**
+
+Each reads the 1.0 files on its own and checks one `octtest` mode's output. They take the 1.0 install first, as
+`octtest` does.
+
+| Tool | Checks |
+|---|---|
+| `fevcheck.py <1.0 install> <output>` | `--fmod`: every registered event is a string of its own `.fev`; where missing names live; the cue list |
+| `fevdeps.py <1.0 install> <output>` | `--fevdeps`: each `.fev`'s `Load` list against a byte scan of the file |
+| `mixercheck.py <1.0 install> <output>` | `--mixer`: the at-rest mixer level per group, recomputed from `Mixer.lua` |
+| `vocheck.py <1.0 install> <output> <out dir> [<3.0 scripts>]` | `--vo`: every 1.0 dialog line and named entry through the transcoded `.dlg30`, and every `NAME` line |
+| `renderoracle.py <1.0 world> <out dir>` | `--render`: the Python render pipeline's output for the same world, to diff against |
 
 **Debugging and analysis**
 
