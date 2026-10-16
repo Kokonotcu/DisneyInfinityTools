@@ -27,6 +27,8 @@
 #include "core/memcheck.hpp"
 #include "core/stack.hpp"
 #include "core/veh.hpp"
+#include "core/zip.hpp"
+#include "games/di1/archives.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -327,34 +329,35 @@ static void loadConfig(const char* dir)
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
 // An engine path <dir>/<name>/<rest> lives in assets\<dir>\<name>.zip as member <rest> (the layout extract.py
-// unpacks), and deeper or shallower splits are tried too. Archives open lazily; miniz is not thread-safe.
+// unpacks), and deeper or shallower splits are tried too (games/di1/archives.hpp). Archives open lazily; miniz is not
+// thread-safe.
 static std::mutex g_zipLock;
-static std::map<std::string, mz_zip_archive*> g_zips;   // nullptr = no such zip
+static std::map<std::string, std::unique_ptr<mz_zip_archive>> g_zips;   // guarded by g_zipLock; nullptr = no such zip
 
+// The 1.0 archive rel, opened on first use and kept open for the session (_setmaxstdio in Pentane_Main). A failed
+// open is kept too (A-12). Caller holds g_zipLock.
 static mz_zip_archive* zipFor(const std::string& rel)
 {
     auto it = g_zips.find(rel);
-    if (it != g_zips.end()) return it->second;
-    std::string full = std::string(g_cfg.install10) + "\\assets\\" + rel;
-    for (char& c : full) if (c == '/') c = '\\';
-    mz_zip_archive* z = nullptr;
-    if (GetFileAttributesA(full.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        z = new mz_zip_archive{};
-        if (!mz_zip_reader_init_file(z, full.c_str(), 0)) { delete z; z = nullptr; }
-    }
-    g_zips[rel] = z;
-    return z;
+    if (it != g_zips.end()) return it->second.get();
+    return (g_zips[rel] = core::openZip(di1::archivePath(g_cfg.install10, rel))).get();
 }
 
 static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
+
+static std::string norm(const char* path)
+{
+    std::string p = path;
+    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
+    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
+    return p;
+}
 
 // -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
 static void* read10z(const std::string& p, size_t* size, std::string* where);
 static void* read10(const char* enginePath, size_t* size, std::string* where)
 {
-    std::string p = enginePath;
-    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
+    std::string p = norm(enginePath);
     void* d = read10z(p, size, where);
     std::string a = d || !g_cfg.choAlias10 ? "" : g_choAlias.resolve(p);
     return a.empty() ? d : read10z(a, size, where);
@@ -363,46 +366,19 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
 static void* read10z(const std::string& p, size_t* size, std::string* where)
 {
     std::lock_guard<std::mutex> lock(g_zipLock);
+    const di1::AssetBuffers buffers = g_cfg.assetBufs10 ? di1::AssetBuffers::Search : di1::AssetBuffers::Skip;
     for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1)) {
-        std::string dir = p.substr(0, cut), member = p.substr(cut + 1);
-        // <dir>.zip (worlds/in_city.zip), a folder-named archive inside <dir> (gamedb/core/core.zip,
-        // shaders/shaders.zip: the engine path leaves the archive's own name out), or a per-asset archive inside
-        // <dir> named after the member (characters/inc_bob/inc_bob_ps.zip holds inc_bob_ps.oct)
-        std::string stem = member.substr(0, member.find('.'));
-        // 1.0 shards choreographies and exploders by the name's first two letters, one flat archive per asset:
-        // choreographies\bhs_beam1\bhs_beam1.oct is choreographies/bh/bhs_beam1.zip, exploders\inc_rubble_0.vbuf
-        // is exploders/in/inc_rubble.zip (in-game 2026-10-13: the avatar's DNA pulls 1.0 choreographies)
-        size_t top = p.find('/'), last = dir.rfind('/');
-        std::string asset = last == std::string::npos ? stem : dir.substr(last + 1);
-        if (asset.size() > 2 && asset.compare(asset.size() - 2, 2, "_0") == 0 && last == std::string::npos) asset.resize(asset.size() - 2);
-        std::string shard = asset.size() >= 2 ? p.substr(0, top) + "/" + asset.substr(0, 2) + "/" + asset + ".zip" : dir + ".zip";
-        // a buffer member (<asset>_0.vbuf) lives in its asset's archive in a shared folder too: characters/omnidroid/
-        // omnidroid_pieces.zip holds omnidroid_pieces_0.vbuf, characters/kiosk/kiosk_in_0.vbuf is in kiosk_in.zip
-        // (in-game 2026-10-13: 7 1.0 models served without geometry, all 14 MISSING buffers had this form;
-        // read10sim.py: 3,772 of 3,772 characters/ buffers found, 630 before; bufpaths.py: 5,234 such buffers).
-        // npc and gp each added this candidate: one candidate, npc's rule (a superset of gp's .vbuf/.ibuf rule), gp's key.
-        size_t us = stem.find_last_of('_');
-        std::string bufAsset = us != std::string::npos && us + 1 < stem.size() &&
-                                       stem.find_first_not_of("0123456789", us + 1) == std::string::npos ? stem.substr(0, us) : stem;
-        std::string zips[5] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard,
-                               g_cfg.assetBufs10 ? dir + "/" + bufAsset + ".zip" : std::string()};
-        for (auto& zr : zips) {
+        std::string member = p.substr(cut + 1);
+        for (const std::string& zr : di1::candidateArchives(p, cut, buffers)) {
             mz_zip_archive* z = zr.empty() ? nullptr : zipFor(zr);
-            if (!z) continue;
-            int i = mz_zip_reader_locate_file(z, member.c_str(), nullptr, 0);   // case-insensitive
-            if (i < 0) continue;
-            void* data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
+            void* data = z ? core::extractZipMember(z, member.c_str(), size) : nullptr;
             if (data) { *where = zr + ":" + member; return data; }
         }
     }
-    // 1.0 mounts its root archives at assets\ (members under full paths): startup3.zip holds
-    // expendables_data/terrainbuildingsexpendables.lua (in-game 2026-10-13: MISSING), startup2.zip the core GameDB
-    // tables, startup5.zip var/*.bin
     if (g_cfg.root10)
-        for (const char* zr : {"startup.zip", "startup2.zip", "startup3.zip", "startup4.zip", "startup5.zip"}) {
+        for (const char* zr : di1::kRootArchives) {
             mz_zip_archive* z = zipFor(zr);
-            int i = z ? mz_zip_reader_locate_file(z, p.c_str(), nullptr, 0) : -1;
-            void* data = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
+            void* data = z ? core::extractZipMember(z, p.c_str(), size) : nullptr;
             if (data) { *where = std::string(zr) + ":" + p; return data; }
         }
     return nullptr;
@@ -413,14 +389,6 @@ static bool endsWith(const char* s, const char* suffix)
 {
     size_t a = strlen(s), b = strlen(suffix);
     return a >= b && _stricmp(s + a - b, suffix) == 0;
-}
-
-static std::string norm(const char* path)
-{
-    std::string p = path;
-    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
-    return p;
 }
 
 static bool read10s(const std::string& path, std::string& out)
