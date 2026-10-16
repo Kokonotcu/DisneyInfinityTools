@@ -36,6 +36,7 @@
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/octsteps.hpp"
+#include "games/di1/renderio.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -243,9 +244,7 @@ static void sceneSettingsIO(render::IO& io)
     std::lock_guard<std::mutex> lock(mx);
     if (!done) {
         done = true;
-        std::string a, b;
-        ok = read10s("shaders/shaders/scenesettingsformat.ssf", a) && read30x("3:shaders/shaders/scenesettingsformat.ssf", b) &&
-             render::parseSsf(a, false, f10) && render::parseSsf(b, true, f30);
+        ok = di1::sceneSettings(read10s, read30x, f10, f30);
         logf("scene settings formats: %s (1.0 block %d B, 3.0 block %d B)", ok ? "ok" : "MISSING", f10.size, f30.size);
     }
     if (ok && g_cfg.sceneSettings10) { io.ssf10 = &f10; io.ssf30 = &f30; }
@@ -299,16 +298,16 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     read10s(dir + "/" + stem + "_0.vbuf", vbuf);
     read10s(dir + "/" + stem + "_0.ibuf", ibuf);
     if (g_cfg.skin10) note += npcrt::skin10(f, vbuf, ibuf);
-    render::IO io;
-    io.read30 = read30x;
-    io.read10 = read10s;
+    di1::WorldRender w;
+    w.translate = g_cfg.shaders10 && g_cfg.translate10;
+    w.skinLayout = g_cfg.skinLayout10;
+    w.skinTr = g_cfg.skinTr10;
+    w.vf10 = &g_vf10;
+    w.vf30 = &g_vf30;
+    w.tails10 = &g_tails10;
+    render::IO io = di1::worldIO(w, read10s, read30x);
     io.log = [](const std::string& s) { logf("%s", s.c_str()); };
-    io.translate = g_cfg.shaders10 && g_cfg.translate10;
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
-    io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
-    io.skinLayout = g_cfg.skinLayout10;
-    io.translateSkinned = g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty();
-    io.tails10 = &g_tails10;
     sceneSettingsIO(io);
     render::Result r;
     if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
@@ -425,9 +424,7 @@ static std::vector<std::pair<std::string, std::string>> particleShaders(const st
     }
     std::string mtb;
     if (!read10s(over.empty() ? mp : over, mtb) || mtb.size() < 4 || memcmp(mtb.data(), "BNDL", 4)) return {};
-    render::IO io;
-    io.read30 = read30x;
-    io.read10 = read10s;
+    render::IO io = di1::bundleIO(read10s, read30x);
     render::Result r;
     if (!render::transcodeBundle(g_render, io, mtb, "3:" + mp.substr(0, mp.find('/') + 1), r)) {
         note += "channels: " + mp + " did not transcode ";
@@ -647,9 +644,7 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         }
         if (!g_renderOk) { note += "render table missing "; return nullptr; }
         std::string p = norm(path);
-        render::IO io;
-        io.read30 = read30x;
-        io.read10 = read10s;
+        render::IO io = di1::bundleIO(read10s, read30x);
         render::Result r;
         if (!render::transcodeBundle(g_render, io, std::string((const char*)data, n), "3:" + p.substr(0, p.find('/') + 1), r)) {
             for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
