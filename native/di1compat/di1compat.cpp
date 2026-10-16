@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
+#include "base/hash.hpp"
 #include "base/text.hpp"
 #include "core/engine_file.hpp"
 #include "core/hooks.hpp"
@@ -91,6 +92,7 @@ using core::watch;
 using core::copyToMemFile;
 using core::memFile;
 using core::readStream;
+using hash::fnv64;
 using text::endsWith;
 using text::norm;
 
@@ -3289,13 +3291,6 @@ static std::mutex g_sh10Lock;
 static std::unordered_map<std::string, uint8_t*> g_sh10;                       // 'x'<GUID> -> finalized .shd (nullptr: failed)
 static std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> g_prog10;  // code -> engine id, table index
 
-static uint64_t fnv64(const std::string& s)
-{
-    uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : s) h = (h ^ c) * 1099511628211ull;
-    return h;
-}
-
 static thread_local std::string g_compiling10;   // the shader shader10 is generating (debug views name it)
 static bool compile10(const std::string& hlsl0, const char* target, std::string& code, std::string& msg)
 {
@@ -3339,9 +3334,7 @@ static bool compile10(const std::string& hlsl0, const char* target, std::string&
     const std::string& hlsl = g_cfg.magenta10 && target[0] == 'p' ? magenta
         : !idcolor.empty() ? idcolor
         : g_cfg.bufview10 && target[0] == 'p' && hlsl0.find("tLight") != std::string::npos ? bufview[(g_cfg.bufview10 - 1) % 5] : hlsl0;
-    char name[40];
-    sprintf_s(name, "\\%016llx.dxbc", (unsigned long long)fnv64(std::string(target) + "\n" + hlsl));
-    std::string path = g_shaderCache + name;
+    std::string path = g_shaderCache + "\\" + hash::shaderCacheName(target, hlsl);
     FILE* f = nullptr;
     if (!fopen_s(&f, path.c_str(), "rb") && f) {
         char buf[65536];
