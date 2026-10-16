@@ -24,6 +24,8 @@
 #include "core/hooks.hpp"
 #include "core/log.hpp"
 #include "core/memcheck.hpp"
+#include "core/stack.hpp"
+#include "core/veh.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -74,6 +76,10 @@ using core::logf;
 using core::rt;
 using core::cstr;
 using core::safeCopy;
+using core::afterCall;
+using core::avHandler;
+using core::stackOf;
+using core::watch;
 
 // ---- config: <plugin dir>\di1compat.cfg, lines "key = value" ----
 static struct {
@@ -1167,103 +1173,6 @@ static uint8_t __fastcall hkFigureOk(void* self, void*, uint32_t player, int sku
 // ... the reader item list the playset flow fills its figure slots from (FUN_00427330(out) -> count, ret 4; items
 // 0x50 B from out+4: +0 type, +4 sku) and its per-item gate FUN_00deb610(type, sku, a3, a4, a5) (ret 0x14); logged
 // on change
-// First access violation in the exe: the faulting address and a call stack (stack words that point into the exe right
-// after a call instruction: E8 rel32 whose target is plausible, or an FF /2 indirect call), static addresses. Logged
-// once, then the exception continues to the game's / CrabeLoader's handlers.
-static volatile LONG g_avLogged;
-static bool afterCall(uintptr_t ret)
-{
-    if (ret < g_base + 0x1000 + 6 || ret >= g_base + 0x2100000) return false;
-    const uint8_t* p = (const uint8_t*)ret;
-    if (!core::vqReadable(p - 6, 6)) return false;
-    if (p[-5] == 0xE8) { uintptr_t t = ret + *(const int32_t*)(p - 4); return t >= g_base && t < g_base + 0x2100000; }
-    if (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) return true;   // call [mem32] / [reg+disp32]
-    if (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) return true;   // call [reg+disp8]
-    if (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) return true;   // call reg / [reg]
-    return false;
-}
-// Appends the exe return addresses found on a stack (static VAs, call-site validated) to line.
-static void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max = 24)
-{
-    MEMORY_BASIC_INFORMATION mbi;   // stay inside the stack's committed region (see readable)
-    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return;
-    int words = (int)(std::min)((size_t)2048, (size_t)((const uint8_t*)mbi.BaseAddress + mbi.RegionSize - (const uint8_t*)sp) / 4);
-    for (int i = 0, found = 0; i < words && found < max; ++i) {
-        uint32_t v;
-        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
-        bool ok = false;
-        if ((v & 0xff00ff00) == 0) continue;   // two UTF-16 characters of a path buffer, not a return address
-        __try { ok = afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-        if (ok) { len += sprintf_s(line + len, cap - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
-    }
-}
-static LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
-{
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || InterlockedExchange(&g_avLogged, 1)) return EXCEPTION_CONTINUE_SEARCH;
-    uintptr_t eip = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
-    char line[900];
-    int len = sprintf_s(line, "ACCESS VIOLATION at %08X (%s %08X), stack:", (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip),
-                        e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (unsigned)e->ExceptionRecord->ExceptionInformation[1]);
-    stackOf((const uint32_t*)e->ContextRecord->Esp, line, sizeof(line), len);
-    logf("%s", line);
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-// Trace only: DR0 write watchpoint on one address in every thread; logs the writer's EIP and stack (first 10 hits).
-static volatile uintptr_t g_watchAddr;
-static volatile LONG g_watchHits;
-static LONG CALLBACK watchHandler(EXCEPTION_POINTERS* e)
-{
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
-    e->ContextRecord->Dr6 = 0;
-    if (InterlockedIncrement(&g_watchHits) <= 10) {
-        char line[700];
-        uintptr_t eip = e->ContextRecord->Eip;
-        int len = sprintf_s(line, "watch hit: value now %d, eip %08X, stack:", *(int*)g_watchAddr,
-                            (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip));
-        const uint32_t* sp = (const uint32_t*)e->ContextRecord->Esp;
-        int words = core::readableWords(sp, 400);
-        for (int i = 0, found = 0; i < words && found < 14; ++i) {
-            uint32_t v = sp[i];
-            if (v >= g_base && v < g_base + 0x2100000) { len += sprintf_s(line + len, sizeof(line) - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
-        }
-        logf("%s", line);
-    }
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-static DWORD WINAPI armWatch(void*)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    THREADENTRY32 te{sizeof(te)};
-    int n = 0;
-    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
-        HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-        if (!t) continue;
-        SuspendThread(t);
-        CONTEXT c{};
-        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-        if (GetThreadContext(t, &c)) {
-            c.Dr0 = g_watchAddr;
-            c.Dr7 = (c.Dr7 & ~0xF0003ul) | 1 | (1ul << 16) | (3ul << 18);   // L0, write, 4 bytes
-            if (SetThreadContext(t, &c)) ++n;
-        }
-        ResumeThread(t);
-        CloseHandle(t);
-    }
-    CloseHandle(snap);
-    logf("watch armed on %08X in %d threads", (unsigned)g_watchAddr, n);
-    return 0;
-}
-static void watch(uintptr_t addr)
-{
-    if (g_watchAddr) return;
-    g_watchAddr = addr;
-    AddVectoredExceptionHandler(1, watchHandler);
-    HANDLE h = CreateThread(nullptr, 0, armWatch, nullptr, 0, nullptr);   // a thread cannot set its own context
-    if (h) { WaitForSingleObject(h, 5000); CloseHandle(h); }
-}
-
 typedef int(__fastcall* ReaderListFn)(void* self, void* edx, int* out);
 static ReaderListFn g_readerList;
 static int __fastcall hkReaderList(void* self, void*, int* out)

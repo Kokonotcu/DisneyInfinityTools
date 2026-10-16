@@ -31,6 +31,8 @@ typedef bool (*InstallFeatureFn)(const char* feature, const std::vector<HookSpec
 
 inline uintptr_t g_base;   // runtime base of DisneyInfinity3.exe (ASLR); set once in Pentane_Main, before any hook
 inline uintptr_t rt(uint32_t staticVa) { return g_base + (staticVa - eng::kImageBase); }
+// rt's inverse: the static address of a runtime exe address.
+inline uint32_t toStaticVa(uintptr_t v) { return (uint32_t)(v - g_base + eng::kImageBase); }
 
 // Whether the target still starts with the analysed bytes. '??' skips a byte that ASLR relocates.
 inline bool prologueMatches(uint32_t staticVa, const char* prologueHex)
