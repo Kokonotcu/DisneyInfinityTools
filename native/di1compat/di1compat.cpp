@@ -35,6 +35,7 @@
 #include "core/zip.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
+#include "games/di1/octsteps.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -331,9 +332,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     return true;
 }
 
-// Choreographies, exploders and clips in 3.0 form (cho.hpp, plan CHO-1 / NPC-6): clip output tables re-packed,
-// ContextNodes as InstanceNodes, SubNetwork play ranges. A motion clip is re-packed only when the owner of its
-// ConnectionTemplate ('characters/kiosk' of 'characters/kiosk/kiosk.ct') is absent from the 3.0 install.
+// clip10motions: is a clip template's folder ('characters/kiosk' of 'characters/kiosk/kiosk.ct') in the 3.0 install?
 static bool has30(std::string dir)
 {
     std::string a = g_gameDir + "\\assets\\" + dir;
@@ -341,43 +340,6 @@ static bool has30(std::string dir)
     return GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA((a + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-static bool transcodeCho(oct::File& f, std::string& note)
-{
-    bool changed = false;
-    if (g_cfg.clip10) {
-        std::function<bool(const std::string&)> motion;
-        if (g_cfg.clip10Motions)
-            motion = [](const std::string& t) { size_t s = t.find_last_of("/\\"); return s != std::string::npos && !has30(t.substr(0, s)); };
-        int failed = 0, ren = 0;
-        if (int n = cho::clips30(f, motion, &failed, g_cfg.clip10Ids, &ren)) {
-            note += "+clips(" + std::to_string(n) + (ren ? ", " + std::to_string(ren) + " with 3.0 port ids" : std::string()) + ") ";
-            changed = true;
-        }
-        if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
-    }
-    if (g_cfg.clip10Ids)
-        if (int n = cho::links30(f)) { note += "+ports(" + std::to_string(n) + " model links in 3.0 port order) "; changed = true; }
-    if (g_cfg.choLayout10) {
-        int inst = 0;
-        if (int n = cho::layout30(f, &inst)) { note += "+layout(" + std::to_string(n) + ", " + std::to_string(inst) + " instances) "; changed = true; }
-    }
-    if (g_cfg.choTime10)
-        if (int n = cho::time30(f)) { note += "+time(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    if (g_cfg.choAnim10) {
-        int sns = 0;
-        if (int n = cho::anim30(f, &sns)) { note += "+anim(" + std::to_string(n) + " in " + std::to_string(sns) + " subnetworks) "; changed = true; }
-    }
-    if (g_cfg.choScene10)
-        if (int n = cho::scene30(f)) { note += "+scene(" + std::to_string(n) + " placements) "; changed = true; }
-    return changed;
-}
-
-// .oct (worlds, missions, exploders ...). Steps, each from the research plan (PLAN.md section 4):
-//   NavMeshPool blobs into the 3.0 layout (npc::navmesh30, OCT-8): 3.0's blob parser FUN_01909fb0 trusts the layout
-//   (in-game 2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it); a mesh that does not convert drops the pool.
-//   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
-//   DataNodeBasisConversion in FUN_004d0160).
-//   World render (render.hpp, REN-5 + geometry): the 1.0 .mtb named 1.0 shaders (int3 in Shader_LookupCrc).
 // gp: the engine's global surface table, in index order (FUN_00754eb0 fills *(0x2204830): +0xc {char*, bool}[],
 // +0x10 count; loaded from startup2 at boot, before any world). Empty until then.
 static std::vector<std::string> surfaceTable30()
@@ -396,30 +358,25 @@ static std::vector<std::string> surfaceTable30()
     return t;
 }
 
-static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
+// The plugin's .oct steps (games/di1/octsteps.hpp): its cfg switches, its render, the 3.0 install, the engine's table
+static di1::OctSteps octSteps10()
 {
-    bool changed = transcodeAssetRender(path, f, note);
-    std::string navWhy = "navmesh10 off";
-    int navs = g_cfg.navmesh10 ? npc::navmesh30(f, &navWhy) : -1;
-    if (navs > 0) { note += "+navmesh(" + std::to_string(navs) + ") "; changed = true; }
-    else if (navs < 0 && f.dropPool("NavMeshPool")) { note += "-NavMeshPool (" + navWhy + ") "; changed = true; }
-    if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
-    if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = g_cfg.camWorld10 ? octx::camera30(f) : 0) { note += "+cameras(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::realm30w(f, g_cfg.realmFile10 && path.rfind("realms/", 0) == 0)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
-    if (transcodeCho(f, note)) changed = true;
-    int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
-    if (ncv || nfl) { note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) "; changed = true; }
-    if (int n = g_cfg.surfaces10 ? gameplay::surfaces30(f, surfaceTable30()) : 0) { note += "+surfaces(" + std::to_string(n) + ") "; changed = true; }
-    // last SubNetwork edit before the counts (it renumbers headers): Static nodes of choreography / exploder graphs
-    // under constant headers (cho.hpp); mission graphs keep octx's variable form
-    std::string np = norm(path.c_str());
-    if (g_cfg.choConst10 && (np.rfind("choreographies/", 0) == 0 || np.rfind("exploders/", 0) == 0))
-        if (int n = cho::const30(f)) { note += "+constant(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    return changed;
+    di1::OctSteps o;
+    o.render = transcodeAssetRender;
+    o.navmesh = g_cfg.navmesh10;
+    o.cameras = g_cfg.camWorld10;
+    o.realmFile = g_cfg.realmFile10;
+    o.clips = g_cfg.clip10;
+    if (g_cfg.clip10Motions) o.installed30 = has30;
+    o.clipIds = g_cfg.clip10Ids;
+    o.layout = g_cfg.choLayout10;
+    o.time = g_cfg.choTime10;
+    o.anim = g_cfg.choAnim10;
+    o.scene = g_cfg.choScene10;
+    o.curves = g_cfg.curves10;
+    if (g_cfg.surfaces10) o.surfaceTable = surfaceTable30;
+    o.constSections = g_cfg.choConst10;
+    return o;
 }
 
 // -> codec name if out holds transcoded bytes, nullptr to serve the 1.0 bytes unchanged.
@@ -580,7 +537,7 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
     if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
         try {
             oct::File f = oct::File::parse(data, n);
-            if (!transcodeOct(norm(path), f, note)) return nullptr;
+            if (!di1::transcodeOct(norm(path), f, octSteps10(), note)) return nullptr;
             out = f.write();
             return "oct";
         } catch (std::exception& e) {
