@@ -24,6 +24,7 @@ that ship in both games (shd.py has the formats):
 
 python gen30.py <1.0 shader> [...]     generate, compile, print the 3.0 description
 python gen30.py --all                   every 1.0 shader: generate + compile counts
+python gen30.py --dump <dir>            every 1.0 shader, compile off: the .shd + HLSL files octtest --gen30 compares
 """
 import os, struct, zlib
 from collections import Counter, defaultdict
@@ -360,15 +361,37 @@ def all_():
         print('  %5d %s' % (v, k))
 
 
+def dump(out):
+    """Every 1.0 shader generated with compile off -> <out>/<shader>.shd + <shader>.<program id>.hlsl (octtest --gen30)."""
+    os.makedirs(out, exist_ok=True)
+    n, failed = 0, []
+    for f in sorted(os.listdir(shd.shader_dir('1.0'))):
+        if not f.endswith('.shd'):
+            continue
+        try:
+            g = generate(f[:-4], False)
+        except Exception as e:
+            failed.append('%s %s' % (f[:-4], type(e).__name__))
+            continue
+        n += 1
+        open(os.path.join(out, f), 'wb').write(g['shd'])
+        for pid, src in g['programs'].items():
+            open(os.path.join(out, '%s.%08x.hlsl' % (f[:-4], pid)), 'wb').write(src)
+    print('%d shaders dumped to %s, %d raised %s' % (n, out, len(failed), failed[:5]))
+
+
 if __name__ == '__main__':
     import argparse, paths
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('shader', nargs='*')
     ap.add_argument('--all', action='store_true')
+    ap.add_argument('--dump', metavar='DIR')
     paths.add_args(ap, 'ext10', 'ext30')
     a = paths.use(ap.parse_args())
     if a.all:
         all_()
+    elif a.dump:
+        dump(a.dump)
     else:
         for s in a.shader:
             show(s)
