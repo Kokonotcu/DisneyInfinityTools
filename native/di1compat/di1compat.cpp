@@ -66,7 +66,11 @@ extern "C" PluginInformation Pentane_PluginInformation = {
 extern "C" size_t Pentane_PluginDependencyCount = 0;
 
 // core's services by their old names: this file and the runtime headers it includes below call them unqualified
+using core::g_base;
+using core::hook;
+using core::installFeature;
 using core::logf;
+using core::rt;
 
 // Copies a C string the engine handed us without trusting the pointer.
 static void safeCopy(char* out, size_t cap, const char* src)
@@ -84,67 +88,6 @@ static void safeCopy(char* out, size_t cap, const char* src)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         strcpy_s(out, cap, "<unreadable>");
     }
-}
-
-// ---- hooks ----
-static uintptr_t g_base;   // runtime base of DisneyInfinity3.exe (ASLR); static addresses assume 0x400000
-static uintptr_t rt(uint32_t staticVa) { return g_base + (staticVa - 0x400000u); }
-
-// Whether the target still starts with the analysed bytes. '??' skips a byte that ASLR relocates.
-static bool prologueMatches(uint32_t staticVa, const char* prologueHex)
-{
-    const uint8_t* target = (const uint8_t*)rt(staticVa);
-    size_t i = 0;
-    for (const char* p = prologueHex; p[0] && p[1]; p += 2, ++i) {
-        if (p[0] == '?') continue;
-        unsigned v;
-        sscanf_s(p, "%2x", &v);
-        if (target[i] != (uint8_t)v) break;
-    }
-    return i * 2 == strlen(prologueHex);
-}
-
-// Installs a detour only if the target's prologue matches. A refused hook leaves *original null.
-static bool hook(const char* name, uint32_t staticVa, const char* prologueHex, void* detour, void** original)
-{
-    if (!prologueMatches(staticVa, prologueHex)) {
-        logf("hook %s @ %08X refused: prologue differs", name, staticVa);
-        return false;
-    }
-    const uint8_t* target = (const uint8_t*)rt(staticVa);
-    MH_STATUS s = MH_CreateHook((LPVOID)target, detour, original);
-    if (s == MH_OK) s = MH_EnableHook((LPVOID)target);
-    logf("hook %s @ %08X %s (%d)", name, staticVa, s == MH_OK ? "ok" : "refused", (int)s);
-    return s == MH_OK;
-}
-
-// Takes one hook back out (a no-op for a hook MinHook never created) and clears its original.
-static void unhook(const core::HookSpec& h)
-{
-    LPVOID target = (LPVOID)rt(h.staticVa);
-    MH_DisableHook(target);
-    MH_RemoveHook(target);
-    *h.original = nullptr;
-}
-
-// Installs all of a feature's hooks or none (CLAUDE.md H2). Success logs exactly what one hook() call per row would.
-static bool installFeature(const char* feature, const std::vector<core::HookSpec>& hooks)
-{
-    for (const core::HookSpec& h : hooks) {
-        if (prologueMatches(h.staticVa, h.prologueHex)) continue;
-        logf("hook %s @ %08X refused: prologue differs", h.name, h.staticVa);
-        logf("feature %s off: hook %s refused, none of its hooks installed", feature, h.name);
-        return false;
-    }
-    for (size_t i = 0; i < hooks.size(); ++i) {
-        const core::HookSpec& h = hooks[i];
-        if (hook(h.name, h.staticVa, h.prologueHex, h.detour, h.original)) continue;
-        // MinHook failed after the prologue check: take this feature's hooks out again
-        for (size_t k = 0; k <= i; ++k) unhook(hooks[k]);
-        logf("feature %s off: hook %s refused, none of its hooks installed", feature, h.name);
-        return false;
-    }
-    return true;
 }
 
 // ---- config: <plugin dir>\di1compat.cfg, lines "key = value" ----
