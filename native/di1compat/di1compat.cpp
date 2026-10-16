@@ -3,8 +3,7 @@
 // zips and handed to the engine as Genie::MemFile streams through its asset open, FUN_0041cb10 (worlds,
 // textures, Lua ... all go through it, archive members included).
 // Log: <game dir>\di1compat.log (Pentane's own log function is not used: its calling convention is unverified).
-// Config: <plugin dir>\di1compat.cfg  install10 = <1.0 install> | serve10 = 0|1 | trace = 0|1 |
-//         memtest = <path substring>[,...]  (serve those 3.0 files from a memory copy: proves the MemFile path)
+// Config: <plugin dir>\di1compat.cfg, "key = value" lines; every key and its default in games/di1/config.hpp.
 #include <windows.h>
 #include <tlhelp32.h>
 #include <intrin.h>
@@ -15,13 +14,25 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
+#include <memory>
+#include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
+#include "core/engine_file.hpp"
 #include "core/hooks.hpp"
+#include "core/log.hpp"
+#include "core/memcheck.hpp"
+#include "core/stack.hpp"
+#include "core/veh.hpp"
+#include "core/zip.hpp"
+#include "games/di1/archives.hpp"
+#include "games/di1/config.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -64,375 +75,55 @@ extern "C" PluginInformation Pentane_PluginInformation = {
     {0, 1, 0}, {0, 0, 0}, {}};
 extern "C" size_t Pentane_PluginDependencyCount = 0;
 
-// ---- log ----
-static CRITICAL_SECTION g_logLock;
-static FILE* g_log;
+// core's services by their old names: this file and the runtime headers it includes below call them unqualified
+using core::g_base;
+using core::hook;
+using core::installFeature;
+using core::logf;
+using core::rt;
+using core::cstr;
+using core::safeCopy;
+using core::afterCall;
+using core::avHandler;
+using core::stackOf;
+using core::watch;
+using core::copyToMemFile;
+using core::memFile;
+using core::readStream;
 
-static void logf(const char* fmt, ...)
-{
-    if (!g_log) return;
-    EnterCriticalSection(&g_logLock);
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    fprintf(g_log, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-    va_list a;
-    va_start(a, fmt);
-    vfprintf(g_log, fmt, a);
-    va_end(a);
-    fputc('\n', g_log);
-    fflush(g_log);
-    LeaveCriticalSection(&g_logLock);
-}
-
-// Copies a C string the engine handed us without trusting the pointer.
-static void safeCopy(char* out, size_t cap, const char* src)
-{
-    // trace hooks pass values that may not be pointers; check first, so no first-chance AV reaches the vectored
-    // handlers (CrabeLoader writes a dump per AV even when the __try below handles it)
-    if (!sys::readable(src, 1)) {
-        if (cap) out[0] = 0;
-        return;
-    }
-    __try {
-        size_t i = 0;
-        for (; src && i + 1 < cap && src[i]; ++i) out[i] = src[i];
-        out[i] = 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        strcpy_s(out, cap, "<unreadable>");
-    }
-}
-
-// ---- hooks ----
-static uintptr_t g_base;   // runtime base of DisneyInfinity3.exe (ASLR); static addresses assume 0x400000
-static uintptr_t rt(uint32_t staticVa) { return g_base + (staticVa - 0x400000u); }
-
-// Whether the target still starts with the analysed bytes. '??' skips a byte that ASLR relocates.
-static bool prologueMatches(uint32_t staticVa, const char* prologueHex)
-{
-    const uint8_t* target = (const uint8_t*)rt(staticVa);
-    size_t i = 0;
-    for (const char* p = prologueHex; p[0] && p[1]; p += 2, ++i) {
-        if (p[0] == '?') continue;
-        unsigned v;
-        sscanf_s(p, "%2x", &v);
-        if (target[i] != (uint8_t)v) break;
-    }
-    return i * 2 == strlen(prologueHex);
-}
-
-// Installs a detour only if the target's prologue matches. A refused hook leaves *original null.
-static bool hook(const char* name, uint32_t staticVa, const char* prologueHex, void* detour, void** original)
-{
-    if (!prologueMatches(staticVa, prologueHex)) {
-        logf("hook %s @ %08X refused: prologue differs", name, staticVa);
-        return false;
-    }
-    const uint8_t* target = (const uint8_t*)rt(staticVa);
-    MH_STATUS s = MH_CreateHook((LPVOID)target, detour, original);
-    if (s == MH_OK) s = MH_EnableHook((LPVOID)target);
-    logf("hook %s @ %08X %s (%d)", name, staticVa, s == MH_OK ? "ok" : "refused", (int)s);
-    return s == MH_OK;
-}
-
-// Takes one hook back out (a no-op for a hook MinHook never created) and clears its original.
-static void unhook(const core::HookSpec& h)
-{
-    LPVOID target = (LPVOID)rt(h.staticVa);
-    MH_DisableHook(target);
-    MH_RemoveHook(target);
-    *h.original = nullptr;
-}
-
-// Installs all of a feature's hooks or none (CLAUDE.md H2). Success logs exactly what one hook() call per row would.
-static bool installFeature(const char* feature, const std::vector<core::HookSpec>& hooks)
-{
-    for (const core::HookSpec& h : hooks) {
-        if (prologueMatches(h.staticVa, h.prologueHex)) continue;
-        logf("hook %s @ %08X refused: prologue differs", h.name, h.staticVa);
-        logf("feature %s off: hook %s refused, none of its hooks installed", feature, h.name);
-        return false;
-    }
-    for (size_t i = 0; i < hooks.size(); ++i) {
-        const core::HookSpec& h = hooks[i];
-        if (hook(h.name, h.staticVa, h.prologueHex, h.detour, h.original)) continue;
-        // MinHook failed after the prologue check: take this feature's hooks out again
-        for (size_t k = 0; k <= i; ++k) unhook(hooks[k]);
-        logf("feature %s off: hook %s refused, none of its hooks installed", feature, h.name);
-        return false;
-    }
-    return true;
-}
-
-// ---- config: <plugin dir>\di1compat.cfg, lines "key = value" ----
-static struct {
-    char install10[MAX_PATH] = "";   // the 1.0 install (its assets\ holds plain zips)
-    bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
-    bool trace = false;              // diagnostic: log every open, 26 probe hooks (incl. hkInst, hide_ps, DR0 watch)
-    bool missionTrace = false;       // log 1.0 playset mission context state changes (one cheap hook; trace's cost frames)
-    bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
-    bool breakTrace = false;         // probe: clip evaluation clocks, exploder hits and explodes (log only)
-    bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
-    bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
-    bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
-    bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 format's 'skin' layout, bones kept
-    bool skinTr10 = true;            // skinned materials take their translated 1.0 shader too (identity bones; gen30)
-    bool sceneSettings10 = true;     // a 1.0 bundle's scene settings (SSET: fog, bloom, exposure, grading) re-laid into 3.0's
-    bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
-    int bufview10 = 0;               // test: translated final passes show 1 the light buffer (t3), 2 view depth (t0), 3 t4
-    int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
-    bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
-    int fadeProbe10 = 0;             // test: 1 log the inputs of every faded object's fade (visibility test FUN_0044b8f0); 2 also draw it unfaded
-    bool fpsLog10 = false;           // test: once a second, frame time and how much of it the main thread waits on rendering
-    bool loadProf10 = false;         // diagnostic: per-open timings + a sampling profile of the frame/open/busiest threads
-    char memtest[600] = "";          // comma list of path substrings served from a memory copy
-    bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
-    char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
-    bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
-    bool progress10 = true;          // mission .lua: 1.0's mission-generated objective line -> ProgressString "<default>"
-    bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
-    bool lockTrace10 = false;        // diagnostic: log control locks, contexts, choreography play/end, messages
-    bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer.hpp Table::portRefs)
-    bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them (Table::ports10)
-    bool pins10 = true;              // .mer: complete pin tables on every instance (Table::pins10)
-    bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (Table::gate10)
-    bool toggleType10 = true;        // .mer: Collision/VisibilityToggle keep their 1.0 mode in 3.0 (Table::toggleType10)
-    bool beacon10 = true;            // zonelist.lua: 1.0 MissionParams.BeaconMap rows in 3.0's row form (mission::beaconMap30)
-    bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
-    bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
-    bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
-    bool sxNatives10 = true;         // sx10's imports bound to 1.0-semantics natives by a linker hook (SX-3/4)
-    bool sxPorts10 = true;           // sxNatives10 with the ported natives (0: stack-balanced stubs only)
-    bool sxBeh10 = true;             // sxPorts10 + 1.0 behavior-type numbers into 1.0 scripts' SetInitialParams
-    bool bmx10 = true;               // 1.0 behavior maps in 3.0's form (sx.hpp BMX-1; 0: raw, 3.0 drops them)
-    bool btx10 = true;               // 1.0 behavior trees in 3.0's form (sx.hpp BTX-1; 0: raw, 3.0 drops them)
-    bool root10 = true;              // sys: read10 also searches the 1.0 root archives (startup*.zip)
-    bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
-    bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)
-    bool chest10 = true;             // sys: 1.0 ChestInfo.bin through 3.0's chestInfo loader (GLB-1)
-    bool bits10 = true;              // sys: the 1.0 core bitmasks after the playset's (PS-5)
-    bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
-    bool perc10 = true;              // sys: the 1.0 perceptions 3.0 lacks through 3.0's perceptions loader (GLB-1)
-    bool deliv10 = true;             // sys: 1.0 RewardType Delivery registered with 3.0's Multi reward (SYS-12)
-    bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
-    bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
-    bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 standard includes) as a DataMap
-    bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
-    bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (coins, sparks: sys.hpp)
-    bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType: coins, Toy Store (gameplay.hpp)
-    bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
-    bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model (npc.hpp)
-    bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
-    bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory has no case for type 10 (npcrt.hpp)
-    bool choTime10 = true;           // cho.hpp: SubNetwork MinTime/MaxTime (choreography play range)
-    bool choAnim10 = true;           // cho.hpp: Float 'Global.Time' clip/event input -> AnimState 'AnimState' (3.0 clock + slot type)
-    bool choScene10 = true;          // cho.hpp: SceneTreeNodeRef on PlacementNode Associations (Layout holds the scene node)
-    bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
-    bool choConst10 = true;          // cho.hpp: Static nodes of choreography graphs stay Static under constant headers
-    bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
-    bool realmFile10 = true;         // octx.hpp: a 1.0 realm file's RealmDataPool as 3.0's RealmData node (realm30.py rule)
-    bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
-    bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
-    bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
-    bool clip10Ids = true;           // cho.hpp: motion clips on templates 3.0 owns (ports10.hpp) with 3.0 port ids; 1.0 model links too
-    bool choAlias10 = true;          // cho.hpp: Cho DataMap paths outside choreographies/<n>/<n> (vault bolts, door)
-    bool banm10 = true;              // cho.hpp: .banm 1.0f -> 1.0g (version gate, full track paths)
-    bool loadScreen10 = true;        // ui: 1.0's loading-screen choice for zones with 1.0's LoadingScreen key
-    bool uiScope10 = true;           // ui: a flash image is served from 1.0 only to a movie served from 1.0
-    bool fmv10 = true;               // ui: FMVs 3.0 lacks play from the 1.0 install's fmv\PC1
-    bool text10 = true;              // ui: a 1.0 playset table also carries 1.0 lang/main keys no 3.0 table has
-    bool tips10 = true;              // ui: 3.0's data/tips.lua + the 1.0 tip records it lacks
-    bool resident10 = true;          // the 1.0 startup*.zip members are served by their full paths (1.0 loads them resident)
-    bool tutorial10 = true;          // ui: tutorial element 61 (1.0's SelectMenu ribbon) is answered by 3.0's ribbon
-    bool context10 = true;           // ui: a 1.0 controller-context list keeps 3.0's extra gates of the actions it keeps
-    bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (audio.hpp)
-    bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
-    bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
-    bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
-    bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
-    bool cineSync10 = true;          // audio10: an audio-synced choreography also starts the 1.0 sound event of its name
-    bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
-    bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
-    bool vfxChan10 = true;           // emitter curve channels re-laid for the shader their material is served on (chan.hpp)
-    bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
-    bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
-    bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
-    bool assetBufs10 = true;         // gp+npc: read10 finds a <stem>_<n>.* member (buffers) in its per-asset archive <dir>/<stem>.zip
-    bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp: types, beacons, givers)
-    bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
-    bool actionMap10 = true;         // ui: a 1.0 movie's UsesActionMap sets its screen's action map, as in 1.0 (gprt.hpp)
-    bool focus10 = true;             // ui: a 3.0 Screen on a 1.0 movie gets 3.0's non-FSM focus (SetHasFocus, +0x60) (gprt.hpp)
-    bool keys10 = true;              // ui: a 3.0 script on a 1.0 movie: its mapped actions also reach the movie as key events, as in 1.0 (gprt.hpp)
-    bool accept10 = true;            // gp: a 1.0 mission activated in a 1.0 zone posts the tutorial 'mission accepted' event (gprt.hpp)
-    bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0's level list refuses is judged by its 1.0 list (gprt.hpp)
-    bool playsetMenu10 = true;       // menu: one Play Sets entry per registered 1.0 playset, opening its start zone (ui::playsetMenu10)
-    bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
-    bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (bldrt.hpp)
-    bool spawnTrace10 = false;       // probe: lots registered, SpawnBuilding firing, lot spawns, player start lookups (log only)
-    bool capsuleTrace10 = false;     // probe: 1.0 expendable spawn requests, the branch each spawn took, async completions (caprt.hpp, log only)
-    bool shutdown10 = true;          // a 1.0 expendable's actor stays drawn while shut down, as in 1.0 (caprt.hpp; needs popin10)
-} g_cfg;
-
-static void loadConfig(const char* dir)
-{
-    char path[MAX_PATH];
-    sprintf_s(path, "%s\\di1compat.cfg", dir);
-    FILE* f = nullptr;
-    if (fopen_s(&f, path, "r") || !f) { logf("no %s: defaults (serve10 off)", path); return; }
-    char line[600];
-    while (fgets(line, sizeof(line), f)) {
-        char key[64], val[MAX_PATH];
-        if (line[0] == '#' || sscanf_s(line, " %63[^= ] = %259[^\r\n]", key, (unsigned)sizeof(key), val, (unsigned)sizeof(val)) != 2)
-            continue;
-        if (!strcmp(key, "install10")) strcpy_s(g_cfg.install10, val);
-        else if (!strcmp(key, "serve10")) g_cfg.serve10 = atoi(val) != 0;
-        else if (!strcmp(key, "trace")) g_cfg.trace = atoi(val) != 0;
-        else if (!strcmp(key, "missiontrace")) g_cfg.missionTrace = atoi(val) != 0;
-        else if (!strcmp(key, "teardowntrace")) g_cfg.teardownTrace = atoi(val) != 0;
-        else if (!strcmp(key, "breaktrace")) g_cfg.breakTrace = atoi(val) != 0;
-        else if (!strcmp(key, "shaders10")) g_cfg.shaders10 = atoi(val) != 0;
-        else if (!strcmp(key, "translate10")) g_cfg.translate10 = atoi(val) != 0;
-        else if (!strcmp(key, "lazylink10")) g_cfg.lazyLink10 = atoi(val) != 0;
-        else if (!strcmp(key, "magenta10")) g_cfg.magenta10 = atoi(val) != 0;
-        else if (!strcmp(key, "skinlayout10")) g_cfg.skinLayout10 = atoi(val) != 0;
-        else if (!strcmp(key, "skintr10")) g_cfg.skinTr10 = atoi(val) != 0;
-        else if (!strcmp(key, "scenesettings10")) g_cfg.sceneSettings10 = atoi(val) != 0;
-        else if (!strcmp(key, "bufview10")) g_cfg.bufview10 = atoi(val);
-        else if (!strcmp(key, "renderdoc10")) g_cfg.renderdoc10 = atoi(val);
-        else if (!strcmp(key, "opacitylog10")) g_cfg.opacityLog10 = atoi(val) != 0;
-        else if (!strcmp(key, "fadeprobe10")) g_cfg.fadeProbe10 = atoi(val);
-        else if (!strcmp(key, "fpslog10")) g_cfg.fpsLog10 = atoi(val) != 0;
-        else if (!strcmp(key, "loadprof10")) g_cfg.loadProf10 = atoi(val) != 0;
-        else if (!strcmp(key, "memtest")) strcpy_s(g_cfg.memtest, val);
-        else if (!strcmp(key, "hide_ps")) g_cfg.hidePs = atoi(val) != 0;
-        else if (!strcmp(key, "block10")) strcpy_s(g_cfg.block10, val);
-        else if (!strcmp(key, "events10")) g_cfg.events10 = atoi(val) != 0;
-        else if (!strcmp(key, "progress10")) g_cfg.progress10 = atoi(val) != 0;
-        else if (!strcmp(key, "aliases10")) g_cfg.aliases10 = atoi(val) != 0;
-        else if (!strcmp(key, "locktrace10")) g_cfg.lockTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "portrefs10")) g_cfg.portRefs10 = atoi(val) != 0;
-        else if (!strcmp(key, "ports10")) g_cfg.ports10 = atoi(val) != 0;
-        else if (!strcmp(key, "pins10")) g_cfg.pins10 = atoi(val) != 0;
-        else if (!strcmp(key, "gate10")) g_cfg.gate10 = atoi(val) != 0;
-        else if (!strcmp(key, "toggletype10")) g_cfg.toggleType10 = atoi(val) != 0;
-        else if (!strcmp(key, "beacon10")) g_cfg.beacon10 = atoi(val) != 0;
-        else if (!strcmp(key, "behav10")) g_cfg.behav10 = atoi(val) != 0;
-        else if (!strcmp(key, "native10")) g_cfg.native10 = atoi(val) != 0;
-        else if (!strcmp(key, "sx10")) g_cfg.sx10 = atoi(val) != 0;
-        else if (!strcmp(key, "sxnatives10")) g_cfg.sxNatives10 = atoi(val) != 0;
-        else if (!strcmp(key, "sxports10")) g_cfg.sxPorts10 = atoi(val) != 0;
-        else if (!strcmp(key, "sxbeh10")) g_cfg.sxBeh10 = atoi(val) != 0;
-        else if (!strcmp(key, "bmx10")) g_cfg.bmx10 = atoi(val) != 0;
-        else if (!strcmp(key, "btx10")) g_cfg.btx10 = atoi(val) != 0;
-        else if (!strcmp(key, "root10")) g_cfg.root10 = atoi(val) != 0;
-        else if (!strcmp(key, "locks10")) g_cfg.locks10 = atoi(val) != 0;
-        else if (!strcmp(key, "popin10")) g_cfg.popin10 = atoi(val) != 0;
-        else if (!strcmp(key, "chest10")) g_cfg.chest10 = atoi(val) != 0;
-        else if (!strcmp(key, "bits10")) g_cfg.bits10 = atoi(val) != 0;
-        else if (!strcmp(key, "econ10")) g_cfg.econ10 = atoi(val) != 0;
-        else if (!strcmp(key, "perc10")) g_cfg.perc10 = atoi(val) != 0;
-        else if (!strcmp(key, "deliv10")) g_cfg.deliv10 = atoi(val) != 0;
-        else if (!strcmp(key, "navmesh10")) g_cfg.navmesh10 = atoi(val) != 0;
-        else if (!strcmp(key, "gamedb30")) g_cfg.gamedb30 = atoi(val) != 0;
-        else if (!strcmp(key, "skin10")) g_cfg.skin10 = atoi(val) != 0;
-        else if (!strcmp(key, "playset30")) g_cfg.playset30 = atoi(val) != 0;
-        else if (!strcmp(key, "hudmarker10")) g_cfg.hudMarker10 = atoi(val) != 0;
-        else if (!strcmp(key, "rewards10")) g_cfg.rewards10 = atoi(val) != 0;
-        else if (!strcmp(key, "currency10")) g_cfg.currency10 = atoi(val) != 0;
-        else if (!strcmp(key, "psdna30")) g_cfg.psdna30 = atoi(val) != 0;
-        else if (!strcmp(key, "avperc10")) g_cfg.avperc10 = atoi(val) != 0;
-        else if (!strcmp(key, "spawner10")) g_cfg.spawner10 = atoi(val) != 0;
-        else if (!strcmp(key, "chotime10")) g_cfg.choTime10 = atoi(val) != 0;
-        else if (!strcmp(key, "choanim10")) g_cfg.choAnim10 = atoi(val) != 0;
-        else if (!strcmp(key, "choscene10")) g_cfg.choScene10 = atoi(val) != 0;
-        else if (!strcmp(key, "variant10")) g_cfg.variant10 = atoi(val) != 0;
-        else if (!strcmp(key, "choconst10")) g_cfg.choConst10 = atoi(val) != 0;
-        else if (!strcmp(key, "camworld10")) g_cfg.camWorld10 = atoi(val) != 0;
-        else if (!strcmp(key, "realmfile10")) g_cfg.realmFile10 = atoi(val) != 0;
-        else if (!strcmp(key, "cholayout10")) g_cfg.choLayout10 = atoi(val) != 0;
-        else if (!strcmp(key, "clip10")) g_cfg.clip10 = atoi(val) != 0;
-        else if (!strcmp(key, "clip10motions")) g_cfg.clip10Motions = atoi(val) != 0;
-        else if (!strcmp(key, "clip10ids")) g_cfg.clip10Ids = atoi(val) != 0;
-        else if (!strcmp(key, "choalias10")) g_cfg.choAlias10 = atoi(val) != 0;
-        else if (!strcmp(key, "banm10")) g_cfg.banm10 = atoi(val) != 0;
-        else if (!strcmp(key, "loadscreen10")) g_cfg.loadScreen10 = atoi(val) != 0;
-        else if (!strcmp(key, "uiscope10")) g_cfg.uiScope10 = atoi(val) != 0;
-        else if (!strcmp(key, "fmv10")) g_cfg.fmv10 = atoi(val) != 0;
-        else if (!strcmp(key, "text10")) g_cfg.text10 = atoi(val) != 0;
-        else if (!strcmp(key, "tips10")) g_cfg.tips10 = atoi(val) != 0;
-        else if (!strcmp(key, "resident10")) g_cfg.resident10 = atoi(val) != 0;
-        else if (!strcmp(key, "tutorial10")) g_cfg.tutorial10 = atoi(val) != 0;
-        else if (!strcmp(key, "context10")) g_cfg.context10 = atoi(val) != 0;
-        else if (!strcmp(key, "audio10")) g_cfg.audio10 = atoi(val) != 0;
-        else if (!strcmp(key, "music10")) g_cfg.music10 = atoi(val) != 0;
-        else if (!strcmp(key, "vo10")) g_cfg.vo10 = atoi(val) != 0;
-        else if (!strcmp(key, "audiotrace10")) g_cfg.audioTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "cinesync10")) g_cfg.cineSync10 = atoi(val) != 0;
-        else if (!strcmp(key, "mixer10")) g_cfg.mixer10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfx10")) g_cfg.vfx10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfx_universal10")) g_cfg.vfxUniversal10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfxchan10")) g_cfg.vfxChan10 = atoi(val) != 0;
-        else if (!strcmp(key, "vfx_trace")) g_cfg.vfxTrace = atoi(val) != 0;
-        else if (!strcmp(key, "curves10")) g_cfg.curves10 = atoi(val) != 0;
-        else if (!strcmp(key, "surfaces10")) g_cfg.surfaces10 = atoi(val) != 0;
-        else if (!strcmp(key, "assetbufs10")) g_cfg.assetBufs10 = atoi(val) != 0;
-        else if (!strcmp(key, "challenge10")) g_cfg.challenge10 = atoi(val) != 0;
-        else if (!strcmp(key, "selectmenu10")) g_cfg.selectMenu10 = atoi(val) != 0;
-        else if (!strcmp(key, "actionmap10")) g_cfg.actionMap10 = atoi(val) != 0;
-        else if (!strcmp(key, "focus10")) g_cfg.focus10 = atoi(val) != 0;
-        else if (!strcmp(key, "keys10")) g_cfg.keys10 = atoi(val) != 0;
-        else if (!strcmp(key, "accept10")) g_cfg.accept10 = atoi(val) != 0;
-        else if (!strcmp(key, "tools10")) g_cfg.tools10 = atoi(val) != 0;
-        else if (!strcmp(key, "playsetmenu10")) g_cfg.playsetMenu10 = atoi(val) != 0;
-        else if (!strcmp(key, "zones10")) g_cfg.zones10 = atoi(val) != 0;
-        else if (!strcmp(key, "building10")) g_cfg.building10 = atoi(val) != 0;
-        else if (!strcmp(key, "spawntrace10")) g_cfg.spawnTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "capsuletrace10")) g_cfg.capsuleTrace10 = atoi(val) != 0;
-        else if (!strcmp(key, "shutdown10")) g_cfg.shutdown10 = atoi(val) != 0;
-    }
-    fclose(f);
-    logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", g_cfg.install10, g_cfg.serve10, g_cfg.trace,
-         g_cfg.memtest, g_cfg.fpsLog10, g_cfg.loadProf10);
-    logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d clip10motions=%d clip10ids=%d choalias10=%d "
-         "banm10=%d variant10=%d camworld10=%d teardowntrace=%d breaktrace=%d", g_cfg.choTime10, g_cfg.choAnim10,
-         g_cfg.choScene10, g_cfg.choConst10, g_cfg.choLayout10, g_cfg.clip10, g_cfg.clip10Motions, g_cfg.clip10Ids, g_cfg.choAlias10, g_cfg.banm10,
-         g_cfg.variant10, g_cfg.camWorld10, g_cfg.teardownTrace, g_cfg.breakTrace);
-    logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d spawntrace10=%d shutdown10=%d capsuletrace10=%d",
-         g_cfg.playsetMenu10, g_cfg.zones10, g_cfg.realmFile10, g_cfg.building10, g_cfg.spawnTrace10, g_cfg.shutdown10,
-         g_cfg.capsuleTrace10);
-    logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", g_cfg.gate10, g_cfg.toggleType10, g_cfg.beacon10,
-         g_cfg.lockTrace10);
-}
+static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set once in Pentane_Main, before any hook
 
 // ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
 // An engine path <dir>/<name>/<rest> lives in assets\<dir>\<name>.zip as member <rest> (the layout extract.py
-// unpacks), and deeper or shallower splits are tried too. Archives open lazily; miniz is not thread-safe.
+// unpacks), and deeper or shallower splits are tried too (games/di1/archives.hpp). Archives open lazily; miniz is not
+// thread-safe.
 static std::mutex g_zipLock;
-static std::map<std::string, mz_zip_archive*> g_zips;   // nullptr = no such zip
+static std::map<std::string, std::unique_ptr<mz_zip_archive>> g_zips;   // guarded by g_zipLock; nullptr = no such zip
 
+// The 1.0 archive rel, opened on first use and kept open for the session (_setmaxstdio in Pentane_Main). A failed
+// open is kept too (A-12). Caller holds g_zipLock.
 static mz_zip_archive* zipFor(const std::string& rel)
 {
     auto it = g_zips.find(rel);
-    if (it != g_zips.end()) return it->second;
-    std::string full = std::string(g_cfg.install10) + "\\assets\\" + rel;
-    for (char& c : full) if (c == '/') c = '\\';
-    mz_zip_archive* z = nullptr;
-    if (GetFileAttributesA(full.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        z = new mz_zip_archive{};
-        if (!mz_zip_reader_init_file(z, full.c_str(), 0)) { delete z; z = nullptr; }
-    }
-    g_zips[rel] = z;
-    return z;
+    if (it != g_zips.end()) return it->second.get();
+    return (g_zips[rel] = core::openZip(di1::archivePath(g_cfg.install10, rel))).get();
 }
 
 static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
+
+static std::string norm(const char* path)
+{
+    std::string p = path;
+    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
+    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
+    return p;
+}
 
 // -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
 static void* read10z(const std::string& p, size_t* size, std::string* where);
 static void* read10(const char* enginePath, size_t* size, std::string* where)
 {
-    std::string p = enginePath;
-    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
+    std::string p = norm(enginePath);
     void* d = read10z(p, size, where);
     std::string a = d || !g_cfg.choAlias10 ? "" : g_choAlias.resolve(p);
     return a.empty() ? d : read10z(a, size, where);
@@ -441,67 +132,22 @@ static void* read10(const char* enginePath, size_t* size, std::string* where)
 static void* read10z(const std::string& p, size_t* size, std::string* where)
 {
     std::lock_guard<std::mutex> lock(g_zipLock);
+    const di1::AssetBuffers buffers = g_cfg.assetBufs10 ? di1::AssetBuffers::Search : di1::AssetBuffers::Skip;
     for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1)) {
-        std::string dir = p.substr(0, cut), member = p.substr(cut + 1);
-        // <dir>.zip (worlds/in_city.zip), a folder-named archive inside <dir> (gamedb/core/core.zip,
-        // shaders/shaders.zip: the engine path leaves the archive's own name out), or a per-asset archive inside
-        // <dir> named after the member (characters/inc_bob/inc_bob_ps.zip holds inc_bob_ps.oct)
-        std::string stem = member.substr(0, member.find('.'));
-        // 1.0 shards choreographies and exploders by the name's first two letters, one flat archive per asset:
-        // choreographies\bhs_beam1\bhs_beam1.oct is choreographies/bh/bhs_beam1.zip, exploders\inc_rubble_0.vbuf
-        // is exploders/in/inc_rubble.zip (in-game 2026-10-13: the avatar's DNA pulls 1.0 choreographies)
-        size_t top = p.find('/'), last = dir.rfind('/');
-        std::string asset = last == std::string::npos ? stem : dir.substr(last + 1);
-        if (asset.size() > 2 && asset.compare(asset.size() - 2, 2, "_0") == 0 && last == std::string::npos) asset.resize(asset.size() - 2);
-        std::string shard = asset.size() >= 2 ? p.substr(0, top) + "/" + asset.substr(0, 2) + "/" + asset + ".zip" : dir + ".zip";
-        // a buffer member (<asset>_0.vbuf) lives in its asset's archive in a shared folder too: characters/omnidroid/
-        // omnidroid_pieces.zip holds omnidroid_pieces_0.vbuf, characters/kiosk/kiosk_in_0.vbuf is in kiosk_in.zip
-        // (in-game 2026-10-13: 7 1.0 models served without geometry, all 14 MISSING buffers had this form;
-        // read10sim.py: 3,772 of 3,772 characters/ buffers found, 630 before; bufpaths.py: 5,234 such buffers).
-        // npc and gp each added this candidate: one candidate, npc's rule (a superset of gp's .vbuf/.ibuf rule), gp's key.
-        size_t us = stem.find_last_of('_');
-        std::string bufAsset = us != std::string::npos && us + 1 < stem.size() &&
-                                       stem.find_first_not_of("0123456789", us + 1) == std::string::npos ? stem.substr(0, us) : stem;
-        std::string zips[5] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard,
-                               g_cfg.assetBufs10 ? dir + "/" + bufAsset + ".zip" : std::string()};
-        for (auto& zr : zips) {
+        std::string member = p.substr(cut + 1);
+        for (const std::string& zr : di1::candidateArchives(p, cut, buffers)) {
             mz_zip_archive* z = zr.empty() ? nullptr : zipFor(zr);
-            if (!z) continue;
-            int i = mz_zip_reader_locate_file(z, member.c_str(), nullptr, 0);   // case-insensitive
-            if (i < 0) continue;
-            void* data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
+            void* data = z ? core::extractZipMember(z, member.c_str(), size) : nullptr;
             if (data) { *where = zr + ":" + member; return data; }
         }
     }
-    // 1.0 mounts its root archives at assets\ (members under full paths): startup3.zip holds
-    // expendables_data/terrainbuildingsexpendables.lua (in-game 2026-10-13: MISSING), startup2.zip the core GameDB
-    // tables, startup5.zip var/*.bin
     if (g_cfg.root10)
-        for (const char* zr : {"startup.zip", "startup2.zip", "startup3.zip", "startup4.zip", "startup5.zip"}) {
+        for (const char* zr : di1::kRootArchives) {
             mz_zip_archive* z = zipFor(zr);
-            int i = z ? mz_zip_reader_locate_file(z, p.c_str(), nullptr, 0) : -1;
-            void* data = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, size, 0);
+            void* data = z ? core::extractZipMember(z, p.c_str(), size) : nullptr;
             if (data) { *where = std::string(zr) + ":" + p; return data; }
         }
     return nullptr;
-}
-
-// A Genie::MemFile holding a copy of data, built the way the engine builds one (0x0041d... reader path):
-// new(0x20), ctor FUN_012ec100(0x400), vtable+0x0c setSize(n, 0), fill data (+0x18), vtable+0x08 seek(0, 0, 0).
-static int* memFile(const void* data, size_t n)
-{
-    typedef void*(__cdecl * NewFn)(size_t);
-    typedef void(__fastcall * CtorFn)(void* self, void* edx, uint32_t grow);
-    typedef void(__fastcall * SetSizeFn)(void* self, void* edx, uint32_t size, uint32_t force);
-    typedef uint32_t(__fastcall * SeekFn)(void* self, void* edx, uint32_t off, uint32_t hi, uint32_t whence);
-    void* f = ((NewFn)rt(0x00406E80))(0x20);
-    if (!f) return nullptr;
-    ((CtorFn)rt(0x012EC100))(f, nullptr, 0x400);
-    void** vt = *(void***)f;
-    ((SetSizeFn)vt[3])(f, nullptr, (uint32_t)n, 0);
-    memcpy(((void**)f)[6], data, n);
-    ((SeekFn)vt[2])(f, nullptr, 0, 0, 0);
-    return (int*)f;
 }
 
 // ---- load-time transcodes: 1.0 bytes in, the form the 3.0 reader takes out (the 1.0 file is never rewritten) ----
@@ -509,14 +155,6 @@ static bool endsWith(const char* s, const char* suffix)
 {
     size_t a = strlen(s), b = strlen(suffix);
     return a >= b && _stricmp(s + a - b, suffix) == 0;
-}
-
-static std::string norm(const char* path)
-{
-    std::string p = path;
-    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
-    return p;
 }
 
 static bool read10s(const std::string& path, std::string& out)
@@ -1158,31 +796,6 @@ static bool memtestMatch(const char* p)
     return false;
 }
 
-// Reads a whole engine stream through the Genie::File interface (+0x10 size, +0x14 read, +0x2c destroy); the
-// stream is destroyed. False if the read came up short.
-static bool readStream(int* s, std::string& buf)
-{
-    typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
-    typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
-    typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
-    void** vt = *(void***)s;
-    uint32_t n = ((SizeFn)vt[4])(s, nullptr);
-    buf.assign(n, '\0');
-    uint32_t got = ((ReadFn)vt[5])(s, nullptr, &buf[0], n);
-    ((DtorFn)vt[11])(s, nullptr, 1);
-    buf.resize(got);
-    return got == n;
-}
-
-// ... and returns a MemFile copy of it.
-static int* copyToMemFile(int* s, size_t* outSize)
-{
-    std::string buf;
-    bool ok = readStream(s, buf);
-    *outSize = buf.size();
-    return ok ? memFile(buf.data(), buf.size()) : nullptr;
-}
-
 // GameDB CHD-only callback loaders (DBFileLoader_Callback_CHD::load, FUN_018db450 -- RumpusData, FUN_00f63e70) given
 // a 1.0 .lua table: the file opened during that call is the table compiled to CHD (chd.hpp), not its Lua text
 // (which the CHD parser reads as a wild pointer: in-game 2026-10-12 AV in FUN_01824810 after rumpusdata.lua).
@@ -1255,131 +868,6 @@ static uint8_t __fastcall hkFigureOk(void* self, void*, uint32_t player, int sku
 // ... the reader item list the playset flow fills its figure slots from (FUN_00427330(out) -> count, ret 4; items
 // 0x50 B from out+4: +0 type, +4 sku) and its per-item gate FUN_00deb610(type, sku, a3, a4, a5) (ret 0x14); logged
 // on change
-// First access violation in the exe: the faulting address and a call stack (stack words that point into the exe right
-// after a call instruction: E8 rel32 whose target is plausible, or an FF /2 indirect call), static addresses. Logged
-// once, then the exception continues to the game's / CrabeLoader's handlers.
-static volatile LONG g_avLogged;
-// Whether [p, p+n) is readable. Pre-check, don't fault: every fault reaches Pentane's and CrabeLoader's handlers.
-// ponytail: query-then-read can race a protection change; never seen.
-static bool readable(const void* p, size_t n)
-{
-    const uint8_t* a = (const uint8_t*)p;
-    MEMORY_BASIC_INFORMATION mbi;
-    while (n) {
-        if (!VirtualQuery(a, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))
-            || !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-            return false;
-        size_t room = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize - a;
-        if (room >= n) return true;
-        a += room; n -= room;
-    }
-    return true;
-}
-static bool afterCall(uintptr_t ret)
-{
-    if (ret < g_base + 0x1000 + 6 || ret >= g_base + 0x2100000) return false;
-    const uint8_t* p = (const uint8_t*)ret;
-    if (!readable(p - 6, 6)) return false;
-    if (p[-5] == 0xE8) { uintptr_t t = ret + *(const int32_t*)(p - 4); return t >= g_base && t < g_base + 0x2100000; }
-    if (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) return true;   // call [mem32] / [reg+disp32]
-    if (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) return true;   // call [reg+disp8]
-    if (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) return true;   // call reg / [reg]
-    return false;
-}
-// Appends the exe return addresses found on a stack (static VAs, call-site validated) to line.
-static void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max = 24)
-{
-    MEMORY_BASIC_INFORMATION mbi;   // stay inside the stack's committed region (see readable)
-    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return;
-    int words = (int)(std::min)((size_t)2048, (size_t)((const uint8_t*)mbi.BaseAddress + mbi.RegionSize - (const uint8_t*)sp) / 4);
-    for (int i = 0, found = 0; i < words && found < max; ++i) {
-        uint32_t v;
-        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
-        bool ok = false;
-        if ((v & 0xff00ff00) == 0) continue;   // two UTF-16 characters of a path buffer, not a return address
-        __try { ok = afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-        if (ok) { len += sprintf_s(line + len, cap - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
-    }
-}
-static LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
-{
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || InterlockedExchange(&g_avLogged, 1)) return EXCEPTION_CONTINUE_SEARCH;
-    uintptr_t eip = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
-    char line[900];
-    int len = sprintf_s(line, "ACCESS VIOLATION at %08X (%s %08X), stack:", (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip),
-                        e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (unsigned)e->ExceptionRecord->ExceptionInformation[1]);
-    stackOf((const uint32_t*)e->ContextRecord->Esp, line, sizeof(line), len);
-    logf("%s", line);
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-// Trace only: DR0 write watchpoint on one address in every thread; logs the writer's EIP and stack (first 10 hits).
-static volatile uintptr_t g_watchAddr;
-static volatile LONG g_watchHits;
-// Readable words from sp, at most max. Stops exactly where an unchecked walk would fault; a VEH must never fault.
-static int readableWords(const uint32_t* sp, int max)
-{
-    int words = 0;
-    MEMORY_BASIC_INFORMATION mbi;
-    while (words < max && readable(sp + words, 4) && VirtualQuery(sp + words, &mbi, sizeof(mbi))) {
-        size_t room = (size_t)((const uint8_t*)mbi.BaseAddress + mbi.RegionSize - (const uint8_t*)(sp + words)) / 4;
-        if (!room) break;   // an unaligned sp in the last 3 bytes of a region
-        words += (int)(std::min)(room, (size_t)(max - words));
-    }
-    return words;
-}
-static LONG CALLBACK watchHandler(EXCEPTION_POINTERS* e)
-{
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
-    e->ContextRecord->Dr6 = 0;
-    if (InterlockedIncrement(&g_watchHits) <= 10) {
-        char line[700];
-        uintptr_t eip = e->ContextRecord->Eip;
-        int len = sprintf_s(line, "watch hit: value now %d, eip %08X, stack:", *(int*)g_watchAddr,
-                            (unsigned)(eip >= g_base && eip < g_base + 0x2100000 ? eip - g_base + 0x400000 : eip));
-        const uint32_t* sp = (const uint32_t*)e->ContextRecord->Esp;
-        int words = readableWords(sp, 400);
-        for (int i = 0, found = 0; i < words && found < 14; ++i) {
-            uint32_t v = sp[i];
-            if (v >= g_base && v < g_base + 0x2100000) { len += sprintf_s(line + len, sizeof(line) - len, " %08X", (unsigned)(v - g_base + 0x400000)); ++found; }
-        }
-        logf("%s", line);
-    }
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-static DWORD WINAPI armWatch(void*)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    THREADENTRY32 te{sizeof(te)};
-    int n = 0;
-    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
-        HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-        if (!t) continue;
-        SuspendThread(t);
-        CONTEXT c{};
-        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-        if (GetThreadContext(t, &c)) {
-            c.Dr0 = g_watchAddr;
-            c.Dr7 = (c.Dr7 & ~0xF0003ul) | 1 | (1ul << 16) | (3ul << 18);   // L0, write, 4 bytes
-            if (SetThreadContext(t, &c)) ++n;
-        }
-        ResumeThread(t);
-        CloseHandle(t);
-    }
-    CloseHandle(snap);
-    logf("watch armed on %08X in %d threads", (unsigned)g_watchAddr, n);
-    return 0;
-}
-static void watch(uintptr_t addr)
-{
-    if (g_watchAddr) return;
-    g_watchAddr = addr;
-    AddVectoredExceptionHandler(1, watchHandler);
-    HANDLE h = CreateThread(nullptr, 0, armWatch, nullptr, 0, nullptr);   // a thread cannot set its own context
-    if (h) { WaitForSingleObject(h, 5000); CloseHandle(h); }
-}
-
 typedef int(__fastcall* ReaderListFn)(void* self, void* edx, int* out);
 static ReaderListFn g_readerList;
 static int __fastcall hkReaderList(void* self, void*, int* out)
@@ -2598,8 +2086,8 @@ static std::string currency10(const char* filter, const char* who)
     std::lock_guard<std::mutex> l(g_currency10Lock);
     auto it = g_currency10.find(filter);
     if (it == g_currency10.end()) return {};
-    static std::set<std::string> told;
-    if (told.insert(std::string(who) + filter).second) logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
+    static core::LogOnce<std::string> told;
+    if (told.first(std::string(who) + filter)) logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
     return it->second;
 }
 // The zone's: the zone manager's (*0x0225f548) string field inventoryFilter of its zone (+0x19c), read through
@@ -2780,13 +2268,6 @@ static void __cdecl hkMerRegistry()
 //   Choreography node play (Link_In -> FUN_017e91b0; resolved path CString at node+0x8c, FUN_017e8680) and its
 //     event handler at node+0x30 (FUN_017e5890: events 0/2 turn 'Playing' on, 1/3 off through FUN_017deef0)
 //   MessageSender send (Link_In -> FUN_018120b0; MessageName/Target/Data CStrings at node+0x1c/+0x28/+0x34)
-static const char* cstr(const void* at, char* buf, size_t cap)   // the char* a CString member at 'at' holds
-{
-    const char* p = nullptr;
-    if (sys::readable(at, sizeof(p))) p = *(const char* const*)at;
-    safeCopy(buf, cap, p);
-    return buf;
-}
 static uint32_t callerVa(void* ret) { return (uint32_t)((uintptr_t)ret - g_base + 0x400000u); }
 // lock/unlock/context lines (rare, they name the holder) have their own budget: choreography and message lines
 // cannot use it up before the control loss
@@ -2892,10 +2373,8 @@ static void __fastcall hkLoadTick(uint8_t* self, void*, uint32_t a1)
 {
     uint8_t on = self[0x24], init = self[0xc];
     g_loadTick(self, nullptr, a1);
-    static std::mutex m;
-    static std::set<uint8_t*> seen;
-    bool first;
-    { std::lock_guard<std::mutex> lock(m); first = seen.size() < 64 && seen.insert(self).second; }
+    static core::LogOnce<uint8_t*> seen(64);
+    bool first = seen.first(self);
     bool fired = self[0x24] != on || (init && !self[0xc]);
     if ((first || fired) && lockTraceRoom(g_gateLines))
         logf("load screen node %p: %s (IsOn %d -> %d%s)", self - 0x14, fired ? (self[0x24] ? "fires Started" : "fires Stopped") : "first tick, no fire",
@@ -2954,10 +2433,8 @@ static uint8_t* __fastcall hkBeaconLookup(void* self, void*, const char* name, c
     safeCopy(n, sizeof(n), name);   // copies first: the callee releases its by-value CStrings
     safeCopy(fb, sizeof(fb), fallback);
     uint8_t* e = g_beaconLookup(self, nullptr, name, fallback);
-    static std::mutex m;
-    static std::set<std::string> seen;
-    bool first;
-    { std::lock_guard<std::mutex> lock(m); first = seen.size() < 300 && seen.insert(n).second; }
+    static core::LogOnce<std::string> seen(300);
+    bool first = seen.first(n);
     static volatile LONG lines;
     if (first && lockTraceRoom(lines)) {
         char c[96], pl[96];
@@ -3042,9 +2519,8 @@ static void __fastcall hkMisProgress(uint8_t* mission, void*, void* table)
     safeCopy(name, sizeof(name), ctx && sys::readable(ctx + 0x10, 4) ? *(const char**)(ctx + 0x10) : "?");
     uint8_t** arr = *(uint8_t***)(mission + 0x2ac);
     int n = *(int*)(mission + 0x2b0);
-    static std::mutex m;
-    static std::set<std::string> seen;
-    { std::lock_guard<std::mutex> lock(m); if (seen.size() > 200 || !seen.insert(std::string(name) + "#" + std::to_string(n)).second) return; }
+    static core::LogOnce<std::string> seen(201);   // at most 201 (mission, entry count) pairs
+    if (!seen.first(std::string(name) + "#" + std::to_string(n))) return;
     static volatile LONG lines;
     if (!lockTraceRoom(lines) || lines > 400) return;
     logf("mission progress '%s': %d entries", name, n);
@@ -4145,7 +3621,6 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
 {
-    InitializeCriticalSection(&g_logLock);
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
@@ -4156,7 +3631,7 @@ extern "C" void __stdcall Pentane_Main()
             MoveFileExA(i ? (base + "." + std::to_string(i) + ".log").c_str() : path,
                         (base + "." + std::to_string(i + 1) + ".log").c_str(), MOVEFILE_REPLACE_EXISTING);
     }
-    g_log = _fsopen(path, "w", _SH_DENYNO);   // readable while the game runs
+    core::openLog(path);
     g_base = (uintptr_t)GetModuleHandleA(nullptr);
     g_gameDir.assign(path, slash ? slash - path : 0);
     logf("di1compat 0.3.0 loaded; exe base %08X", (unsigned)g_base);
@@ -4166,7 +3641,7 @@ extern "C" void __stdcall Pentane_Main()
                        (LPCSTR)&Pentane_Main, &self);
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
-    loadConfig(dir);
+    di1::loadConfig(dir, g_cfg);
     if (g_cfg.renderdoc10 > 0) {   // before the renderer creates its device, so RenderDoc's hooks see it
         HMODULE rd = LoadLibraryExA("C:\\Program Files\\RenderDoc\\x86\\renderdoc.dll", nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         auto get = rd ? (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI") : nullptr;
