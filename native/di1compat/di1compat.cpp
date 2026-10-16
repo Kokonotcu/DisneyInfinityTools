@@ -22,6 +22,7 @@
 #include <string>
 #include "minhook/MinHook.h"
 #include "core/hooks.hpp"
+#include "core/log.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -64,25 +65,8 @@ extern "C" PluginInformation Pentane_PluginInformation = {
     {0, 1, 0}, {0, 0, 0}, {}};
 extern "C" size_t Pentane_PluginDependencyCount = 0;
 
-// ---- log ----
-static CRITICAL_SECTION g_logLock;
-static FILE* g_log;
-
-static void logf(const char* fmt, ...)
-{
-    if (!g_log) return;
-    EnterCriticalSection(&g_logLock);
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    fprintf(g_log, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-    va_list a;
-    va_start(a, fmt);
-    vfprintf(g_log, fmt, a);
-    va_end(a);
-    fputc('\n', g_log);
-    fflush(g_log);
-    LeaveCriticalSection(&g_logLock);
-}
+// core's services by their old names: this file and the runtime headers it includes below call them unqualified
+using core::logf;
 
 // Copies a C string the engine handed us without trusting the pointer.
 static void safeCopy(char* out, size_t cap, const char* src)
@@ -4145,7 +4129,6 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
 {
-    InitializeCriticalSection(&g_logLock);
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
@@ -4156,7 +4139,7 @@ extern "C" void __stdcall Pentane_Main()
             MoveFileExA(i ? (base + "." + std::to_string(i) + ".log").c_str() : path,
                         (base + "." + std::to_string(i + 1) + ".log").c_str(), MOVEFILE_REPLACE_EXISTING);
     }
-    g_log = _fsopen(path, "w", _SH_DENYNO);   // readable while the game runs
+    core::openLog(path);
     g_base = (uintptr_t)GetModuleHandleA(nullptr);
     g_gameDir.assign(path, slash ? slash - path : 0);
     logf("di1compat 0.3.0 loaded; exe base %08X", (unsigned)g_base);
