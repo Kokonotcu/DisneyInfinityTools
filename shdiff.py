@@ -14,21 +14,14 @@ SKIP_PASS = set(range(0x18, 0x1c)) | set(range(0x28, 0x2c)) | set(range(0x30, 0x
 
 def sig(b, tag):
     """[(semantic, index, register, mask, rw)] from a DXBC ISGN / OSGN chunk."""
-    d = b.find(b'DXBC') if b else -1
-    if d < 0:
+    base = shd.chunk(b, tag.encode()) if b else None
+    if base is None:
         return []
-    for i in range(struct.unpack_from('<I', b, d + 28)[0]):
-        co = d + struct.unpack_from('<I', b, d + 32 + 4 * i)[0]
-        if b[co:co + 4] != tag.encode():
-            continue
-        base = co + 8
-        n = struct.unpack_from('<I', b, base)[0]
-        out = []
-        for k in range(n):
-            no, idx, sv, ct, reg, mask, rw = struct.unpack_from('<5IBB', b, base + 8 + 24 * k)
-            out.append((b[base + no:b.index(b'\0', base + no)].decode('latin-1'), idx, reg, mask, rw))
-        return out
-    return []
+    out = []
+    for k in range(struct.unpack_from('<I', b, base)[0]):
+        no, idx, sv, ct, reg, mask, rw = struct.unpack_from('<5IBB', b, base + 8 + 24 * k)
+        out.append((b[base + no:b.index(b'\0', base + no)].decode('latin-1'), idx, reg, mask, rw))
+    return out
 
 
 def binds(b):
