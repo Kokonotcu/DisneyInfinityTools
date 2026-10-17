@@ -19,9 +19,6 @@ inline constexpr const char* kCountsB[] = {"BasisCount", "BasisConversionCount",
                                            "ComponentMemberCount", "VariantGroupCount", "VariantMemberCount",
                                            "LayerBindCount", "BaseDataNodeLinksCount"};
 
-// Arena slack (CO-01): an instance copies only the sized block (FUN_004f5900), so a spill becomes a wild pointer.
-inline int g_slack = 0;
-
 namespace detail {
 
 inline constexpr int kLinkOverhead = 4;   // a base link's additional size: its blobs' data + 4 (15 shipped files)
@@ -367,7 +364,8 @@ inline void addArenaSize(oct::File& f, std::vector<oct::Rec>& a, const std::stri
 }
 
 // The count records in 3.0's order. Interning order is byte output (CO-02): do not reorder.
-inline std::vector<oct::Rec> countRecords(oct::File& f, const SnStats& s, const Mode& m, const LinkStats& links)
+inline std::vector<oct::Rec> countRecords(oct::File& f, const SnStats& s, const Mode& m, const LinkStats& links,
+                                          int slack)
 {
     std::vector<oct::Rec> a;
     const int chc = m.constantHeaders;
@@ -375,27 +373,27 @@ inline std::vector<oct::Rec> countRecords(oct::File& f, const SnStats& s, const 
     const int varHeaders = m.allStatic ? 0 : m.constSection ? s.headerStrings - chc : s.headerStrings;
     const int valsA[] = {constHeaders, varHeaders, s.statics, s.dataNodes - s.statics, s.processors};
     for (size_t k = 0; k < std::size(valsA); ++k) a.push_back(f.intScalar(3, kCountsA[k], valsA[k]));
-    if (s.statics || g_slack) {
-        const int c32 = kNodeBound * s.statics + (s.statics ? s.dataNodeBytes : 0) + g_slack;
+    if (s.statics || slack) {
+        const int c32 = kNodeBound * s.statics + (s.statics ? s.dataNodeBytes : 0) + slack;
         addArenaSize(f, a, "ConstantAccumulatedSize32", {4, c32, s.statics});
         addArenaSize(f, a, "ConstantAccumulatedSize64", {8, 2 * c32, s.statics});
     }
     const int variable = m.exact ? s.dataNodes : s.dataNodes - s.statics + s.processors;
     if (!m.allStatic) {   // 3.0 writes none when nothing is variable
-        addArenaSize(f, a, "VariableAccumulatedSize32", {4, s.size32 + g_slack, variable});
-        addArenaSize(f, a, "VariableAccumulatedSize64", {8, s.size64 + 2 * g_slack, variable});
+        addArenaSize(f, a, "VariableAccumulatedSize32", {4, s.size32 + slack, variable});
+        addArenaSize(f, a, "VariableAccumulatedSize64", {8, s.size64 + 2 * slack, variable});
     }
     const int valsB[] = {s.bases - s.roots, s.conversions, s.families, s.familyMembers, s.variantGroups,
                          s.variantMembers};
     for (size_t k = 0; k < std::size(valsB); ++k) a.push_back(f.intScalar(3, kCountsB[k], valsB[k]));
     if (s.connectionMapAt >= 0) a.push_back(f.recs[s.connectionMapAt]);   // moved into its 3.0 place
     // DefaultDataSize: floor4 of the DefaultData + DefaultDataIndices payloads (1,516/1,518 shipped, ddfit.py)
-    const int defaultSize = ((s.defaultData + s.defaultIndices) & ~3) + g_slack / kSlackShare;
+    const int defaultSize = ((s.defaultData + s.defaultIndices) & ~3) + slack / kSlackShare;
     if (s.defaultData >= 0) a.push_back(f.intScalar(3, "DefaultDataSize", defaultSize));
     a.push_back(f.intScalar(3, kCountsB[6], s.layerBinds));
     if (s.layerBinds) a.push_back(f.intScalar(3, "LayerBindAdditionalSize", s.layerBindBytes));
     a.push_back(f.intScalar(3, kCountsB[7], links.count));
-    const int linksSize = links.extra + g_slack / kSlackShare;
+    const int linksSize = links.extra + slack / kSlackShare;
     if (links.pool) a.push_back(f.intScalar(3, "BaseDataNodeLinksAdditionalSize", linksSize));
     return a;
 }
@@ -422,7 +420,7 @@ inline bool fail(std::string* why, const char* reason)
 }  // namespace detail
 
 // Adds 3.0's count records to the SubNetwork at record sn (1.0 has none: its arenas would be sized 0).
-inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
+inline bool addCounts(oct::File& f, size_t sn, const Options& opt, std::string* why = nullptr)
 {
     // false with f unchanged when it has counts; without Type/HeaderLayout, after links and ConstantHeaderCount
     if (detail::hasCounts(f, sn)) return detail::fail(why, "has counts");
@@ -442,7 +440,7 @@ inline bool addCounts(oct::File& f, size_t sn, std::string* why = nullptr)
         s.size32 += detail::kInexactPad;
         s.size64 = 2 * s.size32;
     }
-    const std::vector<oct::Rec> a = detail::countRecords(f, s, m, links);
+    const std::vector<oct::Rec> a = detail::countRecords(f, s, m, links, opt.slack);
     const int clc = m.allStatic ? s.layoutInts : m.constSection ? m.constantLayout : 0;
     detail::placeCounts(f, s, a, f.intScalar(3, "ConstantLayoutCount", clc));
     return true;
@@ -524,7 +522,7 @@ inline bool clip30(oct::File& f, size_t sn)
 }
 
 // clip30 and addCounts on every SubNetwork of the pool, spliced once. Returns how many got counts.
-inline int addAllCounts(oct::File& f)
+inline int addAllCounts(oct::File& f, const Options& opt)
 {
     long pool = f.pool("SubNetworkPool");
     if (pool < 0) return 0;
@@ -536,7 +534,7 @@ inline int addAllCounts(oct::File& f)
     }
     editPoolChildren(f, pool, kids, order, [&](oct::File& g, size_t) {
         clip30(g, 0);
-        if (addCounts(g, 0)) ++done;
+        if (addCounts(g, 0, opt)) ++done;
     });
     return done;
 }

@@ -14,9 +14,6 @@
 
 namespace octx {
 
-// A variant processor's Input / Output pair goes into a VariantGroup, as on every shipped one (variants.py).
-inline bool g_variantGroups = true;
-
 namespace detail {
 enum class SnPool { Other, DataNodes, Processors, Bases, Conversions };   // the pools SnEdit reads entries of
 }  // namespace detail
@@ -39,8 +36,9 @@ struct SnEdit {
     std::map<int, int> dnAt;                   // header -> its DataNode, last wins; key -1: header-less
     // header string -> its first index (a linear scan per new header cost ~0.1 s on in_city's 1,251 locators)
     std::unordered_map<std::string, int> hsIndex;
+    const bool variantGroups;   // Options::variantGroups
 
-    SnEdit(oct::File& file, size_t snRec);
+    SnEdit(oct::File& file, size_t snRec, const Options& opt);
     bool ok() const { return hsAt >= 0 && hsiAt >= 0 && hlAt >= 0 && dnPool >= 0; }
     // header h's name; a reference, since child() compares it for every sibling
     const std::string& name(int h) const
@@ -97,7 +95,8 @@ inline const SnRecord* snRecord(const std::string& n)
 }
 }  // namespace detail
 
-inline SnEdit::SnEdit(oct::File& file, size_t snRec) : f(file), sn(snRec)
+inline SnEdit::SnEdit(oct::File& file, size_t snRec, const Options& opt)
+    : f(file), sn(snRec), variantGroups(opt.variantGroups)
 {
     detail::SnPool pool = detail::SnPool::Other;
     int basis = -1;
@@ -237,7 +236,7 @@ inline void SnEdit::processor(int h, const std::string& type, const std::vector<
     addPn.push_back(nameList(f, 5, "DataNodeAttributes", attrs));
     const size_t tl = type.size(), vl = strlen("VariantProcessor");
     const bool variant = tl > vl && type.compare(tl - vl, vl, "VariantProcessor") == 0;
-    if (g_variantGroups && refs.size() == 2 && variant) addVg.push_back(f.intList(4, "VariantGroup", refs));
+    if (variantGroups && refs.size() == 2 && variant) addVg.push_back(f.intList(4, "VariantGroup", refs));
 }
 
 // Converter steps (DataNode, target basis) from basis b to root 0: direct, else via parents. found: a chain exists.
@@ -291,8 +290,9 @@ inline void SnEdit::apply()
 
 // Renames each association of type whose path edit(SnEdit&, path) redirects; edit returns the new path or "".
 template <class Edit>
-inline int redirectAssociations(oct::File& f, const std::string& type, Edit edit)
+inline int redirectAssociations(oct::File& f, const std::string& type, Edit edit, const Options& opt = {})
 {
+    // gameplay::curves30 passes no options: it makes no variant processor, so they change nothing there
     long sp = f.pool("SubNetworkPool");
     if (sp < 0) return 0;
     std::vector<size_t> sns;
@@ -307,7 +307,7 @@ inline int redirectAssociations(oct::File& f, const std::string& type, Edit edit
     std::vector<size_t> order;
     for (auto it = want.rbegin(); it != want.rend(); ++it) order.push_back((size_t)it->first);
     editPoolChildren(f, sp, sns, order, [&](oct::File& g, size_t k) {
-        SnEdit e(g, 0);
+        SnEdit e(g, 0, opt);
         if (!e.ok()) return;
         std::map<std::string, std::string> mine;
         for (const std::string& path : want[(int)k]) {

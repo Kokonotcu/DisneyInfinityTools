@@ -11,6 +11,12 @@
 
 namespace octx {
 
+// Settings of the .oct transforms, passed in (N3, CO-01); the defaults are the shipped-exact values octtest checks.
+struct Options {
+    int slack = 0;               // added to arena sizes: an instance copies only its sized block (FUN_004f5900)
+    bool variantGroups = true;   // a two-ref *VariantProcessor gets its VariantGroup, as all shipped (variants.py)
+};
+
 namespace detail {
 // Lends f's name table to g while it lives, and takes it back even on an exception (editPoolChildren).
 struct LentNames {

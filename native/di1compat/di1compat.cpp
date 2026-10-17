@@ -408,24 +408,26 @@ static std::vector<std::string> surfaceTable30()
 static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
 {
     bool changed = transcodeAssetRender(path, f, note);
+    // instanced 1.0 SubNetworks must fit their arenas: the counts get 4096 bytes of slack (CO-01)
+    const octx::Options octOptions{4096, g_cfg.variant10};
     std::string navWhy = "navmesh10 off";
     int navs = g_cfg.navmesh10 ? npc::navmesh30(f, &navWhy) : -1;
     if (navs > 0) { note += "+navmesh(" + std::to_string(navs) + ") "; changed = true; }
     else if (navs < 0 && f.dropPool("NavMeshPool")) { note += "-NavMeshPool (" + navWhy + ") "; changed = true; }
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
-    if (int n = di1::skin30(f)) {
+    if (int n = di1::skin30(f, octOptions)) {
         note += "+skin(" + std::to_string(n) + ") ";
         changed = true;
     }
-    if (int n = di1::locator30(f)) {
+    if (int n = di1::locator30(f, octOptions)) {
         note += "+locators(" + std::to_string(n) + ") ";
         changed = true;
     }
-    if (int n = g_cfg.camWorld10 ? di1::camera30(f) : 0) {
+    if (int n = g_cfg.camWorld10 ? di1::camera30(f, octOptions) : 0) {
         note += "+cameras(" + std::to_string(n) + ") ";
         changed = true;
     }
-    if (int n = di1::collision30(f)) {
+    if (int n = di1::collision30(f, octOptions)) {
         note += "+collision(" + std::to_string(n) + ") ";
         changed = true;
     }
@@ -443,7 +445,10 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     std::string np = norm(path.c_str());
     if (g_cfg.choConst10 && (np.rfind("choreographies/", 0) == 0 || np.rfind("exploders/", 0) == 0))
         if (int n = cho::const30(f)) { note += "+constant(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
+    if (int n = octx::addAllCounts(f, octOptions)) {
+        note += "+counts(" + std::to_string(n) + " subnetworks) ";
+        changed = true;
+    }
     return changed;
 }
 
@@ -3692,8 +3697,6 @@ extern "C" void __stdcall Pentane_Main()
     logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
          (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
          (unsigned)g_render.plans.size());
-    octx::g_slack = 4096;   // instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
-    octx::g_variantGroups = g_cfg.variant10;
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
     g_mer.events10 = g_cfg.events10;
     g_mer.portRefs = g_cfg.portRefs10;

@@ -29,6 +29,9 @@
 #include "chan.hpp"
 #include "gameplay.hpp"
 
+// The plugin's octx settings for this run: OCTX_SLACK, --variants (main); the defaults are the shipped-exact ones
+static octx::Options g_octx;
+
 static std::string slurp(const std::filesystem::path& p)
 {
     std::ifstream in(p, std::ios::binary);
@@ -450,7 +453,7 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
             if (g.recs[j].level == 3 && isCountRecord(g.name(g.recs[j])))
                 g.recs.erase(g.recs.begin() + j, g.recs.begin() + g.blockEnd(j));
         std::string why;
-        if (!octx::addCounts(g, i, &why)) { ++*skip; ++g_skipWhy[why]; continue; }
+        if (!octx::addCounts(g, i, g_octx, &why)) { ++*skip; ++g_skipWhy[why]; continue; }
         if (fits) {
             if (g.write() == b) ++*ok;
             else {
@@ -1057,9 +1060,9 @@ static int choConstTest(char** a)
             if (!scene::tuple(b) || b.find(std::string("ProcessorNodePool\0", 18)) == std::string::npos) continue;
             oct::File f = oct::File::parse(b.data(), b.size());
             octx::addAssetPool(f);
-            di1::skin30(f);
-            di1::locator30(f);
-            di1::collision30(f);
+            di1::skin30(f, g_octx);
+            di1::locator30(f, g_octx);
+            di1::collision30(f, g_octx);
             cho::clips30(f, nullptr);
             cho::layout30(f);
             cho::time30(f);
@@ -1096,7 +1099,7 @@ static int choConstTest(char** a)
                 }
             }
             int conv = cho::const30(f);
-            octx::addAllCounts(f);
+            octx::addAllCounts(f, g_octx);
             std::string w = f.write();
             oct::File g = oct::File::parse(w.data(), w.size());
             if (g.write() != w) ++c["1.0: re-parse DIFFERS"];
@@ -1212,7 +1215,7 @@ static int choConstTest(char** a)
     return bad ? 1 : 0;
 }
 
-// --variants <1.0 assets> <3.0 assets>: octx::g_variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
+// --variants <1.0 assets> <3.0 assets>: octx::Options::variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
 // the plugin's octx steps (addAssetPool, skin30, locator30, collision30, addAllCounts): every *VariantProcessor must sit
 // in a VariantGroup == [Input, Output], VariantGroupCount / VariantMemberCount must match the pool, the file must
 // re-parse identically. Twins: each group made for a 1.0 file must name, by DataNode header path, the members of a
@@ -1271,9 +1274,9 @@ static int variantsTest(char** a)
     };
     auto convert = [](oct::File& f) {
         octx::addAssetPool(f);
-        int n = di1::skin30(f) + di1::locator30(f);
-        di1::collision30(f);
-        octx::addAllCounts(f);
+        int n = di1::skin30(f, g_octx) + di1::locator30(f, g_octx);
+        di1::collision30(f, g_octx);
+        octx::addAllCounts(f, g_octx);
         return n;
     };
     // 1.0 corpus
@@ -2531,7 +2534,7 @@ int main(int argc, char** argv)
     // OCTX_SLACK=<n>: octx's arena slack; the plugin ships 4096 (Pentane_Main). Unset keeps the header's 0 (OT-08)
     char slack[16];
     DWORD slackLen = GetEnvironmentVariableA("OCTX_SLACK", slack, sizeof(slack));
-    if (slackLen && slackLen < sizeof(slack)) octx::g_slack = atoi(slack);
+    if (slackLen && slackLen < sizeof(slack)) g_octx.slack = atoi(slack);
     if (argc > 1 && std::string(argv[1]) == "--readable") return readableTest();
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
@@ -2687,7 +2690,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-anim") return choAnimTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-scene") return choSceneTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-const") return choConstTest(argv);
-    if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) octx::g_variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
+    if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) g_octx.variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
     if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
         std::string in = slurp(argv[2]), out;
         cho::Aliases al;
@@ -2956,11 +2959,11 @@ int main(int argc, char** argv)
         };
         oct::File f = oct::File::parse(b.data(), b.size());
         lap("parse", 0);
-        lap("skin influences redirected", di1::skin30(f));
-        lap("locators redirected", di1::locator30(f));
-        lap("cameras given world twins", di1::camera30(f));
+        lap("skin influences redirected", di1::skin30(f, g_octx));
+        lap("locators redirected", di1::locator30(f, g_octx));
+        lap("cameras given world twins", di1::camera30(f, g_octx));
         lap("asset pool added", (int)octx::addAssetPool(f));
-        lap("collision aggregates added", di1::collision30(f));
+        lap("collision aggregates added", di1::collision30(f, g_octx));
         std::string src = argv[2];   // a realms\ asset gets the realm-file rule, as the plugin's realms/ paths
         for (char& c : src) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
         lap("lighting nodes converted", di1::realm30w(f, src.find("/realms/") != std::string::npos ? di1::RealmRule::RealmFile : di1::RealmRule::WorldOnly));
@@ -2973,7 +2976,7 @@ int main(int argc, char** argv)
             lap("scene refs", cho::scene30(f));
             lap("constant sections", cho::const30(f));
         }
-        lap("subnetworks with counts", octx::addAllCounts(f));
+        lap("subnetworks with counts", octx::addAllCounts(f, g_octx));
         std::string o = f.write();
         lap("write", (int)o.size());
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());

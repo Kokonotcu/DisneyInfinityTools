@@ -33,10 +33,10 @@ inline std::string skinTwin(octx::SnEdit& e, const std::string& path)
 }  // namespace detail
 
 // SkinInfluence in 3.0 form. Without the twin 3.0 binds a load-time 'As' adapter that instancing cannot map.
-inline int skin30(oct::File& f)
+inline int skin30(oct::File& f, const octx::Options& opt)
 {
     // FUN_004a5ee0 -> FUN_005077e0 makes the adapter outside the header arena; the clone faults at 0x4cdabe
-    return octx::redirectAssociations(f, "SkinInfluence", detail::skinTwin);
+    return octx::redirectAssociations(f, "SkinInfluence", detail::skinTwin, opt);
 }
 
 // A 1.0 binding path in 3.0 form: a header whose 'Transform' child is a Dilation names its root-basis twin.
@@ -60,10 +60,13 @@ inline std::string worldTransform30(octx::SnEdit& e, const std::string& path)
 }
 
 // MeridianLocator in 3.0 form: 3.0 binds a root-basis Transform node (FUN_006c1000 -> FUN_006b6830).
-inline int locator30(oct::File& f) { return octx::redirectAssociations(f, "MeridianLocator", worldTransform30); }
+inline int locator30(oct::File& f, const octx::Options& opt)
+{
+    return octx::redirectAssociations(f, "MeridianLocator", worldTransform30, opt);
+}
 
 // Camera in 3.0 form: a non-root camera Transform gets its world twin, 'Transform|In WorldBasis' (camworld.py).
-inline int camera30(oct::File& f)
+inline int camera30(oct::File& f, const octx::Options& opt)
 {
     // without it the binder builds the chain at load with 'As' adapters (FUN_00507c20, FUN_005077e0): instancing faults
     int n = 0;
@@ -73,15 +76,15 @@ inline int camera30(oct::File& f)
         if (e.dns[src].type != "Transform" && e.dns[src].type != "Dilation") return "";
         if (octx::worldChain(e, xf, src, true) >= 0) ++n;
         return "";   // the association keeps naming the camera
-    });
+    }, opt);
     return n;
 }
 
 // Collision in 3.0 form: instances name '<slot>|Transform|In WorldBasis.Transform', then the aggregates. Runs after
 // addAssetPool; returns the aggregates added.
-inline int collision30(oct::File& f)
+inline int collision30(oct::File& f, const octx::Options& opt)
 {
-    octx::redirectAssociations(f, "CollisionInstanceToDataNode", worldTransform30);
+    octx::redirectAssociations(f, "CollisionInstanceToDataNode", worldTransform30, opt);
     return octx::addCollisionAggregates(f);
 }
 
