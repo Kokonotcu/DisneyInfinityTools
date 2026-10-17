@@ -44,6 +44,8 @@
 #include "trace/locktrace.hpp"
 #include "trace/mission.hpp"
 #include "trace/opacity.hpp"
+#include "trace/spawn.hpp"
+#include "trace/spawntrace.hpp"
 #include "trace/teardown.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
@@ -505,217 +507,6 @@ static bool installPlaysetSlot(const di1::Config&)
                 (void**)&g_playsetChar);
 }
 
-// Trace only: the actor registry's "does <name> exist" (FUN_00751750, thiscall, ret 4), which the playset avatar
-// choice FUN_013a4250 asks for <avatar> + avatarSuffix, then <avatar>, before taking FallbackAvatar.
-typedef uint8_t(__fastcall* ActorExistsFn)(void* self, void* edx, const char** name);
-static ActorExistsFn g_actorExists;
-static uint8_t __fastcall hkActorExists(void* self, void*, const char** name)
-{
-    uint8_t r = g_actorExists(self, nullptr, name);
-    char n[200];
-    safeCopy(n, sizeof(n), name && *name ? *name : "(null)");
-    if (g_cfg.hidePs && endsWith(n, "_PS") && !strncmp(n, "AV_", 3)) r = 0;
-    logf("actor exists? %s -> %u", n, r);
-    return r;
-}
-
-// Trace only: the playset flow's figure check FUN_00ddae30(player, sku, int* failCode, a4, a5) (thiscall, ret 0x14)
-// and the figure's playset string Gateway[sku].playset, FUN_00435080(out, sku) (ret 8).
-typedef uint8_t(__fastcall* FigureOkFn)(void* self, void* edx, uint32_t player, int sku, int* code, uint32_t a4, uint32_t a5);
-static FigureOkFn g_figureOk;
-static uint8_t __fastcall hkFigureOk(void* self, void*, uint32_t player, int sku, int* code, uint32_t a4, uint32_t a5)
-{
-    int mine = -1;
-    uint8_t r = g_figureOk(self, nullptr, player, sku, code ? code : &mine, a4, a5);
-    logf("figure check player %u sku %d (a4 %u a5 %u) -> %u code %d", player, sku, a4 & 0xff, a5 & 0xff, r, code ? *code : mine);
-    return r;
-}
-// ... the reader item list the playset flow fills its figure slots from (FUN_00427330(out) -> count, ret 4; items
-// 0x50 B from out+4: +0 type, +4 sku) and its per-item gate FUN_00deb610(type, sku, a3, a4, a5) (ret 0x14); logged
-// on change
-typedef int(__fastcall* ReaderListFn)(void* self, void* edx, int* out);
-static ReaderListFn g_readerList;
-static int __fastcall hkReaderList(void* self, void*, int* out)
-{
-    static std::string last;
-    int n = g_readerList(self, nullptr, out);   // reader slot = this + 0x6c + index * 0x260, its toy id at +0x168
-    std::string s = std::to_string(n) + ":";
-    for (int i = 0; i < n && i < 12; ++i) s += " " + std::to_string(out[1 + i * 20]) + "/" + std::to_string(out[2 + i * 20]);
-    if (s != last) { last = s; logf("reader list %s", s.c_str()); }
-    return n;
-}
-// ... the playset flow's player figure slot (*(this + 0xc) + 0xc + player * 4, read by FUN_00df9fd0(out, player,
-// flag), thiscall ret 0xc): the watchpoint shows who fills and who clears player 0's slot
-typedef void*(__fastcall* IgpNameFn)(void* self, void* edx, void* out, uint32_t player, uint32_t flag);
-static IgpNameFn g_igpName;
-static void* __fastcall hkIgpName(void* self, void*, void* out, uint32_t player, uint32_t flag)
-{
-    if (self && *(char**)((char*)self + 0xc)) watch((uintptr_t)(*(char**)((char*)self + 0xc)) + 0xc);
-    return g_igpName(self, nullptr, out, player, flag);
-}
-typedef uint8_t(__fastcall* ReaderItemOkFn)(void* self, void* edx, uint32_t type, int sku, uint32_t a3, uint32_t a4, uint32_t a5);
-static ReaderItemOkFn g_readerItemOk;
-static uint8_t __fastcall hkReaderItemOk(void* self, void*, uint32_t type, int sku, uint32_t a3, uint32_t a4, uint32_t a5)
-{
-    static std::string last;
-    uint8_t r = g_readerItemOk(self, nullptr, type, sku, a3, a4, a5);
-    std::string s = std::to_string(type) + "/" + std::to_string(sku) + " -> " + std::to_string(r);
-    if (s != last) { last = s; logf("reader item %s", s.c_str()); }
-    return r;
-}
-typedef const char** (__fastcall* FigurePlaysetFn)(void* self, void* edx, const char** out, int sku);
-static FigurePlaysetFn g_figurePlayset;
-static const char** __fastcall hkFigurePlayset(void* self, void*, const char** out, int sku)
-{
-    const char** r = g_figurePlayset(self, nullptr, out, sku);
-    char s[200];
-    safeCopy(s, sizeof(s), out && *out ? *out : "(null)");
-    logf("Gateway[%d].playset = '%s'", sku, s);
-    return r;
-}
-
-// Trace only: an entity instancing one of its assets' SubNetworks (FUN_007734f0(out, const char** subName, a3),
-// thiscall ret 0xc; an empty name = the root SubNetwork).
-typedef void*(__fastcall* AssetInstFn)(void* self, void* edx, void* out, const char** name, uint32_t a3);
-static AssetInstFn g_assetInst;
-static void* __fastcall hkAssetInst(void* self, void*, void* out, const char** name, uint32_t a3)
-{
-    char n[200];
-    safeCopy(n, sizeof(n), name && *name ? *name : "(null)");
-    logf("instance asset '%s' of entity %p", n, self);
-    return g_assetInst(self, nullptr, out, name, a3);
-}
-
-// Diagnostic guard (trace): SubNetwork instancing FUN_004ff0e0(param_1, root, instanceNo) (thiscall on the template,
-// ret 0xc). A template whose root handle (+0xc) no longer resolves faults in FUN_004f5900 (NULL+8, in-game
-// 2026-10-12, instancing a 1.0 prop's 'Anchor'); log it and return 0 (FUN_007734f0 handles a failed instance).
-typedef int(__fastcall* InstFn)(void* self, void* edx, uint32_t p1, uint32_t root, int no);
-static InstFn g_inst;
-static uint32_t g_instHeaders;   // header count of the template being instanced (trace)
-static int __fastcall hkInst(void* self, void*, uint32_t p1, uint32_t root, int no)
-{
-    typedef void*(__fastcall * ResolveFn)(void* handleField, void* edx);
-    void* r = ((ResolveFn)rt(0x004B46D0))((char*)self + 0xc, nullptr);
-    if (!r) {
-        uint32_t* t = (uint32_t*)self;
-        logf("instancing template %p with a dead root handle %08X (block %08X, headers %u, conv %u, procs %u): skipped",
-             self, t[3], t[0x4c / 4], t[0x5c / 4], t[100 / 4], t[0x60 / 4]);
-        return 0;
-    }
-    g_instHeaders = ((uint32_t*)self)[0x5c / 4];
-    return g_inst(self, nullptr, p1, root, no);
-}
-
-// Trace: header creation FUN_004fae90(out, name, parent, a4, a5) (thiscall on the allocator, ret 0x14). Logs the
-// adapter headers ('As...') made at runtime, with the creator's stack.
-typedef void*(__fastcall* HdrMakeFn)(void* self, void* edx, void* out, uint32_t name, uint32_t parent, uint32_t a4, uint32_t a5);
-static HdrMakeFn g_hdrMake;
-static volatile LONG g_hdrMakeLogged;
-static void* __fastcall hkHdrMake(void* self, void*, void* out, uint32_t name, uint32_t parent, uint32_t a4, uint32_t a5)
-{
-    char n[80] = "";
-    __try { if (name) safeCopy(n, sizeof(n), (const char*)(name + 0xc)); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    if (n[0] == 'A' && n[1] == 's' && n[2] >= 'A' && n[2] <= 'Z' && InterlockedIncrement(&g_hdrMakeLogged) <= 6) {
-        char line[700];
-        int len = sprintf_s(line, "make header '%s' (allocator %p, parent %08X, %u %u), stack:", n, self, parent, a4, a5);
-        stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 20);
-        logf("%s", line);
-    }
-    return g_hdrMake(self, nullptr, out, name, parent, a4, a5);
-}
-
-// Trace: the spawn lookup StartPositions FUN_013a85d0(player, zone, out xform, out, flags) (thiscall, ret 0x14):
-// 0 = no registered start (the caller then uses the origin); out[4..6] = the translation. And the
-// PlayerStartPositionNode factory (vtable slot 14, FUN_014884f0, ret 4), to see whether a graph builds one.
-typedef uint32_t(__fastcall* StartLookupFn)(void* self, void* edx, uint32_t player, uint32_t zone, float* out, uint32_t* o2, uint32_t flags);
-static StartLookupFn g_startLookup;
-static volatile LONG g_startLogged;
-static uint32_t __fastcall hkStartLookup(void* self, void*, uint32_t player, uint32_t zone, float* out, uint32_t* o2, uint32_t flags)
-{
-    uint32_t r = g_startLookup(self, nullptr, player, zone, out, o2, flags);
-    if (InterlockedIncrement(&g_startLogged) <= 20)
-        logf("start lookup player %u zone %08X flags %X -> %u at (%.2f, %.2f, %.2f)", player, zone, flags, r,
-             out ? out[4] : 0.f, out ? out[5] : 0.f, out ? out[6] : 0.f);
-    return r;
-}
-// Trace: a start node's provider query FUN_0145f720(a1, player, zone, out, a5) (thiscall on the StartPositionBase,
-// ret 0x14): matches when zone is 0 or its +0x88, the player's bit is in byte +0x85 and vfunc +0x68 fills the transform.
-typedef uint8_t(__fastcall* StartQueryFn)(uint8_t* self, void* edx, uint32_t a1, int player, uint32_t zone, float* out, uint32_t a5);
-static StartQueryFn g_startQuery;
-static volatile LONG g_startQueryLogged;
-static uint8_t __fastcall hkStartQuery(uint8_t* self, void*, uint32_t a1, int player, uint32_t zone, float* out, uint32_t a5)
-{
-    uint8_t r = g_startQuery(self, nullptr, a1, player, zone, out, a5);
-    if (InterlockedIncrement(&g_startQueryLogged) <= 12)
-        logf("start query node %p (zone %08X, players %02X) for player %d zone %08X -> %u at (%.2f, %.2f, %.2f)", self,
-             *(uint32_t*)(self + 0x88), self[0x85], player, zone, r, out ? out[4] : 0.f, out ? out[5] : 0.f, out ? out[6] : 0.f);
-    return r;
-}
-
-// spawntrace10's hooks (H1): where the player is put (Pirates fall); trace installs the same two itself.
-static bool installSpawnTrace(const di1::Config& c)
-{
-    if (!c.spawnTrace10 || c.trace) return true;
-    return installFeature("spawntrace10", {
-        {"start lookup (spawntrace10)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup,
-         (void**)&g_startLookup},
-        {"start query (spawntrace10)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery},
-    });
-}
-
-// Trace: the avatar spawn path. Event posts FUN_0068bbb0(name, a2, a3) (thiscall on the event manager, ret 0xc),
-// first 3 of each spawn/zone name; the level loader FUN_00d00530 state (+0x2c) changes; its load-done check
-// FUN_00ccc450 result changes; AvatarSpawning finalize FUN_00aa36f0 and avatar removal FUN_00a9ec70.
-typedef void(__fastcall* PostFn)(void* self, void* edx, const char* name, uint32_t a2, uint32_t a3);
-static PostFn g_post;
-static std::mutex g_postMx;
-static std::map<std::string, int> g_postSeen;
-static void __fastcall hkPost(void* self, void*, const char* name, uint32_t a2, uint32_t a3)
-{
-    char n[64] = "";
-    safeCopy(n, sizeof(n), name);
-    if (strstr(n, "Zone") || strstr(n, "Avatar") || strstr(n, "Creation") || strstr(n, "Toy") || strstr(n, "Spawn") || strstr(n, "Level")) {
-        std::lock_guard<std::mutex> l(g_postMx);
-        if (++g_postSeen[n] <= 3) logf("event %s (%08X %08X)", n, a2, a3);
-    }
-    g_post(self, nullptr, name, a2, a3);
-}
-typedef void(__fastcall* ThisFn)(void* self, void* edx);
-static ThisFn g_levelTick;
-static int g_levelState = -1;
-static void __fastcall hkLevelTick(void* self, void*)
-{
-    int st = *(int*)((char*)self + 0x2c);
-    if (st != g_levelState) { logf("level loader %p state %d -> %d", self, g_levelState, st); g_levelState = st; }
-    g_levelTick(self, nullptr);
-    st = *(int*)((char*)self + 0x2c);
-    if (st != g_levelState) { logf("level loader %p state -> %d", self, st); g_levelState = st; }
-}
-typedef uint8_t(__fastcall* BoolThisFn)(void* self, void* edx);
-static BoolThisFn g_loadDone;
-static int g_loadDoneLast = -1;
-static uint8_t __fastcall hkLoadDone(void* self, void*)
-{
-    uint8_t r = g_loadDone(self, nullptr);
-    if (r != g_loadDoneLast) {
-        uint8_t* o = (uint8_t*)self;
-        logf("level load-done check %p -> %u (+0x21 %u, +0xc %08X)", self, r, o[0x21], *(uint32_t*)(o + 0xc));
-        g_loadDoneLast = r;
-    }
-    return r;
-}
-typedef void(__fastcall* OneArgFn)(void* self, void* edx, uint32_t a1);
-static OneArgFn g_avFinal, g_avRemove;
-static void __fastcall hkAvFinal(void* self, void*, uint32_t a1) { logf("AvatarSpawning finalize %p rec %08X", self, a1); g_avFinal(self, nullptr, a1); }
-static void __fastcall hkAvRemove(void* self, void*, uint32_t a1)
-{
-    char line[400];
-    int len = sprintf_s(line, "AvatarSpawning remove avatar of player %u, stack:", a1);
-    stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 12);
-    logf("%s", line);
-    g_avRemove(self, nullptr, a1);
-}
-
 // FUN_01449390, thiscall on a choreography instance (+0x38 its path, +0x1b4 flags: 0x20 audio sync): its start.
 typedef void(__fastcall* BtStartFn)(uint8_t* self, void* edx);
 static BtStartFn g_choStart;
@@ -736,50 +527,6 @@ static bool installChoStart(const di1::Config& c)
     if (!c.breakTrace && !cineSync) return true;
     return hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart,
                 (void**)&g_choStart);
-}
-// Trace: the spawn choreography. FUN_00a9f080 asks the creation cho for 'Cho Controls' (FUN_014835c0, thiscall 2 args)
-// and only then registers FUN_00a8b670 on its 'ToyCreation_PlaceToy' event; that callback sets the per-player ready
-// flag (+0xd9) the finalize step waits for.
-typedef uint8_t(__fastcall* ChoHasFn)(void* self, void* edx, uint32_t a1, const char* name);
-static ChoHasFn g_choHas;
-static volatile LONG g_choHasLogged;
-static uint8_t __fastcall hkChoHas(void* self, void*, uint32_t a1, const char* name)
-{
-    uint8_t r = g_choHas(self, nullptr, a1, name);
-    char n[64] = "";
-    safeCopy(n, sizeof(n), name);
-    if (!strcmp(n, "Cho Controls") && InterlockedIncrement(&g_choHasLogged) <= 6) logf("cho %p has '%s' (a1 %08X) -> %u", self, n, a1, r);
-    return r;
-}
-typedef void(__fastcall* AvCreateFn)(void* self, void* edx, uint32_t player, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5);
-static AvCreateFn g_avCreate;
-static void __fastcall hkAvCreate(void* self, void*, uint32_t player, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
-{
-    logf("AvatarSpawning create player %u (%08X %08X %08X %08X) ->", player, a2, a3, a4, a5);
-    g_avCreate(self, nullptr, player, a2, a3, a4, a5);
-    logf("AvatarSpawning create player %u returned", player);
-}
-// AsyncActorCreator (the queued spawn FUN_00752a90 makes when the actor's data is not resident): Execute (vtable 1,
-// FUN_0075a290) builds it through FUN_00759ca0 (cdecl, 11 args, returns the out handle pointer) and calls the
-// completion callback; log Execute (actor name at +0x6c).
-static ThisFn g_aacExec;
-static void __fastcall hkAacExec(void* self, void*)
-{
-    bool avatar = *(uintptr_t*)((char*)self + 0x78) == rt(0x00A9B3E0);   // its callback is the avatar spawn's
-    if (avatar) logf("AsyncActorCreator %p execute (avatar spawn, mode %u)", self, *(uint32_t*)((char*)self + 0x18));
-    g_aacExec(self, nullptr);
-    if (avatar) logf("AsyncActorCreator %p execute returned", self);
-}
-// The avatar spawn's completion callback FUN_00a9b3e0(actor, record) (cdecl): sets record+0x28 = actor and the ready
-// flag unless AvatarSpawning+0x88 is 0.
-typedef void(__cdecl* AvSpawnedFn)(uint32_t actor, uint8_t* rec);
-static AvSpawnedFn g_avSpawned;
-static void __cdecl hkAvSpawned(uint32_t actor, uint8_t* rec)
-{
-    uint8_t* as = *(uint8_t**)rt(0x02212BC4);
-    logf("avatar spawn callback actor %08X rec %p (AvatarSpawning %p +0x88 %08X, rec+0x31 %02X)", actor, rec, as,
-         as ? *(uint32_t*)(as + 0x88) : 0, rec ? rec[0x31] : 0);
-    g_avSpawned(actor, rec);
 }
 // Asset defs lookup FUN_00703340(key) (thiscall on the AssetDefsManager, ret 4): DefID -> FileName of a Cho, "" when
 // no loaded assetdefs has it. A 3.0 playset's gamedb package carries assetdefs.lua (30 engine entries every playset
@@ -843,21 +590,6 @@ static bool installAssetDefs(const di1::Config&)
 {
     return hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
 }
-typedef uint32_t*(__fastcall* ChoMakeFn)(void* self, void* edx, uint32_t* out, const char* name, uint32_t a3, uint32_t a4, uint32_t a5);
-static ChoMakeFn g_choMake;
-static volatile LONG g_choMakeLogged;
-static uint32_t* __fastcall hkChoMake(void* self, void*, uint32_t* out, const char* name, uint32_t a3, uint32_t a4, uint32_t a5)
-{
-    uint32_t* r = g_choMake(self, nullptr, out, name, a3, a4, a5);
-    char n[64] = "";
-    safeCopy(n, sizeof(n), name);
-    if ((strstr(n, "oy") || strstr(n, "pawn") || !n[0]) && InterlockedIncrement(&g_choMakeLogged) <= 20)
-        logf("cho make '%s' -> %08X", n, r == out && out ? *out : 0xffffffff);
-    return r;
-}
-typedef void(__cdecl* PlaceToyFn)(void* msg);
-static PlaceToyFn g_placeToy;
-static void __cdecl hkPlaceToy(void* msg) { logf("ToyCreation_PlaceToy callback (msg %p)", msg); g_placeToy(msg); }
 // test (fpslog10): FUN_0047aab0 runs once per frame on the main thread (FUN_0047f0a0, the frame's render submit) and
 // spins while the render thread still holds the previous frame (+0x71f0 == 2). Call-to-call time = frame time; time
 // inside = the main thread waiting on rendering. Mostly waiting -> render thread / GPU / present bound; hardly
@@ -1442,95 +1174,6 @@ static bool installMerRegistry(const di1::Config& c)
     if (!classes || !g_merOk) return true;
     return hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry,
                 (void**)&g_merRegistry);
-}
-
-// Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
-typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
-static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
-static volatile LONG g_nStart, g_nLocator, g_nSpawnExp;
-static void* __cdecl hkMkStart(void* m, uint32_t a2, uint32_t a3) { logf("MNode PlayerStartPosNode %p (#%ld)", m, InterlockedIncrement(&g_nStart)); return g_mkStart(m, a2, a3); }
-static void* __cdecl hkMkLocator(void* m, uint32_t a2, uint32_t a3) { LONG n = InterlockedIncrement(&g_nLocator); if (n <= 2 || n % 100 == 0) logf("MNode LocatorNode #%ld", n); return g_mkLocator(m, a2, a3); }
-static void* __cdecl hkMkSpawnExp(void* m, uint32_t a2, uint32_t a3) { LONG n = InterlockedIncrement(&g_nSpawnExp); if (n <= 2 || n % 50 == 0) logf("MNode SpawnExpendable #%ld", n); return g_mkSpawnExp(m, a2, a3); }
-
-// Trace: instance header clone FUN_004f5900(index, a2, delta, instRoot) (thiscall on the instance header, ret 0x10).
-// Header = [name, parent|rc, sibling|flags, child-or-self|slot, ...]. FUN_004b4470 gave every header of the cloned array
-// a temp slot (DAT_021af260); 0x4f5a25 maps the +0xc target through it without a check, so a +0xc that leads outside
-// the array reads slot 0 (NULL) and faults at 0x4cdabe. Log such headers with their target.
-typedef void(__fastcall* HdrCloneFn)(void* self, void* edx, uint32_t index, uint32_t a2, int delta, uint32_t instRoot);
-static HdrCloneFn g_hdrClone;
-static volatile LONG g_hdrLogged;
-static void hdrName(const uint32_t* h, char* out, size_t cap)
-{
-    __try { if (h && h[0]) safeCopy(out, cap, (const char*)(h[0] + 0xc)); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-static void __fastcall hkHdrClone(void* self, void*, uint32_t index, uint32_t a2, int delta, uint32_t instRoot)
-{
-    typedef void*(__fastcall * ResolveFn)(void* handleField, void* edx);
-    ResolveFn res = (ResolveFn)rt(0x004B46D0);
-    uint32_t* inst = (uint32_t*)self;
-    uint32_t* tmpl = (uint32_t*)((char*)self - delta);
-    uint32_t* t = (uint32_t*)res(inst + 3, nullptr);
-    uint32_t slots = *(uint32_t*)rt(0x021B725C), e = 1, slot = 0;
-    if (t) {
-        slot = ((t[2] & 0xe001ffff) | (t[3] >> 3)) >> 17;
-        e = slot < slots ? ((uint32_t*)rt(0x021AF260))[slot] : 1;
-    }
-    if ((!t || !e) && InterlockedIncrement(&g_hdrLogged) <= 6) {
-        char name[80] = "?", tname[80] = "?", pname[80] = "?";
-        hdrName(tmpl, name, sizeof(name));
-        hdrName(t, tname, sizeof(tname));
-        uint32_t* tp = t ? (uint32_t*)res(t + 1, nullptr) : nullptr;
-        hdrName(tp, pname, sizeof(pname));
-        const uint32_t* base = (const uint32_t*)((char*)tmpl - index * 0x14);
-        logf("header clone %u/%u '%s' (instRoot %08X, %u slots): template %p [%08X %08X %08X %08X %08X] +0xc -> %p '%s' (array index %d, slot %u) [%08X %08X %08X %08X %08X] parent %p '%s'",
-             index, g_instHeaders, name, instRoot, slots, tmpl, tmpl[0], tmpl[1], tmpl[2], tmpl[3], tmpl[4], t, tname,
-             t ? (int)(((const char*)t - (const char*)base) / 0x14) : -1, slot,
-             t ? t[0] : 0, t ? t[1] : 0, t ? t[2] : 0, t ? t[3] : 0, t ? t[4] : 0, tp, pname);
-    }
-    g_hdrClone(self, nullptr, index, a2, delta, instRoot);
-}
-
-// trace's hooks (H1), all or none; hkInst's dead-root guard stays under trace (owner's choice, B-04).
-static bool installTrace(const di1::Config& c)
-{
-    if (!c.trace) return true;
-    return installFeature("trace", {
-        {"actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists},
-        {"figure check (trace)", 0x00DDAE30, "64A1000000006AFF68", (void*)&hkFigureOk, (void**)&g_figureOk},
-        {"figure playset (trace)", 0x00435080, "6AFF68????????64A100000000", (void*)&hkFigurePlayset,
-         (void**)&g_figurePlayset},
-        {"reader list (trace)", 0x00427330, "83EC08535556", (void*)&hkReaderList, (void**)&g_readerList},
-        {"reader item gate (trace)", 0x00DEB610, "538B5C2408", (void*)&hkReaderItemOk, (void**)&g_readerItemOk},
-        {"playset figure slot (trace)", 0x00DF9FD0, "6AFF68????????64A100000000", (void*)&hkIgpName,
-         (void**)&g_igpName},
-        {"asset instance (trace)", 0x007734F0, "6AFF68????????64A100000000", (void*)&hkAssetInst,
-         (void**)&g_assetInst},
-        {"SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst,
-         (void**)&g_inst},
-        {"header clone (trace)", 0x004F5900, "5153555657", (void*)&hkHdrClone, (void**)&g_hdrClone},
-        {"start lookup (trace)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup,
-         (void**)&g_startLookup},
-        {"AsyncActorCreator execute (trace)", 0x0075A290, "6AFF68????????64A100000000", (void*)&hkAacExec,
-         (void**)&g_aacExec},
-        {"avatar spawn callback (trace)", 0x00A9B3E0, "8B0D????????83B988000000", (void*)&hkAvSpawned,
-         (void**)&g_avSpawned},
-        {"cho make (trace)", 0x014523B0, "83EC1C33C0", (void*)&hkChoMake, (void**)&g_choMake},
-        {"AvatarSpawning create (trace)", 0x00A9F080, "6AFF68????????64A100000000", (void*)&hkAvCreate,
-         (void**)&g_avCreate},
-        {"cho has (trace)", 0x014835C0, "53568B74240C", (void*)&hkChoHas, (void**)&g_choHas},
-        {"PlaceToy callback (trace)", 0x00A8B670, "8B4424048B4004", (void*)&hkPlaceToy, (void**)&g_placeToy},
-        {"event post (trace)", 0x0068BBB0, "56578BF98B07", (void*)&hkPost, (void**)&g_post},
-        {"level loader tick (trace)", 0x00D00530, "6AFF64A100000000", (void*)&hkLevelTick, (void**)&g_levelTick},
-        {"level load-done check (trace)", 0x00CCC450, "568BF1807E2100", (void*)&hkLoadDone, (void**)&g_loadDone},
-        {"AvatarSpawning finalize (trace)", 0x00AA36F0, "64A1000000006AFF68", (void*)&hkAvFinal, (void**)&g_avFinal},
-        {"AvatarSpawning remove (trace)", 0x00A9EC70, "6AFF68????????64A100000000", (void*)&hkAvRemove,
-         (void**)&g_avRemove},
-        {"start query (trace)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery},
-        {"MNode PlayerStartPosNode (trace)", 0x0148A790, "518B442410", (void*)&hkMkStart, (void**)&g_mkStart},
-        {"MNode LocatorNode (trace)", 0x01480090, "518B442410", (void*)&hkMkLocator, (void**)&g_mkLocator},
-        {"MNode SpawnExpendable (trace)", 0x017BF020, "518B442410", (void*)&hkMkSpawnExp, (void**)&g_mkSpawnExp},
-        {"header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake},
-    });
 }
 
 // The open half: a .lua stream (3.0's own or served from 1.0) -> CHD bytes. nullptr leaves the open as it was.
@@ -2693,7 +2336,7 @@ extern "C" void __stdcall Pentane_Main()
     installCurrency(g_cfg);
     installExpDef(g_cfg);
     installPlaysetSlot(g_cfg);
-    installTrace(g_cfg);
+    trace::spawn::install({g_cfg.trace, g_cfg.hidePs});
     installShaders(g_cfg);
     trace::mission::install(missionTraceOf(g_cfg));
     installChoStart(g_cfg);
@@ -2714,7 +2357,7 @@ extern "C" void __stdcall Pentane_Main()
     gprt::install(g_cfg);
     bldrt::install(g_cfg);
     caprt::install(g_cfg);
-    installSpawnTrace(g_cfg);
+    trace::spawntrace::install({g_cfg.spawnTrace10 && !g_cfg.trace});
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
