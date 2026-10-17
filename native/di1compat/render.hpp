@@ -17,10 +17,10 @@
 #include "base/bytes.hpp"
 #include "oct.hpp"
 #include "gen30.hpp"
+#include "formats/bndl.hpp"
+#include "formats/ssf.hpp"
 
 namespace render {
-
-constexpr uint32_t UNSET = 0xffffffff;
 
 // ---- vertex element types (vtxf.TYPES / decode / encode, Python's rounding exactly) ----
 struct VType { char code; int n, csize; double norm; };
@@ -374,322 +374,13 @@ inline void convertVertex(const std::vector<const uint8_t*>& src, const Plan& p,
     }
 }
 
-// ---- material bundles (matp.py) ----
-struct Material { std::string name, shader, A, B; uint32_t hash = 0; int slots = 0, stride = 8; };
-struct Bundle {
-    std::vector<std::string> textures;   // 8-byte name hashes
-    std::vector<Material> mats;
-    std::vector<std::string> ssetNames, ssetBlocks;   // the SSET chunk: scene settings (ssf.py), one block per name
-    uint32_t slot(const Material& m, int s) const { return oct::u((const uint8_t*)m.B.data() + m.stride * s, 4); }
-};
+// 1.0's scenesettingsformat.ssf (FUN_004af580): 4-byte slots, 1.0 .shd post passes, a shader name after each
+inline constexpr ssf::Layout kSsfLayout10 = {0x64, 0x1c, 0x40, 4, 4, gen30::kShd10, true};
 
-inline size_t al(size_t x, size_t a) { return (x + a - 1) & ~(a - 1); }
-
-// ---- scene settings (ssf.py): a world's / realm's fog, sun, ambient SH, bloom, HDR exposure, DOF, motion blur, SSAO,
-// colour-grade LUT and environment map, kept in its bundle's SSET chunk (3.0 FUN_0046b9d0) and laid out by
-// shaders/scenesettingsformat.ssf (3.0 FUN_0045d420, 1.0 FUN_004af580): global block A, global block B, then one block B
-// per post pass (an embedded .shd each). Block sizes predicted exactly for 156/156 1.0 and 420/420 3.0 SSET chunks.
-// 1.0's format is not 3.0's (2544 vs 4256 B; 3.0 adds parameters, passes and 8-byte slots), so a block is re-laid by
-// name: Disney's 42 ported realm blocks equal ours in 2304 of 2394 parameters (the rest are retuned colours).
-struct SsfPart { int off = 0, size = 0; std::vector<uint32_t> slots; std::map<uint32_t, std::pair<int, int>> params; std::string def; };
-struct Ssf {
-    int stride = 8, size = 0;
-    std::vector<std::pair<uint32_t, SsfPart>> parts;   // key: 1 = global A, 2 = global B, else the pass name hash
-    const SsfPart* find(uint32_t k) const { for (auto& p : parts) if (p.first == k) return &p.second; return nullptr; }
-};
-
-namespace detail {
-
-// One part's tables in an .ssf: parameter names and words [from, to), slot names
-struct SsfTables { const uint8_t *names, *words, *slots; int from, to, nslots; };
-
-// One part: params (name hash, offset) sized up to the next one, slot names, the default block. false: a slot or
-// parameter outside the block (RE-23: ssfBlock30 writes and reads by them)
-inline bool addSsfPart(const std::string& s, Ssf& f, uint32_t key, int size, const SsfTables& t, size_t def)
+// The scene-settings slot 3.0 renamed: 1.0's g_colorgrade_lut is 3.0's g_colorgrade_lut_sampler
+inline std::map<uint32_t, uint32_t> ssfRenamedSlots10()
 {
-    SsfPart p;
-    p.size = size;
-    std::vector<std::pair<int, uint32_t>> ps;
-    for (int i = t.from; i < t.to; ++i)
-        ps.push_back({(int)(oct::u(t.words + 4 * i, 4) >> 16), (uint32_t)oct::u(t.names + 4 * i, 4)});
-    std::sort(ps.begin(), ps.end());
-    const bool paramsIn = ps.empty() || ps.back().first <= size;
-    if (!paramsIn || (size_t)t.nslots * ((size_t)f.stride + 1) > (size_t)size) return false;
-    for (size_t i = 0; i < ps.size(); ++i)
-        p.params[ps[i].second] = {ps[i].first, (i + 1 < ps.size() ? ps[i + 1].first : size) - ps[i].first};
-    for (int i = 0; i < t.nslots; ++i) p.slots.push_back((uint32_t)oct::u(t.slots + 4 * i, 4));
-    p.def = s.substr((std::min)(def, s.size()), size);
-    p.off = f.size;
-    f.size = (int)al((size_t)f.size + size, 16);
-    f.parts.push_back({key, p});
-    return true;
-}
-
-}  // namespace detail
-
-inline bool parseSsf(const std::string& s, bool is30, Ssf& f)
-{
-    const uint8_t* b = (const uint8_t*)s.data();
-    const size_t n = s.size();
-    const int hsize = is30 ? 0xa8 : 0x64, ha = is30 ? 0x38 : 0x1c, hb = is30 ? 0x70 : 0x40, ptr = is30 ? 8 : 4;
-    const int counts = is30 ? 0x18 : 0x0c, data = is30 ? 0xe0 : 0xa4, psize = is30 ? 0x50 : 0x30, da = is30 ? 0x68 : 0x44, db = is30 ? 0xa0 : 0x68;
-    if (n < (size_t)hsize) return false;
-    f.stride = is30 ? 8 : 4;
-    int npar = b[0], npass = b[1], nA = b[ha];
-    size_t o = hsize;
-    auto ok = [&](size_t need) { return need <= n; };
-    if (nA > npar || !ok(o + 8 * (size_t)npar + 4 * ((size_t)b[ha + 1] + b[hb + 1]))) return false;
-    const uint8_t *names = b + o, *words = b + o + 4 * npar, *snA = words + 4 * npar, *snB = snA + 4 * b[ha + 1];
-    int sizeA = (int)oct::u(b + ha + 2, 2), sizeB = (int)oct::u(b + hb + 2, 2);
-    o += 8 * (size_t)npar + 4 * ((size_t)b[ha + 1] + b[hb + 1]);
-    size_t defA = al(o, 16), defB = al(defA + sizeA, 16);
-    if (!detail::addSsfPart(s, f, 1, sizeA, {names, words, snA, 0, nA, b[ha + 1]}, defA)) return false;
-    if (!detail::addSsfPart(s, f, 2, sizeB, {names, words, snB, nA, npar, b[hb + 1]}, defB)) return false;
-    o = defB + sizeB;
-    if (!ok(o + 4 * (size_t)npass + ptr * (size_t)npass)) return false;
-    const uint8_t* pnames = b + o;
-    o += 4 * (size_t)npass + ptr * (size_t)npass;
-    for (int i = 0; i < npass; ++i) {
-        o = al(o, 16);
-        if (!ok(o + data)) return false;
-        const uint8_t* h = b + o;
-        int pn = h[counts], pp = h[counts + 1], pt = h[counts + 2], pnA = h[da], psA = h[da + 1], psB = h[db + 1];
-        int pSizeA = (int)oct::u(h + da + 2, 2), pSizeB = (int)oct::u(h + db + 2, 2);
-        size_t q = al(o + data + (size_t)pp * psize + 2 * (size_t)pt, 4);
-        if (!ok(q + 8 * (size_t)pn + 4 * (size_t)pt + 4 * ((size_t)psA + psB))) return false;
-        const uint8_t *pnm = b + q, *pw = b + q + 4 * pn + 4 * pt, *pslots = pw + 4 * pn + 4 * psA;   // block B slot names
-        o = q + 8 * (size_t)pn + 4 * (size_t)pt + 4 * ((size_t)psA + psB);
-        size_t pdA = al(o, 16), pdB = al(pdA + pSizeA, 16);
-        if (!detail::addSsfPart(s, f, (uint32_t)oct::u(pnames + 4 * i, 4), pSizeB, {pnm, pw, pslots, pnA, pn, psB}, pdB))
-            return false;
-        o = pdB + pSizeB;
-        if (!is30) { while (o < n && b[o]) ++o; ++o; }   // 1.0 names the pass's shader after its blocks
-        if (o > n) return false;
-    }
-    return true;
-}
-
-// One 1.0 settings block -> 3.0: the 3.0 format's defaults with every slot unset, then each 1.0 parameter of the same
-// part and name at its 3.0 offset, each texture slot by name (index through tex; the slot's flag byte with it).
-inline std::string ssfBlock30(const Ssf& f10, const Ssf& f30, const std::string& b10, const std::function<uint32_t(uint32_t)>& tex)
-{
-    static const uint32_t LUT10 = gen30::ehash("g_colorgrade_lut"), LUT30 = gen30::ehash("g_colorgrade_lut_sampler");   // renamed
-    std::string out((size_t)f30.size, '\0');
-    for (auto& [k, p] : f30.parts) {
-        out.replace(p.off, (std::min)(p.def.size(), (size_t)p.size), p.def, 0, (std::min)(p.def.size(), (size_t)p.size));
-        std::fill(out.begin() + p.off, out.begin() + p.off + 8 * p.slots.size(), '\xff');
-    }
-    for (auto& [k, p] : f30.parts) {
-        const SsfPart* q = f10.find(k);
-        if (!q || (size_t)q->off + q->size > b10.size()) continue;
-        for (auto& [h, at] : p.params) {
-            auto x = q->params.find(h);
-            if (x == q->params.end()) continue;
-            int len = (std::min)(at.second, x->second.second);
-            if (len > 0) out.replace(p.off + at.first, len, b10, q->off + x->second.first, len);
-        }
-        for (size_t i = 0; i < p.slots.size(); ++i)
-            for (size_t j = 0; j < q->slots.size(); ++j) {
-                if ((q->slots[j] == LUT10 ? LUT30 : q->slots[j]) != p.slots[i]) continue;
-                uint32_t t = oct::u((const uint8_t*)b10.data() + q->off + 4 * j, 4);
-                uint32_t w[2] = {t == UNSET ? UNSET : tex(t), 0};
-                if (w[0] == UNSET) w[1] = UNSET;
-                memcpy(&out[p.off + 8 * i], w, 8);
-                out[p.off + 8 * p.slots.size() + i] = b10[q->off + 4 * q->slots.size() + j];
-                break;
-            }
-    }
-    return out;
-}
-
-using BlockSizes = std::function<bool(const std::string&, int&, int&, int&)>;
-
-namespace detail {
-
-// The NUL-terminated string at p, which must end inside raw (RE-23); p moves past its NUL
-inline bool cstrAt(const std::string& raw, size_t& p, std::string& out)
-{
-    const size_t e = p < raw.size() ? raw.find('\0', p) : std::string::npos;
-    if (e == std::string::npos) return false;
-    out.assign(raw, p, e - p);
-    p = e + 1;
-    return true;
-}
-
-// count elements of elem bytes at off lie inside size bytes
-inline bool fitsArray(size_t size, size_t off, size_t count, size_t elem)
-{
-    return count <= size / elem && bytes::fits(size, off, count * elem);
-}
-
-inline bool fail(std::string& err, const std::string& why)
-{
-    err = why;
-    return false;
-}
-
-// TEXB at o: 8-byte texture name hashes, 12 bytes apart; each must lie inside raw
-inline bool parseTexb(const std::string& raw, size_t o, Bundle& out, std::string& err)
-{
-    const uint32_t cnt = oct::u((const uint8_t*)raw.data() + o + 12, 4);
-    if (cnt == 0) return true;
-    if (cnt - 1 > raw.size() / 12 || !bytes::fits(raw.size(), o + 20, 12 * (size_t)(cnt - 1) + 8))
-        return fail(err, "TEXB overrun");
-    for (uint32_t i = 0; i < cnt; ++i) out.textures.emplace_back(raw, o + 20 + 12 * (size_t)i, 8);
-    return true;
-}
-
-// MATP name tables at p: count, then count strings; p moves past them
-inline bool matpNames(const std::string& raw, size_t& p, std::vector<std::string>& out)
-{
-    if (!bytes::fits(raw.size(), p, 4)) return false;
-    const uint32_t n = oct::u((const uint8_t*)raw.data() + p, 4);
-    p += 4;
-    for (uint32_t i = 0; i < n; ++i) {
-        out.emplace_back();
-        if (!cstrAt(raw, p, out.back())) return false;
-    }
-    return true;
-}
-
-// a material's blocks, sized by its shader; its slots (m.stride bytes each) lie inside block B (Bundle::slot)
-inline bool matpBlocks(const std::string& raw, size_t& p, const BlockSizes& sizes, Material& m, std::string& err)
-{
-    int A = 0, B = 0, slots = 0;
-    if (!sizes(m.shader, A, B, slots)) return fail(err, "unknown shader " + m.shader);
-    if (A < 0 || B < 0 || slots < 0) return fail(err, "MATP block sizes of shader " + m.shader);
-    if (!bytes::fits(raw.size(), p, (size_t)A + (size_t)B)) return fail(err, "MATP overrun");
-    if ((size_t)slots * (size_t)m.stride > (size_t)B) return fail(err, "MATP slots past block B of shader " + m.shader);
-    m.A = raw.substr(p, A);
-    m.B = raw.substr(p + A, B);
-    m.slots = slots;
-    p += (size_t)A + (size_t)B;
-    return true;
-}
-
-// MATP at o: shader names, material names, shader indices, hashes, then each material's blocks A and B
-inline bool parseMatp(const std::string& raw, size_t o, int stride, const BlockSizes& sizes, Bundle& out, std::string& err)
-{
-    const uint8_t* b = (const uint8_t*)raw.data();
-    const uint32_t nmat = oct::u(b + o + 12, 4);
-    size_t p = al(o + 16, 4);
-    std::vector<std::string> shaders, names;
-    if (!matpNames(raw, p, shaders)) return fail(err, "MATP overrun");
-    p = al(p, 4);
-    if (!bytes::fits(raw.size(), p, 4)) return fail(err, "MATP overrun");
-    if (oct::u(b + p, 4) != nmat) return fail(err, "MATP count");
-    if (!matpNames(raw, p, names)) return fail(err, "MATP overrun");
-    const size_t pIdx = al(p, 2), pHash = al(pIdx + 2 * (size_t)nmat, 4);
-    if (!fitsArray(raw.size(), pIdx, nmat, 2) || !fitsArray(raw.size(), pHash, nmat, 4)) return fail(err, "MATP overrun");
-    p = al(pHash + 4 * (size_t)nmat, 16);
-    for (uint32_t i = 0; i < nmat; ++i) {
-        Material m;
-        const uint32_t sidx = oct::u(b + pIdx + 2 * (size_t)i, 2);
-        if (sidx >= shaders.size()) return fail(err, "MATP shader index");
-        m.name = names[i];
-        m.shader = shaders[sidx];
-        m.hash = oct::u(b + pHash + 4 * (size_t)i, 4);
-        m.stride = stride;
-        if (!matpBlocks(raw, p, sizes, m, err)) return false;
-        out.mats.push_back(m);
-    }
-    return true;
-}
-
-// SSET at o (csize bytes): u32 count twice, names, 16-aligned blocks
-inline void parseSset(const std::string& raw, size_t o, size_t csize, Bundle& out)
-{
-    const uint32_t cnt = oct::u((const uint8_t*)raw.data() + o + 12, 4);
-    size_t p = o + 20;
-    const size_t end = csize <= raw.size() - o ? o + csize : raw.size();
-    for (uint32_t i = 0; i < cnt && p < end; ++i) {
-        const size_t e = raw.find('\0', p);
-        out.ssetNames.push_back(raw.substr(p, e == std::string::npos ? std::string::npos : e - p));
-        p += out.ssetNames.back().size() + 1;
-    }
-    p = al(p, 16);
-    const size_t sz = cnt && end > p ? (end - p) / cnt : 0;
-    for (uint32_t i = 0; i < cnt && sz; ++i) out.ssetBlocks.push_back(raw.substr(p + i * sz, sz));
-}
-
-}  // namespace detail
-
-// sizes(shader, A, B, slots) -> false if unknown. stride: 8 (3.0) or 4 (1.0). false: err says why.
-inline bool parseBundle(const std::string& raw, Bundle& out, int stride, const BlockSizes& sizes, std::string* err)
-{
-    const uint8_t* b = (const uint8_t*)raw.data();
-    if (raw.size() < 16 || memcmp(b, "BNDL", 4)) { if (err) *err = "not a BNDL"; return false; }
-    uint32_t n = oct::u(b + 12, 4);
-    size_t o = 16;
-    std::string why;
-    for (uint32_t c = 0; c < n && bytes::fits(raw.size(), o, 16); ++c) {
-        uint32_t csize = oct::u(b + o + 8, 4);
-        const bool sset = !memcmp(b + o, "SSET", 4) && bytes::fits(raw.size(), o, 20);
-        bool ok = true;
-        if (!memcmp(b + o, "TEXB", 4)) ok = detail::parseTexb(raw, o, out, why);
-        else if (!memcmp(b + o, "MATP", 4)) ok = detail::parseMatp(raw, o, stride, sizes, out, why);
-        else if (sset) detail::parseSset(raw, o, csize, out);
-        if (!ok) {
-            if (err) *err = why;
-            return false;
-        }
-        // a chunk past the end ends the walk, as the next bounds check would; o never wraps (A-26 form)
-        if (!csize || csize > raw.size() - o) break;
-        o += csize;
-    }
-    return true;
-}
-
-// matp.build: TEXB + MATP (+ SSET when given), file-relative alignment.
-inline std::string buildBundle(const std::vector<std::string>& textures, const std::vector<Material>& mats,
-                               const std::vector<std::string>& ssetNames = {}, const std::vector<std::string>& ssetBlocks = {})
-{
-    auto u32 = [](std::string& s, uint32_t v) { s.append((const char*)&v, 4); };
-    std::string texb = "TEXB";
-    u32(texb, 3); u32(texb, 0); u32(texb, (uint32_t)textures.size()); u32(texb, 0);
-    for (auto& t : textures) { texb += t; u32(texb, 0xffffffff); }
-    texb.resize(al(texb.size(), 16), '\0');
-    uint32_t ts = (uint32_t)texb.size(); memcpy(&texb[8], &ts, 4);
-
-    std::vector<std::string> shaders;
-    for (auto& m : mats) {
-        bool seen = false;
-        for (auto& s : shaders) seen |= s == m.shader;
-        if (!seen) shaders.push_back(m.shader);
-    }
-    size_t base = 16 + texb.size();
-    std::string m = "MATP";
-    u32(m, 2); u32(m, 0); u32(m, (uint32_t)mats.size());
-    auto pad = [&](size_t a) { m.resize(al(base + m.size(), a) - base, '\0'); };
-    pad(4); u32(m, (uint32_t)shaders.size());
-    for (auto& s : shaders) { m += s; m.push_back('\0'); }
-    pad(4); u32(m, (uint32_t)mats.size());
-    for (auto& x : mats) { m += x.name; m.push_back('\0'); }
-    pad(2);
-    for (auto& x : mats) {
-        uint16_t i = 0;
-        while (shaders[i] != x.shader) ++i;
-        m.append((const char*)&i, 2);
-    }
-    pad(4);
-    for (auto& x : mats) u32(m, x.hash);
-    pad(16);
-    for (auto& x : mats) { m += x.A; m += x.B; }
-    uint32_t ms = (uint32_t)m.size(); memcpy(&m[8], &ms, 4);
-    std::string body = texb + m, out = "BNDL";
-    if (!ssetBlocks.empty()) {   // 'SSET' ver 0, size, n, n, names, blocks 16-aligned in the file (as 3.0 realms ship it)
-        size_t at = 16 + body.size();
-        std::string s = "SSET";
-        u32(s, 0); u32(s, 0); u32(s, (uint32_t)ssetBlocks.size()); u32(s, (uint32_t)ssetBlocks.size());
-        for (auto& nm : ssetNames) { s += nm; s.push_back('\0'); }
-        s.resize(al(at + s.size(), 16) - at, '\0');
-        for (auto& blk : ssetBlocks) s += blk;
-        s.resize(al(at + s.size(), 16) - at, '\0');
-        uint32_t ss = (uint32_t)s.size(); memcpy(&s[8], &ss, 4);
-        body += s;
-    }
-    u32(out, 1); u32(out, (uint32_t)(16 + body.size())); u32(out, ssetBlocks.empty() ? 2 : 3);
-    return out + body;
+    return {{gen30::ehash("g_colorgrade_lut"), gen30::ehash("g_colorgrade_lut_sampler")}};
 }
 
 // ---- the world transcode ----
@@ -711,10 +402,9 @@ struct IO {
     // (R plans), as every shipped skinned primitive is stored (3,396 of 3,396; rigid ones 'main', 75,895 of 75,895).
     // Off: the 'main' layout, bones dropped, which the GPU skinning pass then reads as bones (cfg skinlayout10)
     bool skinLayout = false;
-    // both games' scenesettingsformat.ssf: when set, a bundle's 1.0 SSET chunk is re-laid into 3.0's (ssfBlock30) and
-    // kept; without it the transcoded bundle had no scene settings at all (no bloom, fog, grading: cfg scenesettings10)
-    const Ssf* ssf10 = nullptr;
-    const Ssf* ssf30 = nullptr;
+    // cfg scenesettings10: both games' scenesettingsformat.ssf; a 1.0 SSET chunk is re-laid into 3.0's and kept
+    const ssf::Format* ssf10 = nullptr;
+    const ssf::Format* ssf30 = nullptr;
     // the served vformat.vtxf's re-laid 1.0 formats (gen30::mergeVtxf): a translated primitive in one has its
     // trailing vertex colour split into a stream of its own, as that layout says
     const std::map<uint32_t, gen30::ColourTail>* tails10 = nullptr;
@@ -746,12 +436,12 @@ struct Result {
     std::vector<std::pair<std::string, std::string>> shaders;   // per 1.0 material: (its 1.0 shader, the shader served)
 };
 
-struct Src { Bundle b; int i; };   // one material of a source bundle (merge input)
+struct Src { bndl::Bundle b; int i; };   // one material of a source bundle (merge input)
 
 namespace detail {
 
 // The table's material index inside the bundle read from the install; another 3.0 build moves it (RE-18)
-inline bool hasMaterial(const Bundle& b, const Ref& ref, std::vector<std::string>& problems)
+inline bool hasMaterial(const bndl::Bundle& b, const Ref& ref, std::vector<std::string>& problems)
 {
     if (ref.idx >= 0 && (size_t)ref.idx < b.mats.size()) return true;
     problems.push_back("3.0 bundle " + ref.extract + ": no material " + std::to_string(ref.idx));
@@ -762,10 +452,10 @@ inline bool hasMaterial(const Bundle& b, const Ref& ref, std::vector<std::string
 inline bool texturesInRange(const std::vector<Src>& srcs, std::vector<std::string>& problems)
 {
     for (const Src& s : srcs) {
-        const Material& m = s.b.mats[s.i];
+        const bndl::Material& m = s.b.mats[s.i];
         for (int k = 0; k < m.slots; ++k) {
             const uint32_t t = s.b.slot(m, k);
-            if (t == UNSET || t < s.b.textures.size()) continue;
+            if (t == bndl::kUnset || t < s.b.textures.size()) continue;
             problems.push_back(m.name + ": texture index " + std::to_string(t) + " past the bundle's TEXB");
             return false;
         }
@@ -810,8 +500,8 @@ struct MaterialRun {
     const IO& io;
     const MaterialInput& in;
     Result& r;
-    Bundle b10;
-    std::map<std::string, Bundle> cache30;   // by extract path, for this call only
+    bndl::Bundle b10;
+    std::map<std::string, bndl::Bundle> cache30;   // by extract path, for this call only
     std::vector<Src> srcs;
     std::string err;                          // the last bundle parse failure
 };
@@ -851,16 +541,16 @@ inline bool BlockSizes10::get(const std::string& sh, int& A, int& B, int& slots)
 }
 
 // The 3.0 bundle at ref.extract, read once per call; null (and a problem) when it does not read
-inline Bundle* bundle30(MaterialRun& run, const Ref& ref)
+inline bndl::Bundle* bundle30(MaterialRun& run, const Ref& ref)
 {
     auto it = run.cache30.find(ref.extract);
     if (it != run.cache30.end()) return &it->second;
     std::string raw;
-    Bundle b;
+    bndl::Bundle b;
     const auto sizes3 = [&](const std::string& sh, int& A, int& B, int& slots) {
         return blockSizes30(run.T, sh, A, B, slots);
     };
-    if (!run.io.read30(ref.extract, raw) || !parseBundle(raw, b, kSlotStride30, sizes3, &run.err)) {
+    if (!run.io.read30(ref.extract, raw) || !bndl::parse(raw, b, kSlotStride30, sizes3, &run.err)) {
         const std::string why = raw.empty() ? std::string("unreadable") : run.err;
         run.r.problems.push_back("3.0 bundle " + ref.extract + ": " + why);
         return nullptr;
@@ -886,7 +576,8 @@ inline SkinUse skinUse(const IO& io, const std::set<uint32_t>* formats)
 }
 
 // skintr10: only when drawn skinned alone, each format with a planned 3.0 skin target, and not real
-inline bool skinTranslates(const MaterialRun& run, const Material& m10, const std::set<uint32_t>& formats, SkinUse u)
+inline bool skinTranslates(const MaterialRun& run, const bndl::Material& m10, const std::set<uint32_t>& formats,
+                           SkinUse u)
 {
     if (!run.io.translateSkinned || u.rigid || isReal(run.T, m10.name)) return false;
     for (uint32_t c : formats) {
@@ -897,18 +588,18 @@ inline bool skinTranslates(const MaterialRun& run, const Material& m10, const st
 }
 
 // dm, holding the 1.0 bundle's textures, as a merge source
-inline void addOwnSource(MaterialRun& run, const Material& dm)
+inline void addOwnSource(MaterialRun& run, const bndl::Material& dm)
 {
-    Bundle one;
+    bndl::Bundle one;
     one.textures = run.b10.textures;
     one.mats.push_back(dm);
     run.srcs.push_back({one, 0});
 }
 
-inline void placeTranslated(MaterialRun& run, int k, const Material& m10, const gen30::Shd10& s10, SkinUse u)
+inline void placeTranslated(MaterialRun& run, int k, const bndl::Material& m10, const gen30::Shd10& s10, SkinUse u)
 {
     gen30::Layout L = gen30::layout(s10);
-    Material dm;
+    bndl::Material dm;
     dm.name = m10.name;
     dm.shader = "x" + m10.shader;
     dm.hash = m10.hash ^ kTranslatedHashXor;
@@ -926,7 +617,7 @@ inline void placeTranslated(MaterialRun& run, int k, const Material& m10, const 
 }
 
 // The translated tier: the material keeps its 1.0 shader as 'x'<shader>, with its own blocks. false: another tier
-inline bool tryTranslated(MaterialRun& run, int k, const Material& m10, const std::set<uint32_t>* formats)
+inline bool tryTranslated(MaterialRun& run, int k, const bndl::Material& m10, const std::set<uint32_t>* formats)
 {
     const IO& io = run.io;
     const SkinUse u = skinUse(io, formats);
@@ -940,7 +631,7 @@ inline bool tryTranslated(MaterialRun& run, int k, const Material& m10, const st
     return true;
 }
 
-inline std::string slotTextures(const Bundle& b, const Material& m)
+inline std::string slotTextures(const bndl::Bundle& b, const bndl::Material& m)
 {
     std::string l;
     for (int s = 0; s < m.slots; ++s) {
@@ -951,9 +642,9 @@ inline std::string slotTextures(const Bundle& b, const Material& m)
 }
 
 // The real tier: the 3.0 material as it ships. false: a problem says why
-inline bool addReal(MaterialRun& run, const Material& m10, const Ref& ref)
+inline bool addReal(MaterialRun& run, const bndl::Material& m10, const Ref& ref)
 {
-    Bundle* bnd = bundle30(run, ref);
+    bndl::Bundle* bnd = bundle30(run, ref);
     if (!bnd || !hasMaterial(*bnd, ref, run.r.problems)) return false;
     if (run.io.verbose) {   // the textures side by side: a GUID 3.0 reused shows as a mismatch
         std::string l = "real " + m10.name + " " + ref.extract + " 1.0:" + slotTextures(run.b10, m10);
@@ -1028,7 +719,7 @@ inline std::optional<int> colourBufferRoles(const Table& T, const std::set<uint3
 }
 
 // The generic tier: the most common 3.0 shader taking a twin of every drawn format; colour-buffer readers first
-inline const Ref* genericDonor(const MaterialRun& run, const Material& m10, const std::set<uint32_t>* formats)
+inline const Ref* genericDonor(const MaterialRun& run, const bndl::Material& m10, const std::set<uint32_t>* formats)
 {
     const std::vector<std::set<uint32_t>> need = twinSets(run.T, formats);
     const std::set<uint32_t> slots10 = slotNames10(run.io, m10.shader);
@@ -1048,7 +739,7 @@ inline const Ref* genericDonor(const MaterialRun& run, const Material& m10, cons
 struct DonorPick { const Ref* ref = nullptr; const char* tier = "same-sh"; };
 
 // same-sh: the table's donor for the 1.0 shader; else generic. No donor: a problem
-inline DonorPick pickDonor(MaterialRun& run, const Material& m10, const std::set<uint32_t>* formats)
+inline DonorPick pickDonor(MaterialRun& run, const bndl::Material& m10, const std::set<uint32_t>* formats)
 {
     DonorPick p;
     auto di = run.T.donors.find(m10.shader);
@@ -1063,36 +754,37 @@ inline DonorPick pickDonor(MaterialRun& run, const Material& m10, const std::set
 }
 
 // On another shader the 1.0 textures go in order into the slots whose role materials fill (FORMATS.md 6.4)
-inline std::vector<uint32_t> genericSlots(const Table& T, const std::string& shader10, const Material& dm,
+inline std::vector<uint32_t> genericSlots(const Table& T, const std::string& shader10, const bndl::Material& dm,
                                           std::vector<uint32_t> used)
 {
     auto g = T.genericSlots.find(shader10);
     if (g != T.genericSlots.end()) {
         std::vector<uint32_t> pick;
-        for (int i : g->second) pick.push_back(i < (int)used.size() ? used[i] : UNSET);
+        for (int i : g->second) pick.push_back(i < (int)used.size() ? used[i] : bndl::kUnset);
         used = pick;
     }
     std::vector<uint32_t> set;
     for (uint32_t t : used)
-        if (t != UNSET) set.push_back(t);
+        if (t != bndl::kUnset) set.push_back(t);
     std::vector<int> targets;
     const auto& roles = T.shaders.at(dm.shader).roles;
     for (size_t s = 0; s < roles.size(); ++s)
         if (!roles[s].empty() && T.filled.count(roles[s])) targets.push_back((int)s);
-    used.assign(dm.slots, UNSET);
+    used.assign(dm.slots, bndl::kUnset);
     for (size_t ti = 0; ti < targets.size() && ti < set.size(); ++ti)   // targets ascend: each slot once
         if (targets[ti] < dm.slots) used[targets[ti]] = set[ti];
     return used;
 }
 
 // The 1.0 material's textures into the donor's slots (whole 8-byte slots, FORMATS.md 6.2) -> the slot assignment
-inline std::vector<uint32_t> substituteSlots(const Table& T, const Bundle& b10, const Material& m10, Material& dm)
+inline std::vector<uint32_t> substituteSlots(const Table& T, const bndl::Bundle& b10, const bndl::Material& m10,
+                                             bndl::Material& dm)
 {
     std::vector<uint32_t> used;
     for (int s = 0; s < m10.slots; ++s) used.push_back(b10.slot(m10, s));
     if (dm.shader != m10.shader) used = genericSlots(T, m10.shader, dm, used);
     for (int s = 0; s < dm.slots; ++s) {
-        uint32_t t = s < (int)used.size() ? used[s] : UNSET, w2 = t == UNSET ? UNSET : 0;
+        uint32_t t = s < (int)used.size() ? used[s] : bndl::kUnset, w2 = t == bndl::kUnset ? bndl::kUnset : 0;
         memcpy(&dm.B[dm.stride * s], &t, sizeof t);
         memcpy(&dm.B[dm.stride * s + sizeof t], &w2, sizeof w2);
     }
@@ -1100,7 +792,7 @@ inline std::vector<uint32_t> substituteSlots(const Table& T, const Bundle& b10, 
 }
 
 // The donor's 3.0 shader's block A, when it reads and fits the donor material's block
-inline std::optional<shd::BlockA> donorBlockA(const IO& io, const Material& dm)
+inline std::optional<shd::BlockA> donorBlockA(const IO& io, const bndl::Material& dm)
 {
     if (!io.read30) return std::nullopt;
     std::string raw30;
@@ -1111,7 +803,7 @@ inline std::optional<shd::BlockA> donorBlockA(const IO& io, const Material& dm)
 }
 
 // 3.0's defaults, then each 1.0 block A parameter at 3.0's offset for its name
-inline std::string blockAByName(const IO& io, const Material& m10, const shd::BlockA& a30)
+inline std::string blockAByName(const IO& io, const bndl::Material& m10, const shd::BlockA& a30)
 {
     const std::string& a10 = m10.A;
     std::string A = a30.defA, raw10;
@@ -1128,7 +820,7 @@ inline std::string blockAByName(const IO& io, const Material& m10, const shd::Bl
 }
 
 // Block A by parameter name: copied raw, 1.0's layout put parameters 3.0 moved at the wrong offsets
-inline void relayBlockA(const IO& io, const Material& m10, Material& dm)
+inline void relayBlockA(const IO& io, const bndl::Material& m10, bndl::Material& dm)
 {
     const std::string& a10 = m10.A;
     const bool firstParam = a10.size() >= kParamBytes && dm.A.size() >= kParamBytes;
@@ -1138,15 +830,15 @@ inline void relayBlockA(const IO& io, const Material& m10, Material& dm)
 }
 
 // octtest --render with RENDER_VERBOSE: which 1.0 texture went to which donor slot
-inline void logSubstitute(const MaterialRun& run, const char* tier, const Material& m10, const Material& dm,
+inline void logSubstitute(const MaterialRun& run, const char* tier, const bndl::Material& m10, const bndl::Material& dm,
                           const std::vector<uint32_t>& used)
 {
     std::string l = std::string(tier) + " " + m10.name + " [" + m10.shader + " -> " + dm.shader + "]";
     const auto& roles = run.T.shaders.at(dm.shader).roles;
     for (int s = 0; s < dm.slots; ++s) {
-        uint32_t t = s < (int)used.size() ? used[s] : UNSET;
+        uint32_t t = s < (int)used.size() ? used[s] : bndl::kUnset;
         const bool named = s < (int)roles.size() && !roles[s].empty();
-        const bool none = t == UNSET || t >= run.b10.textures.size();
+        const bool none = t == bndl::kUnset || t >= run.b10.textures.size();
         const std::string texture = none ? std::string("none") : hex8(run.b10.textures[t]);
         l += " " + (named ? roles[s] : std::string("-")) + "=" + texture;
     }
@@ -1154,11 +846,11 @@ inline void logSubstitute(const MaterialRun& run, const char* tier, const Materi
 }
 
 // autobundle._substitute: the donor's blocks holding the 1.0 material's own textures. false: a problem says why
-inline bool addSubstitute(MaterialRun& run, const Material& m10, const DonorPick& pick)
+inline bool addSubstitute(MaterialRun& run, const bndl::Material& m10, const DonorPick& pick)
 {
-    Bundle* bnd = bundle30(run, *pick.ref);
+    bndl::Bundle* bnd = bundle30(run, *pick.ref);
     if (!bnd || !hasMaterial(*bnd, *pick.ref, run.r.problems)) return false;
-    Material dm = bnd->mats[pick.ref->idx];
+    bndl::Material dm = bnd->mats[pick.ref->idx];
     const std::vector<uint32_t> used = substituteSlots(run.T, run.b10, m10, dm);
     relayBlockA(run.io, m10, dm);
     if (run.io.verbose) logSubstitute(run, pick.tier, m10, dm, used);
@@ -1170,7 +862,7 @@ inline bool addSubstitute(MaterialRun& run, const Material& m10, const DonorPick
 }
 
 // The real tier, else a donor's (same-sh, generic). false: a problem says why
-inline bool placeOnDonor(MaterialRun& run, const Material& m10, const std::set<uint32_t>* formats)
+inline bool placeOnDonor(MaterialRun& run, const bndl::Material& m10, const std::set<uint32_t>* formats)
 {
     if (isReal(run.T, m10.name)) return addReal(run, m10, run.T.matindex.at(m10.name));
     const DonorPick pick = pickDonor(run, m10, formats);
@@ -1180,12 +872,12 @@ inline bool placeOnDonor(MaterialRun& run, const Material& m10, const std::set<u
 // Material k onto its first tier; shaderVf gets the formats its final shader declares (not for translated ones)
 inline void placeMaterial(MaterialRun& run, int k, std::map<int, const std::set<uint32_t>*>& shaderVf)
 {
-    const Material& m10 = run.b10.mats[k];
+    const bndl::Material& m10 = run.b10.mats[k];
     auto dk = run.in.drawn.find(k);
     const std::set<uint32_t>* formats = dk != run.in.drawn.end() ? &dk->second : nullptr;
     if (tryTranslated(run, k, m10, formats)) return;
     if (!placeOnDonor(run, m10, formats)) return;
-    const Material& fin = run.srcs.back().b.mats[run.srcs.back().i];
+    const bndl::Material& fin = run.srcs.back().b.mats[run.srcs.back().i];
     run.r.shaders.push_back({m10.shader, fin.shader});
     shaderVf[k] = &run.T.shaders.at(fin.shader).vf;
 }
@@ -1200,14 +892,14 @@ inline uint32_t textureIndex(std::vector<std::string>& tex, const std::string& h
 }
 
 // matp.merge: TEXB union in first-use order, slot indices rebased (index word only)
-inline std::vector<Material> mergeSources(const std::vector<Src>& srcs, std::vector<std::string>& tex)
+inline std::vector<bndl::Material> mergeSources(const std::vector<Src>& srcs, std::vector<std::string>& tex)
 {
-    std::vector<Material> mats;
+    std::vector<bndl::Material> mats;
     for (auto& s : srcs) {
-        Material m = s.b.mats[s.i];
+        bndl::Material m = s.b.mats[s.i];
         for (int k = 0; k < m.slots; ++k) {
             uint32_t t = s.b.slot(m, k);
-            if (t == UNSET) continue;
+            if (t == bndl::kUnset) continue;
             uint32_t at = textureIndex(tex, s.b.textures[t]);
             memcpy(&m.B[m.stride * k], &at, sizeof at);
         }
@@ -1217,12 +909,15 @@ inline std::vector<Material> mergeSources(const std::vector<Src>& srcs, std::vec
 }
 
 // Scene settings re-laid into 3.0's format; their textures (LUT, environment map) join the merged TEXB
-inline std::vector<std::string> relaySceneSettings(const IO& io, const Bundle& b10, std::vector<std::string>& tex)
+inline std::vector<std::string> relaySceneSettings(const IO& io, const bndl::Bundle& b10, std::vector<std::string>& tex)
 {
     std::vector<std::string> sset;
     if (!io.ssf10 || !io.ssf30) return sset;
-    const auto index = [&](uint32_t t) { return t < b10.textures.size() ? textureIndex(tex, b10.textures[t]) : UNSET; };
-    for (auto& blk : b10.ssetBlocks) sset.push_back(ssfBlock30(*io.ssf10, *io.ssf30, blk, index));
+    const auto index = [&](uint32_t t) {
+        return t < b10.textures.size() ? textureIndex(tex, b10.textures[t]) : bndl::kUnset;
+    };
+    const std::map<uint32_t, uint32_t> renamed = ssfRenamedSlots10();
+    for (auto& blk : b10.ssetBlocks) sset.push_back(ssf::relayBlock(*io.ssf10, *io.ssf30, blk, index, renamed));
     return sset;
 }
 
@@ -1235,18 +930,18 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const MaterialInput
     detail::MaterialRun run{T, io, in, r, {}, {}, {}, {}};
     detail::BlockSizes10 sizes10{io, {}};
     const auto sizes1 = [&](const std::string& sh, int& A, int& B, int& slots) { return sizes10.get(sh, A, B, slots); };
-    if (!parseBundle(in.mtb10, run.b10, detail::kSlotStride10, sizes1, &run.err)) {
+    if (!bndl::parse(in.mtb10, run.b10, detail::kSlotStride10, sizes1, &run.err)) {
         r.problems.push_back("1.0 bundle: " + run.err);
         return false;
     }
     for (size_t k = 0; k < run.b10.mats.size(); ++k) detail::placeMaterial(run, (int)k, shaderVf);
     if (!r.problems.empty() || !detail::texturesInRange(run.srcs, r.problems)) return false;
     std::vector<std::string> tex;
-    const std::vector<Material> mats = detail::mergeSources(run.srcs, tex);
+    const std::vector<bndl::Material> mats = detail::mergeSources(run.srcs, tex);
     const std::vector<std::string> sset = detail::relaySceneSettings(io, run.b10, tex);
     r.sceneSettings = (int)sset.size();
     for (auto& t : tex) r.textures10.insert(hex8(t));
-    r.mtb = buildBundle(tex, mats, sset.empty() ? std::vector<std::string>() : run.b10.ssetNames, sset);
+    r.mtb = bndl::build(tex, mats, sset.empty() ? std::vector<std::string>() : run.b10.ssetNames, sset);
     return true;
 }
 

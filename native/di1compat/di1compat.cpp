@@ -242,18 +242,18 @@ static std::map<uint32_t, gen30::ColourTail> g_tails10;   // re-laid 1.0 formats
 static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
 
-// Both games' scenesettingsformat.ssf (render.hpp ssfBlock30), parsed on first use; both or neither (cfg scenesettings10)
+// Both games' scenesettingsformat.ssf (ssf::relayBlock), parsed on first use; both or neither (cfg scenesettings10)
 static void sceneSettingsIO(render::IO& io)
 {
     static std::mutex mx;
     static bool done, ok;
-    static render::Ssf f10, f30;
+    static ssf::Format f10, f30;
     std::lock_guard<std::mutex> lock(mx);
     if (!done) {
         done = true;
         std::string a, b;
         ok = read10s("shaders/shaders/scenesettingsformat.ssf", a) && read30x("3:shaders/shaders/scenesettingsformat.ssf", b) &&
-             render::parseSsf(a, false, f10) && render::parseSsf(b, true, f30);
+             ssf::parse(a, render::kSsfLayout10, f10) && ssf::parse(b, ssf::kLayout30, f30);
         logf("scene settings formats: %s (1.0 block %d B, 3.0 block %d B)", ok ? "ok" : "MISSING", f10.size, f30.size);
     }
     if (ok && g_cfg.sceneSettings10) { io.ssf10 = &f10; io.ssf30 = &f30; }

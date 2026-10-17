@@ -24,6 +24,20 @@ inline uint16_t u16OrZero(const std::string& b, size_t off)
     return v;
 }
 
+// The little-endian u32 / u16 at p; the caller has checked that it fits
+inline uint32_t u32At(const uint8_t* p)
+{
+    uint32_t v;
+    memcpy(&v, p, sizeof v);
+    return v;
+}
+inline uint16_t u16At(const uint8_t* p)
+{
+    uint16_t v;
+    memcpy(&v, p, sizeof v);
+    return v;
+}
+
 // v little-endian at off in s, which already holds those bytes
 inline void put32(std::string& s, size_t off, uint32_t v) { memcpy(&s[off], &v, sizeof v); }
 inline void put16(std::string& s, size_t off, uint16_t v) { memcpy(&s[off], &v, sizeof v); }

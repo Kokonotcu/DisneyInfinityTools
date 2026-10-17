@@ -283,9 +283,9 @@ static int renderTest(char** a)
     io.verbose = getenv("RENDER_VERBOSE") != nullptr;
     io.translate = getenv("RENDER_TRANSLATE") != nullptr;   // real 1.0 shaders (read10 finds shaders/shaders/<x>.shd)
     io.skinLayout = getenv("RENDER_SKIN") != nullptr;       // cfg skinlayout10 (the Python oracle keeps 'main')
-    render::Ssf ssf10, ssf30;                                 // cfg scenesettings10 (RENDER_SSF): SSET re-laid and kept
-    if (getenv("RENDER_SSF") && render::parseSsf(slurp(fs::path(ext10) / "assets/shaders/shaders/scenesettingsformat.ssf"), false, ssf10) &&
-        render::parseSsf(slurp(fs::path(ext30) / "assets/shaders/shaders/scenesettingsformat.ssf"), true, ssf30)) {
+    ssf::Format ssf10, ssf30;                                 // cfg scenesettings10 (RENDER_SSF): SSET re-laid and kept
+    if (getenv("RENDER_SSF") && ssf::parse(slurp(fs::path(ext10) / "assets/shaders/shaders/scenesettingsformat.ssf"), render::kSsfLayout10, ssf10) &&
+        ssf::parse(slurp(fs::path(ext30) / "assets/shaders/shaders/scenesettingsformat.ssf"), ssf::kLayout30, ssf30)) {
         io.ssf10 = &ssf10;
         io.ssf30 = &ssf30;
     }
