@@ -64,6 +64,7 @@ struct Config {
     bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass (supplement.hpp)
     bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (groups.hpp)
     bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType (zones.hpp)
+    bool currencyTrace10 = false;    // probe: currency payouts, pickups and the balances read (trace/currency.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (skin.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (gamedb30.hpp)
@@ -176,6 +177,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"hudmarker10", core::ConfigKind::Flag, offsetof(Config, hudMarker10)},
     {"rewards10", core::ConfigKind::Flag, offsetof(Config, rewards10)},
     {"currency10", core::ConfigKind::Flag, offsetof(Config, currency10)},
+    {"currencytrace10", core::ConfigKind::Flag, offsetof(Config, currencyTrace10)},
     {"psdna30", core::ConfigKind::Flag, offsetof(Config, psdna30)},
     {"avperc10", core::ConfigKind::Flag, offsetof(Config, avperc10)},
     {"spawner10", core::ConfigKind::Flag, offsetof(Config, spawner10)},
