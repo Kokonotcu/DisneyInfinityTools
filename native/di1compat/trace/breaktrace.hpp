@@ -25,6 +25,12 @@ struct Config {
 // Installs the probes when c asks for them, all or none (H1, H2); false when they were refused.
 inline bool install(const Config& c);
 
+// The line for a choreography's start (engine::choreography's starting callback, set only under breaktrace).
+inline void choreographyStart(const uint8_t* cho, const char* name, uint32_t flags)
+{
+    core::logf("breaktrace cho start %p '%s' flags %08X", cho, name, flags);
+}
+
 namespace detail {
 
 namespace eng {

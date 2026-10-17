@@ -35,6 +35,7 @@
 #include "core/veh.hpp"
 #include "core/zip.hpp"
 #include "engine/assets.hpp"
+#include "engine/choreography.hpp"
 #include "engine/crt.hpp"
 #include "engine/playsetslot.hpp"
 #include "engine/shaderlinks.hpp"
@@ -450,26 +451,15 @@ static bool memtestMatch(const char* p)
     return false;
 }
 
-// FUN_01449390, thiscall on a choreography instance (+0x38 its path, +0x1b4 flags: 0x20 audio sync): its start.
-typedef void(__fastcall* BtStartFn)(uint8_t* self, void* edx);
-static BtStartFn g_choStart;
-static void __fastcall hkChoStart(uint8_t* self, void*)
-{
-    char name[100] = "";
-    safeCopy(name, sizeof(name), *(const char**)(self + 0x38));
-    uint32_t flags = *(uint32_t*)(self + 0x1b4);
-    if (g_cfg.breakTrace) logf("breaktrace cho start %p '%s' flags %08X", self, name, flags);
-    g_choStart(self, nullptr);
-    if (g_cfg.audio10 && g_cfg.cineSync10) audio::choreographyStarted(name, flags);
-}
-
-// The choreography start hook (H1): cinesync10 starts 1.0's audio-sync sound event (audio.hpp); breaktrace logs.
+// The choreography start hook: cinesync10 starts 1.0's audio-sync sound event (audio.hpp); breaktrace logs.
 static bool installChoStart(const di1::Config& c)
 {
+    engine::choreography::Config cho;
+    if (c.breakTrace) cho.starting = trace::breaktrace::choreographyStart;
     const bool cineSync = c.audio10 && c.cineSync10;
-    if (!c.breakTrace && !cineSync) return true;
-    return hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart,
-                (void**)&g_choStart);
+    if (cineSync)
+        cho.started = [](const uint8_t*, const char* name, uint32_t flags) { audio::choreographyStarted(name, flags); };
+    return engine::choreography::install(cho);
 }
 // Asset defs lookup FUN_00703340(key) (thiscall on the AssetDefsManager, ret 4): DefID -> FileName of a Cho, "" when
 // no loaded assetdefs has it. A 3.0 playset's gamedb package carries assetdefs.lua (30 engine entries every playset
