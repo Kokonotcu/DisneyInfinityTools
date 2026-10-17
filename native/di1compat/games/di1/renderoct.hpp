@@ -427,9 +427,14 @@ inline std::vector<std::vector<uint32_t>> appendStreams(const std::vector<PrimOu
 // sub + vbase, indexBytes each, appended to buf -> where they start
 inline uint32_t appendIndices(const std::vector<uint32_t>& sub, uint32_t vbase, int indexBytes, std::string& buf)
 {
-    const uint32_t at = (uint32_t)buf.size();
-    for (uint32_t x : sub) bytes::appendLe(buf, x + vbase, indexBytes);
-    return at;
+    const size_t at = buf.size();
+    buf.resize(at + sub.size() * indexBytes);
+    if (indexBytes == kIndexBytes32) {
+        for (size_t i = 0; i < sub.size(); ++i) bytes::put32(buf, at + i * kIndexBytes32, sub[i] + vbase);
+        return (uint32_t)at;
+    }
+    for (size_t i = 0; i < sub.size(); ++i) bytes::put16(buf, at + i * kIndexBytes16, (uint16_t)(sub[i] + vbase));
+    return (uint32_t)at;
 }
 
 // Vdata: [streams, vertices, (0, offset, stride) per stream]
