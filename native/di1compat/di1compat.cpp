@@ -48,6 +48,7 @@
 #include "games/di1/econ.hpp"
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
+#include "games/di1/meridian.hpp"
 #include "games/di1/octsteps.hpp"
 #include "games/di1/options.hpp"
 #include "games/di1/playsets.hpp"
@@ -484,42 +485,6 @@ static trace::mission::Config missionTraceOf(const di1::Config& c)
     m.ownMission = di1::playsets::ownMission;
     if (g_rdoc) m.ownMissionTick = armRenderDocCapture;
     return m;
-}
-// Meridian class registry (FUN_0178e330, run once at boot by FUN_013aaba0): the 1.0 classes of mission.hpp kAliases
-// are registered after it with their 3.0 template. The transcoder treats them as registered only once that has run,
-// so a registry built before the hook (plugin loaded late) leaves them stand-ins, never slotless (verify-meridian 6).
-// native10: then the native classes of mernode.hpp. Only the SYS-1 probe is added here (no graph names it, so the
-// registration path runs at boot and nothing instantiates it); 1.0 classes are added with mernode::add before this.
-typedef void(__cdecl* VoidFn)();
-static VoidFn g_merRegistry;
-static int g_probeClass = -1;
-static void probeImpulse(uint8_t* node, int, void* payload) { mernode::fire(node, g_probeClass, 1, payload); }
-static void __cdecl hkMerRegistry()
-{
-    g_merRegistry();
-    if (g_cfg.aliases10) {
-        typedef void(__cdecl * RegFn)(const char* name);
-        for (auto& a : mission::kAliases) {
-            ((RegFn)rt(a.templateVa))(a.name);
-            logf("meridian: 1.0 class %s registered with the template of %s", a.name, a.twin);
-        }
-        mer::addAliases(g_mer);
-    }
-    if (g_cfg.native10) {
-        if (g_probeClass < 0)
-            g_probeClass = mernode::add({"DI1NativeProbe", {{"Link_In", mernode::In}, {"Link_Out", mernode::Out}}, {}, 0, probeImpulse});
-        int n = mernode::registerAll(rt, static_cast<void (*)(const char*, ...)>(logf), g_mer);
-        logf("meridian native: %d of %d classes registered", n, mernode::count());
-    }
-}
-
-// The Meridian registry hook (H1): aliases10 or native10, and only with the mer table loaded.
-static bool installMerRegistry(const di1::Config& c)
-{
-    const bool classes = c.aliases10 || c.native10;
-    if (!classes || !g_merOk) return true;
-    return hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry,
-                (void**)&g_merRegistry);
 }
 
 // Open half: a .lua stream (3.0's, or 1.0's served) as CHD bytes; nullptr leaves the open as it was.
@@ -1256,7 +1221,7 @@ extern "C" void __stdcall Pentane_Main()
     installChoStart(g_cfg);
     trace::breaktrace::install({g_cfg.breakTrace});
     trace::teardown::install({g_cfg.teardownTrace});
-    installMerRegistry(g_cfg);
+    di1::meridian::install({g_cfg.aliases10, g_cfg.native10, g_merOk ? &g_mer : nullptr});
     trace::locktrace::install({g_cfg.lockTrace10});
     trace::opacity::install({g_cfg.opacityLog10});
     trace::fade::install({g_cfg.fadeProbe10});
