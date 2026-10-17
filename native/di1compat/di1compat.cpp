@@ -38,6 +38,7 @@
 #include "engine/assets.hpp"
 #include "engine/choreography.hpp"
 #include "engine/crt.hpp"
+#include "engine/langkeys.hpp"
 #include "engine/playsetslot.hpp"
 #include "engine/shaderlinks.hpp"
 #include "engine/shaders.hpp"
@@ -57,9 +58,13 @@
 #include "games/di1/playsets.hpp"
 #include "games/di1/popin.hpp"
 #include "games/di1/renderio.hpp"
+#include "games/di1/render10.hpp"
 #include "games/di1/screens.hpp"
 #include "games/di1/session.hpp"
+#include "games/di1/shaders10.hpp"
+#include "games/di1/tables.hpp"
 #include "games/di1/transcode.hpp"
+#include "games/di1/transcodeio.hpp"
 #include "games/di1/vfs.hpp"
 #include "games/di1/zones.hpp"
 #include "formats/oct.hpp"
@@ -143,50 +148,6 @@ static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set
 
 static std::string g_gameDir;   // the 3.0 install; set once in Pentane_Main, before any hook
 
-// Every 3.0 table's key hashes for language lang (both .dct kinds of each assets\lang package), read once (text10).
-static const std::unordered_set<uint32_t>& lang30(const std::string& lang)
-{
-    static std::mutex mx;
-    static std::map<std::string, std::unordered_set<uint32_t>> cache;
-    std::lock_guard<std::mutex> lock(mx);
-    auto it = cache.find(lang);
-    if (it != cache.end()) return it->second;
-    auto& s = cache[lang];
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((g_gameDir + "\\assets\\lang\\*").c_str(), &fd);
-    for (BOOL ok = h != INVALID_HANDLE_VALUE; ok; ok = FindNextFileA(h, &fd)) {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
-        std::string pkg = fd.cFileName, t;
-        for (const char* v : {"_win32.dct", "_pc_con.dct"})
-            if (read30x("3:lang/" + pkg + "/" + pkg + "/" + lang + v, t)) dct::hashes(t, s);
-    }
-    if (h != INVALID_HANDLE_VALUE) FindClose(h);
-    return s;
-}
-
-static rentable::Table g_render;
-static vtxf::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
-static vtxf::VFormats g_vf30;              // 3.0's (skintr10: the formats skinned passes draw in), set with the vtxf
-static std::map<uint32_t, vtxf::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
-static bool g_renderOk;
-
-// Both games' scenesettingsformat.ssf (ssf::relayBlock), parsed once; both or neither (scenesettings10).
-static void sceneSettingsIO(render::IO& io)
-{
-    static std::mutex mx;
-    static bool done, ok;
-    static ssf::Format f10, f30;
-    std::lock_guard<std::mutex> lock(mx);
-    if (!done) {
-        done = true;
-        ok = di1::sceneSettings(read10s, read30x, f10, f30);
-        logf("scene settings formats: %s (1.0 block %d B, 3.0 block %d B)", ok ? "ok" : "MISSING", f10.size, f30.size);
-    }
-    if (ok && g_cfg.sceneSettings10) { io.ssf10 = &f10; io.ssf30 = &f30; }
-}
-static mer::Table g_mer;
-static bool g_merOk;
-
 // D3D11 rejects block-compressed textures under 4x4; a 1x1/2x2 one-mip DXT file holds a whole block:
 // header only (conv.copy_texture).
 static void padSmallDxt(std::string& d)
@@ -198,151 +159,6 @@ static void padSmallDxt(std::string& d)
         uint32_t v[2] = {h < 4 ? 4u : h, w < 4 ? 4u : w};
         memcpy(&d[12], v, 8);
     }
-}
-
-// The render half of a 1.0 asset with a material bundle (render.hpp): materials onto 3.0 shaders, vertices into
-// their formats.
-static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string& note)
-{
-    if (!g_renderOk) { note += "render table missing "; return false; }
-    size_t b = p.rfind('/');
-    if (b == std::string::npos) return false;
-    std::string dir = p.substr(0, b), stem = p.substr(b + 1, p.size() - b - 1 - 4);
-    std::string mtb, vbuf, ibuf;
-    if (!read10s(dir + "/" + stem + ".mtb", mtb)) return false;     // nothing to render
-    read10s(dir + "/" + stem + "_0.vbuf", vbuf);
-    read10s(dir + "/" + stem + "_0.ibuf", ibuf);
-    if (g_cfg.skin10) note += npcrt::skin10(f, vbuf, ibuf);
-    di1::WorldRender w = di1::worldRenderOf(g_cfg);
-    w.vf10 = &g_vf10;
-    w.vf30 = &g_vf30;
-    w.tails10 = &g_tails10;
-    render::IO io = di1::worldIO(w, read10s, read30x);
-    io.log = [](const std::string& s) { logf("%s", s.c_str()); };
-    io.translatable = [](const std::string& sh) { return engine::shaders::make(("x" + sh).c_str()) != nullptr; };
-    sceneSettingsIO(io);
-    render::Result r;
-    if (!render::transcodeWorld(g_render, io, f, {stem, mtb, vbuf, ibuf}, r)) {
-        for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
-        note += "render FAILED ";
-        return false;
-    }
-    di1::session::Files files = {{dir + "/" + stem + ".mtb", std::move(r.mtb)}};
-    if (!r.vbuf.empty()) files.push_back({dir + "/" + stem + "_0.vbuf", std::move(r.vbuf)});
-    if (!r.ibuf.empty()) files.push_back({dir + "/" + stem + "_0.ibuf", std::move(r.ibuf)});
-    if (!r.ibuf2.empty()) files.push_back({dir + "/" + stem + "_2.ibuf", std::move(r.ibuf2)});
-    di1::session::keep(std::move(files));
-    // at most 179 characters (60 fixed, five numbers, both tails): never cut
-    char buf[200];
-    snprintf(buf, sizeof(buf), "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s%s) ",
-             r.tiers["translated"], r.tiers["real"], r.tiers["same-sh"], r.tiers["generic"],
-             (unsigned)r.textures10.size(),
-             r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "",
-             r.sceneSettings ? (", " + std::to_string(r.sceneSettings) + " scene settings").c_str() : "");
-    note += buf;
-    return true;
-}
-
-// clip10motions: is a clip template's folder ('characters/kiosk' of 'characters/kiosk/kiosk.ct') in the 3.0 install?
-static bool has30(std::string dir)
-{
-    std::string a = g_gameDir + "\\assets\\" + dir;
-    for (char& c : a) if (c == '/') c = '\\';
-    if (GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
-    return GetFileAttributesA((a + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
-// gp: the engine's surface table, index order (FUN_00754eb0 fills *(0x2204830): +0xc {char*, bool}[], +0x10 count);
-// empty until startup2 loads.
-static std::vector<std::string> surfaceTable30()
-{
-    std::vector<std::string> t;
-    uintptr_t obj = *(const uintptr_t*)rt(0x02204830);
-    if (!sys::readable((const void*)obj, 0x14)) return t;
-    uintptr_t arr = *(const uintptr_t*)(obj + 0xc);
-    uint32_t n = *(const uint32_t*)(obj + 0x10);
-    if (n > 1024 || !sys::readable((const void*)arr, 8 * (size_t)n)) return t;
-    for (uint32_t i = 0; i < n; ++i) {
-        char s[64];
-        safeCopy(s, sizeof(s), *(const char* const*)(arr + 8 * i));
-        t.push_back(s);
-    }
-    return t;
-}
-
-// The plugin's .oct steps: its cfg, its render, the 3.0 install and the engine's surface table
-static di1::OctSteps octSteps10()
-{
-    di1::OctSteps o = di1::octStepsOf(g_cfg);
-    o.render = transcodeAssetRender;
-    if (g_cfg.clip10Motions) o.installed30 = has30;
-    if (g_cfg.surfaces10) o.surfaceTable = surfaceTable30;
-    return o;
-}
-
-// vfxchan10: a particle package's shaders; its served .mtb is kept for the engine's request right after (same frame).
-static di1::Shaders particleShaders(const std::string& pd, std::string& note)
-{
-    if (!g_renderOk) return {};
-    std::string mp = pd.substr(0, pd.size() - strlen(".particledata")) + ".mtb";
-    // the .mtb beside it, or the overlay member the alias names
-    const std::string over = di1::session::overlayMember(mp);
-    std::string mtb;
-    if (!read10s(over.empty() ? mp : over, mtb)) return {};
-    di1::ParticleBundle b = di1::particleBundle(g_render, di1::bundleIO(read10s, read30x), mp, mtb, note);
-    if (!b.ok) return {};
-    di1::session::keepFirst(mp, std::move(b.mtb));
-    return b.shaders;
-}
-
-// currency10: does a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path) carry FastCoin.IsSpark? Memoised.
-static bool isSpark10(const std::string& dnaFile)
-{
-    static std::mutex m;
-    static std::map<std::string, bool> memo;
-    std::string p = di1::dnaPath(dnaFile);
-    if (p.empty()) return false;
-    {
-        std::lock_guard<std::mutex> l(m);
-        if (auto it = memo.find(p); it != memo.end()) return it->second;
-    }
-    bool spark = false;
-    std::string b;
-    if (read10s(p, b)) spark = di1::paysSparks(b);
-    std::lock_guard<std::mutex> l(m);
-    return memo[p] = spark;
-}
-
-static di1::TranscodeOptions transcodeOptions10() { return di1::transcodeOptionsOf(g_cfg); }
-
-static void keepBundle(const std::string& path, const std::string& bytes) { di1::session::keep({{path, bytes}}); }
-
-// A DataMap entry, before it is normalised: Cho aliases (choalias10) and the playset's GameDB tables (sys.hpp)
-static void dataMapEntry10(const std::string& s)
-{
-    di1::choalias::add(s);
-    sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
-}
-
-// The plugin's readers, tables and session for the transcode dispatch
-static di1::TranscodeIO transcodeIO10()
-{
-    di1::TranscodeIO io;
-    io.read10 = read10s;
-    io.read30x = read30x;
-    io.read30 = read30;
-    io.oct = octSteps10();
-    io.mer = g_merOk ? &g_mer : nullptr;
-    io.render = g_renderOk ? &g_render : nullptr;
-    io.lang30 = lang30;
-    io.keep = keepBundle;
-    io.renderProblem = [](const std::string& p, const std::string& pr) {
-        logf("render problem %s: %s", p.c_str(), pr.c_str());
-    };
-    if (g_cfg.vfxChan10) io.particleShaders = particleShaders;
-    if (g_cfg.currency10) io.isSpark = isSpark10;
-    io.dataMapEntry = dataMapEntry10;
-    return io;
 }
 
 // memtest: whether p contains one of the cfg's comma-separated substrings.
@@ -433,7 +249,6 @@ static int* sysServe(const char* p)
          (unsigned)have.size(), ok ? "" : " -- layout not found, not served");
     return ok ? memFile(out.data(), out.size()) : nullptr;
 }
-static std::string mergeVtxf(const std::string& t30, const std::string& t10);
 
 // ---- AssetOpen: every engine file open goes through hkOpen's stages ----
 constexpr uint32_t kOpenWrite = 1;   // AssetOpen flags bit 0: a write, never served or rewritten
@@ -501,7 +316,7 @@ static bool vtxfStage(Open& o, int*& out)
     std::string t30, t10;
     const bool full = readKeep(o.r, t30);
     if (full && read10s("shaders/vformat.vtxf", t10)) {
-        std::string m = mergeVtxf(t30, t10);
+        std::string m = di1::render10::mergeVtxf(t30, t10);
         destroyStream(o.r);
         out = memFile(m.data(), m.size());
         return true;
@@ -730,7 +545,8 @@ static Transcoded transcodeServed(const Open& o, const std::string& np, const st
             t.codec = t.out.size() == rd.n && memcmp(t.out.data(), rd.data, rd.n) ? "tbody" : nullptr;
         } else {
             t.codec =
-                di1::transcode({o.p, rd.data, rd.n}, {t.out, t.note, &mtc}, transcodeOptions10(), transcodeIO10());
+                di1::transcode({o.p, rd.data, rd.n}, {t.out, t.note, &mtc}, di1::transcodeio::options(),
+                               di1::transcodeio::io());
         }
         // the .mtc request transcodes read10s(<same path>.mer): these bytes when nothing redirected the read
         const bool mer = t.codec && !strcmp(t.codec, "mer") && !mtc.empty();
@@ -855,60 +671,6 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     return o.r;
 }
 
-
-// ---- real 1.0 shaders at runtime (engine/shaders.hpp makes them, engine/shaderlinks.hpp links them) ----
-constexpr size_t kShaderHashName = 33;   // 'x' and a hash-named 1.0 shader's name, as the world transcode writes it
-
-// 'x' names are 1.0 shaders: hash names are made on demand, others only found (an unmade name hangs the loader).
-static uint8_t* shader10(const char* name)
-{
-    if (!name || name[0] != 'x') return nullptr;
-    return strlen(name) == kShaderHashName ? engine::shaders::make(name) : engine::shaders::find(name);
-}
-
-// The 1.0 shader after name's 'x' as a 3.0 one (gen30: render table V/W/Q lines); false when it has problems.
-static bool generateShader10(const char* name, const engine::shaders::Compile& compile, engine::shaders::Generated& out)
-{
-    gen30::Generated g;
-    std::function<uint32_t(uint32_t)> skinTarget;
-    if (g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty())
-        skinTarget = [](uint32_t vf) { return render::skinTarget30(g_render, vf); };
-    gen30::generate(g_render.shaderRules, {read10s, g_vf10, compile, skinTarget, &g_vf30}, std::string(name + 1), g);
-    for (auto& pr : g.problems) logf("shaders10 %s: %s", name, pr.c_str());
-    if (g.shd.empty() || !g.problems.empty()) return false;
-    out.shd = std::move(g.shd);
-    for (gen30::Program& p : g.programs) out.programs.push_back({p.id, p.ps, std::move(p.code)});
-    return true;
-}
-
-// shaders10: 1.0's generator and test views, then the linking hooks with 1.0's shader names.
-static bool installShaders(const di1::Config& c, const engine::shaders::Compiler& compiler)
-{
-    if (!c.shaders10) return true;
-    engine::shaders::Config made;
-    made.compiler = compiler;
-    made.bufView = c.bufview10;
-    made.magenta = c.magenta10;
-    made.generate = generateShader10;
-    engine::shaders::install(made);
-    engine::shaderlinks::Config links;
-    links.lazyLink = c.lazyLink10;
-    links.fadeProbe = c.fadeProbe10 != 0;
-    links.gameShader = shader10;
-    return engine::shaderlinks::install(links);
-}
-
-// vformat.vtxf: 3.0's formats plus the 1.0 formats 3.0 lacks (vtxf::merge). Read at boot, before any transcode.
-static std::string mergeVtxf(const std::string& t30, const std::string& t10)
-{
-    int n = 0;
-    std::string m = vtxf::merge(t30, t10, n, g_tails10);
-    g_vf30 = vtxf::formats(t30);
-    logf("shaders10: vformat.vtxf + %d 1.0 formats, %u with their vertex colour in its own stream", n,
-         (unsigned)g_tails10.size());
-    return m;
-}
-
 // sxnatives10's hooks (H1). sx::g_log is set in every config: BMX-1 and BTX-1 log unpaired key ids through it.
 static bool installSx(const di1::Config& c)
 {
@@ -944,65 +706,18 @@ static bool installAudio(const di1::Config& c)
     return false;
 }
 
-// A file in the plugin's folder, read whole; "" when it cannot be opened.
-static std::string slurpFile(const char* dir, const char* name)
-{
-    std::string text;
-    FILE* tf = nullptr;
-    if (fopen_s(&tf, (std::string(dir) + "\\" + name).c_str(), "rb") || !tf) return text;
-    char buf[65536];
-    for (size_t got = fread(buf, 1, sizeof(buf), tf); got > 0; got = fread(buf, 1, sizeof(buf), tf))
-        text.append(buf, got);
-    fclose(tf);
-    return text;
-}
-
-// The render and Meridian tables beside the DLL.
-static void loadTables(const di1::Config& c, const char* dir)
-{
-    g_renderOk = g_render.load(slurpFile(dir, "di1compat_render.txt"));
-    logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
-         (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
-         (unsigned)g_render.plans.size());
-    g_merOk = g_mer.load(slurpFile(dir, "di1compat_mer.txt"));
-    g_mer.events10 = c.events10;
-    g_mer.portRefs = c.portRefs10;
-    g_mer.ports10 = c.ports10;
-    g_mer.pins10 = c.pins10;
-    g_mer.gate10 = c.gate10;
-    g_mer.toggleType10 = c.toggleType10;
-    logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
-         (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
-}
-
-// shaders10: 1.0's vertex formats, and the HLSL compiler and DXBC cache folder it returns, before any hook.
-static engine::shaders::Compiler prepareShaders10(const di1::Config& c, const char* dir)
-{
-    engine::shaders::Compiler out;
-    if (!c.shaders10) return out;
-    HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
-    out.compile = dc ? (engine::shaders::D3DCompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
-    out.cacheDir = std::string(dir) + "\\di1compat_shaders";
-    CreateDirectoryA(out.cacheDir.c_str(), nullptr);
-    std::string v10;
-    if (read10s("shaders/vformat.vtxf", v10)) g_vf10 = vtxf::formats(v10);
-    logf("shaders10: compiler %s, %u 1.0 vertex formats, %u 3.0 globals, cache %s", out.compile ? "ok" : "MISSING",
-         (unsigned)g_vf10.size(), (unsigned)g_render.shaderRules.globals.size(), out.cacheDir.c_str());
-    return out;
-}
-
 // Before any hook, in this order: RenderDoc, 1.0 archives, resident archives, tables, shaders10, playsets.
-// Returns shaders10's compiler.
-static engine::shaders::Compiler prepare(const di1::Config& c, const char* dir)
+static void prepare(const di1::Config& c)
 {
     trace::renderdoc::install({c.renderdoc10, g_gameDir + "\\di3cap"});
     di1::vfs::install(c);
     di1::choalias::install(c);
     di1::session::install(c);
-    loadTables(c, dir);
-    engine::shaders::Compiler compiler = prepareShaders10(c, dir);
+    di1::tables::install(c);
+    di1::render10::install(c);
     di1::playsets::install(c);
-    return compiler;
+    engine::langkeys::install({g_gameDir, read30x});
+    di1::transcodeio::install(c);
 }
 
 // The first-AV handler, then MinHook; false: no hook can be installed.
@@ -1038,7 +753,7 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     di1::loadConfig(dir, g_cfg);
-    const engine::shaders::Compiler compiler = prepare(g_cfg, dir);
+    prepare(g_cfg);
 
     // the modules' hooks in install order (B3): a hook is live once enabled
     if (!startHooks()) return;
@@ -1051,12 +766,12 @@ extern "C" void __stdcall Pentane_Main()
     engine::playsetslot::install({});   // always on: no cfg key (B-20)
     trace::spawn::install({g_cfg.trace, g_cfg.hidePs});
     di1::hideps::install(g_cfg);
-    installShaders(g_cfg, compiler);
+    di1::shaders10::install(g_cfg);
     trace::mission::install(missionTraceOf(g_cfg));
     installChoStart(g_cfg);
     trace::breaktrace::install({g_cfg.breakTrace});
     trace::teardown::install({g_cfg.teardownTrace});
-    di1::meridian::install({g_cfg.aliases10, g_cfg.native10, g_merOk ? &g_mer : nullptr});
+    di1::meridian::install({g_cfg.aliases10, g_cfg.native10, di1::tables::mer()});
     trace::locktrace::install({g_cfg.lockTrace10});
     trace::opacity::install({g_cfg.opacityLog10});
     trace::fade::install({g_cfg.fadeProbe10});

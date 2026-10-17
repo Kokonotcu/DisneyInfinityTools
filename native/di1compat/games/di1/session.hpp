@@ -22,7 +22,7 @@ using Files = std::vector<std::pair<std::string, std::string>>;   // (path, byte
 
 // Keeps vfx10 and (resident10) indexes the 1.0 startup archives, before any hook.
 inline bool install(const Config& c);
-// Keeps each file for the engine's next opens of its path; a path kept again is replaced. One lock for all.
+// Keeps each file for the engine's next opens; a path kept again is replaced. One lock for all.
 inline void keep(Files files);
 // Keeps a file unless its path is kept already (first wins).
 inline void keepFirst(const std::string& path, std::string bytes);

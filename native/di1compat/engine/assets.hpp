@@ -24,6 +24,8 @@ inline int* open(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int
 inline const std::string& gameDir();
 // Whether the engine's own archives have path (opened and destroyed).
 inline bool shipped(const char* path);
+// Whether the install has assets\<dir> ('characters/kiosk'), as a folder or a .zip; two file-attribute calls at most.
+inline bool installed(const std::string& dir);
 // A 3.0 asset through the engine's own open, read whole and destroyed; false on a short read.
 inline bool read30(const std::string& path, std::string& out);
 // A 3.0 archive member by extract path, '3:X/name/member' = a member of <game>/assets/X/name.zip, read in place.
@@ -53,6 +55,15 @@ inline int* open(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int
 }
 
 inline const std::string& gameDir() { return detail::g_state.gameDir; }
+
+inline bool installed(const std::string& dir)
+{
+    std::string a = detail::g_state.gameDir + "\\assets\\" + dir;
+    for (char& c : a)
+        if (c == '/') c = '\\';
+    if (GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+    return GetFileAttributesA((a + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
 
 inline bool shipped(const char* path)
 {
