@@ -495,6 +495,32 @@ Code: `native/di1compat/bldrt.hpp` (cfg `building10`, probe `spawntrace10`). Mea
 - **Metroville's** four SpawnBuilding nodes fire only from a `DebugInput` ("Place Buildings" -> `PlaceBuildings` message), so its lots stay empty in 1.0 too; its buildings come from the store.
 - Not decoded: 3.0's twins of the owner hand-over FUN_00d1bd60 and of 1.0's object flag 8.
 
+### 5.8 1.0 graphs in 3.0 form
+Code: `native/di1compat` `mer.hpp` (`mer::transcode`, `mer::mtc`), the class table `di1compat_mer.txt` (`mertable.py`). Plan MER-2/MER-4; research verify-meridian and `mer.py`.
+
+3.0 reads node parameters only through `Mer_ParameterDescription` (FUN_006b2700 -> FUN_006a9740, default on a miss) and links only in version 3 (FUN_006ab3d0: namespace-relative 6-byte rows). 1.0 stores parameters as named fields per node (a data pin's constant as `<pin>_value`) and links with global node indices. The conversion is additive: every 1.0 record stays (3.0 reads fields by name hash and ignores the rest), and the 3.0 form is added:
+
+| Part | 3.0 form added |
+|---|---|
+| node | `Mer_ParametersOffset` + `Mer_ParameterDescription` over its block in the namespace's `ParameterValues` ([5.3](#53-mer-and-merdebug)); strings appended in parameter order |
+| namespace | `ParameterValues`, `ParameterStrings`, `EnableNetworking 1` (104/104 shipped), `RootNodeCount` = its node count (520/520 shipped; 1.0 counts IsRootObject nodes), `MergedLayoutPath` = `ReferenceEmbeddedNamespace` on merged namespaces that lack it (FUN_006c88f0 copies it; 1.0 never writes it) |
+| pins | names from 3.0 graphs (the class table). 1.0 lists a class's pin table once per file; 3.0 shares a definition only within a namespace and parameter layout (FUN_006c6b80), so every instance gets the pins. A name with a `<name>_value` sibling is a data pin |
+| types | a parameter's type is the one 3.0 reads it as (the table), else the record's own |
+| second `Type` | the parameter `Type` (2,127 1.0 mission nodes; 3.0 data stores it so) |
+| `LeafName` | + `LeafNameHash` = lookup2(port name: `LeafName`, else the owner field naming the sub-node); a DataFetch's `Value` becomes the parameter of that port name; the owner field stays an int record only (cfg `portrefs10`) |
+| links | `u32 n, u8 0, u16 3, n x (u16 code, u16 from, u16 to)`, from/to = node index - Begin - 1 |
+| unregistered classes | classes 3.0 does not register (DeliveryNode, Activate/SpawnDecorationSockets + 8 mission classes) would leave no node slot and shift every later index (verify-meridian claim 6: out-of-bounds link writes), so until they are ported (MER-3/6) such a node becomes a pinless NodeGroup and its links are dropped |
+| `Event` | MissionPresentationList* `Event` in the 3.0 mission event enum (cfg `events10`, `mission.hpp`) |
+| NetSync | MasterNetSync links from `Link_Out` leave from `Private`, the output 3.0 fires locally (cfg `gate10`) |
+| ToggleType | Collision/Visibility/ColVisToggle describe `Type` = their class, 3.0's mode switch (cfg `toggletype10`) |
+
+- **Port names** (cfg `ports10`). A sub-node's `LeafName`, else the owner field naming it: 1.0 camera / LuaNode / EventSurge ports carry no `LeafName`; their owner lists `<port> = <sub-node index>` and the sub-nodes sit right before it (the search looks back at most 64 nodes). 3.0 needs the name as `LeafNameHash` (FUN_006c8be0 -> node+0x18) and names a DataFetch's constant after it: over 400 3.0 graphs every owned sub-node's `LeafNameHash` = lookup2(owner field) (9,629/9,629) and every DataFetch parameter hash = its `LeafNameHash` (2,638/2,638), while 1.0 stores that constant as `Value` (808 DataFetch nodes). Read raw, camera priorities, transition times, AI attack counts and the like fell back to defaults.
+- **Port references** (cfg `portrefs10`). The owner's field itself is a port reference: 3.0 owners keep it as an int record and never describe it as a parameter (2,937 3.0 mission/choreography graphs: 3,984 DataFetch ports, 0 owners with a same-named parameter), and it is no pin either, so it is neither described nor copied between instances.
+- **Pin tables** (cfg `pins10`). A class's pin records come from its first instance listing any (1.0 writes the table once per file). Every plain int field that is not a parameter 3.0 reads counts: the class table names a pin only if a 3.0 graph listed it, which misses classes no 3.0 graph uses (AbsoluteValueInt: 5 link ends) and names the table cannot hold (MissionMonitor `Now Available`: 22 link ends unbound on the instances that list no pins). Copies only add names an instance lacks, and 1.0 writes parameters on every instance, so only the pin table is ever copied. With `pins10` off the previous rule applies: only the pins the table names, and the whole table only on instances that list none.
+- **MasterNetSync** (cfg `gate10`). 1.0's fires Private, then Link_Out, on every Link_In (1.0 FUN_006b2350: def+0x30, def+0x28). 3.0's fires Private always but Link_Out only when its graph is networked and the host (FUN_006ec4f0: def+0x3c, then def+0x34 behind GraphInstance vf+0x10 FUN_006ab280 / vf+0x14), so 1.0 Link_Out chains need 3.0's Private: in `in_city.mer`, LoadScreenActive.Stopped -> 506 -> Saved Gate7 -> INC_CIN_OpeningA -> `OpeningDone` never ran.
+- **ColVisToggle** (cfg `toggletype10`). 3.0's ColVisToggle node (template FUN_0177dbc0, shared by ColVisToggle / CollisionToggle / VisibilityToggle) picks collision-only or visibility-only from the string parameter `Type` (LoadParameters 0x01808FE0: FUN_006baff0(lookup2("Type")), stricmp; no match keeps both bits). 1.0 reads the node's own `Type` record, the class name (0x010F7260: FUN_004c9b80(record, "Type")), and its nodes carry no such parameter, so every 1.0 CollisionToggle also drew and hid its targets in 3.0 (`in_city.mer` node 3603 IsOn 1 showed the hidden GlassWall). Every shipped 3.0 node of the family describes `Type` = its class (1,292 / 585 / 927).
+- **Failure.** `mer::transcode` leaves the file unchanged when it returns false: every check runs before the first record or name is added.
+
 ---
 
 ## 6. Materials (.mtb) and textures (.tbody)
