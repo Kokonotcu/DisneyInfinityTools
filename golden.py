@@ -625,8 +625,8 @@ def config_keys():
         obj, keys = max(chains.items(), key=lambda x: len(x[1]))
         body = struct_of(files, obj)
     else:
-        obj, keys = config_table(files)
-        body = struct_named(files, obj)
+        obj, keys, home = config_table(files)
+        body = struct_named([home] + files, obj)   # the table's own file first: modules have Configs too
     members = {}
     for k in range(len(body) - 3):   # type name [N] = value ;
         if body[k][0] == 'id' and body[k + 1][0] == 'id':
@@ -646,8 +646,8 @@ def config_keys():
 
 
 def config_table(files):
-    """Rows {"key", ...ConfigKind::Kind, offsetof(Type, field) ...} -> (Type, [(key, kind, field)])."""
-    kinds, found = {'Flag': 'bool', 'Int': 'int', 'Text': 'str'}, {}
+    """Rows {"key", ...ConfigKind::Kind, offsetof(Type, field) ...} -> (Type, [(key, kind, field)], its file)."""
+    kinds, found, home = {'Flag': 'bool', 'Int': 'int', 'Text': 'str'}, {}, {}
     for toks in files:
         for i in range(len(toks) - 5):
             if toks[i][1] != 'offsetof' or toks[i + 1][1] != '(' or toks[i + 3][1] != ',':
@@ -662,9 +662,11 @@ def config_table(files):
             if key and kind:
                 found.setdefault(toks[i + 2][1], []).append((literal(key[:1]), kinds.get(kind[0], '?'),
                                                              toks[i + 4][1]))
+                home.setdefault(toks[i + 2][1], toks)
     if not found:
         raise SystemExit('static/config: no config key found under %s' % SRC)
-    return max(found.items(), key=lambda x: len(x[1]))
+    typ, keys = max(found.items(), key=lambda x: len(x[1]))
+    return typ, keys, home[typ]
 
 
 def struct_named(files, typ):
