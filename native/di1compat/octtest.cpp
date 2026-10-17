@@ -13,7 +13,8 @@
 #include "formats/chd.hpp"
 #include "mer.hpp"
 #include "render.hpp"
-#include "arc30.hpp"
+#include "formats/arc30.hpp"
+#include "core/readonly_file.hpp"
 #include "convert/datamap.hpp"
 #include "formats/dct.hpp"
 #include "base/hash.hpp"
@@ -31,6 +32,15 @@
 
 // The plugin's octx settings for this run: OCTX_SLACK, --variants (main); the defaults are the shipped-exact ones
 static octx::Options g_octx;
+
+// arc30::readMember of a member of the archive file at path
+static bool readArc30(const std::string& path, const std::string& member, std::string& out)
+{
+    core::ReadOnlyFile file(path);
+    if (!file.open()) return false;
+    const arc30::Source src{file.size(), [&file](uint64_t at, void* dst, size_t n) { return file.readAt(at, dst, n); }};
+    return arc30::readMember(src, member, out);
+}
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -279,7 +289,7 @@ static int renderTest(char** a)
         auto t = std::chrono::steady_clock::now();
         std::string rel = p.substr(2);
         size_t cut = rel.rfind('/');
-        bool ok = cut != std::string::npos && arc30::readMember(std::string(game) + "/assets/" + rel.substr(0, cut) + ".zip", rel.substr(cut + 1), o);
+        bool ok = cut != std::string::npos && readArc30(std::string(game) + "/assets/" + rel.substr(0, cut) + ".zip", rel.substr(cut + 1), o);
         readMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
         ++reads;
         return ok;
@@ -3325,7 +3335,7 @@ int main(int argc, char** argv)
     }
     if (argc > 3 && std::string(argv[1]) == "--member") {   // --member <archive> <name>: one read, its size
         std::string got;
-        bool r = arc30::readMember(argv[2], argv[3], got);
+        bool r = readArc30(argv[2], argv[3], got);
         printf("%s %zu B\n", r ? "ok" : "FAILED", got.size());
         return r ? 0 : 1;
     }
@@ -3357,7 +3367,7 @@ int main(int argc, char** argv)
         std::string out;
         if (menu) {
             std::string in;
-            if (argc > 6 ? !arc30::readMember(argv[5], argv[6], in) : (in = slurp(argv[5])).empty()) return 1;
+            if (argc > 6 ? !readArc30(argv[5], argv[6], in) : (in = slurp(argv[5])).empty()) return 1;
             out = ui::playsetMenu10(in, list);
             printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
         } else {
@@ -3384,7 +3394,7 @@ int main(int argc, char** argv)
             size_t cut = rel.rfind('/');
             fprintf(stderr, "%s\n", x.c_str());
             std::string arc = std::string(argv[3]) + "/assets/" + rel.substr(0, cut) + ".zip";
-            bool r = arc30::readMember(arc, rel.substr(cut + 1), got);
+            bool r = readArc30(arc, rel.substr(cut + 1), got);
             fprintf(stderr, "  read %d %zu\n", (int)r, got.size());
             std::string ext = slurp(std::filesystem::path(argv[4]) / "assets" / rel);
             fprintf(stderr, "  extract %zu\n", ext.size());

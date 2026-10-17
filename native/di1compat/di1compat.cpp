@@ -28,6 +28,7 @@
 #include "core/hooks.hpp"
 #include "core/log.hpp"
 #include "core/memcheck.hpp"
+#include "core/readonly_file.hpp"
 #include "core/stack.hpp"
 #include "core/veh.hpp"
 #include "core/zip.hpp"
@@ -40,7 +41,7 @@
 #include "mer.hpp"
 #include "mernode.hpp"
 #include "render.hpp"
-#include "arc30.hpp"
+#include "formats/arc30.hpp"
 #include "convert/datamap.hpp"
 #include "formats/dct.hpp"
 #include "formats/luachunk.hpp"
@@ -197,7 +198,10 @@ static bool read30x(const std::string& extract, std::string& out)
     if (cut == std::string::npos) return false;
     std::string arc = g_gameDir + "/assets/" + rel.substr(0, cut) + ".zip";
     for (char& c : arc) if (c == '/') c = '\\';
-    return arc30::readMember(arc, rel.substr(cut + 1), out);
+    core::ReadOnlyFile file(arc);
+    if (!file.open()) return false;
+    const arc30::Source src{file.size(), [&file](uint64_t at, void* dst, size_t n) { return file.readAt(at, dst, n); }};
+    return arc30::readMember(src, rel.substr(cut + 1), out);
 }
 
 // The key hashes of every 3.0 table of language `lang` (english_ntsc ...: _win32 and _pc_con of each package under
