@@ -20,6 +20,8 @@ struct Config {
 inline bool install(const Config& c);
 // The engine's own open, unhooked.
 inline int* open(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5);
+// The 3.0 install's folder, as install() was given it.
+inline const std::string& gameDir();
 // Whether the engine's own archives have path (opened and destroyed).
 inline bool shipped(const char* path);
 // A 3.0 asset through the engine's own open, read whole and destroyed; false on a short read.
@@ -49,6 +51,8 @@ inline int* open(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int
 {
     return detail::g_state.g_open(path, flags, a3, a4, a5);
 }
+
+inline const std::string& gameDir() { return detail::g_state.gameDir; }
 
 inline bool shipped(const char* path)
 {

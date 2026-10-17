@@ -44,6 +44,7 @@
 #include "engine/zones.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/assetdefs.hpp"
+#include "games/di1/choalias.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/currency.hpp"
 #include "games/di1/econ.hpp"
@@ -57,7 +58,9 @@
 #include "games/di1/popin.hpp"
 #include "games/di1/renderio.hpp"
 #include "games/di1/screens.hpp"
+#include "games/di1/session.hpp"
 #include "games/di1/transcode.hpp"
+#include "games/di1/vfs.hpp"
 #include "games/di1/zones.hpp"
 #include "formats/oct.hpp"
 #include "formats/chd.hpp"
@@ -87,6 +90,11 @@
 #include "games/di1/vfx.hpp"
 #include "games/di1/chan.hpp"
 #include "gameplay.hpp"
+#include "npcrt.hpp"
+#include "vfxrt.hpp"
+#include "gprt.hpp"
+#include "bldrt.hpp"
+#include "caprt.hpp"
 #include "third_party/miniz/miniz.h"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
@@ -107,7 +115,7 @@ extern "C" PluginInformation Pentane_PluginInformation = {
     {0, 1, 0}, {0, 0, 0}, {}};
 extern "C" size_t Pentane_PluginDependencyCount = 0;
 
-// core's services by their old names: this file and the runtime headers it includes below call them unqualified
+// The services by their old names: this file's code calls them unqualified
 using core::g_base;
 using core::hook;
 using core::installFeature;
@@ -128,73 +136,10 @@ using text::norm;
 using trace::loadprof::frameNo;
 using trace::loadprof::noteOpenThread;
 using trace::loadprof::nowMs;
+using di1::vfs::read10;
+using di1::vfs::read10s;
 
 static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set once in Pentane_Main, before any hook
-
-// ---- VFS1: the 1.0 install's own zips, read in place ----
-
-// The open archives, by path under assets; miniz is not thread-safe. Search order: games/di1/archives.hpp.
-static std::mutex g_zipLock;
-static std::map<std::string, std::unique_ptr<mz_zip_archive>> g_zips;   // guarded by g_zipLock; nullptr = no such zip
-
-// The archive rel, opened on first use and kept for the session; failures too (A-12). Caller holds g_zipLock.
-static mz_zip_archive* zipFor(const std::string& rel)
-{
-    auto it = g_zips.find(rel);
-    if (it != g_zips.end()) return it->second.get();
-    return (g_zips[rel] = core::openZip(di1::archivePath(g_cfg.install10, rel))).get();
-}
-
-static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
-
-// -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
-static void* read10z(const std::string& p, size_t* size, std::string* where);
-static void* read10(const char* enginePath, size_t* size, std::string* where)
-{
-    std::string p = norm(enginePath);
-    void* d = read10z(p, size, where);
-    std::string a = d || !g_cfg.choAlias10 ? "" : g_choAlias.resolve(p);
-    return a.empty() ? d : read10z(a, size, where);
-}
-
-static void* read10z(const std::string& p, size_t* size, std::string* where)
-{
-    std::lock_guard<std::mutex> lock(g_zipLock);
-    const di1::AssetBuffers buffers = g_cfg.assetBufs10 ? di1::AssetBuffers::Search : di1::AssetBuffers::Skip;
-    for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1)) {
-        std::string member = p.substr(cut + 1);
-        for (const std::string& zr : di1::candidateArchives(p, cut, buffers)) {
-            mz_zip_archive* z = zr.empty() ? nullptr : zipFor(zr);
-            void* data = z ? core::extractZipMember(z, member.c_str(), size) : nullptr;
-            if (data) { *where = zr + ":" + member; return data; }
-        }
-    }
-    if (g_cfg.root10)
-        for (const char* zr : di1::kRootArchives) {
-            mz_zip_archive* z = zipFor(zr);
-            void* data = z ? core::extractZipMember(z, p.c_str(), size) : nullptr;
-            if (data) { *where = std::string(zr) + ":" + p; return data; }
-        }
-    return nullptr;
-}
-
-// ---- load-time transcodes: 1.0 bytes in, the form the 3.0 reader takes out (the 1.0 file is never rewritten) ----
-static bool read10s(const std::string& path, std::string& out)
-{
-    size_t n = 0;
-    std::string where;
-    void* d = read10(path.c_str(), &n, &where);
-    if (!d) return false;
-    out.assign((const char*)d, n);
-    mz_free(d);
-    return true;
-}
-
-// npcrt calls the engine's own open by this name (its internals move in a later lane).
-static int* g_open(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
-{
-    return engine::assets::open(path, flags, a3, a4, a5);
-}
 
 static std::string g_gameDir;   // the 3.0 install; set once in Pentane_Main, before any hook
 
@@ -219,14 +164,6 @@ static const std::unordered_set<uint32_t>& lang30(const std::string& lang)
     return s;
 }
 
-// World session: one .oct request transcodes the whole world; the engine's next requests for its files come from here.
-static std::mutex g_sessLock;
-static std::map<std::string, std::string> g_served;   // guarded by g_sessLock
-// 1.0 archives' full-path members (path -> "<archive>/<member>"), seen once 1.0 loads the archive; first wins.
-static std::map<std::string, std::string> g_over10;   // guarded by g_sessLock
-static std::set<std::string> g_indexed10;
-static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1.0 (ui: their images may be too)
-static std::set<std::string> g_screens10;   // presentation/<screen>.lua served from 1.0: lower-case screen names (gprt)
 static rentable::Table g_render;
 static vtxf::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
 static vtxf::VFormats g_vf30;              // 3.0's (skintr10: the formats skinned passes draw in), set with the vtxf
@@ -250,26 +187,6 @@ static void sceneSettingsIO(render::IO& io)
 static mer::Table g_mer;
 static bool g_merOk;
 
-static void indexZip10(const std::string& zipRel)
-{
-    std::lock_guard<std::mutex> lock(g_zipLock);
-    mz_zip_archive* z = zipFor(zipRel);
-    if (!z) return;
-    std::lock_guard<std::mutex> l2(g_sessLock);
-    if (!g_indexed10.insert(zipRel).second) return;
-    std::string base = zipRel.substr(0, zipRel.size() - 4) + "/";
-    for (mz_uint i = 0; i < mz_zip_reader_get_num_files(z); ++i) {
-        char name[300];
-        mz_zip_reader_get_filename(z, i, name, sizeof(name));
-        std::string n = name;
-        for (char& c : n) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-        if (n.find('/') != std::string::npos && n.back() != '/') g_over10.emplace(n, base + name);
-        if (!g_cfg.vfx10) continue;
-        // 3.0 opens meshes by hash
-        if (std::string a = vfx::p3dAlias(n); !a.empty()) g_over10.emplace(a, base + name);
-    }
-}
-
 // D3D11 rejects block-compressed textures under 4x4; a 1x1/2x2 one-mip DXT file holds a whole block:
 // header only (conv.copy_texture).
 static void padSmallDxt(std::string& d)
@@ -282,8 +199,6 @@ static void padSmallDxt(std::string& d)
         memcpy(&d[12], v, 8);
     }
 }
-
-#include "npcrt.hpp"
 
 // The render half of a 1.0 asset with a material bundle (render.hpp): materials onto 3.0 shaders, vertices into
 // their formats.
@@ -312,13 +227,11 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
         note += "render FAILED ";
         return false;
     }
-    {
-        std::lock_guard<std::mutex> lock(g_sessLock);
-        g_served[dir + "/" + stem + ".mtb"] = r.mtb;
-        if (!r.vbuf.empty()) g_served[dir + "/" + stem + "_0.vbuf"] = r.vbuf;
-        if (!r.ibuf.empty()) g_served[dir + "/" + stem + "_0.ibuf"] = r.ibuf;
-        if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
-    }
+    di1::session::Files files = {{dir + "/" + stem + ".mtb", std::move(r.mtb)}};
+    if (!r.vbuf.empty()) files.push_back({dir + "/" + stem + "_0.vbuf", std::move(r.vbuf)});
+    if (!r.ibuf.empty()) files.push_back({dir + "/" + stem + "_0.ibuf", std::move(r.ibuf)});
+    if (!r.ibuf2.empty()) files.push_back({dir + "/" + stem + "_2.ibuf", std::move(r.ibuf2)});
+    di1::session::keep(std::move(files));
     // at most 179 characters (60 fixed, five numbers, both tails): never cut
     char buf[200];
     snprintf(buf, sizeof(buf), "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s%s) ",
@@ -371,19 +284,14 @@ static di1::OctSteps octSteps10()
 static di1::Shaders particleShaders(const std::string& pd, std::string& note)
 {
     if (!g_renderOk) return {};
-    std::string mp = pd.substr(0, pd.size() - strlen(".particledata")) + ".mtb", over;
+    std::string mp = pd.substr(0, pd.size() - strlen(".particledata")) + ".mtb";
     // the .mtb beside it, or the overlay member the alias names
-    {
-        std::lock_guard<std::mutex> lock(g_sessLock);
-        auto o = g_over10.find(mp);
-        if (o != g_over10.end()) over = o->second;
-    }
+    const std::string over = di1::session::overlayMember(mp);
     std::string mtb;
     if (!read10s(over.empty() ? mp : over, mtb)) return {};
     di1::ParticleBundle b = di1::particleBundle(g_render, di1::bundleIO(read10s, read30x), mp, mtb, note);
     if (!b.ok) return {};
-    std::lock_guard<std::mutex> lock(g_sessLock);
-    g_served.emplace(mp, std::move(b.mtb));
+    di1::session::keepFirst(mp, std::move(b.mtb));
     return b.shaders;
 }
 
@@ -407,16 +315,12 @@ static bool isSpark10(const std::string& dnaFile)
 
 static di1::TranscodeOptions transcodeOptions10() { return di1::transcodeOptionsOf(g_cfg); }
 
-static void keepBundle(const std::string& path, const std::string& bytes)
-{
-    std::lock_guard<std::mutex> lock(g_sessLock);
-    g_served[path] = bytes;
-}
+static void keepBundle(const std::string& path, const std::string& bytes) { di1::session::keep({{path, bytes}}); }
 
 // A DataMap entry, before it is normalised: Cho aliases (choalias10) and the playset's GameDB tables (sys.hpp)
 static void dataMapEntry10(const std::string& s)
 {
-    if (g_cfg.choAlias10) g_choAlias.add(s);
+    di1::choalias::add(s);
     sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
 }
 
@@ -729,19 +633,6 @@ static bool blockStage(Open& o, int*&)
     return false;
 }
 
-// A world session product (kept: the engine reopens files), else a full-path member of a loaded 1.0 archive.
-static void sessionLookup(const std::string& np, std::string& hit, std::string& over)
-{
-    std::lock_guard<std::mutex> lock(g_sessLock);
-    auto it = g_served.find(np);
-    if (it != g_served.end()) {
-        hit = it->second;
-        return;
-    }
-    auto o = g_over10.find(np);
-    if (o != g_over10.end()) over = o->second;
-}
-
 static int* serveSession(const Open& o, const std::string& hit)
 {
     int* r = memFile(hit.data(), hit.size());
@@ -766,8 +657,7 @@ static bool imageOfMovie30(Open& o, const std::string& np)
 {
     std::string movie = g_cfg.uiScope10 ? ui::flashImageMovie(np) : "";
     if (movie.empty()) return false;
-    std::lock_guard<std::mutex> lock(g_sessLock);
-    const bool scoped = !g_movies10.count(movie);
+    const bool scoped = !di1::session::movieServed(movie);
     if (scoped) o.missWhy = " (image id of a movie not served from 1.0: not served)";
     return scoped;
 }
@@ -787,17 +677,16 @@ static void* read10StandIn(const Open& o, const std::string& np, size_t* n, std:
     return read10(w.c_str(), n, where);
 }
 
-// vo10: a 1.0 dialog line's lipsync (audio.hpp annoSource), read from its zip under g_zipLock.
+// vo10: a 1.0 dialog line's lipsync (audio.hpp annoSource), read from its zip.
 static void* read10Lipsync(const char* p, size_t* n, std::string* where)
 {
     std::string annoZip, annoMember;
     const bool vo = g_cfg.audio10 && g_cfg.vo10;
     if (!vo || !audio::annoSource(p, annoZip, annoMember)) return nullptr;
-    std::lock_guard<std::mutex> lock(g_zipLock);
-    mz_zip_archive* z = zipFor(annoZip);
-    int i = z ? mz_zip_reader_locate_file(z, annoMember.c_str(), nullptr, 0) : -1;
-    if (i < 0) return nullptr;
-    void* data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, n, 0);
+    void* data = nullptr;
+    di1::vfs::withArchive(annoZip, [&](mz_zip_archive* z) {
+        if (z) data = core::extractZipMember(z, annoMember.c_str(), n);
+    });
     if (data) *where = annoZip + ":" + annoMember;
     return data;
 }
@@ -808,8 +697,9 @@ static Read10 read10For(Open& o, const std::string& np, const std::string& over)
     double tR = o.prof ? nowMs() : 0;
     Read10 rd;
     // the count includes the candidate names that were not there (A-12)
-    o.missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)"
-                             : " (overlay " + over + " unreadable)";
+    o.missWhy = over.empty()
+                    ? " (not in the 1.0 archives, " + std::to_string(di1::vfs::archiveCount()) + " archives open)"
+                    : " (overlay " + over + " unreadable)";
     const bool scoped = imageOfMovie30(o, np);
     rd.chal = g_cfg.challenge10 ? gameplay::challengeTypePath(np) : "";
     const char* from = !rd.chal.empty() ? rd.chal.c_str() : over.empty() ? o.p : over.c_str();
@@ -844,10 +734,8 @@ static Transcoded transcodeServed(const Open& o, const std::string& np, const st
         }
         // the .mtc request transcodes read10s(<same path>.mer): these bytes when nothing redirected the read
         const bool mer = t.codec && !strcmp(t.codec, "mer") && !mtc.empty();
-        if (mer && over.empty() && rd.chal.empty()) {
-            std::lock_guard<std::mutex> lock(g_sessLock);
-            g_served[np.substr(0, np.size() - kMerSuffix) + ".mtc"] = mtc;
-        }
+        if (mer && over.empty() && rd.chal.empty())
+            di1::session::keep({{np.substr(0, np.size() - kMerSuffix) + ".mtc", mtc}});
     } catch (std::exception& e) {   // never unwind into engine code (that ends in a silent fail-fast)
         t.note += std::string("TRANSCODE EXCEPTION: ") + e.what() + " ";
         t.codec = nullptr;
@@ -866,13 +754,9 @@ constexpr size_t kLuaSuffix = sizeof(".lua") - 1;
 static void noteServedUi(const std::string& np, const char* p)
 {
     std::string mv = ui::flashMovie(np);
-    if (!mv.empty()) {
-        std::lock_guard<std::mutex> lock(g_sessLock);
-        g_movies10.insert(mv);
-    }
+    if (!mv.empty()) di1::session::noteMovie(mv);
     if (np.rfind("presentation/", 0) != 0 || !endsWith(p, ".lua")) return;
-    std::lock_guard<std::mutex> lock(g_sessLock);
-    g_screens10.insert(np.substr(kPresentationDir, np.size() - kPresentationDir - kLuaSuffix));
+    di1::session::noteScreen(np.substr(kPresentationDir, np.size() - kPresentationDir - kLuaSuffix));
 }
 
 // loadprof10: the engine stack of the first 3 served files per kind (15 in all), appended to pf.
@@ -894,7 +778,7 @@ static void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_
 // A file served from 1.0: indexed overlay, transcode, MemFile, the served line. Frees rd's bytes.
 static int* serveRead(const Open& o, const std::string& np, const std::string& over, const Read10& rd)
 {
-    indexZip10(rd.where.substr(0, rd.where.find(':')));
+    di1::session::indexArchive(rd.where.substr(0, rd.where.find(':')));
     double tT = o.prof ? nowMs() : 0;
     Transcoded t = transcodeServed(o, np, over, rd);
     noteServedUi(np, o.p);
@@ -921,7 +805,7 @@ static bool serveStage(Open& o, int*& out)
     const bool absent = !o.r && !o.blocked && !o.write;
     if (!absent || !g_cfg.serve10 || !g_cfg.install10[0]) return false;
     std::string np = norm(o.p), hit, over;
-    sessionLookup(np, hit, over);
+    di1::session::lookup(np, hit, over);
     if (!hit.empty()) {
         out = serveSession(o, hit);
         return true;
@@ -1025,11 +909,6 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
     return m;
 }
 
-#include "vfxrt.hpp"
-#include "gprt.hpp"
-#include "bldrt.hpp"
-#include "caprt.hpp"
-
 // sxnatives10's hooks (H1). sx::g_log is set in every config: BMX-1 and BTX-1 log unpaired key ids through it.
 static bool installSx(const di1::Config& c)
 {
@@ -1063,17 +942,6 @@ static bool installAudio(const di1::Config& c)
     if (audio::install(a)) return true;
     logf("audio10: off (FMOD host failed)");
     return false;
-}
-
-// resident10: 1.0 loads assets\startup*.zip resident, so their members are found by full path.
-static void indexResident10(const di1::Config& c)
-{
-    if (!c.serve10 || !c.resident10 || !c.install10[0]) return;
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((std::string(c.install10) + "\\assets\\startup*.zip").c_str(), &fd);
-    for (BOOL ok = h != INVALID_HANDLE_VALUE; ok; ok = FindNextFileA(h, &fd)) indexZip10(fd.cFileName);
-    if (h != INVALID_HANDLE_VALUE) FindClose(h);
-    logf("resident10: %u full-path members of the 1.0 startup archives indexed", (unsigned)g_over10.size());
 }
 
 // A file in the plugin's folder, read whole; "" when it cannot be opened.
@@ -1123,15 +991,14 @@ static engine::shaders::Compiler prepareShaders10(const di1::Config& c, const ch
     return out;
 }
 
-constexpr int kOpenFiles = 8192;   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
-
-// Before any hook, in this order: RenderDoc, file limit, resident archives, tables, shaders10, playsets.
+// Before any hook, in this order: RenderDoc, 1.0 archives, resident archives, tables, shaders10, playsets.
 // Returns shaders10's compiler.
 static engine::shaders::Compiler prepare(const di1::Config& c, const char* dir)
 {
     trace::renderdoc::install({c.renderdoc10, g_gameDir + "\\di3cap"});
-    _setmaxstdio(kOpenFiles);
-    indexResident10(c);
+    di1::vfs::install(c);
+    di1::choalias::install(c);
+    di1::session::install(c);
     loadTables(c, dir);
     engine::shaders::Compiler compiler = prepareShaders10(c, dir);
     di1::playsets::install(c);

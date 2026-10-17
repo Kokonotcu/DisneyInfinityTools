@@ -25,11 +25,11 @@ struct LockNesting {
 
 // Take locks outer to inner, never against a row. None is inverted anywhere.
 inline constexpr LockNesting kLockOrder[] = {
-    {"g_dbLock (npcrt)", "g_zipLock", "prepare -> read10s"},
-    {"g_dbLock (npcrt)", "g_sessLock", "prepare"},
-    {"g_zipLock", "g_sessLock", "indexZip10"},
-    {"engine::shaders mx (shaders10)", "g_zipLock", "make -> generateShader10 -> gen30::generate -> read10s"},
-    {"sceneSettingsIO's mx", "g_zipLock", "read10s"},
+    {"g_dbLock (npcrt)", "di1::vfs mx", "prepare -> read10s"},
+    {"g_dbLock (npcrt)", "di1::session mx", "prepare -> keep"},
+    {"di1::vfs mx", "di1::session mx", "session::indexArchive"},
+    {"engine::shaders mx (shaders10)", "di1::vfs mx", "make -> generateShader10 -> gen30::generate -> read10s"},
+    {"sceneSettingsIO's mx", "di1::vfs mx", "read10s"},
     {"sceneSettingsIO's mx", "arc30's cipherLock", "read30x"},
     {"lang30's mx", "arc30's cipherLock", "read30x"},
     {"the engine's DialogueManager lock (+0x58)", "vo.mx", "audio.hpp"},
@@ -49,7 +49,7 @@ inline constexpr const char* kHeldAcrossEngineCalls[] = {
     "engine::shaders recCs (input layouts)",
 };
 
-// Never hold a plugin lock across g_open, read30, readStream or an engine loader.
+// Never hold a plugin lock across engine::assets::open, read30, readStream or an engine loader.
 
 // Loader lock (B-N1): Pentane_Main and install() run in DllMain; nothing they call waits on another thread.
 
