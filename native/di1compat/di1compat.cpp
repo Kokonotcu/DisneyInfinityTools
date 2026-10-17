@@ -39,6 +39,7 @@
 #include "games/di1/selectmenu.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/shaders10.hpp"
+#include "games/di1/shutdown.hpp"
 #include "games/di1/sxnatives.hpp"
 #include "games/di1/tables.hpp"
 #include "games/di1/tools.hpp"
@@ -56,7 +57,6 @@
 #include "trace/teardown.hpp"
 #include "npcrt.hpp"
 #include "vfxrt.hpp"
-#include "caprt.hpp"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -133,7 +133,7 @@ extern "C" void __stdcall Pentane_Main()
     di1::movies::install(cfg);
     di1::buildings::install(cfg);
     trace::buildings::install({cfg.spawnTrace10});
-    caprt::install(cfg);
+    di1::shutdown::install(cfg);
     trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});
 }
 
