@@ -7,9 +7,13 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
-#include "octx.hpp"
-#include "bent.hpp"
-#include "btd.hpp"
+#include "convert/assets.hpp"
+#include "convert/counts.hpp"
+#include "games/di1/associations.hpp"
+#include "games/di1/realms.hpp"
+#include "games/di1/bent.hpp"
+#include "formats/btd.hpp"
+#include "games/di1/btd.hpp"
 #include "formats/chd.hpp"
 #include "mer.hpp"
 #include "render.hpp"
