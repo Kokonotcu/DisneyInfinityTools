@@ -19,6 +19,7 @@
 #include "games/di1/assetdefs.hpp"
 #include "games/di1/assetopen.hpp"
 #include "games/di1/audio10.hpp"
+#include "games/di1/buildings.hpp"
 #include "games/di1/choalias.hpp"
 #include "games/di1/chostart.hpp"
 #include "games/di1/config.hpp"
@@ -44,6 +45,7 @@
 #include "games/di1/transcodeio.hpp"
 #include "games/di1/vfs.hpp"
 #include "trace/breaktrace.hpp"
+#include "trace/buildings.hpp"
 #include "trace/fade.hpp"
 #include "trace/loadprof.hpp"
 #include "trace/locktrace.hpp"
@@ -54,7 +56,6 @@
 #include "trace/teardown.hpp"
 #include "npcrt.hpp"
 #include "vfxrt.hpp"
-#include "bldrt.hpp"
 #include "caprt.hpp"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
@@ -130,7 +131,8 @@ extern "C" void __stdcall Pentane_Main()
     di1::tools::install(cfg);
     di1::selectmenu::install(cfg);
     di1::movies::install(cfg);
-    bldrt::install(cfg);
+    di1::buildings::install(cfg);
+    trace::buildings::install({cfg.spawnTrace10});
     caprt::install(cfg);
     trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});
 }
