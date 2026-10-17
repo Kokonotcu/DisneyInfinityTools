@@ -43,7 +43,7 @@ inline constexpr LockNesting kLockOrder[] = {
 
 // Fibers (B-09): a std::mutex held across a yielding engine call deadlocks its own thread. Add none here.
 inline constexpr const char* kHeldAcrossEngineCalls[] = {
-    "g_defsMx (fallbackDef -> read30)",
+    "di1::assetdefs mx (fallbackDef -> read30)",
     "g_dbLock (prepare's engine opens)",
     "engine::shaders mx (program registration)",
     "engine::shaders recCs (input layouts)",

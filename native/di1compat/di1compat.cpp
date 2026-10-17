@@ -42,6 +42,7 @@
 #include "engine/shaders.hpp"
 #include "engine/zones.hpp"
 #include "games/di1/archives.hpp"
+#include "games/di1/assetdefs.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/currency.hpp"
 #include "games/di1/econ.hpp"
@@ -461,68 +462,6 @@ static bool installChoStart(const di1::Config& c)
         cho.started = [](const uint8_t*, const char* name, uint32_t flags) { audio::choreographyStarted(name, flags); };
     return engine::choreography::install(cho);
 }
-// Asset defs lookup FUN_00703340(key) (thiscall on the AssetDefsManager, ret 4): DefID -> FileName of a Cho, "" when
-// no loaded assetdefs has it. A 3.0 playset's gamedb package carries assetdefs.lua (30 engine entries every playset
-// ships identically, GamePlayers_ToyCreation_Fast among them, plus character entries) and the GameDB loader parses it
-// when the playset loads; the Incredibles package is loaded by the older fixed-list path that never opens it, so
-// AvatarSpawning got no creation cho, skipped its ToyCreation_PlaceToy setup and never finalized the avatar
-// (in-game 2026-10-13). On a miss the lookup answers from gamedb/incredibles/assetdefs.lua (3.0 entries, added to that
-// package), read once through the engine's own open.
-typedef const char*(__fastcall* AssetDefFn)(void* self, void* edx, const char* key);
-static AssetDefFn g_assetDef;
-static std::map<std::string, std::string>* g_defs;   // lowercase DefID -> FileName (Cho entries)
-static std::mutex g_defsMx;
-static const char* fallbackDef(const char* key)
-{
-    std::lock_guard<std::mutex> l(g_defsMx);
-    if (!g_defs) {
-        g_defs = new std::map<std::string, std::string>;
-        std::string t;
-        if (read30("gamedb/incredibles/assetdefs.lua", t)) {
-            for (size_t a = t.find('{', t.find("AssetDefs")); a != std::string::npos; a = t.find('{', a + 1)) {
-                size_t b = t.find('}', a);
-                if (b == std::string::npos) break;
-                std::string blk = t.substr(a, b - a);
-                auto field = [&](const char* n) {
-                    size_t i = blk.find(n);
-                    if (i == std::string::npos) return std::string();
-                    size_t q = blk.find('"', i), e = q == std::string::npos ? q : blk.find('"', q + 1);
-                    return e == std::string::npos ? std::string() : blk.substr(q + 1, e - q - 1);
-                };
-                std::string id = field("DefID"), file = field("FileName");
-                if (field("AssetType") != "Cho" || id.empty()) continue;
-                for (char& c : id) c = (char)tolower((unsigned char)c);
-                (*g_defs)[id] = file;
-            }
-        }
-        logf("asset defs fallback: %u Cho entries from gamedb/incredibles/assetdefs.lua", (unsigned)g_defs->size());
-    }
-    std::string k = key ? key : "";
-    for (char& c : k) c = (char)tolower((unsigned char)c);
-    auto it = g_defs->find(k);
-    return it == g_defs->end() ? nullptr : it->second.c_str();
-}
-static volatile LONG g_assetDefLogged;
-static const char* __fastcall hkAssetDef(void* self, void*, const char* key)
-{
-    const char* r = g_assetDef(self, nullptr, key);
-    if (r && !*r) {
-        const char* f = nullptr;
-        __try { f = fallbackDef(key); } __except (EXCEPTION_EXECUTE_HANDLER) { f = nullptr; }
-        if (f) {
-            if (InterlockedIncrement(&g_assetDefLogged) <= 20) { char k[64] = ""; safeCopy(k, sizeof(k), key); logf("assetdef '%s' -> '%s' (fallback)", k, f); }
-            return f;
-        }
-    }
-    return r;
-}
-
-// The asset defs fallback's hook (H1): always on.
-static bool installAssetDefs(const di1::Config&)
-{
-    return hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
-}
-
 static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc loaded in-process, one frame captured once the world runs
 // renderdoc10: one frame captured renderdoc10 seconds after the first 1.0 playset mission's tick (missiontrace).
 static void armRenderDocCapture()
@@ -1319,7 +1258,7 @@ extern "C" void __stdcall Pentane_Main()
     trace::opacity::install({g_cfg.opacityLog10});
     trace::fade::install({g_cfg.fadeProbe10});
     trace::loadprof::install({g_cfg.fpsLog10, g_cfg.loadProf10, g_gameDir});
-    installAssetDefs(g_cfg);
+    di1::assetdefs::install(g_cfg);
     engine::crt::install({});
     installSx(g_cfg);
     npcrt::install(g_cfg);
