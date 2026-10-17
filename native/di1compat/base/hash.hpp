@@ -1,6 +1,7 @@
 // Hashes with fixed results: the engines' name hashes, zlib's CRC-32, on-disk file names. base/bytes.hpp; any thread.
 #pragma once
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -69,13 +70,24 @@ inline std::string shaderCacheName(const char* target, const std::string& hlsl)
 constexpr uint32_t kH131 = 131;
 constexpr uint32_t kEhashFold = 0x25;   // FUN_0044a9f0 adds each 4 chars and multiplies by it
 
-// x131 over n chars or to a NUL, chars sign-extended (3.0 FUN_0040bb50, 1.0 FUN_0040bac0); audio.hpp's is unsigned
+// x131 over n chars or to a NUL, chars sign-extended (3.0 FUN_0040bb50, 1.0 FUN_0040bac0); lower-cased: FUN_0040bb80
 inline uint32_t h131Signed(const char* s, size_t n)
 {
     uint32_t h = 0;
     for (size_t i = 0; i < n && s[i]; ++i) h = h * kH131 + (uint32_t)(int32_t)(signed char)s[i];
     return h;
 }
+
+// FNV-1 of the name lower-cased by the CRT: Wwise's GetIDFromString (3.0 FUN_01947970)
+inline uint32_t fnv1Lower(const char* s)
+{
+    constexpr uint32_t kBasis = 0x811c9dc5u;   // the FNV-1 32-bit offset basis
+    constexpr uint32_t kPrime = 0x1000193u;    // the FNV-1 32-bit prime
+    uint32_t h = kBasis;
+    for (; *s; ++s) h = (h * kPrime) ^ (uint8_t)tolower((uint8_t)*s);
+    return h;
+}
+inline uint32_t fnv1Lower(const std::string& s) { return fnv1Lower(s.c_str()); }
 
 // The engine's name hash of shader parameters, slots, techniques: case-sensitive (FUN_0044a9f0, shd.py ehash)
 inline uint32_t ehash(const std::string& s)

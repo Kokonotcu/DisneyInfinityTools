@@ -1,10 +1,10 @@
-// audio10: the FMOD host (audio.hpp) set up from the cfg's audio keys and both installs. core, engine/assets.
+// audio10: the FMOD host (di1::audio) set up from the cfg's audio keys and both installs. core, engine/assets.
 // Boot thread.
 #pragma once
-#include "../../audio.hpp"
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
 #include "../../engine/assets.hpp"
+#include "audio.hpp"
 #include "config.hpp"
 
 namespace di1::audio10 {
@@ -13,8 +13,8 @@ namespace di1::audio10 {
 inline bool install(const Config& c)
 {
     if (!c.audio10 || !c.install10[0]) return true;
-    audio::logfn = core::logf;
     audio::Cfg a;
+    a.log = core::logf;
     a.music = c.music10;
     a.vo = c.vo10;
     a.trace = c.audioTrace10;

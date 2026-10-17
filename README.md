@@ -72,7 +72,7 @@ the translated result to the engine as an in-memory file. The translations by fo
 | Scripts and AI (Slang, behaviour maps and trees, navmeshes) | 3.0 containers, with natives bound to their 1.0 semantics | `sx.hpp`, `npc.hpp`, `npcrt.hpp` |
 | Missions and UI | Event enums, beacons, loading screens, menus | `games/di1/mission.hpp`, `ui.hpp` |
 | Collision (`.btd`), localisation (`.dct`) | 3.0 block layout; 1.0 dictionaries | `btd.hpp`, `dct.hpp` |
-| Audio (FMOD Ex events, music, dialogue) | A 1.0 FMOD event system runs beside 3.0's Wwise. Posts for 1.0 events, music cues and dialogue lines are routed to it | `audio.hpp` |
+| Audio (FMOD Ex events, music, dialogue) | A 1.0 FMOD event system runs beside 3.0's Wwise. Posts for 1.0 events, music cues and dialogue lines are routed to it | `engine/audio/`, `games/di1/audio.hpp`, `dlg.hpp`, `mixer.hpp` |
 
 Every translation has a configuration switch, on by default, so a problem can be narrowed down one subsystem at a
 time.

@@ -7,7 +7,6 @@
 #include <exception>
 #include <set>
 #include <string>
-#include "../../audio.hpp"
 #include "../../base/format.hpp"
 #include "../../base/text.hpp"
 #include "../../core/engine_file.hpp"
@@ -19,12 +18,13 @@
 #include "../../sys.hpp"
 #include "../../third_party/miniz/miniz.h"
 #include "../../trace/loadprof.hpp"
-#include "ui.hpp"
+#include "audio.hpp"
 #include "config.hpp"
 #include "openstage.hpp"
 #include "session.hpp"
 #include "transcode.hpp"
 #include "transcodeio.hpp"
+#include "ui.hpp"
 #include "vfs.hpp"
 
 namespace di1::serve {
