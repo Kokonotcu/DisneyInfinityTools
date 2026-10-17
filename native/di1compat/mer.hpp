@@ -400,7 +400,7 @@ struct LinkRecord {
 inline std::optional<LinkRecord> linkRecord(const oct::File& f, size_t i)
 {
     LinkRecord L;
-    for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
+    for (size_t j = i + 1, end = f.blockEnd(i); j < end; ++j) {
         const std::string& n = f.name(f.recs[j]);
         if (n == "Data") L.data = (long)j;
         if (n != "Type" && n != "Name") continue;
@@ -523,7 +523,7 @@ inline bool rewriteLinks(Graph& g, std::string* why)
     if (lpool < 0) return true;
     std::map<std::string, int> seen;   // namespace name -> times matched
     int curNs = -1;
-    for (size_t i = lpool + 1; i < f.blockEnd(lpool); i = f.blockEnd(i)) {
+    for (size_t i = lpool + 1, end = f.blockEnd(lpool); i < end; i = f.blockEnd(i)) {   // f is not edited here
         if (f.recs[i].level != f.recs[lpool].level + 1) continue;
         const std::optional<LinkRecord> L = linkRecord(f, i);
         if (!L) return fail(why, "link record holds no name");
@@ -781,6 +781,24 @@ inline bool transcode(const Table& T, oct::File& f, Stats* st = nullptr, std::st
     return true;
 }
 
+namespace detail {
+
+// Each entry of pool p counted under its first Type; ends hoisted, a rescan per entry cost 132 ms (GR-04)
+inline void countTypes(const oct::File& f, size_t p, std::map<std::string, uint32_t>& c)
+{
+    for (size_t i = p + 1, pe = f.blockEnd(p); i < pe; i = f.blockEnd(i)) {
+        if (f.recs[i].level != f.recs[p].level + 1) continue;
+        for (size_t j = i + 1, je = f.blockEnd(i); j < je; ++j) {
+            if (f.name(f.recs[j]) != "Type") continue;
+            const std::optional<std::string> type = firstName(f, f.recs[j]);
+            if (type) c[*type]++;   // one holding no name counts nothing (GR-16)
+            break;
+        }
+    }
+}
+
+}  // namespace detail
+
 // The .mtc type manifest of a graph (DI3Tools mer.mtc, first Type record): u32 0xffff, u32 node types, u32 link
 // types, per type (u32 count, u32 file offset of its name), then the names; node classes then link classes, each
 // sorted, without NameSpaceBegin / NameSpaceEnd.
@@ -790,15 +808,7 @@ inline std::string mtc(const oct::File& f)
     for (const char* poolName : {"MeridianNodePool", "MeridianLinkPool"}) {
         std::map<std::string, uint32_t> c;
         long p = f.pool(poolName);
-        for (size_t i = p + 1; p >= 0 && i < f.blockEnd(p); i = f.blockEnd(i)) {
-            if (f.recs[i].level != f.recs[p].level + 1) continue;
-            for (size_t j = i + 1; j < f.blockEnd(i); ++j) {
-                if (f.name(f.recs[j]) != "Type") continue;
-                const std::optional<std::string> type = detail::firstName(f, f.recs[j]);
-                if (type) c[*type]++;   // one holding no name counts nothing (GR-16)
-                break;
-            }
-        }
+        if (p >= 0) detail::countTypes(f, (size_t)p, c);
         c.erase("NameSpaceBegin");
         c.erase("NameSpaceEnd");
         sections.emplace_back(c.begin(), c.end());
