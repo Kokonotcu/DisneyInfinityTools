@@ -6,7 +6,7 @@
 namespace datamap {
 
 namespace detail {
-// The Kinds whose 3.0 handler appends the extension itself (FUN_0070c090; a path with it was doubled).
+// The Kinds whose 3.0 handler appends the extension itself (FUN_0070c090): a path keeping it gets it twice.
 struct KindExt {
     const char* kind;
     const char* ext;

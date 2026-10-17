@@ -314,7 +314,7 @@ inline int redirectAssociations(oct::File& f, const std::string& type, Edit edit
         if (sn < (int)sns.size()) want[sn].push_back(f.name0(r));
     });
     std::map<std::pair<int, std::string>, std::string> renamed;
-    // last to first, the order the names were always added in (name-table bytes, CO-02)
+    // last to first: names are interned in this order, so the name table's bytes follow it (CO-02)
     std::vector<size_t> order;
     for (auto it = want.rbegin(); it != want.rend(); ++it) order.push_back((size_t)it->first);
     editPoolChildren(f, sp, sns, order, [&](oct::File& g, size_t k) {
