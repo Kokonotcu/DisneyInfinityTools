@@ -408,24 +408,28 @@ static std::string skin10(oct::File& f, std::string& vbuf, const std::string& ib
     return n || !why.empty() ? "+skinremap(" + std::to_string(n) + (why.empty() ? "" : ": " + why) + ") " : "";
 }
 
-inline void install()
+// The NPC runtime's hooks (H1); avperc10 works on the GameDb that gamedb30 builds, so it needs gamedb30's hooks.
+inline bool install()
 {
+    bool ok = true;
     if (g_cfg.spawner10)
-        hook("quarterback factory (spawner10)", 0x010C2F70, "64A1000000006AFF68????????50", (void*)&hkQbFactory, (void**)&g_qbFactory);
-    if (!g_cfg.gamedb30) return;
-    bool db = installFeature("gamedb30", {
+        ok &= hook("quarterback factory (spawner10)", 0x010C2F70, "64A1000000006AFF68????????50", (void*)&hkQbFactory,
+                   (void**)&g_qbFactory);
+    if (!g_cfg.gamedb30) return ok;
+    const bool db = installFeature("gamedb30", {
         {"DataMap record include (gamedb30)", 0x0070D730, "6AFF68????????64A100000000", (void*)&hkInclude,
          (void**)&g_include},
         {"DataMap playset unload (gamedb30)", 0x0070DF70, "566A0068????????8BF1", (void*)&hkPlaysetUnload,
          (void**)&g_playsetUnload},
     });
-    if (db && g_cfg.avperc10)   // avperc10 works on the GameDb that gamedb30 builds
-        installFeature("avperc10", {
+    if (db && g_cfg.avperc10)
+        ok &= installFeature("avperc10", {
             {"perception mode apply (avperc10)", 0x0152AE80, "51837C240CF9578BF9", (void*)&hkPercApply,
              (void**)&g_percApply},
             {"perception mode remove (avperc10)", 0x0152AFA0, "837C2408F9568BF1", (void*)&hkPercRemove,
              (void**)&g_percRemove},
         });
+    return ok && db;
 }
 
 }  // namespace npcrt

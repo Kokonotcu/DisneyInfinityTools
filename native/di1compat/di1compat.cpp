@@ -492,6 +492,13 @@ static uint8_t __fastcall hkPlaysetChar(void* self, void*, const char* key, int 
     return 1;
 }
 
+// The playset slot's hook (H1): always on, it has no cfg key (B-20).
+static bool installPlaysetSlot()
+{
+    return hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar,
+                (void**)&g_playsetChar);
+}
+
 // Trace only: the actor registry's "does <name> exist" (FUN_00751750, thiscall, ret 4), which the playset avatar
 // choice FUN_013a4250 asks for <avatar> + avatarSuffix, then <avatar>, before taking FallbackAvatar.
 typedef uint8_t(__fastcall* ActorExistsFn)(void* self, void* edx, const char** name);
@@ -637,6 +644,17 @@ static uint8_t __fastcall hkStartQuery(uint8_t* self, void*, uint32_t a1, int pl
         logf("start query node %p (zone %08X, players %02X) for player %d zone %08X -> %u at (%.2f, %.2f, %.2f)", self,
              *(uint32_t*)(self + 0x88), self[0x85], player, zone, r, out ? out[4] : 0.f, out ? out[5] : 0.f, out ? out[6] : 0.f);
     return r;
+}
+
+// spawntrace10's hooks (H1): where the player is put (Pirates fall); trace installs the same two itself.
+static bool installSpawnTrace()
+{
+    if (!g_cfg.spawnTrace10 || g_cfg.trace) return true;
+    return installFeature("spawntrace10", {
+        {"start lookup (spawntrace10)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup,
+         (void**)&g_startLookup},
+        {"start query (spawntrace10)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery},
+    });
 }
 
 // Trace: the avatar spawn path. Event posts FUN_0068bbb0(name, a2, a3) (thiscall on the event manager, ret 0xc),
@@ -818,6 +836,15 @@ static void __fastcall hkChoStart(uint8_t* self, void*)
     g_choStart(self, nullptr);
     if (g_cfg.audio10 && g_cfg.cineSync10) audio::choreographyStarted(name, flags);
 }
+
+// The choreography start hook (H1): cinesync10 starts 1.0's audio-sync sound event (audio.hpp); breaktrace logs.
+static bool installChoStart()
+{
+    const bool cineSync = g_cfg.audio10 && g_cfg.cineSync10;
+    if (!g_cfg.breakTrace && !cineSync) return true;
+    return hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart,
+                (void**)&g_choStart);
+}
 // - choreography layout attachments FUN_00788280 (thiscall on the layout, 4 args, ret 0x10): after its gate
 //   FUN_00785b40(a1, a2) (ret 8; 0 = nothing applied) it walks the attachments (+0x30, count +0x34; 0xc each, base
 //   instance u16 +8, layer instance u16 +10) and binds one only when both instance objects (a3 +4: 0xc each, object
@@ -949,6 +976,30 @@ static void __fastcall hkExplode(void* self, void*, uint32_t a1)
         logf("breaktrace explode: data %p actor %08X PieceFile '%s' PieceName '%s' pieces %d -> %d flags %02X", self,
              *(uint32_t*)d, file, piece, before, *(int*)(d + 0x60), d[0xf1]);
     }
+}
+
+// breaktrace's hooks (H1), all or none.
+static bool installBreakTrace()
+{
+    if (!g_cfg.breakTrace) return true;
+    return installFeature("breaktrace", {
+        {"ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&hkClipEval, (void**)&g_clipEval},
+        {"exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&hkMunHit,
+         (void**)&g_munHit},
+        {"exploder explode (breaktrace)", 0x0151E130, "6AFF64A100000000", (void*)&hkExplode, (void**)&g_explode},
+        {"choreography audio-sync wait (breaktrace)", 0x01442EE0, "568BF185F6744D8B06", (void*)&hkChoReady,
+         (void**)&g_choReady},
+        {"choreography play (breaktrace)", 0x01445E70, "5183790C00753B8B01", (void*)&hkBtPlay, (void**)&g_btPlay},
+        {"layout attachments apply (breaktrace)", 0x00788280, "6AFF68????????64A100000000", (void*)&hkLayApply,
+         (void**)&g_layApply},
+        {"layout attachments gate (breaktrace)", 0x00785B40, "8B4C240885C97407", (void*)&hkLayGate,
+         (void**)&g_layGate},
+        {"layout attachment bind (breaktrace)", 0x00787830, "6AFF68????????64A100000000", (void*)&hkLayBind,
+         (void**)&g_layBind},
+        {"clip setup (breaktrace)", 0x00552FC0, "8B44240456578BF1", (void*)&hkClipSet, (void**)&g_clipSet},
+        {"music cue push (breaktrace)", 0x0073C5C0, "81EC1C010000538BD9807B1000", (void*)&hkMusicPush,
+         (void**)&g_musicPush},
+    });
 }
 // "ptr vt=<static> <rtti> ref=<word> prot=<protect>"
 static void tdObj(char* out, size_t cap, uintptr_t p)
@@ -1149,6 +1200,27 @@ static void __cdecl hkHeapFree(uint32_t p)
          (uint32_t)(t_tdOuter - p), tdProt(t_tdOuter));
 }
 
+// teardowntrace's hooks (H1), all or none.
+static bool installTeardownTrace()
+{
+    if (!g_cfg.teardownTrace) return true;
+    return installFeature("teardowntrace", {
+        {"Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor,
+         (void**)&g_layoutDtor},
+        {"Samurai::Node dtor (teardowntrace)", 0x004EE5F0, "6AFF68????????64A100000000", (void*)&hkNodeDtor,
+         (void**)&g_nodeDtor},
+        {"hierarchy entry release (teardowntrace)", 0x004B2780, "8B442404568D7110", (void*)&hkEntryRel,
+         (void**)&g_entryRel},
+        {"hierarchy entry free (teardowntrace)", 0x004E1A40, "83EC0853578B7C2414", (void*)&hkEntryFree,
+         (void**)&g_entryFree},
+        {"Layout placement bind (teardowntrace)", 0x0077D9C0, "6AFF68????????64A100000000", (void*)&hkPlBind,
+         (void**)&g_plBind},
+        {"block tracker delete" " (teardowntrace)", 0x00416840, "535556578BF9", (void*)&hkTrackFree,
+         (void**)&g_trackFree},
+        {"heap free (teardowntrace)", 0x00409E10, "8B4424046A0350E8", (void*)&hkHeapFree, (void**)&g_heapFree},
+    });
+}
+
 // Trace: the spawn choreography. FUN_00a9f080 asks the creation cho for 'Cho Controls' (FUN_014835c0, thiscall 2 args)
 // and only then registers FUN_00a8b670 on its 'ToyCreation_PlaceToy' event; that callback sets the per-player ready
 // flag (+0xd9) the finalize step waits for.
@@ -1248,6 +1320,12 @@ static const char* __fastcall hkAssetDef(void* self, void*, const char* key)
         }
     }
     return r;
+}
+
+// The asset defs fallback's hook (H1): always on.
+static bool installAssetDefs()
+{
+    return hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
 }
 typedef uint32_t*(__fastcall* ChoMakeFn)(void* self, void* edx, uint32_t* out, const char* name, uint32_t a3, uint32_t a4, uint32_t a5);
 static ChoMakeFn g_choMake;
@@ -1625,6 +1703,26 @@ static DWORD WINAPI profThread(void*)
         }
     }
 }
+
+// fpslog10's frame sync and loadprof10's hooks (H1); the sampler starts only with all of loadprof10's.
+static bool installLoadProf()
+{
+    bool ok = true;
+    if (g_cfg.fpsLog10 || g_cfg.loadProf10)
+        ok &= hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync,
+                   (void**)&g_frameSync);
+    if (!g_cfg.loadProf10) return ok;
+    const bool profiler = installFeature("loadprof10", {
+        {"fiber switch (loadprof10)", 0x0041E480, "8B44240C85C0740C", (void*)&hkFiberSwitch, (void**)&g_fiberSwitch},
+        {"file-done wait (loadprof10)", 0x0041FC10, "56578B3D????????8BF1", (void*)&hkFileWait, (void**)&g_fileWait},
+        {".oct asset load (loadprof10)", 0x00786D00, "6AFF68????????64A100000000", (void*)&hkOctLoad,
+         (void**)&g_octLoad},
+    });
+    if (!profiler) return false;
+    g_profPath = g_gameDir + "\\di1compat_prof.tsv";
+    if (HANDLE h = CreateThread(nullptr, 0, profThread, nullptr, 0, nullptr); h) CloseHandle(h);
+    return ok;
+}
 // test (opacitylog10): FUN_0044ad80 -> bit i set = primitive i is "faded" (opacity param * object fade < 1) and the
 // opaque G-buffer list skips it (FUN_00461020); logs our skipped primitives with the values that decided it
 typedef uint32_t(__cdecl* OpacityMaskFn)(uint32_t n, float fade, uint32_t prims, uint32_t insts);
@@ -1712,6 +1810,19 @@ static uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t
          node[0xf], *(float*)(node + 0x10), *(float*)(node + 0x14), sphere[0], sphere[1], sphere[2], sphere[3], z, F(0xd0),
          F(0x130), F(0x150), F(0x170), s, out[1]);
     return r;
+}
+
+// The render probes' hooks (H1): opacitylog10 and fadeprobe10, each on its own.
+static bool installRenderProbes()
+{
+    bool ok = true;
+    if (g_cfg.opacityLog10)
+        ok &= hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask,
+                   (void**)&g_opacityMask);
+    if (g_cfg.fadeProbe10)
+        ok &= hook("visibility test (fadeprobe10)", 0x0044B8F0, "8B5424088A442414F30F10620C", (void*)&hkVisTest,
+                   (void**)&g_visTest);
+    return ok;
 }
 
 // PS-1 (zones10): the 1.0 playsets the 3.0 zone list holds once it has loaded (gameplay::playsets10; added here unless
@@ -1804,6 +1915,20 @@ static uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
     }
     if (info.L) ((ReleaseFn)rt(0x0130E4D0))(info.L, info.idx);
     return changed;
+}
+
+// currency10's hooks (H1), all or none.
+static bool installCurrency()
+{
+    if (!g_cfg.currency10) return true;
+    return installFeature("currency10", {
+        {"zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&hkZoneCurrency,
+         (void**)&g_zoneCurrency},
+        {"UI_GetPlaysetCurrency (currency10)", 0x00B54B50, "6AFF68????????64A100000000", (void*)&hkPlaysetCurrency,
+         (void**)&g_playsetCurrency},
+        {"HUD currency (currency10)", 0x00FBB420, "6AFF68????????64A100000000", (void*)&hkHudCurrency,
+         (void**)&g_hudCurrency},
+    });
 }
 static bool world10(const std::string& zone) { return di1::worldInstalled(g_cfg.install10, zone); }
 static int zones10(std::string& t, const char* p)
@@ -1904,6 +2029,15 @@ static void __cdecl hkMerRegistry()
         int n = mernode::registerAll(rt, static_cast<void (*)(const char*, ...)>(logf), g_mer);
         logf("meridian native: %d of %d classes registered", n, mernode::count());
     }
+}
+
+// The Meridian registry hook (H1): aliases10 or native10, and only with the mer table loaded.
+static bool installMerRegistry()
+{
+    const bool classes = g_cfg.aliases10 || g_cfg.native10;
+    if (!classes || !g_merOk) return true;
+    return hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry,
+                (void**)&g_merRegistry);
 }
 
 // locktrace10: who takes the player's controls and gives them back, and the mission chain around it (in-game
@@ -2184,6 +2318,49 @@ static void __fastcall hkMisProgress(uint8_t* mission, void*, void* table)
     }
 }
 
+// locktrace10's hooks (H1), all or none.
+static bool installLockTrace()
+{
+    if (!g_cfg.lockTrace10) return true;
+    return installFeature("locktrace10", {
+        {"GamePlayers lock controls (locktrace10)", 0x0139B8D0, "833D????????00558BE9", (void*)&hkCtlLock,
+         (void**)&g_ctlLock},
+        {"GamePlayers unlock controls (locktrace10)", 0x0139B960, "55578B7C240C8BE985FF", (void*)&hkCtlUnlock,
+         (void**)&g_ctlUnlock},
+        {"controller context apply (locktrace10)", 0x0121D5C0, "8B44240483EC0C53568BD9", (void*)&hkCtxOn,
+         (void**)&g_ctxOn},
+        {"controller context remove (locktrace10)", 0x0121D8C0, "8B44240483EC0C56578BF9", (void*)&hkCtxOff,
+         (void**)&g_ctxOff},
+        {"choreography node play (locktrace10)", 0x017E91B0, "83EC1C5556578BF1E8", (void*)&hkChoPlay,
+         (void**)&g_choPlay},
+        {"choreography node event (locktrace10)", 0x017E5890, "538BD9568D73D057", (void*)&hkChoEvent,
+         (void**)&g_choEvent},
+        {"message sender send (locktrace10)", 0x018120B0, "6AFF68????????64A100000000", (void*)&hkMsgSend,
+         (void**)&g_msgSend},
+        {"message handler delivery (locktrace10)", 0x018049F0, "83EC08568BF18B4E20", (void*)&hkMsgRecv,
+         (void**)&g_msgRecv},
+        {"mission monitor fire (locktrace10)", 0x01730490, "5156578BF18B068B504833FF57", (void*)&hkMonPin,
+         (void**)&g_monPin},
+        {"load screen active update (locktrace10)", 0x0145B9A0, "5356578BF98D77ECBB01000000", (void*)&hkLoadTick,
+         (void**)&g_loadTick},
+        {"master net sync Link_In (locktrace10)", 0x006EC4F0,
+         "6AFF68????????64A100000000506489250000000083EC30535556578BF1", (void*)&hkNetSync, (void**)&g_netSync},
+        {"colvis toggle parameters (locktrace10)", 0x01808FE0,
+         "6AFF68????????64A1000000005064892500000000518B442414535657508BF1", (void*)&hkColVisLoad,
+         (void**)&g_colVisLoad},
+        {"colvis toggle apply (locktrace10)", 0x01803550, "558B6C2408565733FF8BF1", (void*)&hkColVisApply,
+         (void**)&g_colVisApply},
+        {"beacon map lookup (locktrace10)", 0x01591570, "83EC088B81740100005355", (void*)&hkBeaconLookup,
+         (void**)&g_beaconLookup},
+        {"compass mission track (locktrace10)", 0x015BA4D0, "83EC0C538B5C2414568BF1", (void*)&hkTrack,
+         (void**)&g_track},
+        {"compass draw (locktrace10)", 0x00C13C50, "558BEC83E4F081ECB4000000", (void*)&hkNavUpdate,
+         (void**)&g_navUpdate},
+        {"mission progress entries (locktrace10)", 0x0157CD10, "558BEC83E4F86AFF68????????64A100000000",
+         (void*)&hkMisProgress, (void**)&g_misProgress},
+    });
+}
+
 // missiontrace: a 1.0 mission's actor focus points (MU tutorial 2026-10-15: no marker on the FearTech decorations).
 // The graph node MissionFocusPoint_Actor (Meridian::FocusPointActor, vtable 01DE726C) binds at init to the mission's
 // FocusPoint_Actor record by its MissionID 'name:id' (FUN_01747160: +0x40 the string, +0x28 the mission element,
@@ -2320,6 +2497,26 @@ static void __fastcall hkFpScan(uint8_t* fp, void*)
     if (lockTraceRoom(lines) && lines <= 300) logf("focus point %.60s:%d %s", name, *(int16_t*)(fp + 0x142), sig);
 }
 
+// missiontrace's hooks (H1), all or none.
+static bool installMissionTrace()
+{
+    if (!g_cfg.missionTrace) return true;
+    return installFeature("missiontrace", {
+        {"MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick,
+         (void**)&g_missionTick},
+        {"FocusPoint_Actor update (missiontrace)", 0x015DF390, "6AFF64A10000000068????????50", (void*)&hkFpUpdate,
+         (void**)&g_fpUpdate},
+        {"FocusPointActor Update pin (missiontrace)", 0x01730E80, "8B4424048B40048B486485C9", (void*)&hkFpNodeUpdate,
+         (void**)&g_fpNodeUpdate},
+        {"FocusPointActor tag apply (missiontrace)", 0x0173A3F0, "6AFF68????????64A100000000", (void*)&hkFpApply,
+         (void**)&g_fpApply},
+        {"FocusPoint_Actor tag scan (missiontrace)", 0x015D5F80, "6AFF68????????64A100000000", (void*)&hkFpScan,
+         (void**)&g_fpScan},
+        {"handle to actor (missiontrace)", 0x0074B200, "83EC088B44240C8D0C2451", (void*)&hkActorOf,
+         (void**)&g_actorOf},
+    });
+}
+
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
 typedef void*(__cdecl* NodeMakeFn)(void* mem, uint32_t a2, uint32_t a3);
 static NodeMakeFn g_mkStart, g_mkLocator, g_mkSpawnExp;
@@ -2364,6 +2561,49 @@ static void __fastcall hkHdrClone(void* self, void*, uint32_t index, uint32_t a2
              t ? t[0] : 0, t ? t[1] : 0, t ? t[2] : 0, t ? t[3] : 0, t ? t[4] : 0, tp, pname);
     }
     g_hdrClone(self, nullptr, index, a2, delta, instRoot);
+}
+
+// trace's hooks (H1), all or none; hkInst's dead-root guard stays under trace (owner's choice, B-04).
+static bool installTrace()
+{
+    if (!g_cfg.trace) return true;
+    return installFeature("trace", {
+        {"actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists},
+        {"figure check (trace)", 0x00DDAE30, "64A1000000006AFF68", (void*)&hkFigureOk, (void**)&g_figureOk},
+        {"figure playset (trace)", 0x00435080, "6AFF68????????64A100000000", (void*)&hkFigurePlayset,
+         (void**)&g_figurePlayset},
+        {"reader list (trace)", 0x00427330, "83EC08535556", (void*)&hkReaderList, (void**)&g_readerList},
+        {"reader item gate (trace)", 0x00DEB610, "538B5C2408", (void*)&hkReaderItemOk, (void**)&g_readerItemOk},
+        {"playset figure slot (trace)", 0x00DF9FD0, "6AFF68????????64A100000000", (void*)&hkIgpName,
+         (void**)&g_igpName},
+        {"asset instance (trace)", 0x007734F0, "6AFF68????????64A100000000", (void*)&hkAssetInst,
+         (void**)&g_assetInst},
+        {"SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst,
+         (void**)&g_inst},
+        {"header clone (trace)", 0x004F5900, "5153555657", (void*)&hkHdrClone, (void**)&g_hdrClone},
+        {"start lookup (trace)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup,
+         (void**)&g_startLookup},
+        {"AsyncActorCreator execute (trace)", 0x0075A290, "6AFF68????????64A100000000", (void*)&hkAacExec,
+         (void**)&g_aacExec},
+        {"avatar spawn callback (trace)", 0x00A9B3E0, "8B0D????????83B988000000", (void*)&hkAvSpawned,
+         (void**)&g_avSpawned},
+        {"cho make (trace)", 0x014523B0, "83EC1C33C0", (void*)&hkChoMake, (void**)&g_choMake},
+        {"AvatarSpawning create (trace)", 0x00A9F080, "6AFF68????????64A100000000", (void*)&hkAvCreate,
+         (void**)&g_avCreate},
+        {"cho has (trace)", 0x014835C0, "53568B74240C", (void*)&hkChoHas, (void**)&g_choHas},
+        {"PlaceToy callback (trace)", 0x00A8B670, "8B4424048B4004", (void*)&hkPlaceToy, (void**)&g_placeToy},
+        {"event post (trace)", 0x0068BBB0, "56578BF98B07", (void*)&hkPost, (void**)&g_post},
+        {"level loader tick (trace)", 0x00D00530, "6AFF64A100000000", (void*)&hkLevelTick, (void**)&g_levelTick},
+        {"level load-done check (trace)", 0x00CCC450, "568BF1807E2100", (void*)&hkLoadDone, (void**)&g_loadDone},
+        {"AvatarSpawning finalize (trace)", 0x00AA36F0, "64A1000000006AFF68", (void*)&hkAvFinal, (void**)&g_avFinal},
+        {"AvatarSpawning remove (trace)", 0x00A9EC70, "6AFF68????????64A100000000", (void*)&hkAvRemove,
+         (void**)&g_avRemove},
+        {"start query (trace)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery},
+        {"MNode PlayerStartPosNode (trace)", 0x0148A790, "518B442410", (void*)&hkMkStart, (void**)&g_mkStart},
+        {"MNode LocatorNode (trace)", 0x01480090, "518B442410", (void*)&hkMkLocator, (void**)&g_mkLocator},
+        {"MNode SpawnExpendable (trace)", 0x017BF020, "518B442410", (void*)&hkMkSpawnExp, (void**)&g_mkSpawnExp},
+        {"header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake},
+    });
 }
 
 // The open half: a .lua stream (3.0's own or served from 1.0) -> CHD bytes. nullptr leaves the open as it was.
@@ -2481,6 +2721,14 @@ static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
     if (sys::g_pkg10 >= 0) logf("expendables %s (a 1.0 package): %d entries without PopinDistance pop in as in 1.0", p, sys::g_pkg10);
     sys::g_pkg10 = -1;
 }
+
+// The expendables package hook (H1): popin10 or deliv10.
+static bool installExpPkg()
+{
+    if (!g_cfg.popin10 && !g_cfg.deliv10) return true;
+    return hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg,
+                (void**)&g_expPkg);
+}
 // PS-5 (sys.hpp): DBFileLoader_Callback::load FUN_018db270 (thiscall CString path, a2, a3; ret 0xc) -- every Lua
 // callback loader (bitMask, stats, chestInfo ...); after the playset's bitmasks, the 1.0 core masks as one more package,
 // then (GLB-1) the 1.0 perceptions 3.0 lacks, whose actor types those masks register
@@ -2525,6 +2773,14 @@ static uint32_t __fastcall hkEconOnDeath(uint8_t* self, void*)
     return g_econOnDeath(self, nullptr);
 }
 
+// econ10's hook (H1).
+static bool installEcon()
+{
+    if (!g_cfg.econ10) return true;
+    return hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath,
+                (void**)&g_econOnDeath);
+}
+
 // the ctor returns this, and the entry reader uses it (FUN_01603930 at 0x01603a20: mov esi, eax for an entry without
 // RewardType), so the detour must hand it back
 typedef void*(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
@@ -2534,6 +2790,14 @@ static void* __fastcall hkExpDef(void* self, void*, void* entry)
     void* r = g_expDef(self, nullptr, entry);
     if (sys::g_pkg10 >= 0 && sys::applyPopin10(self)) ++sys::g_pkg10;
     return r;
+}
+
+// popin10's definition ctor hook (H1).
+static bool installExpDef()
+{
+    if (!g_cfg.popin10) return true;
+    return hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef,
+                (void**)&g_expDef);
 }
 
 // sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
@@ -2578,6 +2842,20 @@ static uint32_t __fastcall hkLoadInventory(void* self, void*, const char* path, 
     return gameDbLoad(g_loadInventory, "inventory", self, path, a2, a3);
 }
 
+// The GameDB loader hooks (H1); the callback loader only for bits10 or perc10.
+static bool installGameDb()
+{
+    bool ok = hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
+    ok &= hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory,
+               (void**)&g_loadInventory);
+    ok &= hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback,
+               (void**)&g_loadChdCallback);
+    if (g_cfg.bits10 || g_cfg.perc10)
+        ok &= hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad,
+                   (void**)&g_cbLoad);
+    return ok;
+}
+
 // __invoke_watson (0x12CA1D1): the CRT's invalid-parameter fail-fast terminates without any exception handler
 // seeing it (in-game 2026-10-12: 0xC0000417 loading the 1.0 side-missions graph). Log who called it, then die.
 typedef void(__cdecl* WatsonFn)(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t);
@@ -2612,6 +2890,14 @@ static void __cdecl hkNormPath(char* dst, unsigned size, const char* src)
         return;
     }
     g_normPath(dst, size, src);
+}
+
+// The exe CRT's fail-fast hooks (H1): always on.
+static bool installCrt()
+{
+    bool ok = hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
+    ok &= hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
+    return ok;
 }
 
 // ---- ui (ui.hpp) ----
@@ -2697,6 +2983,40 @@ static void __fastcall hkCtxParse(void* self, void*)
         }
     }
     g_ctxParse(self, nullptr);
+}
+
+// tutorial10 keys on the case-0x3d push (68 <imm32> at 0x00DE4C5A, relocated) of the literal "SelectMenu".
+static bool selectMenuPushFound()
+{
+    const uint8_t* push = (const uint8_t*)rt(0x00DE4C5A);
+    const bool pushes = push[0] == 0x68 && *(const uint32_t*)(push + 1) == (uint32_t)rt(0x01D19CDC);
+    return pushes && !strcmp((const char*)rt(0x01D19CDC), "SelectMenu");
+}
+
+// The ui hooks (H1), each with serve10; the ui keys are logged first.
+static bool installUi()
+{
+    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d context10=%d", g_cfg.loadScreen10,
+         g_cfg.uiScope10, g_cfg.fmv10, g_cfg.text10, g_cfg.tips10, g_cfg.tutorial10, g_cfg.context10);
+    if (!g_cfg.serve10) return true;
+    bool ok = true;
+    if (g_cfg.loadScreen10)
+        ok &= hook("zone string field (ui: 1.0 loading screen)", 0x0139E0B0, "83EC08568BF180BEE403000000",
+                   (void*)&hkZoneStr, (void**)&g_zoneStr);
+    if (g_cfg.fmv10)
+        ok &= hook("FMV path (ui: 1.0 clips)", 0x0067E460, "81EC0401000053568BB42418010000", (void*)&hkFmvPath,
+                   (void**)&g_fmvPath);
+    if (g_cfg.tutorial10 && selectMenuPushFound()) {
+        ok &= hook("screen by name (ui: tutorial element 61)", 0x0154FF90, "837C2404007505", (void*)&hkFindScreen,
+                   (void**)&g_findScreen);
+    } else if (g_cfg.tutorial10) {
+        logf("tutorial10: the element-61 push of \"SelectMenu\" is not where it was analysed: not hooked");
+        ok = false;
+    }
+    if (g_cfg.context10)
+        ok &= hook("controller context list (ui: 1.0 tutorial contexts)", 0x01224880, "5153558BE98A85A4000000",
+                   (void*)&hkCtxParse, (void**)&g_ctxParse);
+    return ok;
 }
 
 // data/tips.lua (3.0's, opened as r) + the 1.0 tip records it lacks (ui::mergeTips); a ZoneTipCategories key naming
@@ -2926,6 +3246,14 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
                   qpcMs() - tIn);
     if (g_cfg.trace || !r) logf("open %s flags=%X -> %s%s%s", p, flags & 0xff, r ? "ok" : "MISSING", r ? "" : missWhy.c_str(), pf);
     return r;
+}
+
+// The asset open hook (H1). Code outside hkOpen calls its original, so a refused AssetOpen installs nothing else.
+static bool installAssetOpen()
+{
+    if (hook("AssetOpen", 0x0041CB10, "6AFF68????????", (void*)&hkOpen, (void**)&g_open)) return true;
+    logf("feature AssetOpen off: no other hook installed, the game runs as plain 3.0");
+    return false;
 }
 
 // ---- real 1.0 shaders at runtime (gen30.hpp; plan in DI3Tools/gen30.py) ----
@@ -3249,6 +3577,21 @@ static uint8_t* __cdecl hkShaderByName(const char* name)
     return s;
 }
 
+// shaders10's hooks (H1), all or none; the record lock is ready before the first can run (B-01).
+static bool installShaders()
+{
+    if (!g_cfg.shaders10) return true;
+    InitializeCriticalSection(&g_recCs);
+    std::vector<core::HookSpec> shaders = {
+        {"shader by name", 0x0045C820, "8B44240450E8????????8B0D", (void*)&hkShaderByName, (void**)&g_shaderByName}};
+    if (g_cfg.lazyLink10)
+        shaders.push_back({"shader linker (deferred)", 0x00472050, "83EC50A1????????535657", (void*)&hkLinkAll,
+                           (void**)&g_linkAll});
+    shaders.push_back({"pass-state clone (locked)", 0x0045C5C0, "83EC4856578B7C2454", (void*)&hkCloneRec,
+                       (void**)&g_cloneRec});
+    return installFeature("shaders10", shaders);
+}
+
 // vformat.vtxf: 3.0's formats plus every 1.0 format 3.0 lacks, so 1.0 vertex buffers draw as they are (their
 // trailing vertex colour in a stream of its own: gen30::mergeVtxf). Read once at boot, before any asset transcode.
 static std::string mergeVtxf(const std::string& t30, const std::string& t10)
@@ -3264,6 +3607,120 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 #include "gprt.hpp"
 #include "bldrt.hpp"
 #include "caprt.hpp"
+
+// sxnatives10's hooks (H1). sx::g_log is set in every config: BMX-1 and BTX-1 log unpaired key ids through it.
+static bool installSx()
+{
+    sx::g_log = logf;
+    if (!g_cfg.sx10 || !g_cfg.sxNatives10) return true;
+    sx::g_exe = g_base;
+    sx::init(g_cfg.sxPorts10);
+    std::vector<core::HookSpec> natives = {
+        {"Slang linker (1.0 natives)", 0x00736DA0, "51538B5C240C568BF18BCBE8", (void*)&sx::hkLink,
+         (void**)&sx::g_link}};
+    if (g_cfg.sxPorts10 && g_cfg.sxBeh10)
+        natives.push_back({"Slang call by name (1.0 behavior type)", 0x00739090, "56578B7C240C8BF18B4E04",
+                           (void*)&sx::hkCallByName, (void**)&sx::g_callByName});
+    return installFeature("sxnatives10", natives);
+}
+
+// audio10's hooks (audio::install) need the 1.0 install; its keys and log go in first.
+static bool installAudio()
+{
+    if (!g_cfg.audio10 || !g_cfg.install10[0]) return true;
+    audio::logfn = logf;
+    audio::cfg.music = g_cfg.music10;
+    audio::cfg.vo = g_cfg.vo10;
+    audio::cfg.trace = g_cfg.audioTrace10;
+    audio::cfg.mixer = g_cfg.mixer10;
+    if (audio::install(installFeature, rt, g_cfg.install10, g_gameDir)) return true;
+    logf("audio10: off (FMOD host failed)");
+    return false;
+}
+
+// renderdoc10: RenderDoc in-process before the renderer creates its device, so its hooks see the device.
+static void loadRenderDoc()
+{
+    if (g_cfg.renderdoc10 <= 0) return;
+    HMODULE rd = LoadLibraryExA("C:\\Program Files\\RenderDoc\\x86\\renderdoc.dll", nullptr,
+                                LOAD_WITH_ALTERED_SEARCH_PATH);
+    auto get = rd ? (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI") : nullptr;
+    if (get && get(eRENDERDOC_API_Version_1_1_2, (void**)&g_rdoc) == 1) {
+        g_rdoc->SetCaptureFilePathTemplate((g_gameDir + "\\di3cap").c_str());
+        logf("renderdoc: loaded; capture %d s after the first mission tick (missiontrace)", g_cfg.renderdoc10);
+    } else {
+        logf("renderdoc: not loaded (%lu)", GetLastError());
+    }
+}
+
+// resident10: 1.0 loads assets\startup*.zip resident, so their members are found by full path.
+static void indexResident10()
+{
+    if (!g_cfg.serve10 || !g_cfg.resident10 || !g_cfg.install10[0]) return;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((std::string(g_cfg.install10) + "\\assets\\startup*.zip").c_str(), &fd);
+    for (BOOL ok = h != INVALID_HANDLE_VALUE; ok; ok = FindNextFileA(h, &fd)) indexZip10(fd.cFileName);
+    if (h != INVALID_HANDLE_VALUE) FindClose(h);
+    logf("resident10: %u full-path members of the 1.0 startup archives indexed", (unsigned)g_over10.size());
+}
+
+// A file in the plugin's folder, read whole; "" when it cannot be opened.
+static std::string slurpFile(const char* dir, const char* name)
+{
+    std::string text;
+    FILE* tf = nullptr;
+    if (fopen_s(&tf, (std::string(dir) + "\\" + name).c_str(), "rb") || !tf) return text;
+    char buf[65536];
+    for (size_t got = fread(buf, 1, sizeof(buf), tf); got > 0; got = fread(buf, 1, sizeof(buf), tf))
+        text.append(buf, got);
+    fclose(tf);
+    return text;
+}
+
+constexpr size_t kOctSlack = 4096;   // octx arena slack: instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
+
+// The render and Meridian tables beside the DLL, and the octx switches the transcode runs with.
+static void loadTables(const char* dir)
+{
+    g_renderOk = g_render.load(slurpFile(dir, "di1compat_render.txt"));
+    logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
+         (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
+         (unsigned)g_render.plans.size());
+    octx::g_slack = kOctSlack;
+    octx::g_variantGroups = g_cfg.variant10;
+    g_merOk = g_mer.load(slurpFile(dir, "di1compat_mer.txt"));
+    g_mer.events10 = g_cfg.events10;
+    g_mer.portRefs = g_cfg.portRefs10;
+    g_mer.ports10 = g_cfg.ports10;
+    g_mer.pins10 = g_cfg.pins10;
+    g_mer.gate10 = g_cfg.gate10;
+    g_mer.toggleType10 = g_cfg.toggleType10;
+    logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
+         (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
+}
+
+// shaders10: the HLSL compiler, the DXBC cache folder and 1.0's vertex formats, before any hook.
+static void prepareShaders10(const char* dir)
+{
+    if (!g_cfg.shaders10) return;
+    HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
+    g_d3dCompile = dc ? (D3DCompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
+    g_shaderCache = std::string(dir) + "\\di1compat_shaders";
+    CreateDirectoryA(g_shaderCache.c_str(), nullptr);
+    std::string v10;
+    if (read10s("shaders/vformat.vtxf", v10)) g_vf10 = gen30::vformats(v10);
+    logf("shaders10: compiler %s, %u 1.0 vertex formats, %u 3.0 globals, cache %s", g_d3dCompile ? "ok" : "MISSING",
+         (unsigned)g_vf10.size(), (unsigned)g_render.shaders10.globals.size(), g_shaderCache.c_str());
+}
+
+// The first-AV handler, then MinHook; false: no hook can be installed.
+static bool startHooks()
+{
+    AddVectoredExceptionHandler(1, avHandler);
+    if (MH_Initialize() == MH_OK) return true;
+    logf("MinHook init failed; no hooks");
+    return false;
+}
 
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
@@ -3289,321 +3746,42 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     di1::loadConfig(dir, g_cfg);
-    if (g_cfg.renderdoc10 > 0) {   // before the renderer creates its device, so RenderDoc's hooks see it
-        HMODULE rd = LoadLibraryExA("C:\\Program Files\\RenderDoc\\x86\\renderdoc.dll", nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        auto get = rd ? (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI") : nullptr;
-        if (get && get(eRENDERDOC_API_Version_1_1_2, (void**)&g_rdoc) == 1) {
-            g_rdoc->SetCaptureFilePathTemplate((g_gameDir + "\\di3cap").c_str());
-            logf("renderdoc: loaded; capture %d s after the first mission tick (missiontrace)", g_cfg.renderdoc10);
-        } else logf("renderdoc: not loaded (%lu)", GetLastError());
-    }
+    loadRenderDoc();
     _setmaxstdio(8192);   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
-    // 1.0 loads assets\startup*.zip resident, so their members are seen by full path: startup3 holds
-    // expendables_data/terrainbuildingsexpendables.lua (in-game 2026-10-13: MISSING), startup4 flash/hud/hud_collection.gfx
-    // (the HudPellet screen's movie) and hud_playerinfo.gfx, startup5 var/*.bin. read10 never looked there.
-    if (g_cfg.serve10 && g_cfg.resident10 && g_cfg.install10[0]) {
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA((std::string(g_cfg.install10) + "\\assets\\startup*.zip").c_str(), &fd);
-        for (BOOL ok = h != INVALID_HANDLE_VALUE; ok; ok = FindNextFileA(h, &fd)) indexZip10(fd.cFileName);
-        if (h != INVALID_HANDLE_VALUE) FindClose(h);
-        logf("resident10: %u full-path members of the 1.0 startup archives indexed", (unsigned)g_over10.size());
-    }
-    auto slurpFile = [&](const char* name) {
-        std::string text;
-        FILE* tf = nullptr;
-        if (!fopen_s(&tf, (std::string(dir) + "\\" + name).c_str(), "rb") && tf) {
-            char buf[65536];
-            size_t got;
-            while ((got = fread(buf, 1, sizeof(buf), tf)) > 0) text.append(buf, got);
-            fclose(tf);
-        }
-        return text;
-    };
-    g_renderOk = g_render.load(slurpFile("di1compat_render.txt"));
-    logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
-         (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
-         (unsigned)g_render.plans.size());
-    octx::g_slack = 4096;   // instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
-    octx::g_variantGroups = g_cfg.variant10;
-    g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
-    g_mer.events10 = g_cfg.events10;
-    g_mer.portRefs = g_cfg.portRefs10;
-    g_mer.ports10 = g_cfg.ports10;
-    g_mer.pins10 = g_cfg.pins10;
-    g_mer.gate10 = g_cfg.gate10;
-    g_mer.toggleType10 = g_cfg.toggleType10;
-    logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
-         (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
-    if (g_cfg.shaders10) {
-        HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
-        g_d3dCompile = dc ? (D3DCompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
-        g_shaderCache = std::string(dir) + "\\di1compat_shaders";
-        CreateDirectoryA(g_shaderCache.c_str(), nullptr);
-        std::string v10;
-        if (read10s("shaders/vformat.vtxf", v10)) g_vf10 = gen30::vformats(v10);
-        logf("shaders10: compiler %s, %u 1.0 vertex formats, %u 3.0 globals, cache %s", g_d3dCompile ? "ok" : "MISSING",
-             (unsigned)g_vf10.size(), (unsigned)g_render.shaders10.globals.size(), g_shaderCache.c_str());
-    }
+    indexResident10();
+    loadTables(dir);
+    prepareShaders10(dir);
 
-    AddVectoredExceptionHandler(1, avHandler);
-    if (MH_Initialize() != MH_OK) {
-        logf("MinHook init failed; no hooks");
-        return;
-    }
-    // Code outside hkOpen calls its original, so a refused AssetOpen installs nothing: the game runs as plain 3.0.
-    bool assetOpen = hook("AssetOpen", 0x0041CB10, "6AFF68????????", (void*)&hkOpen, (void**)&g_open);
-    if (!assetOpen) {
-        logf("feature AssetOpen off: no other hook installed, the game runs as plain 3.0");
-        return;
-    }
-    hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
-    hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory, (void**)&g_loadInventory);
-    hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback, (void**)&g_loadChdCallback);
-    if (g_cfg.bits10 || g_cfg.perc10)
-        hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad, (void**)&g_cbLoad);
-    if (g_cfg.econ10)
-        hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath, (void**)&g_econOnDeath);
-    if (g_cfg.popin10 || g_cfg.deliv10)
-        hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg, (void**)&g_expPkg);
-    if (g_cfg.currency10)
-        installFeature("currency10", {
-            {"zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&hkZoneCurrency,
-             (void**)&g_zoneCurrency},
-            {"UI_GetPlaysetCurrency (currency10)", 0x00B54B50, "6AFF68????????64A100000000", (void*)&hkPlaysetCurrency,
-             (void**)&g_playsetCurrency},
-            {"HUD currency (currency10)", 0x00FBB420, "6AFF68????????64A100000000", (void*)&hkHudCurrency,
-             (void**)&g_hudCurrency},
-        });
-    if (g_cfg.popin10)
-        hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef, (void**)&g_expDef);
-    hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar, (void**)&g_playsetChar);
-    if (g_cfg.trace)
-        installFeature("trace", {
-            {"actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists},
-            {"figure check (trace)", 0x00DDAE30, "64A1000000006AFF68", (void*)&hkFigureOk, (void**)&g_figureOk},
-            {"figure playset (trace)", 0x00435080, "6AFF68????????64A100000000", (void*)&hkFigurePlayset,
-             (void**)&g_figurePlayset},
-            {"reader list (trace)", 0x00427330, "83EC08535556", (void*)&hkReaderList, (void**)&g_readerList},
-            {"reader item gate (trace)", 0x00DEB610, "538B5C2408", (void*)&hkReaderItemOk, (void**)&g_readerItemOk},
-            {"playset figure slot (trace)", 0x00DF9FD0, "6AFF68????????64A100000000", (void*)&hkIgpName,
-             (void**)&g_igpName},
-            {"asset instance (trace)", 0x007734F0, "6AFF68????????64A100000000", (void*)&hkAssetInst,
-             (void**)&g_assetInst},
-            {"SubNetwork instance guard (trace)", 0x004FF0E0, "6AFF68????????64A100000000", (void*)&hkInst,
-             (void**)&g_inst},
-            {"header clone (trace)", 0x004F5900, "5153555657", (void*)&hkHdrClone, (void**)&g_hdrClone},
-            {"start lookup (trace)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup,
-             (void**)&g_startLookup},
-            {"AsyncActorCreator execute (trace)", 0x0075A290, "6AFF68????????64A100000000", (void*)&hkAacExec,
-             (void**)&g_aacExec},
-            {"avatar spawn callback (trace)", 0x00A9B3E0, "8B0D????????83B988000000", (void*)&hkAvSpawned,
-             (void**)&g_avSpawned},
-            {"cho make (trace)", 0x014523B0, "83EC1C33C0", (void*)&hkChoMake, (void**)&g_choMake},
-            {"AvatarSpawning create (trace)", 0x00A9F080, "6AFF68????????64A100000000", (void*)&hkAvCreate,
-             (void**)&g_avCreate},
-            {"cho has (trace)", 0x014835C0, "53568B74240C", (void*)&hkChoHas, (void**)&g_choHas},
-            {"PlaceToy callback (trace)", 0x00A8B670, "8B4424048B4004", (void*)&hkPlaceToy, (void**)&g_placeToy},
-            {"event post (trace)", 0x0068BBB0, "56578BF98B07", (void*)&hkPost, (void**)&g_post},
-            {"level loader tick (trace)", 0x00D00530, "6AFF64A100000000", (void*)&hkLevelTick, (void**)&g_levelTick},
-            {"level load-done check (trace)", 0x00CCC450, "568BF1807E2100", (void*)&hkLoadDone, (void**)&g_loadDone},
-            {"AvatarSpawning finalize (trace)", 0x00AA36F0, "64A1000000006AFF68", (void*)&hkAvFinal,
-             (void**)&g_avFinal},
-            {"AvatarSpawning remove (trace)", 0x00A9EC70, "6AFF68????????64A100000000", (void*)&hkAvRemove,
-             (void**)&g_avRemove},
-            {"start query (trace)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery},
-            {"MNode PlayerStartPosNode (trace)", 0x0148A790, "518B442410", (void*)&hkMkStart, (void**)&g_mkStart},
-            {"MNode LocatorNode (trace)", 0x01480090, "518B442410", (void*)&hkMkLocator, (void**)&g_mkLocator},
-            {"MNode SpawnExpendable (trace)", 0x017BF020, "518B442410", (void*)&hkMkSpawnExp, (void**)&g_mkSpawnExp},
-            {"header make (trace)", 0x004FAE90, "6AFF68????????64A100000000", (void*)&hkHdrMake, (void**)&g_hdrMake},
-        });
-    if (g_cfg.shaders10) {
-        InitializeCriticalSection(&g_recCs);
-        std::vector<core::HookSpec> shaders = {
-            {"shader by name", 0x0045C820, "8B44240450E8????????8B0D", (void*)&hkShaderByName,
-             (void**)&g_shaderByName}};
-        if (g_cfg.lazyLink10)
-            shaders.push_back({"shader linker (deferred)", 0x00472050, "83EC50A1????????535657", (void*)&hkLinkAll,
-                               (void**)&g_linkAll});
-        shaders.push_back({"pass-state clone (locked)", 0x0045C5C0, "83EC4856578B7C2454", (void*)&hkCloneRec,
-                           (void**)&g_cloneRec});
-        installFeature("shaders10", shaders);
-    }
-    if (g_cfg.missionTrace)
-        installFeature("missiontrace", {
-            {"MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick,
-             (void**)&g_missionTick},
-            {"FocusPoint_Actor update (missiontrace)", 0x015DF390, "6AFF64A10000000068????????50", (void*)&hkFpUpdate,
-             (void**)&g_fpUpdate},
-            {"FocusPointActor Update pin (missiontrace)", 0x01730E80, "8B4424048B40048B486485C9",
-             (void*)&hkFpNodeUpdate,
-             (void**)&g_fpNodeUpdate},
-            {"FocusPointActor tag apply (missiontrace)", 0x0173A3F0, "6AFF68????????64A100000000", (void*)&hkFpApply,
-             (void**)&g_fpApply},
-            {"FocusPoint_Actor tag scan (missiontrace)", 0x015D5F80, "6AFF68????????64A100000000", (void*)&hkFpScan,
-             (void**)&g_fpScan},
-            {"handle to actor (missiontrace)", 0x0074B200, "83EC088B44240C8D0C2451", (void*)&hkActorOf,
-             (void**)&g_actorOf},
-        });
-    if (g_cfg.breakTrace || (g_cfg.audio10 && g_cfg.cineSync10))   // cinesync10: 1.0's audio-sync sound event (audio.hpp)
-        hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart, (void**)&g_choStart);
-    if (g_cfg.breakTrace)
-        installFeature("breaktrace", {
-            {"ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&hkClipEval,
-             (void**)&g_clipEval},
-            {"exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&hkMunHit,
-             (void**)&g_munHit},
-            {"exploder explode (breaktrace)", 0x0151E130, "6AFF64A100000000", (void*)&hkExplode, (void**)&g_explode},
-            {"choreography audio-sync wait (breaktrace)", 0x01442EE0, "568BF185F6744D8B06", (void*)&hkChoReady,
-             (void**)&g_choReady},
-            {"choreography play (breaktrace)", 0x01445E70, "5183790C00753B8B01", (void*)&hkBtPlay, (void**)&g_btPlay},
-            {"layout attachments apply (breaktrace)", 0x00788280, "6AFF68????????64A100000000", (void*)&hkLayApply,
-             (void**)&g_layApply},
-            {"layout attachments gate (breaktrace)", 0x00785B40, "8B4C240885C97407", (void*)&hkLayGate,
-             (void**)&g_layGate},
-            {"layout attachment bind (breaktrace)", 0x00787830, "6AFF68????????64A100000000", (void*)&hkLayBind,
-             (void**)&g_layBind},
-            {"clip setup (breaktrace)", 0x00552FC0, "8B44240456578BF1", (void*)&hkClipSet, (void**)&g_clipSet},
-            {"music cue push (breaktrace)", 0x0073C5C0, "81EC1C010000538BD9807B1000", (void*)&hkMusicPush,
-             (void**)&g_musicPush},
-        });
-    if (g_cfg.teardownTrace)
-        installFeature("teardowntrace", {
-            {"Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor,
-             (void**)&g_layoutDtor},
-            {"Samurai::Node dtor (teardowntrace)", 0x004EE5F0, "6AFF68????????64A100000000", (void*)&hkNodeDtor,
-             (void**)&g_nodeDtor},
-            {"hierarchy entry release (teardowntrace)", 0x004B2780, "8B442404568D7110", (void*)&hkEntryRel,
-             (void**)&g_entryRel},
-            {"hierarchy entry free (teardowntrace)", 0x004E1A40, "83EC0853578B7C2414", (void*)&hkEntryFree,
-             (void**)&g_entryFree},
-            {"Layout placement bind (teardowntrace)", 0x0077D9C0, "6AFF68????????64A100000000", (void*)&hkPlBind,
-             (void**)&g_plBind},
-            {"block tracker delete (teardowntrace)", 0x00416840, "535556578BF9", (void*)&hkTrackFree,
-             (void**)&g_trackFree},
-            {"heap free (teardowntrace)", 0x00409E10, "8B4424046A0350E8", (void*)&hkHeapFree, (void**)&g_heapFree},
-        });
-    if ((g_cfg.aliases10 || g_cfg.native10) && g_merOk)
-        hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry, (void**)&g_merRegistry);
-    if (g_cfg.lockTrace10)
-        installFeature("locktrace10", {
-            {"GamePlayers lock controls (locktrace10)", 0x0139B8D0, "833D????????00558BE9", (void*)&hkCtlLock,
-             (void**)&g_ctlLock},
-            {"GamePlayers unlock controls (locktrace10)", 0x0139B960, "55578B7C240C8BE985FF", (void*)&hkCtlUnlock,
-             (void**)&g_ctlUnlock},
-            {"controller context apply (locktrace10)", 0x0121D5C0, "8B44240483EC0C53568BD9", (void*)&hkCtxOn,
-             (void**)&g_ctxOn},
-            {"controller context remove (locktrace10)", 0x0121D8C0, "8B44240483EC0C56578BF9", (void*)&hkCtxOff,
-             (void**)&g_ctxOff},
-            {"choreography node play (locktrace10)", 0x017E91B0, "83EC1C5556578BF1E8", (void*)&hkChoPlay,
-             (void**)&g_choPlay},
-            {"choreography node event (locktrace10)", 0x017E5890, "538BD9568D73D057", (void*)&hkChoEvent,
-             (void**)&g_choEvent},
-            {"message sender send (locktrace10)", 0x018120B0, "6AFF68????????64A100000000", (void*)&hkMsgSend,
-             (void**)&g_msgSend},
-            {"message handler delivery (locktrace10)", 0x018049F0, "83EC08568BF18B4E20", (void*)&hkMsgRecv,
-             (void**)&g_msgRecv},
-            {"mission monitor fire (locktrace10)", 0x01730490, "5156578BF18B068B504833FF57", (void*)&hkMonPin,
-             (void**)&g_monPin},
-            {"load screen active update (locktrace10)", 0x0145B9A0, "5356578BF98D77ECBB01000000", (void*)&hkLoadTick,
-             (void**)&g_loadTick},
-            {"master net sync Link_In (locktrace10)", 0x006EC4F0,
-             "6AFF68????????64A100000000506489250000000083EC30535556578BF1",
-             (void*)&hkNetSync, (void**)&g_netSync},
-            {"colvis toggle parameters (locktrace10)", 0x01808FE0,
-             "6AFF68????????64A1000000005064892500000000518B442414535657508BF1",
-             (void*)&hkColVisLoad, (void**)&g_colVisLoad},
-            {"colvis toggle apply (locktrace10)", 0x01803550, "558B6C2408565733FF8BF1", (void*)&hkColVisApply,
-             (void**)&g_colVisApply},
-            {"beacon map lookup (locktrace10)", 0x01591570, "83EC088B81740100005355", (void*)&hkBeaconLookup,
-             (void**)&g_beaconLookup},
-            {"compass mission track (locktrace10)", 0x015BA4D0, "83EC0C538B5C2414568BF1", (void*)&hkTrack,
-             (void**)&g_track},
-            {"compass draw (locktrace10)", 0x00C13C50, "558BEC83E4F081ECB4000000", (void*)&hkNavUpdate,
-             (void**)&g_navUpdate},
-            {"mission progress entries (locktrace10)", 0x0157CD10, "558BEC83E4F86AFF68????????64A100000000",
-             (void*)&hkMisProgress,
-             (void**)&g_misProgress},
-        });
-    if (g_cfg.opacityLog10)
-        hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask, (void**)&g_opacityMask);
-    if (g_cfg.fadeProbe10)
-        hook("visibility test (fadeprobe10)", 0x0044B8F0, "8B5424088A442414F30F10620C", (void*)&hkVisTest, (void**)&g_visTest);
-    if (g_cfg.fpsLog10 || g_cfg.loadProf10) hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync, (void**)&g_frameSync);
-    bool profiler = g_cfg.loadProf10 && installFeature("loadprof10", {
-        {"fiber switch (loadprof10)", 0x0041E480, "8B44240C85C0740C", (void*)&hkFiberSwitch, (void**)&g_fiberSwitch},
-        {"file-done wait (loadprof10)", 0x0041FC10, "56578B3D????????8BF1", (void*)&hkFileWait, (void**)&g_fileWait},
-        {".oct asset load (loadprof10)", 0x00786D00, "6AFF68????????64A100000000", (void*)&hkOctLoad,
-         (void**)&g_octLoad},
-    });
-    if (profiler) {
-        g_profPath = g_gameDir + "\\di1compat_prof.tsv";
-        if (HANDLE h = CreateThread(nullptr, 0, profThread, nullptr, 0, nullptr)) CloseHandle(h);
-    }
-    hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
-    hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
-    hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
-    sx::g_log = logf;   // also names the key ids BMX-1/BTX-1 give unpaired 1.0 key names
-    if (g_cfg.sx10 && g_cfg.sxNatives10) {
-        sx::g_exe = g_base;
-        sx::init(g_cfg.sxPorts10);
-        std::vector<core::HookSpec> natives = {
-            {"Slang linker (1.0 natives)", 0x00736DA0, "51538B5C240C568BF18BCBE8", (void*)&sx::hkLink,
-             (void**)&sx::g_link}};
-        if (g_cfg.sxPorts10 && g_cfg.sxBeh10)
-            natives.push_back({"Slang call by name (1.0 behavior type)", 0x00739090, "56578B7C240C8BF18B4E04",
-                               (void*)&sx::hkCallByName,
-                               (void**)&sx::g_callByName});
-        installFeature("sxnatives10", natives);
-    }
+    // the modules' hooks in install order (B3): a hook is live once enabled
+    if (!startHooks()) return;
+    if (!installAssetOpen()) return;
+    installGameDb();
+    installEcon();
+    installExpPkg();
+    installCurrency();
+    installExpDef();
+    installPlaysetSlot();
+    installTrace();
+    installShaders();
+    installMissionTrace();
+    installChoStart();
+    installBreakTrace();
+    installTeardownTrace();
+    installMerRegistry();
+    installLockTrace();
+    installRenderProbes();
+    installLoadProf();
+    installAssetDefs();
+    installCrt();
+    installSx();
     npcrt::install();
-    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d context10=%d", g_cfg.loadScreen10,
-         g_cfg.uiScope10, g_cfg.fmv10, g_cfg.text10, g_cfg.tips10, g_cfg.tutorial10, g_cfg.context10);
-    if (g_cfg.serve10 && g_cfg.loadScreen10)
-        hook("zone string field (ui: 1.0 loading screen)", 0x0139E0B0, "83EC08568BF180BEE403000000", (void*)&hkZoneStr, (void**)&g_zoneStr);
-    if (g_cfg.serve10 && g_cfg.fmv10)
-        hook("FMV path (ui: 1.0 clips)", 0x0067E460, "81EC0401000053568BB42418010000", (void*)&hkFmvPath, (void**)&g_fmvPath);
-    if (g_cfg.serve10 && g_cfg.tutorial10) {
-        // the redirect keys on the case-0x3d push (68 <imm32> at 0x00DE4C5A, relocated) of the literal "SelectMenu"
-        const uint8_t* push = (const uint8_t*)rt(0x00DE4C5A);
-        if (push[0] == 0x68 && *(const uint32_t*)(push + 1) == (uint32_t)rt(0x01D19CDC) && !strcmp((const char*)rt(0x01D19CDC), "SelectMenu"))
-            hook("screen by name (ui: tutorial element 61)", 0x0154FF90, "837C2404007505", (void*)&hkFindScreen, (void**)&g_findScreen);
-        else logf("tutorial10: the element-61 push of \"SelectMenu\" is not where it was analysed: not hooked");
-    }
-    if (g_cfg.serve10 && g_cfg.context10)
-        hook("controller context list (ui: 1.0 tutorial contexts)", 0x01224880, "5153558BE98A85A4000000", (void*)&hkCtxParse, (void**)&g_ctxParse);
-    if (g_cfg.audio10 && g_cfg.install10[0]) {
-        audio::logfn = logf;
-        audio::cfg.music = g_cfg.music10;
-        audio::cfg.vo = g_cfg.vo10;
-        audio::cfg.trace = g_cfg.audioTrace10;
-        audio::cfg.mixer = g_cfg.mixer10;
-        if (!audio::install(installFeature, rt, g_cfg.install10, g_gameDir)) logf("audio10: off (FMOD host failed)");
-    }
-    if (g_cfg.vfx10 && g_cfg.vfxUniversal10) {
-        std::unique_lock<std::mutex> lock(g_sessLock);   // AssetOpen is live already
-        for (const char* e : {".particledata", ".mtb"})   // the alias vfxrt::hkPkg loads -> 1.0 particles/universal.zip
-            g_over10.emplace(std::string("particles/universal10") + e, std::string("particles/universal/universal") + e);
-        lock.unlock();
-        hook("particle package load (vfx)", 0x00672620, "6AFF68????????64A100000000", (void*)&vfxrt::hkPkg, (void**)&vfxrt::g_pkg);
-    }
-    if (g_cfg.vfxTrace)
-        installFeature("vfx_trace", {
-            {"effect create (vfx trace)", 0x0065E3A0, "8B54240C8B4A18", (void*)&vfxrt::hkEffect,
-             (void**)&vfxrt::g_effect},
-            {"emitter create (vfx trace)", 0x0066A1C0, "6AFF68????????64A100000000", (void*)&vfxrt::hkEmitter,
-             (void**)&vfxrt::g_emitter},
-            {"slaved emitter create (vfx trace)", 0x0066E7F0, "6AFF68????????64A100000000", (void*)&vfxrt::hkAttached,
-             (void**)&vfxrt::g_attached},
-        });
+    installUi();
+    installAudio();
+    vfxrt::install();
     gprt::install();
     bldrt::install();
     caprt::install();
-    if (g_cfg.spawnTrace10 && !g_cfg.trace)   // where the player is put (Pirates fall): trace's start hooks alone
-        installFeature("spawntrace10", {
-            {"start lookup (spawntrace10)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup,
-             (void**)&g_startLookup},
-            {"start query (spawntrace10)", 0x0145F720, "8B44240C83EC30", (void*)&hkStartQuery, (void**)&g_startQuery},
-        });
+    installSpawnTrace();
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
