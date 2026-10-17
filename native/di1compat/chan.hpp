@@ -31,6 +31,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "formats/shd.hpp"
+#include "gen30.hpp"
 
 namespace chan {
 
@@ -257,9 +259,7 @@ inline std::vector<int> map(const std::vector<char>& r10, int n10, const std::ve
 
 using Read = std::function<bool(const std::string& path, std::string& out)>;
 
-// roles of a shader's first-pass VS: 1.0 .shd pass records at 0xa4 (0x30 each, VS id +0x18, count u8 +0x0d),
-// programs 'shaders/shaders/%x.vp' (gen30::program10); 3.0 at 0xE0 (0x50 each, VS id +0x28, count +0x19),
-// programs '%08x.vp' read as '3:<path>' (render IO.read30). Cached per game and shader.
+// Roles of a shader's first-pass VS, cached per game and shader. Programs: 1.0 '%x.vp', 3.0 '3:...%08x.vp'
 inline std::vector<char> shaderRoles(const Read& read, const std::string& guid, bool is30)
 {
     static std::mutex mx;
@@ -273,7 +273,8 @@ inline std::vector<char> shaderRoles(const Read& read, const std::string& guid, 
     std::vector<char> r;
     std::string shd, prog;
     std::string pre = is30 ? "3:shaders/shaders/" : "shaders/shaders/";
-    size_t at = is30 ? 0xE0 + 0x28 : 0xa4 + 0x18, cnt = is30 ? 0x19 : 0x0d;
+    const shd::Layout& L = is30 ? shd::kLayout30 : gen30::kShd10;
+    const size_t at = L.data + L.passVs, cnt = L.counts + 1;
     if (read(pre + guid + ".shd", shd) && shd.size() >= at + 4 && (uint8_t)shd[cnt] > 0) {
         uint32_t vs;
         memcpy(&vs, shd.data() + at, 4);

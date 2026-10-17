@@ -5,6 +5,10 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <tuple>
 #include <functional>
 #include <map>
@@ -13,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 #include "base/bytes.hpp"
+#include "formats/shd.hpp"
 #include "sm3.hpp"
 
 namespace gen30 {
@@ -40,57 +45,44 @@ struct Tables {
     std::map<std::pair<uint32_t, uint32_t>, int> passByte;                // (technique, 3.0 word) -> +0x1c
 };
 
-inline uint32_t u32(const std::string& b, size_t o) { uint32_t v = 0; if (bytes::fits(b.size(), o, 4)) memcpy(&v, b.data() + o, 4); return v; }
-inline uint16_t u16(const std::string& b, size_t o) { uint16_t v = 0; if (bytes::fits(b.size(), o, 2)) memcpy(&v, b.data() + o, 2); return v; }
-
 struct Param { uint32_t hash; bool A; int offset, type; };
 struct Pass { uint32_t word, vf, vs, ps; };
 struct Tech { uint32_t hash; int first, count; };
 struct Shd10 { std::vector<Pass> passes; std::vector<Tech> techs; std::vector<Param> params; std::vector<uint32_t> slotsB; int sizeA = 0, sizeB = 0; size_t defaultsAt = 0; };
 
+// 1.0's .shd (DisneyInfinity.exe FUN_004af380 'Shaders/%s.shd', finalize FUN_004af200); a name ends its slot names
+inline constexpr shd::Layout kShd10 = {0x0C, 0xA4, 0x30, 0x10, 0x18, 0x20, 0x44, 0x68};
+constexpr size_t kShd10TechSlots = 0x30;   // 16 bytes, 3.0's +0x54 in the same slot order (gen30.py)
+
 // shd.parse(b, '1.0')
 inline bool parse10(const std::string& b, Shd10& s)
 {
-    if (b.size() < 0xa4) return false;
-    int npar = (uint8_t)b[0x0c], npass = (uint8_t)b[0x0d], ntech = (uint8_t)b[0x0e];
-    size_t o = 0xa4;
-    for (int i = 0; i < npass; ++i, o += 0x30) s.passes.push_back({u32(b, o), u32(b, o + 0x10), u32(b, o + 0x18), u32(b, o + 0x20)});
+    const shd::Layout& L = kShd10;
+    if (b.size() < L.data) return false;
+    int npar = (uint8_t)b[L.counts], npass = (uint8_t)b[L.counts + 1], ntech = (uint8_t)b[L.counts + 2];
+    size_t o = L.data;
+    for (int i = 0; i < npass; ++i, o += L.pass) {
+        const uint32_t word = bytes::u32OrZero(b, o), vf = bytes::u32OrZero(b, o + L.passVformat);
+        s.passes.push_back({word, vf, bytes::u32OrZero(b, o + L.passVs), bytes::u32OrZero(b, o + L.passPs)});
+    }
     std::vector<uint16_t> tr;
-    for (int i = 0; i < ntech; ++i) tr.push_back(u16(b, o + 2 * i));
-    o = (o + 2 * ntech + 3) & ~(size_t)3;
+    for (int i = 0; i < ntech; ++i) tr.push_back(bytes::u16OrZero(b, o + 2 * i));
+    o = bytes::alignUp(o + 2 * ntech, 4);
     std::vector<uint32_t> pn, tn, pw;
-    for (int i = 0; i < npar; ++i, o += 4) pn.push_back(u32(b, o));
-    for (int i = 0; i < ntech; ++i, o += 4) tn.push_back(u32(b, o));
-    for (int i = 0; i < npar; ++i, o += 4) pw.push_back(u32(b, o));
-    int nA = (uint8_t)b[0x44], slotsA = (uint8_t)b[0x45], slotsB = (uint8_t)b[0x69];
-    s.sizeA = u16(b, 0x46); s.sizeB = u16(b, 0x6a);
+    for (int i = 0; i < npar; ++i, o += 4) pn.push_back(bytes::u32OrZero(b, o));
+    for (int i = 0; i < ntech; ++i, o += 4) tn.push_back(bytes::u32OrZero(b, o));
+    for (int i = 0; i < npar; ++i, o += 4) pw.push_back(bytes::u32OrZero(b, o));
+    int nA = (uint8_t)b[L.blockA], slotsA = (uint8_t)b[L.blockA + 1], slotsB = (uint8_t)b[L.blockB + 1];
+    s.sizeA = bytes::u16OrZero(b, L.blockA + 2);
+    s.sizeB = bytes::u16OrZero(b, L.blockB + 2);
     o += 4 * slotsA;
-    for (int i = 0; i < slotsB; ++i, o += 4) s.slotsB.push_back(u32(b, o));
+    for (int i = 0; i < slotsB; ++i, o += 4) s.slotsB.push_back(bytes::u32OrZero(b, o));
     size_t e = b.find('\0', o);
     if (e == std::string::npos) return false;
     s.defaultsAt = e + 1;
     for (int i = 0; i < ntech; ++i) s.techs.push_back({tn[i], tr[i] & 0xff, tr[i] >> 8});
     for (int i = 0; i < npar; ++i) s.params.push_back({pn[i], i < nA, (int)(pw[i] >> 16), (int)(pw[i] & 0xffff)});
     return o <= b.size();
-}
-
-// A 3.0 .shd's block A: parameter offsets by name hash, size, and the shader's default block (shd.parse(b, '3.0'):
-// header to 0xE0, passes 0x50 each, techniques, params, slot names, then 16-aligned defaults A).
-struct ShdA30 { std::map<uint32_t, int> off; int sizeA = 0; std::string defA; };
-inline bool parseA30(const std::string& b, ShdA30& s)
-{
-    if (b.size() < 0xE0) return false;
-    int npar = (uint8_t)b[0x18], npass = (uint8_t)b[0x19], ntech = (uint8_t)b[0x1a], nA = (uint8_t)b[0x68];
-    size_t o = 0xE0 + 0x50 * (size_t)npass + 2 * (size_t)ntech;
-    o = (o + 3) & ~(size_t)3;
-    size_t names = o, words = o + 4 * ((size_t)npar + ntech);
-    o = words + 4 * (size_t)npar + 4 * ((size_t)(uint8_t)b[0x69] + (uint8_t)b[0xa1]);
-    o = (o + 15) & ~(size_t)15;
-    s.sizeA = u16(b, 0x6a);
-    if (o + s.sizeA > b.size()) return false;
-    for (int i = 0; i < npar && i < nA; ++i) s.off[u32(b, names + 4 * i)] = (int)(u32(b, words + 4 * i) >> 16);
-    s.defA = b.substr(o, s.sizeA);
-    return true;
 }
 
 // A D3D9 program's constant table: (name, set 'b'/'i'/'f'/'s', register, count).
@@ -107,11 +99,13 @@ inline std::vector<Const> ctab(const std::string& b)
     size_t i = b.find("CTAB");
     if (i == std::string::npos) return out;
     size_t base = i + 4;
-    uint32_t n = u32(b, base + 12), info = u32(b, base + 16);
+    uint32_t n = bytes::u32OrZero(b, base + 12), info = bytes::u32OrZero(b, base + 16);
     for (uint32_t k = 0; k < n && entryStarts(b, base, info, k); ++k) {
         size_t e = base + info + 20 * k;
-        uint32_t nm = u32(b, e);
-        uint16_t rs = u16(b, e + 4), reg = u16(b, e + 6), cnt = u16(b, e + 8);
+        uint32_t nm = bytes::u32OrZero(b, e);
+        uint16_t rs = bytes::u16OrZero(b, e + 4);
+        uint16_t reg = bytes::u16OrZero(b, e + 6);
+        uint16_t cnt = bytes::u16OrZero(b, e + 8);
         size_t z = b.find('\0', base + nm);
         if (z == std::string::npos || rs > 3) continue;
         out.push_back({b.substr(base + nm, z - base - nm), "bifs"[rs], reg, cnt});
@@ -300,7 +294,7 @@ inline uint32_t convWord(uint32_t w)
 inline uint32_t word30(const Tables& T, uint32_t tech, uint32_t w10)
 {
     uint32_t w = convWord(w10);
-    auto it = T.wordRules.find({tech, (int)((w >> 3) & 7), (int)((w >> 12) & 0xf)});
+    auto it = T.wordRules.find({tech, (int)shd::depthField(w), (int)shd::xField(w)});
     return w | (it != T.wordRules.end() ? it->second : 0);
 }
 
@@ -321,12 +315,15 @@ inline Layout layout(const Shd10& s)
     return L;
 }
 
+constexpr uint32_t kEmptySlot = 0xffffffff;   // an empty slot's texture index
+constexpr size_t kSlot30Bytes = 8;            // a 3.0 slot: texture index, then 0 (FORMATS.md 6.2)
+
 inline std::string blockB30(const std::string& b10, const Layout& L)
 {
     std::string out;
     for (int i = 0; i < L.slots; ++i) {
-        uint32_t idx = u32(b10, 4 * i), w[2] = {idx, idx == 0xffffffff ? 0xffffffffu : 0u};
-        out.append((const char*)w, 8);
+        uint32_t idx = bytes::u32OrZero(b10, 4 * i), w[2] = {idx, idx == kEmptySlot ? kEmptySlot : 0u};
+        out.append((const char*)w, sizeof w);
     }
     out += b10.substr(std::min<size_t>(4 * L.slots, b10.size()), L.slots);
     out.resize(L.first30, '\0');
@@ -489,7 +486,7 @@ inline uint32_t progId(const std::string& shader, int i, const char* kind)
 }
 
 struct Program { uint32_t id; bool ps; std::string hlsl, code; };
-struct Generated { std::string shd, name; std::vector<Program> programs; std::vector<std::string> problems; };
+struct Generated { std::string shd; std::vector<Program> programs; std::vector<std::string> problems; };
 using Read = std::function<bool(const std::string& path, std::string& out)>;
 using Compile = std::function<bool(const std::string& hlsl, const char* target, std::string& code, std::string& msg)>;
 
@@ -502,170 +499,222 @@ inline bool program10(const Read& read10, uint32_t id, const char* kind, std::st
     return read10(a, out) || read10(b, out);
 }
 
-inline std::string buildShd(const Tables& T, const std::string& raw10, const Shd10& s, const Layout& L,
-                            const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>>& passes)
+// What generate reads
+struct Sources {
+    Read read10;
+    const VFormats& vf;                             // 1.0's vertex formats
+    Compile compile;                                // empty: no code, sizes 0 (gen30.py compile_=False)
+    std::function<uint32_t(uint32_t)> skinTarget;   // skintr10: a skinned 1.0 format's 3.0 target
+    const VFormats* vf30 = nullptr;                 // skintr10: 3.0's formats; without them a skinned pass fails
+};
+
+// A pass's vertex format; a skinned pass draws its 1.0 format's 3.0 skin target, the GPU skinning's output
+struct PassFormat {
+    uint32_t vformat = 0;
+    std::map<std::string, std::string> elements;   // semantic -> element type
+    bool skinned = false;
+};
+
+inline PassFormat passFormat(const Sources& in, const Pass& p, const std::string& at, Generated& g)
 {
-    int nA = 0;
-    for (auto& p : s.params) nA += p.A;
-    int nB = (int)s.params.size() - nA, slots = L.slots;
-    std::string h(0xE0, '\0');
-    auto put32 = [](std::string& b, size_t o, uint32_t v) { memcpy(&b[o], &v, 4); };
-    auto put16 = [](std::string& b, size_t o, uint16_t v) { memcpy(&b[o], &v, 2); };
-    h[0x18] = (char)s.params.size(); h[0x19] = (char)passes.size(); h[0x1a] = (char)s.techs.size(); h[0x1b] = (char)slots;
-    int flags = 0;
-    for (auto& p : passes) {
-        uint32_t w = std::get<0>(p);
-        if (((w >> 6) & 0xf) > 1) flags |= 0x4;
-        if (((w >> 3) & 7) == 0 && ((w >> 12) & 0xf) == 3) flags |= 0x40;
+    PassFormat f;
+    f.vformat = p.vf;
+    if (auto e = in.vf.find(p.vf); e != in.vf.end()) f.elements = e->second;
+    else g.problems.push_back(at + ": vformat unknown");
+    if (!in.skinTarget || !f.elements.count("BLENDINDICES0")) return f;
+    const uint32_t t = in.skinTarget(p.vf);
+    auto f30 = in.vf30 && t ? in.vf30->find(t) : VFormats::const_iterator();
+    if (!t || !in.vf30 || f30 == in.vf30->end()) {
+        g.problems.push_back(at + ": skinned, no 3.0 format to draw it in");
+        return f;
     }
-    h[0x48] = (char)flags;
-    if (nA) {
-        put32(h, 0x4c, (uint32_t)s.params[0].type | ((uint32_t)s.params[0].offset << 16));
-        put32(h, 0x50, (uint32_t)s.params[nA - 1].type | ((uint32_t)s.params[nA - 1].offset << 16));
-    }
-    memcpy(&h[0x54], raw10.data() + 0x30, 16);
-    h[0x68] = (char)nA; h[0x69] = 0;
-    put16(h, 0x6a, (uint16_t)L.sizeA);
-    h[0x90] = (char)(std::max)(L.sizeA / 16 - 1, 0);
-    memset(&h[0x94], 0x0f, 6);
-    h[0xa0] = (char)nB; h[0xa1] = (char)slots;
-    put16(h, 0xa2, (uint16_t)L.sizeB);
-    h[0xc4] = (char)L.firstB;
-    h[0xc8] = (char)(std::max)(L.sizeB / 16 - L.firstB, 0);
-    h[0xca] = (char)slots;
-    h[0xcc] = (char)(slots ? (5 | (slots << 4)) : 0x0f);
-    memset(&h[0xcd], 0x0f, 5);
-    h[0xd9] = 1; h[0xda] = (char)0xff;
-    std::string out = h;
-    for (auto& [w, vf, tech, vs, ps, vsz, psz] : passes) {
-        std::string r(0x50, '\0');
-        put32(r, 0, w);
-        put32(r, 0x18, vf);
-        auto b = T.passByte.find({tech, w});
-        r[0x1c] = (char)(b != T.passByte.end() ? b->second : 0);
-        put32(r, 0x28, vs);
-        put32(r, 0x30, ps);
-        put32(r, 0x40, vsz);
-        put32(r, 0x44, psz);
-        out += r;
-    }
-    for (auto& t : s.techs) { uint16_t v = (uint16_t)(t.first | (t.count << 8)); out.append((const char*)&v, 2); }
-    out.resize((out.size() + 3) & ~(size_t)3, '\0');
-    for (auto& p : s.params) out.append((const char*)&p.hash, 4);
-    for (auto& t : s.techs) out.append((const char*)&t.hash, 4);
-    for (auto& p : s.params) {
-        uint32_t w = (uint32_t)p.type | ((uint32_t)(p.A ? p.offset : L.B.at(p.hash)) << 16);
-        out.append((const char*)&w, 4);
-    }
-    for (uint32_t x : s.slotsB) out.append((const char*)&x, 4);
-    size_t a = (s.defaultsAt + 15) & ~(size_t)15, b = (a + s.sizeA + 15) & ~(size_t)15;
-    std::string dA = raw10.substr((std::min)(a, raw10.size()), s.sizeA), dB = raw10.substr((std::min)(b, raw10.size()), s.sizeB);
-    dA.resize(s.sizeA, '\0');
-    dB.resize(s.sizeB, '\0');
-    out.resize((out.size() + 15) & ~(size_t)15, '\0');
-    out += dA;
-    out.resize((out.size() + 15) & ~(size_t)15, '\0');
-    // the template's slots hold texture object pointers the engine fills (FUN_0045ce20 reads any non-zero one as a
-    // texture): zero in all 836 3.0 shaders. 1.0's empty 0xffffffff there crashed finalize (in-game 2026-10-13).
-    std::string b30 = blockB30(dB, L);
-    std::fill(b30.begin(), b30.begin() + (std::min)(b30.size(), (size_t)8 * L.slots), '\0');
-    out += b30;
-    return out;
+    f.vformat = t;
+    f.elements = f30->second;
+    f.skinned = true;
+    return f;
 }
 
-// gen30.generate: compile may be empty (sizes 0, as gen30.py with compile_=False). skinTarget / vf30 (cfg skintr10):
-// a skinned 1.0 format -> the 3.0 format its vertices are converted to, and 3.0's formats; without them a skinned
-// pass is a problem (the material keeps another tier).
-inline bool generate(const Tables& T, const Read& read10, const VFormats& vf, const std::string& shader, const Compile& compile, Generated& g,
-                     const std::function<uint32_t(uint32_t)>& skinTarget = nullptr, const VFormats* vf30 = nullptr)
+// One 1.0 shader being generated
+struct ShaderJob {
+    const Tables& T;
+    const Sources& in;
+    const std::string& shader;
+    const Shd10& s;
+    const Layout& L;
+    std::map<int, uint32_t> techOf;   // pass -> its technique's hash
+};
+
+// One pass of it: its index, 3.0 word and vertex format
+struct PassJob {
+    const ShaderJob& sj;
+    size_t index;
+    uint32_t word;
+    const PassFormat& format;
+};
+
+enum class Stage { Vertex, Pixel };
+struct ProgramRef { uint32_t id = 0, size = 0; };
+constexpr size_t kCompileMessageChars = 200;
+
+// Every input a skinned VS still reads must be in the 3.0 format, or no input layout can be made
+inline void checkSkinInputs(const Binding30& B, const PassFormat& f, const std::string& at, Generated& g)
 {
-    std::string raw10;
-    if (!read10("shaders/shaders/" + shader + ".shd", raw10)) { g.problems.push_back("no 1.0 shader " + shader); return false; }
-    Shd10 s;
-    if (!parse10(raw10, s)) { g.problems.push_back("1.0 shader unreadable"); return false; }
-    Layout L = layout(s);
-    std::map<int, uint32_t> techOf;
-    for (auto& t : s.techs) for (int i = t.first; i < t.first + t.count; ++i) techOf[i] = t.hash;
-    std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> passes;
-    for (size_t i = 0; i < s.passes.size(); ++i) {
-        const Pass& p = s.passes[i];
-        uint32_t tech = techOf.count((int)i) ? techOf[(int)i] : 0;
-        uint32_t w = word30(T, tech, p.word);
-        bool gb = ((w >> 3) & 7) == 2;
-        std::map<std::string, std::string> fmt;
-        if (auto f = vf.find(p.vf); f != vf.end()) fmt = f->second;
-        else g.problems.push_back("pass " + std::to_string(i) + ": vformat unknown");
-        // a skinned pass (its 1.0 format has bone indices) draws 3.0's skinned vertices: the pass takes the 3.0 format
-        // the render transcode converts that 1.0 format to (skinTarget), whose main layout is what 3.0's skinning writes
-        uint32_t pvf = p.vf;
-        bool skinned = false;
-        if (skinTarget && fmt.count("BLENDINDICES0")) {
-            uint32_t t = skinTarget(p.vf);
-            auto f30 = vf30 && t ? vf30->find(t) : VFormats::const_iterator();
-            if (!t || !vf30 || f30 == vf30->end()) g.problems.push_back("pass " + std::to_string(i) + ": skinned, no 3.0 format to draw it in");
-            else { pvf = t; fmt = f30->second; skinned = true; }
-        }
-        uint32_t ids[2] = {0, 0}, sizes[2] = {0, 0};
-        for (int k = 0; k < 2; ++k) {
-            uint32_t pid = k ? p.ps : p.vs;
-            const char* kind = k ? "fp" : "vp";
-            if (!pid) continue;
-            std::string b;
-            if (!program10(read10, pid, kind, b)) { g.problems.push_back("pass " + std::to_string(i) + ": no program"); continue; }
-            Program pr;
-            pr.id = progId(shader, (int)i, kind);
-            pr.ps = k == 1;
-            try {
-                sm3::Program prog = sm3::parse(b);
-                Binding30 B(T, L, ctab(b), k ? std::map<std::string, std::string>() : fmt, gb && k);
-                // depth field 1 = a depth-only pass: no colour output in 1549 of 3.0's 1550. 1.0's wrote linear depth as
-                // colour; translated as is it painted near-black, dithered, over fading objects (2026-10-13)
-                B.depthOnly = k == 1 && ((w >> 3) & 7) == 1;
-                B.skin = skinned && k == 0;
-                pr.hlsl = sm3::toHlsl(prog, B);
-                if (!B.unresolved.empty()) g.problems.push_back("pass " + std::to_string(i) + ": unresolved " + B.unresolved[0]);
-                if (B.skin)   // every input it still reads must be in the 3.0 format, or no input layout can be made
-                    for (auto& sem : B.needed)
-                        if (!fmt.count(sem)) g.problems.push_back("pass " + std::to_string(i) + ": skinned, 3.0 format lacks " + sem);
-            } catch (std::exception& e) {
-                g.problems.push_back("pass " + std::to_string(i) + ": " + e.what());
-                continue;
-            }
-            if (compile) {
-                std::string msg;
-                if (!compile(pr.hlsl, k ? "ps_4_0" : "vs_4_0", pr.code, msg)) g.problems.push_back("pass " + std::to_string(i) + ": compile: " + msg.substr(0, 200));
-            }
-            ids[k] = pr.id;
-            sizes[k] = (uint32_t)pr.code.size();
-            g.programs.push_back(std::move(pr));
-        }
-        passes.emplace_back(w, pvf, tech, ids[0], ids[1], sizes[0], sizes[1]);
+    for (auto& sem : B.needed)
+        if (!f.elements.count(sem)) g.problems.push_back(at + ": skinned, 3.0 format lacks " + sem);
+}
+
+// The program as HLSL through Binding30; false: sm3 refused it, a problem says why
+inline bool translateProgram(const PassJob& job, Stage stage, const std::string& b, std::string& hlsl, Generated& g)
+{
+    const bool ps = stage == Stage::Pixel;
+    const uint32_t depth = shd::depthField(job.word);
+    const std::string at = "pass " + std::to_string(job.index);
+    try {
+        sm3::Program prog = sm3::parse(b);
+        const std::map<std::string, std::string> none;
+        Binding30 B(job.sj.T, job.sj.L, ctab(b), ps ? none : job.format.elements, depth == shd::kDepthGBuffer && ps);
+        // depth-only: no colour output in 1549 of 3.0's 1550; 1.0's linear-depth colour painted near-black
+        B.depthOnly = ps && depth == shd::kDepthOnly;
+        B.skin = job.format.skinned && !ps;
+        hlsl = sm3::toHlsl(prog, B);
+        if (!B.unresolved.empty()) g.problems.push_back(at + ": unresolved " + B.unresolved[0]);
+        if (B.skin) checkSkinInputs(B, job.format, at, g);
+    } catch (std::exception& e) {
+        g.problems.push_back(at + ": " + e.what());
+        return false;
     }
-    g.name = "x" + shader;
-    g.shd = buildShd(T, raw10, s, L, passes);
-    // Pass bytes +0x1c/+0x1d: the texture registers the engine binds for the pass (bit n = tn); a technique's first
-    // pass carries the union over the technique. 3794 of 3.0's 3802 passes follow this exactly (shdiff.py). A mask
-    // learned per word left the 1.0 final pass without its diffuse texture: the world drew black (2026-10-13).
+    return true;
+}
+
+// The pass's program id10 translated (and compiled) into g.programs -> its generated id and code size
+inline ProgramRef addProgram(const PassJob& job, Stage stage, uint32_t id10, Generated& g)
+{
+    const bool ps = stage == Stage::Pixel;
+    const char* kind = ps ? "fp" : "vp";
+    const std::string at = "pass " + std::to_string(job.index);
+    std::string b;
+    if (!id10) return {};
+    if (!program10(job.sj.in.read10, id10, kind, b)) {
+        g.problems.push_back(at + ": no program");
+        return {};
+    }
+    Program pr;
+    pr.id = progId(job.sj.shader, (int)job.index, kind);
+    pr.ps = ps;
+    if (!translateProgram(job, stage, b, pr.hlsl, g)) return {};
+    std::string msg;
+    const bool compiled = !job.sj.in.compile || job.sj.in.compile(pr.hlsl, ps ? "ps_4_0" : "vs_4_0", pr.code, msg);
+    if (!compiled) g.problems.push_back(at + ": compile: " + msg.substr(0, kCompileMessageChars));
+    const ProgramRef ref{pr.id, (uint32_t)pr.code.size()};
+    g.programs.push_back(std::move(pr));
+    return ref;
+}
+
+// The render table's +0x1c byte for (technique, word); a technique's passes take texture masks instead (RE-24)
+inline uint16_t passByte(const Tables& T, uint32_t tech, uint32_t w)
+{
+    auto b = T.passByte.find({tech, w});
+    return (uint8_t)(b != T.passByte.end() ? b->second : 0);
+}
+
+inline shd::Pass generatePass(const ShaderJob& sj, size_t i, Generated& g)
+{
+    const Pass& p = sj.s.passes[i];
+    auto t = sj.techOf.find((int)i);
+    const uint32_t tech = t != sj.techOf.end() ? t->second : 0;
+    const uint32_t w = word30(sj.T, tech, p.word);
+    const PassFormat f = passFormat(sj.in, p, "pass " + std::to_string(i), g);
+    const PassJob job{sj, i, w, f};
+    const ProgramRef vs = addProgram(job, Stage::Vertex, p.vs, g);
+    const ProgramRef ps = addProgram(job, Stage::Pixel, p.ps, g);
+    return {w, f.vformat, vs.id, ps.id, vs.size, ps.size, passByte(sj.T, tech, w)};
+}
+
+// The texture registers an HLSL program declares, bit n = tn (t0..t15 fit the pass's u16)
+inline uint32_t textureRegisters(const std::string& hlsl)
+{
+    constexpr const char kDecl[] = "register(t";
+    constexpr int kTextureRegisters = 16;
+    uint32_t mask = 0;
+    for (size_t at = 0; (at = hlsl.find(kDecl, at)) != std::string::npos;) {
+        at += sizeof kDecl - 1;
+        const int r = atoi(hlsl.c_str() + at);
+        if (r >= 0 && r < kTextureRegisters) mask |= 1u << r;
+    }
+    return mask;
+}
+
+// The first pass running program id, or -1
+inline int passOf(const std::vector<shd::Pass>& passes, uint32_t id)
+{
+    for (size_t k = 0; k < passes.size(); ++k)
+        if (passes[k].vs == id || passes[k].ps == id) return (int)k;
+    return -1;
+}
+
+// A technique's first pass binds the union of its passes' textures: 3794 of 3.0's 3802 passes (shdiff.py)
+inline void setTextureMasks(const Shd10& s, const std::vector<Program>& programs, std::vector<shd::Pass>& passes)
+{
     std::vector<uint32_t> mask(passes.size(), 0);
-    for (auto& pr : g.programs) {
-        int i = -1;
-        for (size_t k = 0; k < passes.size(); ++k)
-            if (std::get<3>(passes[k]) == pr.id || std::get<4>(passes[k]) == pr.id) { i = (int)k; break; }
-        for (size_t at = 0; i >= 0 && (at = pr.hlsl.find("register(t", at)) != std::string::npos;) {
-            at += 10;
-            int r = atoi(pr.hlsl.c_str() + at);
-            if (r >= 0 && r < 16) mask[i] |= 1u << r;
-        }
+    for (auto& pr : programs) {
+        const int i = passOf(passes, pr.id);
+        if (i >= 0) mask[i] |= textureRegisters(pr.hlsl);
     }
     for (auto& t : s.techs) {
         uint32_t all = 0;
-        for (int i = t.first; i < t.first + t.count && i < (int)passes.size(); ++i) all |= mask[i];
-        for (int i = t.first; i < t.first + t.count && i < (int)passes.size(); ++i) {
-            uint32_t m = i == t.first ? all : mask[i];
-            g.shd[0xE0 + 0x50 * i + 0x1c] = (char)(m & 0xff);
-            g.shd[0xE0 + 0x50 * i + 0x1d] = (char)(m >> 8);
-        }
+        const int end = (std::min)(t.first + t.count, (int)passes.size());
+        for (int i = t.first; i < end; ++i) all |= mask[i];
+        for (int i = t.first; i < end; ++i) passes[i].textures = (uint16_t)(i == t.first ? all : mask[i]);
     }
+}
+
+// The 1.0 shader's 3.0 description: parameters at 3.0 offsets, its defaults, block B re-laid for 8-byte slots
+inline shd::Shader shader30(const std::string& raw10, const Shd10& s, const Layout& L, std::vector<shd::Pass> passes)
+{
+    shd::Shader d;
+    d.passes = std::move(passes);
+    for (auto& t : s.techs) d.techs.push_back({t.hash, t.first, t.count});
+    for (auto& p : s.params) {
+        d.params.push_back({p.hash, (uint32_t)p.type | ((uint32_t)(p.A ? p.offset : L.B.at(p.hash)) << 16)});
+        d.paramsA += p.A;
+    }
+    d.slots = s.slotsB;
+    memcpy(d.techSlots.data(), raw10.data() + kShd10TechSlots, d.techSlots.size());
+    d.sizeA = L.sizeA;
+    d.sizeB = L.sizeB;
+    d.firstB = L.firstB;
+    const size_t a = bytes::alignUp(s.defaultsAt, 16), b = bytes::alignUp(a + s.sizeA, 16);
+    d.defaultsA = raw10.substr((std::min)(a, raw10.size()), s.sizeA);
+    d.defaultsA.resize(s.sizeA, '\0');
+    std::string dB = raw10.substr((std::min)(b, raw10.size()), s.sizeB);
+    dB.resize(s.sizeB, '\0');
+    d.blockB = blockB30(dB, L);
+    // its slots hold texture pointers the engine fills (FUN_0045ce20): zero in all 836 3.0 shaders
+    std::fill(d.blockB.begin(), d.blockB.begin() + (std::min)(d.blockB.size(), kSlot30Bytes * L.slots), '\0');
+    return d;
+}
+
+// gen30.generate: a 1.0 shader -> its 3.0 .shd and the programs' HLSL (compiled when in.compile is set)
+inline bool generate(const Tables& T, const Sources& in, const std::string& shader, Generated& g)
+{
+    std::string raw10;
+    if (!in.read10("shaders/shaders/" + shader + ".shd", raw10)) {
+        g.problems.push_back("no 1.0 shader " + shader);
+        return false;
+    }
+    Shd10 s;
+    if (!parse10(raw10, s)) {
+        g.problems.push_back("1.0 shader unreadable");
+        return false;
+    }
+    const Layout L = layout(s);
+    ShaderJob sj{T, in, shader, s, L, {}};
+    for (auto& t : s.techs)
+        for (int i = t.first; i < t.first + t.count; ++i) sj.techOf[i] = t.hash;
+    std::vector<shd::Pass> passes;
+    for (size_t i = 0; i < s.passes.size(); ++i) passes.push_back(generatePass(sj, i, g));
+    setTextureMasks(s, g.programs, passes);
+    g.shd = shd::write(shader30(raw10, s, L, std::move(passes)));
     return true;
 }
 

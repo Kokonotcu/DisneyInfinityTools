@@ -799,8 +799,6 @@ struct MaterialInput {
 
 namespace detail {
 
-// 1.0 .shd block descriptors (FORMATS.md 6.1): A size, B slot count, B size
-constexpr size_t kShd10SizeA = 0x46, kShd10SlotsB = 0x69, kShd10SizeB = 0x6a;
 constexpr int kSlotStride10 = 4, kSlotStride30 = 8;   // a texture slot's bytes in block B (FORMATS.md 6.1)
 // own hash space: MATP load (FUN_00472590) reuses a material registered under the hash (FUN_00468500)
 constexpr uint32_t kTranslatedHashXor = 0x9E3779B9u;
@@ -840,10 +838,11 @@ inline bool BlockSizes10::get(const std::string& sh, int& A, int& B, int& slots)
     auto it = memo.find(sh);
     if (it == memo.end()) {
         std::string b;
-        if (!io.read10("shaders/shaders/" + sh + ".shd", b) || b.size() < kShd10SizeB + 2) return false;
+        const shd::Layout& L = gen30::kShd10;   // block descriptors: u8 params, u8 slots, u16 size
+        if (!io.read10("shaders/shaders/" + sh + ".shd", b) || b.size() < L.blockB + 4) return false;
         const uint8_t* p = (const uint8_t*)b.data();
-        const int sizeA = (int)oct::u(p + kShd10SizeA, 2), sizeB = (int)oct::u(p + kShd10SizeB, 2);
-        it = memo.emplace(sh, std::array<int, 3>{sizeA, sizeB, (int)p[kShd10SlotsB]}).first;
+        const int sizeA = (int)oct::u(p + L.blockA + 2, 2), sizeB = (int)oct::u(p + L.blockB + 2, 2);
+        it = memo.emplace(sh, std::array<int, 3>{sizeA, sizeB, (int)p[L.blockB + 1]}).first;
     }
     A = it->second[0];
     B = it->second[1];
@@ -1101,18 +1100,18 @@ inline std::vector<uint32_t> substituteSlots(const Table& T, const Bundle& b10, 
 }
 
 // The donor's 3.0 shader's block A, when it reads and fits the donor material's block
-inline std::optional<gen30::ShdA30> donorBlockA(const IO& io, const Material& dm)
+inline std::optional<shd::BlockA> donorBlockA(const IO& io, const Material& dm)
 {
     if (!io.read30) return std::nullopt;
     std::string raw30;
-    gen30::ShdA30 a30;
+    shd::BlockA a30;
     if (!io.read30("3:shaders/shaders/" + dm.shader + ".shd", raw30)) return std::nullopt;
-    if (!gen30::parseA30(raw30, a30) || (int)dm.A.size() != a30.sizeA) return std::nullopt;
+    if (!shd::parseBlockA(raw30, a30) || (int)dm.A.size() != a30.sizeA) return std::nullopt;
     return a30;
 }
 
 // 3.0's defaults, then each 1.0 block A parameter at 3.0's offset for its name
-inline std::string blockAByName(const IO& io, const Material& m10, const gen30::ShdA30& a30)
+inline std::string blockAByName(const IO& io, const Material& m10, const shd::BlockA& a30)
 {
     const std::string& a10 = m10.A;
     std::string A = a30.defA, raw10;
@@ -1133,7 +1132,7 @@ inline void relayBlockA(const IO& io, const Material& m10, Material& dm)
 {
     const std::string& a10 = m10.A;
     const bool firstParam = a10.size() >= kParamBytes && dm.A.size() >= kParamBytes;
-    if (const std::optional<gen30::ShdA30> a30 = donorBlockA(io, dm)) dm.A = blockAByName(io, m10, *a30);
+    if (const std::optional<shd::BlockA> a30 = donorBlockA(io, dm)) dm.A = blockAByName(io, m10, *a30);
     else if (dm.shader == m10.shader && a10.size() <= dm.A.size()) dm.A = a10 + dm.A.substr(a10.size());
     else if (firstParam) dm.A = a10.substr(0, kParamBytes) + dm.A.substr(kParamBytes);
 }

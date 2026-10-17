@@ -335,7 +335,7 @@ static int renderTest(char** a)
                 return true;
             };
             gen30::Generated g;
-            gen30::generate(T.shaders10, rd, vf10, sh, comp, g, st, &vf30);
+            gen30::generate(T.shaders10, {rd, vf10, comp, st, &vf30}, sh, g);
             for (auto& p : g.problems) printf("shaders10 x%s: %s\n", sh.c_str(), p.c_str());
             return made[sh] = !g.shd.empty() && g.problems.empty();
         };
@@ -3220,7 +3220,7 @@ int main(int argc, char** argv)
             if (e.path().extension() != ".shd") continue;
             std::string sh = e.path().stem().string();
             gen30::Generated g;
-            gen30::generate(T.shaders10, read10, vf, sh, nullptr, g);
+            gen30::generate(T.shaders10, {read10, vf, nullptr}, sh, g);
             bool same = g.shd == slurp(e.path());
             for (auto& p : g.programs) {
                 char nm[64];
@@ -3276,15 +3276,15 @@ int main(int argc, char** argv)
         std::set<std::string> shaders;
         for (int a = 5; a < argc; ++a) {
             std::string b = slurp(argv[a]);
-            size_t o = 16, nc = b.size() >= 16 ? gen30::u32(b, 12) : 0;
+            size_t o = 16, nc = b.size() >= 16 ? bytes::u32OrZero(b, 12) : 0;
             for (size_t c = 0; c < nc && o + 16 <= b.size(); ++c) {
                 if (!b.compare(o, 4, "MATP")) {
                     size_t p = (o + 16 + 3) & ~(size_t)3;
-                    uint32_t ns = gen30::u32(b, p);
+                    uint32_t ns = bytes::u32OrZero(b, p);
                     p += 4;
                     for (uint32_t i = 0; i < ns; ++i) { size_t e = b.find('\0', p); shaders.insert(b.substr(p, e - p)); p = e + 1; }
                 }
-                o += gen30::u32(b, o + 8);
+                o += bytes::u32OrZero(b, o + 8);
             }
         }
         size_t probs = 0;
@@ -3295,7 +3295,7 @@ int main(int argc, char** argv)
         if (!vf30.empty()) st = [&](uint32_t v) { return render::skinTarget30(T, v); };
         for (auto& sh : shaders) {
             gen30::Generated g;
-            gen30::generate(T.shaders10, read10, vf, sh, comp, g, st, &vf30);
+            gen30::generate(T.shaders10, {read10, vf, comp, st, &vf30}, sh, g);
             for (auto& pr : g.problems) if (++probs <= 10) printf("  %s: %s\n", sh.c_str(), pr.c_str());
         }
         printf("%zu shaders: %zu programs compiled, %zu already cached, %zu failed, %zu problems\n", shaders.size(), compiled, cached, failed, probs);

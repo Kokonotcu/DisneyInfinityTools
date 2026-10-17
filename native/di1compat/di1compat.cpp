@@ -3559,7 +3559,7 @@ static uint8_t* shader10(const char* name, bool create)
     g_compiling10 = name;
     std::function<uint32_t(uint32_t)> skinTarget;
     if (g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty()) skinTarget = [](uint32_t vf) { return render::skinTarget30(g_render, vf); };
-    gen30::generate(g_render.shaders10, read10s, g_vf10, std::string(name + 1), compile10, g, skinTarget, &g_vf30);
+    gen30::generate(g_render.shaders10, {read10s, g_vf10, compile10, skinTarget, &g_vf30}, std::string(name + 1), g);
     for (auto& pr : g.problems) logf("shaders10 %s: %s", name, pr.c_str());
     if (g.shd.empty() || !g.problems.empty()) return nullptr;
     std::map<uint32_t, uint32_t> engineId, vsIndex, psIndex;   // generator id -> engine id; engine id -> index
