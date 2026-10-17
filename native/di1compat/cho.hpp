@@ -138,6 +138,75 @@ inline int first(const oct::File& f, const oct::Rec& r, int def)
     return v.empty() ? def : v[0];
 }
 
+namespace detail {
+
+// A record reader of a scan table: record i of f into out
+template <class Out>
+struct FieldRule {
+    const char* name;
+    void (*read)(const oct::File& f, size_t i, Out& out);
+};
+
+// Runs the rule named like record i, if any (the names of a table are distinct)
+template <class Out, size_t N>
+inline void readField(const oct::File& f, size_t i, const FieldRule<Out> (&rules)[N], Out& out)
+{
+    const std::string& k = f.name(f.recs[i]);
+    for (const FieldRule<Out>& rule : rules) {
+        if (k != rule.name) continue;
+        rule.read(f, i, out);
+        return;
+    }
+}
+
+// The pool's level-2 children named SubNetwork, in file order
+inline std::vector<size_t> subNetworks(const oct::File& f, long pool)
+{
+    std::vector<size_t> sns;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
+        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
+    return sns;
+}
+
+// The first child of record i (one level down) with this name, -1 if none
+inline long child(const oct::File& f, size_t i, const char* nm)
+{
+    for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
+        if (f.recs[j].level == f.recs[i].level + 1 && f.name(f.recs[j]) == nm) return (long)j;
+    return -1;
+}
+
+// Record r's first name ("" for none or r < 0)
+inline std::string name1(const oct::File& f, long r)
+{
+    auto v = r < 0 ? std::vector<std::string>{} : f.nameValues(f.recs[r]);
+    return v.empty() ? std::string() : v[0];
+}
+
+// A ClipDataBlock's play range: its first two f32 (nullopt when shorter)
+inline std::optional<std::pair<float, float>> clipTimes(const std::string& block)
+{
+    if (block.size() < 8) return std::nullopt;
+    float a, z;
+    memcpy(&a, &block[0], 4);
+    memcpy(&z, &block[4], 4);
+    return std::make_pair(a, z);
+}
+
+// fn(time) per event of the EventList at off in a NetworkBuffer: u32 n, n x (f32 time, f32 value)
+template <class Fn>
+inline void eachEventTime(const std::string& nb, uint32_t off, Fn fn)
+{
+    uint32_t cnt = rd(nb, off, 4);
+    for (uint32_t k = 0; cnt != 0xffffffffu && k < cnt && bytes::fits(nb.size(), off + 4 + 8 * (size_t)k, 4); ++k) {
+        float t;
+        memcpy(&t, &nb[off + 4 + 8 * k], 4);
+        fn(t);
+    }
+}
+
+}  // namespace detail
+
 // ---- clips ----
 struct ClipOut { uint32_t id; std::vector<std::vector<uint16_t>> comps; };
 
@@ -423,114 +492,169 @@ inline int time30(oct::File& f)
     return n;
 }
 
-// Returns the DataNodes converted; *subnets = SubNetworks touched.
+namespace detail {
+
+// What anim30 reads of one SubNetwork: its level-3 header records and pools, and a NetworkBuffer copy
+struct AnimScan {
+    long hs = -1, hsi = -1, hl = -1;   // HeaderStrings, HeaderStringIndices, HeaderLayout
+    long dp = -1, pp = -1;             // DataNodePool, ProcessorNodePool
+    std::string nb;
+};
+inline constexpr FieldRule<AnimScan> kAnimLevel3[] = {
+    {"HeaderStrings", [](const oct::File&, size_t i, AnimScan& s) { s.hs = (long)i; }},
+    {"HeaderStringIndices", [](const oct::File&, size_t i, AnimScan& s) { s.hsi = (long)i; }},
+    {"HeaderLayout", [](const oct::File&, size_t i, AnimScan& s) { s.hl = (long)i; }},
+    {"DataNodePool", [](const oct::File&, size_t i, AnimScan& s) { s.dp = (long)i; }},
+    {"ProcessorNodePool", [](const oct::File&, size_t i, AnimScan& s) { s.pp = (long)i; }},
+    {"NetworkBuffer",
+     [](const oct::File& f, size_t i, AnimScan& s) { s.nb = f.recs[i].pay.substr(oct::spec(f.recs[i].type).cw); }},
+};
+
+// The 'Global.Time' string s and its root header h (1-based), when exactly one header names s
+struct TimeHeader {
+    int32_t s;
+    int h;
+};
+inline std::optional<TimeHeader> timeHeader(const std::vector<std::string>& strs, const std::vector<int32_t>& idx,
+                                            const std::vector<int32_t>& lay)
+{
+    auto at = std::find(strs.begin(), strs.end(), "Global.Time");
+    if (at == strs.end() || std::count(strs.begin(), strs.end(), "AnimState")) return std::nullopt;
+    const int32_t s = (int32_t)(at - strs.begin());
+    if (std::count(idx.begin(), idx.end(), s) != 1) return std::nullopt;   // the string names another header too
+    // HeaderLayout: (parent, child count) pairs; the children take the next indices, numbered from 1 (0 = root)
+    int h = -1;
+    size_t k = 0;
+    for (size_t p = 0; p + 1 < lay.size(); p += 2)
+        for (int32_t c = 0; c < lay[p + 1] && k < idx.size(); ++c, ++k)
+            if (lay[p] == 0 && idx[k] == s) h = (int)k + 1;
+    if (h < 0) return std::nullopt;
+    return TimeHeader{s, h};
+}
+
+// The play range of the clips and events one DataNode drives
+struct TimeRange {
+    bool any = false;
+    float t0 = 0, t1 = 0;
+    void add(float t)
+    {
+        t0 = any ? (std::min)(t0, t) : t;
+        t1 = any ? (std::max)(t1, t) : t;
+        any = true;
+    }
+};
+
+// Value of the processor attribute a in DataNodeRefs, -1 if it has none
+inline int attributeRef(const std::vector<std::string>& attrs, const std::vector<int32_t>& refs, const char* a)
+{
+    for (size_t q = 0; q < attrs.size() && q < refs.size(); ++q)
+        if (attrs[q] == a) return refs[q];
+    return -1;
+}
+
+// The times in DataNode src that a processor of type ty reads (ClipDataBlock or EventList), into r
+inline void processorTimes(const oct::File& f, const AnimScan& s, size_t src, const std::string& ty, TimeRange& r)
+{
+    if (ty == "ClipProcessor") {
+        long b = child(f, src, "ClipDataBlock");
+        if (b < 0 || oct::spec(f.recs[b].type).kind != oct::BYTE) return;
+        const auto ts = clipTimes(f.recs[b].pay.substr(oct::spec(f.recs[b].type).cw));
+        if (!ts) return;
+        r.add(ts->first);
+        r.add(ts->second);
+        return;
+    }
+    long o = child(f, src, "NetworkBufferOffset");
+    long at = o < 0 ? -1 : first(f, f.recs[o], -1);
+    if (at >= 0) eachEventTime(s.nb, (uint32_t)at, [&](float t) { r.add(t); });   // as time30's off >= 0
+}
+
+// The time range of the ClipProcessors / EventLists whose Input is DataNode d (FORMATS.md 4.10)
+inline TimeRange timeRange(const oct::File& f, const AnimScan& s, const std::vector<size_t>& dns, int d)
+{
+    TimeRange r;
+    for (size_t i = s.pp + 1, e = f.blockEnd(s.pp); i < e; ++i) {
+        if (f.recs[i].level != 4) continue;
+        std::string ty = name1(f, child(f, i, "Type"));
+        long ar = child(f, i, "DataNodeAttributes"), rr = child(f, i, "DataNodeRefs");
+        const bool reader = ty == "ClipProcessor" || ty == "EventList";
+        if (!reader || ar < 0 || rr < 0) continue;
+        auto attrs = f.nameValues(f.recs[ar]);
+        auto refs = f.ints(f.recs[rr]);
+        if (attributeRef(attrs, refs, "Input") != d) continue;
+        int src = attributeRef(attrs, refs, ty == "ClipProcessor" ? "ClipData" : "EventListData");
+        if (src < 0 || (size_t)src >= dns.size()) continue;
+        processorTimes(f, s, dns[src], ty, r);
+    }
+    return r;
+}
+
+// DataNode d's new children if it is the Float 'Global.Time' node: AnimState with its range; else empty
+inline std::vector<oct::Rec> animNode(oct::File& f, const AnimScan& s, const std::vector<size_t>& dns, size_t d, int h)
+{
+    long hd = child(f, dns[d], "Header"), ty = child(f, dns[d], "Type");
+    if (hd < 0 || ty < 0) return {};
+    if (first(f, f.recs[hd], -1) != h || name1(f, ty) != "Float") return {};
+    const TimeRange r = timeRange(f, s, dns, (int)d);
+    if (!r.any) return {};
+    return {f.recs[hd], f.nameScalar(5, f.recs[ty].name, "AnimState"), f.node(5, "Data"),
+            floatRec(f, "RangeMin", r.t0, 6), floatRec(f, "RangeMax", r.t1, 6)};
+}
+
+// HeaderStrings element s set to name index a in place (a non-keyed NAME list of u16, GR-34)
+inline void setHeaderString(oct::File& f, long hs, int32_t s, uint16_t a)
+{
+    const oct::Spec ss = oct::spec(f.recs[hs].type);
+    memcpy(&f.recs[hs].pay[ss.cw + 2 * (size_t)s], &a, 2);
+}
+
+// One SubNetwork's time input in 3.0's form; the DataNodes converted
+inline int animSubNetwork(oct::File& f, size_t sn)
+{
+    AnimScan s;
+    for (size_t i = sn + 1, end = f.blockEnd(sn); i < end; ++i)
+        if (f.recs[i].level == 3) readField(f, i, kAnimLevel3, s);
+    const bool headers = s.hs >= 0 && s.hsi >= 0 && s.hl >= 0;
+    if (!headers || s.dp < 0 || s.pp < 0) return 0;
+    const oct::Spec ss = oct::spec(f.recs[s.hs].type);
+    if (ss.kind != oct::NAME || ss.keyed) return 0;
+    const std::optional<TimeHeader> th =
+        timeHeader(f.nameValues(f.recs[s.hs]), f.ints(f.recs[s.hsi]), f.ints(f.recs[s.hl]));
+    if (!th) return 0;
+    std::vector<size_t> dns;
+    for (size_t i = s.dp + 1, e = f.blockEnd(s.dp); i < e; ++i)
+        if (f.recs[i].level == 4) dns.push_back(i);
+    std::vector<std::vector<oct::Rec>> rep(dns.size());   // per DataNode: its children to be, built before any edit
+    int here = 0;
+    for (size_t d = 0; d < dns.size(); ++d) {
+        rep[d] = animNode(f, s, dns, d, th->h);
+        here += !rep[d].empty();
+    }
+    if (!here) return 0;
+    setHeaderString(f, s.hs, th->s, f.addName("AnimState"));   // before the edits: they shift a later hs (GR-N1)
+    for (size_t d = dns.size(); d-- > 0;) {   // last first: edits keep earlier indices
+        if (rep[d].empty()) continue;
+        size_t i = dns[d];
+        f.recs.erase(f.recs.begin() + i + 1, f.recs.begin() + f.blockEnd(i));
+        f.recs.insert(f.recs.begin() + i + 1, rep[d].begin(), rep[d].end());
+    }
+    return here;
+}
+
+}  // namespace detail
+
+// anim30 (choanim10): 'Global.Time' Float inputs become AnimState (FORMATS.md 4.10). Returns the DataNodes converted;
+// *subnets = SubNetworks touched.
 inline int anim30(oct::File& f, int* subnets = nullptr)
 {
     long pool = f.pool("SubNetworkPool");
     if (pool < 0) return 0;
-    std::vector<size_t> sns;
-    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
-        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
+    const std::vector<size_t> sns = detail::subNetworks(f, pool);
     int n = 0, touched = 0;
     for (auto it = sns.rbegin(); it != sns.rend(); ++it) {   // last first: edits keep earlier indices
-        size_t sn = *it, end = f.blockEnd(sn);
-        long hs = -1, hsi = -1, hl = -1, dp = -1, pp = -1;
-        std::string nb;
-        for (size_t i = sn + 1; i < end; ++i) {
-            if (f.recs[i].level != 3) continue;
-            const std::string& k = f.name(f.recs[i]);
-            if (k == "HeaderStrings") hs = (long)i;
-            else if (k == "HeaderStringIndices") hsi = (long)i;
-            else if (k == "HeaderLayout") hl = (long)i;
-            else if (k == "DataNodePool") dp = (long)i;
-            else if (k == "ProcessorNodePool") pp = (long)i;
-            else if (k == "NetworkBuffer") nb = f.recs[i].pay.substr(oct::spec(f.recs[i].type).cw);
-        }
-        if (hs < 0 || hsi < 0 || hl < 0 || dp < 0 || pp < 0) continue;
-        oct::Spec ss = oct::spec(f.recs[hs].type);
-        if (ss.kind != oct::NAME || ss.keyed) continue;
-        std::vector<std::string> strs = f.nameValues(f.recs[hs]);
-        std::vector<int32_t> idx = f.ints(f.recs[hsi]), lay = f.ints(f.recs[hl]);
-        auto at = std::find(strs.begin(), strs.end(), "Global.Time");
-        if (at == strs.end() || std::count(strs.begin(), strs.end(), "AnimState")) continue;
-        int32_t s = (int32_t)(at - strs.begin());
-        if (std::count(idx.begin(), idx.end(), s) != 1) continue;   // the string names another header too
-        // HeaderLayout: (parent header, child count) pairs; the children take the next HeaderStringIndices and are
-        // numbered from 1 (0 = root)
-        int h = -1;
-        size_t k = 0;
-        for (size_t p = 0; p + 1 < lay.size(); p += 2)
-            for (int32_t c = 0; c < lay[p + 1] && k < idx.size(); ++c, ++k)
-                if (lay[p] == 0 && idx[k] == s) h = (int)k + 1;
-        if (h < 0) continue;
-        // child of a node (level + 1) by name, -1 if none
-        auto kid = [&](size_t i, const char* nm) -> long {
-            for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
-                if (f.recs[j].level == f.recs[i].level + 1 && f.name(f.recs[j]) == nm) return (long)j;
-            return -1;
-        };
-        auto str1 = [&](long r) { auto v = r < 0 ? std::vector<std::string>{} : f.nameValues(f.recs[r]); return v.empty() ? std::string() : v[0]; };
-        std::vector<size_t> dns;
-        for (size_t i = dp + 1, e = f.blockEnd(dp); i < e; ++i)
-            if (f.recs[i].level == 4) dns.push_back(i);
-        // the time range of the clips and events this DataNode drives
-        auto range = [&](int d, float& t0, float& t1) {
-            bool any = false;
-            auto add = [&](float t) { t0 = any ? (std::min)(t0, t) : t; t1 = any ? (std::max)(t1, t) : t; any = true; };
-            for (size_t i = pp + 1, e = f.blockEnd(pp); i < e; ++i) {
-                if (f.recs[i].level != 4) continue;
-                std::string ty = str1(kid(i, "Type"));
-                long ar = kid(i, "DataNodeAttributes"), rr = kid(i, "DataNodeRefs");
-                if ((ty != "ClipProcessor" && ty != "EventList") || ar < 0 || rr < 0) continue;
-                auto attrs = f.nameValues(f.recs[ar]);
-                auto rf = f.ints(f.recs[rr]);
-                auto ref = [&](const char* a) { for (size_t q = 0; q < attrs.size() && q < rf.size(); ++q) if (attrs[q] == a) return rf[q]; return -1; };
-                if (ref("Input") != d) continue;
-                int src = ref(ty == "ClipProcessor" ? "ClipData" : "EventListData");
-                if (src < 0 || (size_t)src >= dns.size()) continue;
-                if (ty == "ClipProcessor") {
-                    long b = kid(dns[src], "ClipDataBlock");
-                    if (b < 0 || oct::spec(f.recs[b].type).kind != oct::BYTE) continue;
-                    std::string blk = f.recs[b].pay.substr(oct::spec(f.recs[b].type).cw);
-                    if (blk.size() < 8) continue;
-                    float a, z;
-                    memcpy(&a, &blk[0], 4);
-                    memcpy(&z, &blk[4], 4);
-                    add(a);
-                    add(z);
-                } else {
-                    long o = kid(dns[src], "NetworkBufferOffset"), at = o < 0 ? -1 : first(f, f.recs[o], -1);
-                    uint32_t off = (uint32_t)at, cnt = at < 0 ? 0xffffffffu : rd(nb, off, 4);   // as time30's off >= 0
-                    for (uint32_t k2 = 0; cnt != 0xffffffffu && k2 < cnt && off + 8 + 8 * (size_t)k2 <= nb.size(); ++k2) {
-                        float t;
-                        memcpy(&t, &nb[off + 4 + 8 * k2], 4);
-                        add(t);
-                    }
-                }
-            }
-            return any;
-        };
-        std::vector<std::vector<oct::Rec>> rep(dns.size());   // new children per DataNode, built before any edit
-        int here = 0;
-        for (size_t d = 0; d < dns.size(); ++d) {
-            long hd = kid(dns[d], "Header"), ty = kid(dns[d], "Type");
-            float t0 = 0, t1 = 0;
-            if (hd < 0 || ty < 0 || first(f, f.recs[hd], -1) != h || str1(ty) != "Float" || !range((int)d, t0, t1)) continue;
-            rep[d] = {f.recs[hd], f.nameScalar(5, f.recs[ty].name, "AnimState"), f.node(5, "Data"),
-                      floatRec(f, "RangeMin", t0, 6), floatRec(f, "RangeMax", t1, 6)};
-            ++here;
-        }
-        if (!here) continue;
-        uint16_t a = f.addName("AnimState");
-        memcpy(&f.recs[hs].pay[ss.cw + 2 * (size_t)s], &a, 2);   // before the edits: they shift a later hs (GR-N1)
-        for (size_t d = dns.size(); d-- > 0;) {   // last first: edits keep earlier indices
-            if (rep[d].empty()) continue;
-            size_t i = dns[d];
-            f.recs.erase(f.recs.begin() + i + 1, f.recs.begin() + f.blockEnd(i));
-            f.recs.insert(f.recs.begin() + i + 1, rep[d].begin(), rep[d].end());
-        }
+        const int here = detail::animSubNetwork(f, *it);
         n += here;
-        ++touched;
+        touched += here > 0;
     }
     if (subnets) *subnets = touched;
     return n;
@@ -538,34 +662,6 @@ inline int anim30(oct::File& f, int* subnets = nullptr)
 
 // ---- constant section ----
 namespace detail {
-
-// A record reader of a scan table: record i of f into out
-template <class Out>
-struct FieldRule {
-    const char* name;
-    void (*read)(const oct::File& f, size_t i, Out& out);
-};
-
-// Runs the rule named like record i, if any (the names of a table are distinct)
-template <class Out, size_t N>
-inline void readField(const oct::File& f, size_t i, const FieldRule<Out> (&rules)[N], Out& out)
-{
-    const std::string& k = f.name(f.recs[i]);
-    for (const FieldRule<Out>& rule : rules) {
-        if (k != rule.name) continue;
-        rule.read(f, i, out);
-        return;
-    }
-}
-
-// The pool's level-2 children named SubNetwork, in file order
-inline std::vector<size_t> subNetworks(const oct::File& f, long pool)
-{
-    std::vector<size_t> sns;
-    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
-        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
-    return sns;
-}
 
 // A DataNode as const30 reads it
 struct ConstNode {

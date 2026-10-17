@@ -342,6 +342,14 @@ Code: `expl30.py`
 ### 4.10 1.0 choreographies in 3.0 form
 Code: `native/di1compat` `cho.hpp` (plan CHO-1, NPC-6), each step behind its own cfg key; the step order is `games/di1/octsteps.hpp`'s.
 
+#### Animation time inputs (`anim30`, cfg `choanim10`)
+The time input of ClipProcessor / EventList: 1.0 drives them from a Float DataNode under the root header `Global.Time`, 3.0 from an AnimState DataNode under the root header `AnimState`.
+- 3.0 binds the input slot by type: EventListProcessor FUN_0054b180 binds slot 2 `Input` via FUN_00530ad0 with an AnimState type check (DAT_0213e6b0/ac). A Float leaves the slot empty and the evaluate FUN_0052d390 passes NULL to FUN_0048d2b0 (in-game 2026-10-13: AV at 0048D2B3 once `time30` let ts_watersplashdown evaluate).
+- Its play clock finds the node by path and type (FUN_007822e0 / FUN_007823b0 / FUN_0077d280 -> FUN_0077c530("AnimState"), same type check), connects its TimeProcessor to it (FUN_00780d50 / FUN_00780af0) and takes the asset range from its RangeMin / RangeMax (FUN_007823b0 -> FUN_0076c4d0). AnimState fields (field table 0x02003bb8): Time, RangeMin, RangeMax, DiscontinuityTime, StateData.
+- Twins (choreographies + exploders, `twinscan.py`): every matched ClipProcessor (680) and EventList (716) Input is 1.0 Float `Global.Time` -> 3.0 AnimState `AnimState`; no other processor input changed type. All 606 1.0 `Global.Time` nodes are {Header, Type Float, Data 0.0} used only as those Inputs; all 606 3.0 AnimState nodes are {Type AnimState, Data {RangeMin, RangeMax}}.
+- **Range rule**, exact on all 7,167 AnimState nodes of the 3.0 choreographies + exploders + motions (`animrule.py`; `octtest --cho-anim` regenerates them): min / max of the ClipDataBlock f32[0] / f32[1] and the event times of the ClipProcessors / EventLists whose Input is that node. There is no FLT_MIN floor, so it differs from MinTime/MaxTime when every time is <= 0 (cin_isw_e_insideout: -7.33..-0.5 vs ..FLT_MIN) or a clip has another input (krt_wkrh_kingcandy_*: BLINK clips -10..10 on a Float).
+- **Written so**: the node's children are replaced by a copy of its Header, Type AnimState and Data {RangeMin, RangeMax}; the root header string is renamed in place. Skipped, node left as it was: the string also names another header, the SubNetwork already has an `AnimState` string, or the node drives no clip or event (no range).
+
 #### Constant sections (`const30`, cfg `choconst10`)
 The Static DataNodes of a processor SubNetwork go under constant headers, as 3.0 ships them.
 - 3.0 never has a variable ClipData or EventList node (processor graphs: 8,389 + 7,811 Static, 0 not; `statics.py`). Its reader keeps them in the constant arena (FUN_0050d8d0: Static -> +0x84) under constant headers 1..CHC (FUN_004fe4d0 builds them from the first `ConstantLayoutCount` layout ints), which instances share.
