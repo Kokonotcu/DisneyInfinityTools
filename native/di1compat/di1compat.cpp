@@ -1,9 +1,8 @@
-// di1compat: Pentane plugin that serves Disney Infinity 1.0 data to the 3.0 engine (research plan
-// D:\DI-Extract\_research\PLAN.md, INF-1/INF-6). The 1.0 files are read in place from the 1.0 install's own
-// zips and handed to the engine as Genie::MemFile streams through its asset open, FUN_0041cb10 (worlds,
-// textures, Lua ... all go through it, archive members included).
-// Log: <game dir>\di1compat.log (Pentane's own log function is not used: its calling convention is unverified).
-// Config: <plugin dir>\di1compat.cfg, "key = value" lines; every key and its default in games/di1/config.hpp.
+// di1compat: a Pentane plugin that serves Disney Infinity 1.0 data, read in place from its zips, to the 3.0 engine.
+
+// Files reach the engine as Genie::MemFile streams through its asset open, FUN_0041cb10.
+
+// Log: <game dir>\di1compat.log, not Pentane's (its calling convention is unverified). Config: games/di1/config.hpp.
 #include <windows.h>
 #include <tlhelp32.h>
 #include <intrin.h>
@@ -24,26 +23,32 @@
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
+#include "base/hash.hpp"
+#include "base/text.hpp"
 #include "core/engine_file.hpp"
 #include "core/hooks.hpp"
 #include "core/log.hpp"
 #include "core/memcheck.hpp"
+#include "core/readonly_file.hpp"
 #include "core/stack.hpp"
 #include "core/veh.hpp"
 #include "core/zip.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
-#include "octx.hpp"
-#include "bent.hpp"
-#include "btd.hpp"
-#include "chd.hpp"
+#include "games/di1/octsteps.hpp"
+#include "games/di1/options.hpp"
+#include "games/di1/renderio.hpp"
+#include "games/di1/transcode.hpp"
+#include "games/di1/zones.hpp"
+#include "formats/oct.hpp"
+#include "formats/chd.hpp"
 #include "mer.hpp"
 #include "mernode.hpp"
 #include "render.hpp"
-#include "arc30.hpp"
-#include "datamap.hpp"
-#include "dct.hpp"
-#include "luachunk.hpp"
+#include "formats/arc30.hpp"
+#include "convert/datamap.hpp"
+#include "formats/dct.hpp"
+#include "formats/luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
@@ -90,18 +95,19 @@ using core::watch;
 using core::copyToMemFile;
 using core::memFile;
 using core::readStream;
+using hash::fnv64;
+using text::endsWith;
+using text::norm;
 
 static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set once in Pentane_Main, before any hook
 
-// ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
-// An engine path <dir>/<name>/<rest> lives in assets\<dir>\<name>.zip as member <rest> (the layout extract.py
-// unpacks), and deeper or shallower splits are tried too (games/di1/archives.hpp). Archives open lazily; miniz is not
-// thread-safe.
+// ---- VFS1: the 1.0 install's own zips, read in place ----
+
+// The open archives, by path under assets; miniz is not thread-safe. Search order: games/di1/archives.hpp.
 static std::mutex g_zipLock;
 static std::map<std::string, std::unique_ptr<mz_zip_archive>> g_zips;   // guarded by g_zipLock; nullptr = no such zip
 
-// The 1.0 archive rel, opened on first use and kept open for the session (_setmaxstdio in Pentane_Main). A failed
-// open is kept too (A-12). Caller holds g_zipLock.
+// The archive rel, opened on first use and kept for the session; failures too (A-12). Caller holds g_zipLock.
 static mz_zip_archive* zipFor(const std::string& rel)
 {
     auto it = g_zips.find(rel);
@@ -110,14 +116,6 @@ static mz_zip_archive* zipFor(const std::string& rel)
 }
 
 static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
-
-static std::string norm(const char* path)
-{
-    std::string p = path;
-    for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    if (p.rfind("assets/", 0) == 0) p.erase(0, 7);
-    return p;
-}
 
 // -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
 static void* read10z(const std::string& p, size_t* size, std::string* where);
@@ -151,12 +149,6 @@ static void* read10z(const std::string& p, size_t* size, std::string* where)
 }
 
 // ---- load-time transcodes: 1.0 bytes in, the form the 3.0 reader takes out (the 1.0 file is never rewritten) ----
-static bool endsWith(const char* s, const char* suffix)
-{
-    size_t a = strlen(s), b = strlen(suffix);
-    return a >= b && _stricmp(s + a - b, suffix) == 0;
-}
-
 static bool read10s(const std::string& path, std::string& out)
 {
     size_t n = 0;
@@ -197,7 +189,10 @@ static bool read30x(const std::string& extract, std::string& out)
     if (cut == std::string::npos) return false;
     std::string arc = g_gameDir + "/assets/" + rel.substr(0, cut) + ".zip";
     for (char& c : arc) if (c == '/') c = '\\';
-    return arc30::readMember(arc, rel.substr(cut + 1), out);
+    core::ReadOnlyFile file(arc);
+    if (!file.open()) return false;
+    const arc30::Source src{file.size(), [&file](uint64_t at, void* dst, size_t n) { return file.readAt(at, dst, n); }};
+    return arc30::readMember(src, rel.substr(cut + 1), out);
 }
 
 // The key hashes of every 3.0 table of language `lang` (english_ntsc ...: _win32 and _pc_con of each package under
@@ -251,9 +246,7 @@ static void sceneSettingsIO(render::IO& io)
     std::lock_guard<std::mutex> lock(mx);
     if (!done) {
         done = true;
-        std::string a, b;
-        ok = read10s("shaders/shaders/scenesettingsformat.ssf", a) && read30x("3:shaders/shaders/scenesettingsformat.ssf", b) &&
-             ssf::parse(a, render::kSsfLayout10, f10) && ssf::parse(b, ssf::kLayout30, f30);
+        ok = di1::sceneSettings(read10s, read30x, f10, f30);
         logf("scene settings formats: %s (1.0 block %d B, 3.0 block %d B)", ok ? "ok" : "MISSING", f10.size, f30.size);
     }
     if (ok && g_cfg.sceneSettings10) { io.ssf10 = &f10; io.ssf30 = &f30; }
@@ -307,16 +300,13 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     read10s(dir + "/" + stem + "_0.vbuf", vbuf);
     read10s(dir + "/" + stem + "_0.ibuf", ibuf);
     if (g_cfg.skin10) note += npcrt::skin10(f, vbuf, ibuf);
-    render::IO io;
-    io.read30 = read30x;
-    io.read10 = read10s;
+    di1::WorldRender w = di1::worldRenderOf(g_cfg);
+    w.vf10 = &g_vf10;
+    w.vf30 = &g_vf30;
+    w.tails10 = &g_tails10;
+    render::IO io = di1::worldIO(w, read10s, read30x);
     io.log = [](const std::string& s) { logf("%s", s.c_str()); };
-    io.translate = g_cfg.shaders10 && g_cfg.translate10;
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
-    io.skinned = [](uint32_t vf) { auto f = g_vf10.find(vf); return f != g_vf10.end() && f->second.count("BLENDINDICES0"); };
-    io.skinLayout = g_cfg.skinLayout10;
-    io.translateSkinned = g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty();
-    io.tails10 = &g_tails10;
     sceneSettingsIO(io);
     render::Result r;
     if (!render::transcodeWorld(g_render, io, f, {stem, mtb, vbuf, ibuf}, r)) {
@@ -340,9 +330,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     return true;
 }
 
-// Choreographies, exploders and clips in 3.0 form (cho.hpp, plan CHO-1 / NPC-6): clip output tables re-packed,
-// ContextNodes as InstanceNodes, SubNetwork play ranges. A motion clip is re-packed only when the owner of its
-// ConnectionTemplate ('characters/kiosk' of 'characters/kiosk/kiosk.ct') is absent from the 3.0 install.
+// clip10motions: is a clip template's folder ('characters/kiosk' of 'characters/kiosk/kiosk.ct') in the 3.0 install?
 static bool has30(std::string dir)
 {
     std::string a = g_gameDir + "\\assets\\" + dir;
@@ -350,43 +338,6 @@ static bool has30(std::string dir)
     return GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA((a + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-static bool transcodeCho(oct::File& f, std::string& note)
-{
-    bool changed = false;
-    if (g_cfg.clip10) {
-        std::function<bool(const std::string&)> motion;
-        if (g_cfg.clip10Motions)
-            motion = [](const std::string& t) { size_t s = t.find_last_of("/\\"); return s != std::string::npos && !has30(t.substr(0, s)); };
-        int failed = 0, ren = 0;
-        if (int n = cho::clips30(f, motion, &failed, g_cfg.clip10Ids, &ren)) {
-            note += "+clips(" + std::to_string(n) + (ren ? ", " + std::to_string(ren) + " with 3.0 port ids" : std::string()) + ") ";
-            changed = true;
-        }
-        if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
-    }
-    if (g_cfg.clip10Ids)
-        if (int n = cho::links30(f)) { note += "+ports(" + std::to_string(n) + " model links in 3.0 port order) "; changed = true; }
-    if (g_cfg.choLayout10) {
-        int inst = 0;
-        if (int n = cho::layout30(f, &inst)) { note += "+layout(" + std::to_string(n) + ", " + std::to_string(inst) + " instances) "; changed = true; }
-    }
-    if (g_cfg.choTime10)
-        if (int n = cho::time30(f)) { note += "+time(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    if (g_cfg.choAnim10) {
-        int sns = 0;
-        if (int n = cho::anim30(f, &sns)) { note += "+anim(" + std::to_string(n) + " in " + std::to_string(sns) + " subnetworks) "; changed = true; }
-    }
-    if (g_cfg.choScene10)
-        if (int n = cho::scene30(f)) { note += "+scene(" + std::to_string(n) + " placements) "; changed = true; }
-    return changed;
-}
-
-// .oct (worlds, missions, exploders ...). Steps, each from the research plan (PLAN.md section 4):
-//   NavMeshPool blobs into the 3.0 layout (npc::navmesh30, OCT-8): 3.0's blob parser FUN_01909fb0 trusts the layout
-//   (in-game 2026-10-12: raw in_city.oct faulted at 0x190A4A7 inside it); a mesh that does not convert drops the pool.
-//   SubNetwork counts added (octx::addCounts, OCT-1): without them the basis arenas are sized 0 (in-game: NULL
-//   DataNodeBasisConversion in FUN_004d0160).
-//   World render (render.hpp, REN-5 + geometry): the 1.0 .mtb named 1.0 shaders (int3 in Shader_LookupCrc).
 // gp: the engine's global surface table, in index order (FUN_00754eb0 fills *(0x2204830): +0xc {char*, bool}[],
 // +0x10 count; loaded from startup2 at boot, before any world). Empty until then.
 static std::vector<std::string> surfaceTable30()
@@ -405,91 +356,34 @@ static std::vector<std::string> surfaceTable30()
     return t;
 }
 
-static bool transcodeOct(const std::string& path, oct::File& f, std::string& note)
+// The plugin's .oct steps: its cfg, its render, the 3.0 install and the engine's surface table
+static di1::OctSteps octSteps10()
 {
-    bool changed = transcodeAssetRender(path, f, note);
-    std::string navWhy = "navmesh10 off";
-    int navs = g_cfg.navmesh10 ? npc::navmesh30(f, &navWhy) : -1;
-    if (navs > 0) { note += "+navmesh(" + std::to_string(navs) + ") "; changed = true; }
-    else if (navs < 0 && f.dropPool("NavMeshPool")) { note += "-NavMeshPool (" + navWhy + ") "; changed = true; }
-    if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
-    if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = g_cfg.camWorld10 ? octx::camera30(f) : 0) { note += "+cameras(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::realm30w(f, g_cfg.realmFile10 && path.rfind("realms/", 0) == 0)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
-    if (transcodeCho(f, note)) changed = true;
-    int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
-    if (ncv || nfl) { note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) "; changed = true; }
-    if (int n = g_cfg.surfaces10 ? gameplay::surfaces30(f, surfaceTable30()) : 0) { note += "+surfaces(" + std::to_string(n) + ") "; changed = true; }
-    // last SubNetwork edit before the counts (it renumbers headers): Static nodes of choreography / exploder graphs
-    // under constant headers (cho.hpp); mission graphs keep octx's variable form
-    std::string np = norm(path.c_str());
-    if (g_cfg.choConst10 && (np.rfind("choreographies/", 0) == 0 || np.rfind("exploders/", 0) == 0))
-        if (int n = cho::const30(f)) { note += "+constant(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    return changed;
+    di1::OctSteps o = di1::octStepsOf(g_cfg);
+    o.render = transcodeAssetRender;
+    if (g_cfg.clip10Motions) o.installed30 = has30;
+    if (g_cfg.surfaces10) o.surfaceTable = surfaceTable30;
+    return o;
 }
 
-// -> codec name if out holds transcoded bytes, nullptr to serve the 1.0 bytes unchanged.
-// A 1.0 mission line (<line>__missiongraph.lua, the Unlocks database) in 3.0 terms. 1.0 started a story line's
-// opening mission -- the one with no Unlocks -- by itself, even with its giver far away (IN_City_DockFire: giver
-// IN_Edna, who spawns at HQ ~550 m from the start; Edna's call, the compass and ledge tutorials open the 1.0 game,
-// user screenshots 2026-10-13). 3.0 waits for the player to talk to a named giver unless the record says
-// ForceActivateFirstTime = true (3.0 ships it on its own named-giver openers: MBA_Side_Tutorial_Quest_01,
-// PSX_L1_Main04). Adds that field to story-line records with empty Unlocks. Returns the records changed.
-static int missionGraph30(std::string& t)
-{
-    static const std::string emptyUnlocks = "\t\t\tUnlocks = \n\t\t\t{\n\t\t\t},\n\t\t\tline = \"";
-    int n = 0;
-    for (size_t pos = t.find(emptyUnlocks); pos != std::string::npos; pos = t.find(emptyUnlocks, pos + 1)) {
-        size_t q = pos + emptyUnlocks.size(), e = t.find('"', q);
-        if (e == std::string::npos) break;
-        std::string line = t.substr(q, e - q);
-        for (char& c : line) c = (char)tolower((unsigned char)c);
-        size_t start = t.rfind("\n\t\t{\n", pos);
-        if (start == std::string::npos || line.find("story") == std::string::npos) continue;
-        std::string rec = t.substr(start, pos - start);
-        size_t ar = rec.find("\t\t\t\tAvatarReady = ");
-        if (rec.find("Type = \"MissionContext\"") == std::string::npos || rec.find("ForceActivateFirstTime") != std::string::npos ||
-            ar == std::string::npos)
-            continue;
-        static const std::string add = "\t\t\t\tForceActivateFirstTime = true,\n";
-        t.insert(start + ar, add);
-        pos += add.size();
-        ++n;
-    }
-    return n;
-}
-
-// The shaders a particle package's materials are served on: its .mtb (beside it, or the overlay member the alias
-// names) through the stand-alone bundle transcode (the .mtb case of transcode(), same donors), kept in the session
-// so the engine's .mtb request right after (log: particledata then mtb, same frame) is served the same bytes.
-// Per 1.0 material: (1.0 shader, served shader); empty if the bundle is missing or does not transcode.
-static std::vector<std::pair<std::string, std::string>> particleShaders(const std::string& pd, std::string& note)
+// vfxchan10: a particle package's shaders; its served .mtb is kept for the engine's request right after (same frame).
+static di1::Shaders particleShaders(const std::string& pd, std::string& note)
 {
     if (!g_renderOk) return {};
-    std::string mp = pd.substr(0, pd.size() - 13) + ".mtb", over;
+    std::string mp = pd.substr(0, pd.size() - strlen(".particledata")) + ".mtb", over;
+    // the .mtb beside it, or the overlay member the alias names
     {
         std::lock_guard<std::mutex> lock(g_sessLock);
         auto o = g_over10.find(mp);
         if (o != g_over10.end()) over = o->second;
     }
     std::string mtb;
-    if (!read10s(over.empty() ? mp : over, mtb) || mtb.size() < 4 || memcmp(mtb.data(), "BNDL", 4)) return {};
-    render::IO io;
-    io.read30 = read30x;
-    io.read10 = read10s;
-    render::Result r;
-    if (!render::transcodeBundle(g_render, io, mtb, "3:" + mp.substr(0, mp.find('/') + 1), r)) {
-        note += "channels: " + mp + " did not transcode ";
-        return {};
-    }
-    note += "(" + mp + ": real " + std::to_string(r.tiers["real"]) + " same-sh " + std::to_string(r.tiers["same-sh"]) + " generic " +
-            std::to_string(r.tiers["generic"]) + ", served from the session) ";
+    if (!read10s(over.empty() ? mp : over, mtb)) return {};
+    di1::ParticleBundle b = di1::particleBundle(g_render, di1::bundleIO(read10s, read30x), mp, mtb, note);
+    if (!b.ok) return {};
     std::lock_guard<std::mutex> lock(g_sessLock);
-    g_served.emplace(mp, r.mtb);
-    return r.shaders;
+    g_served.emplace(mp, std::move(b.mtb));
+    return b.shaders;
 }
 
 // currency10: does a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path) carry FastCoin.IsSpark? Memoised.
@@ -497,293 +391,53 @@ static bool isSpark10(const std::string& dnaFile)
 {
     static std::mutex m;
     static std::map<std::string, bool> memo;
-    std::string p = dnaFile;
-    for (char& c : p) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
-    if (p.empty() || p == "none") return false;
-    if (p.find('/') == std::string::npos) p = "expendables_data/dna/" + p;
-    if (!endsWith(p.c_str(), ".dnax")) p += ".dnax";
+    std::string p = di1::dnaPath(dnaFile);
+    if (p.empty()) return false;
     {
         std::lock_guard<std::mutex> l(m);
         if (auto it = memo.find(p); it != memo.end()) return it->second;
     }
     bool spark = false;
     std::string b;
-    if (read10s(p, b)) {
-        try {
-            auto G = luachunk::eval(b);
-            const luachunk::Value* d = G.count("DNA") ? &G["DNA"] : nullptr;
-            const luachunk::Value* ag = d ? d->get("AgentGadgets") : nullptr;
-            const luachunk::Value* fc = ag ? ag->get("FastCoin") : nullptr;
-            const luachunk::Value* is = fc ? fc->get("IsSpark") : nullptr;
-            spark = is && is->t == luachunk::Value::BOOL && is->b;
-        } catch (std::exception&) {}
-    }
+    if (read10s(p, b)) spark = di1::paysSparks(b);
     std::lock_guard<std::mutex> l(m);
     return memo[p] = spark;
 }
 
-// mtc: for a .mer, also the .mtc built from the same transcoded graph (the engine asks for the .mtc right after,
-// 48/48 pairs in a load: serving it from the session saves reading and transcoding the .mer a second time)
-static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note, std::string* mtc = nullptr)
+static di1::TranscodeOptions transcodeOptions10() { return di1::transcodeOptionsOf(g_cfg); }
+
+static void keepBundle(const std::string& path, const std::string& bytes)
 {
-    // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp): type data, giver sections, giver DNA
-    std::string np = norm(path);
-    bool types = !gameplay::challengeTypePath(np).empty(), ap = endsWith(path, ".ap"), dna = endsWith(path, ".dnax");
-    bool mlua = endsWith(path, ".lua") && np.rfind("mission_data/", 0) == 0 && !endsWith(path, "__missiongraph.lua");
-    std::string actLua;   // a mission table activityTasks30 changed
-    if (g_cfg.challenge10 && n && (types || ap || dna || mlua)) {
-        std::string t((const char*)data, n);
-        int k = 0;
-        const char* codec = nullptr;
-        if (types && t[0] != 0x1b) { k = gameplay::challengeTypes30(t); codec = "challengetypes"; }
-        else if (mlua && t[0] != 0x1b) { k = gameplay::activityTasks30(t); codec = "activitytasks"; }
-        else if (ap && t.find("\nActivityIcon=") != std::string::npos) {   // givers of the missions activityTasks30
-            std::string graph, dir = np.substr(0, np.rfind('/') + 1);                // converts (the missiongraph beside
-            std::set<std::string> ok;                                                 // the .ap names them)
-            if (read10s(np.substr(0, np.size() - 3) + ".lua", graph))
-                ok = gameplay::activityGivers(graph, [&](const std::string& name, std::string& o) {
-                    std::string m = dir + name + ".lua";
-                    for (char& c : m) c = (char)tolower((unsigned char)c);
-                    return read10s(m, o);
-                });
-            k = gameplay::apGivers30(t, &ok);
-            codec = "apgivers";
-        }
-        else if (dna && t[0] == 0x1b) {
-            std::string o;
-            try { k = gameplay::dnaGadgets30(t, o); } catch (std::exception&) { k = 0; }
-            if (k) t.swap(o);
-            codec = "dnagadgets";
-        }
-        if (k) {
-            note += std::string("+") + codec + "(" + std::to_string(k) + ") ";
-            if (mlua) actLua.swap(t);   // integration: mis's events10 still applies to it (below; disjoint keys)
-            else { out.swap(t); return codec; }
-        }
-    }
-    if (endsWith(path, "__missiongraph.lua") && n && ((const char*)data)[0] != 0x1b) {
-        std::string t((const char*)data, n);
-        int k = missionGraph30(t), b = g_cfg.behav10 ? mission::behaviour30(t) : 0;
-        if (!k && !b) return nullptr;
-        note += "+missiongraph(" + std::to_string(k) + " opening missions force-activated, " + std::to_string(b) +
-                " behaviours 2 -> story/side) ";
-        out.swap(t);
-        return "missiongraph";
-    }
-    // a mission (Mission_Data/<playset>/<line>/<name>.lua): presentation events in the 3.0 enum, the 1.0
-    // mission-generated objective line as 3.0's ProgressString "<default>" (mission.hpp)
-    if ((g_cfg.events10 || g_cfg.progress10 || !actLua.empty()) && endsWith(path, ".lua") && n &&
-        ((const char*)data)[0] != 0x1b && norm(path).rfind("mission_data/", 0) == 0 && !strstr(path, "__")) {
-        std::string t = actLua.empty() ? std::string((const char*)data, n) : actLua;
-        bool m = t.compare(0, 9, "Mission =") == 0;
-        int k = g_cfg.events10 && m ? mission::luaEvents30(t) : 0, pr = g_cfg.progress10 && m ? mission::progress30(t) : 0;
-        if (k) note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
-        if (pr) note += "+progress(objective line <MissionName>_Desc) ";
-        int tl = g_cfg.progress10 && m ? mission::taskLines30(t) : 0;
-        if (tl) note += "+tasklines(" + std::to_string(tl) + " 1.0 eval lines as ProgressString) ";
-        if (!k && !pr && !tl && actLua.empty()) return nullptr;
-        out.swap(t);
-        return k || pr || tl ? "mission" : "activitytasks";
-    }
-    if (!actLua.empty()) { out.swap(actLua); return "activitytasks"; }
-    if (endsWith(path, ".oct") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
-        try {
-            oct::File f = oct::File::parse(data, n);
-            if (!transcodeOct(norm(path), f, note)) return nullptr;
-            out = f.write();
-            return "oct";
-        } catch (std::exception& e) {
-            note = std::string("oct parse failed: ") + e.what();
-            return nullptr;
-        }
-    }
-    // a Meridian graph (.mer, mer.hpp, MER-2/4) and its type manifest (.mtc, rebuilt from the transcoded graph, since
-    // stand-ins change the class counts)
-    bool isMtc = endsWith(path, ".mtc");
-    if ((endsWith(path, ".mer") || isMtc) && g_merOk) {
-        std::string graph, why;
-        if (isMtc) {
-            std::string p = norm(path);
-            if (!read10s(p.substr(0, p.size() - 4) + ".mer", graph)) return nullptr;
-        } else graph.assign((const char*)data, n);
-        if (graph.size() < 4 || oct::u((const uint8_t*)graph.data(), 4) != oct::MAGIC) return nullptr;
-        oct::File f = oct::File::parse(graph.data(), graph.size());
-        int actRe = 0, actDrop = 0, act = g_cfg.challenge10 ? gameplay::activityGraph30(f, &actRe, &actDrop) : 0;   // gp
-        if (act) note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) + " participant links, " +
-                         std::to_string(actDrop) + " dropped) ";
-        mer::Stats st;
-        if (!mer::transcode(g_mer, f, &st, &why)) { note += "mer: " + why + " "; return nullptr; }
-        char buf[300];
-        sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, %d fetches, "
-                  "%d net-sync links, %d toggle types) ", st.namespaces, st.nodes, st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped,
-                  st.events, st.fetches, st.netSync, st.typed);
-        note += buf;
-        out = isMtc ? mer::mtc(f) : f.write();
-        if (!isMtc && mtc) *mtc = mer::mtc(f);
-        return isMtc ? "mtc" : "mer";
-    }
-    // a localisation table: keys re-hashed under 3.0's one seed (dct.hpp), names from the stringids table beside it
-    if (endsWith(path, ".dct") && n >= 4 && !memcmp(data, "DICT", 4)) {
-        std::string p = norm(path), ids;
-        size_t us = p.rfind('_'), sl = p.rfind('/');
-        if (us == std::string::npos || sl == std::string::npos || us < sl) return nullptr;
-        std::string plat = endsWith(path, "_pc_con.dct") ? "_win32.dct" : p.substr(us);   // its stand-in (hkOpen)
-        if (!read10s(p.substr(0, sl + 1) + "stringids" + plat, ids)) { note += "dct: no stringids beside it "; return nullptr; }
-        std::string t((const char*)data, n);
-        int dropped = 0, kept = dct::reseed(t, ids, dct::SEED30, &dropped);
-        if (kept < 0) return nullptr;
-        note += "+dct(" + std::to_string(kept) + " keys re-hashed, " + std::to_string(dropped) + " unnamed dropped) ";
-        std::string m10, mids, lang = p.substr(sl + 1, (endsWith(path, "_pc_con.dct") ? p.size() - 11 : us) - sl - 1);
-        if (g_cfg.text10 && read10s("lang/main/" + lang + "_win32.dct", m10) && read10s("lang/main/stringids_win32.dct", mids)) {
-            int k = dct::supplement(t, m10, mids, lang30(lang));
-            note += "+text10(" + std::to_string(k) + " 1.0 lang/main keys no 3.0 table has) ";
-        }
-        out.swap(t);
-        return "dct";
-    }
-    // collision (.btd blocks in the 3.0 layout, btd.hpp) and its block table (.btm, rebuilt from the converted
-    // sibling .btd); raw 1.0 collision gave a world without ground (in-game 2026-10-13: the avatar fell, respawned)
-    bool isBtm = endsWith(path, ".btm");
-    if (endsWith(path, ".btd") || isBtm) {
-        std::string src, conv;
-        if (isBtm) {
-            std::string p = norm(path);
-            if (!read10s(p.substr(0, p.size() - 4) + ".btd", src)) return nullptr;
-        } else src.assign((const char*)data, n);
-        if (!btd::convert(src, conv)) { note += "btd: not the 1.0 block layout "; return nullptr; }
-        char buf[64];
-        sprintf_s(buf, "+btd(%u blocks) ", (unsigned)btd::blocks(conv, 3).size());
-        note += buf;
-        out = isBtm ? btd::btm(conv) : conv;
-        return isBtm ? "btm" : "btd";
-    }
-    // an entity description (.bent 4.1 -> 4.1f, bent.hpp, NPC-4): characters, playset avatars, choreographies
-    if (endsWith(path, ".bent") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
-        oct::File f = oct::File::parse(data, n);
-        std::string why;
-        if (!bent::transcode(f, norm(path), &why)) { note += "bent: " + why + " "; return nullptr; }
-        out = f.write();
-        return "bent";
-    }
-    // a blended animation (.banm 1.0f -> 1.0g, cho.hpp, NPC-5): 3.0 dropped every 1.0 one at its version gate
-    if (g_cfg.banm10 && endsWith(path, ".banm") && n >= 4 && oct::u((const uint8_t*)data, 4) == oct::MAGIC) {
-        oct::File f = oct::File::parse(data, n);
-        if (!cho::banm30(f, norm(path))) { note += "banm: not 1.0f "; return nullptr; }
-        out = f.write();
-        return "banm";
-    }
-    // a material bundle outside any asset session (particles/<x>.mtb): its materials onto 3.0 shaders, generic donors
-    // from the same 3.0 asset family (in-game 2026-10-12: raw particles/IN_City.mtb -> int3 in Shader_LookupCrc)
-    if (endsWith(path, ".mtb") && n >= 4 && !memcmp(data, "BNDL", 4)) {
-        // texture-only bundles (UI images: ui/charactericons, flash/<screen>/*_iN.mtb) hold a named TEXB laid out as
-        // in 3.0 (count, name length, name, hash) and no materials: served as they are. The material path read them
-        // as unnamed TEXB and wrote garbage (in-game 2026-10-13: Edna's dialog icon fell back to the IN badge).
-        bool hasMatp = false;
-        const size_t nc = n >= 16 ? oct::u((const uint8_t*)data + 12, 4) : 0;
-        for (size_t o = 16, c = 0; c < nc && bytes::fits(n, o, 16); ++c) {
-            if (!memcmp((const char*)data + o, "MATP", 4)) hasMatp = true;
-            uint32_t cs = oct::u((const uint8_t*)data + o + 8, 4);
-            if (!cs || cs > n - o) break;   // a chunk past the end ends the walk; o never wraps (A-26)
-            o += cs;
-        }
-        if (!hasMatp) {
-            // the _holo portrait stand-in (below, in hkOpen) carries the asked name (ui::texBundleAs)
-            std::string np = norm(path), stem = np.substr(np.rfind('/') + 1);
-            stem.resize(stem.size() - 4);
-            if (np.rfind("ui/charactericons/", 0) == 0 && endsWith(path, "_holo.mtb") &&
-                !(out = ui::texBundleAs(std::string((const char*)data, n), stem)).empty()) {
-                note += "+texname(" + stem + ") ";
-                return "mtb";
-            }
-            return nullptr;
-        }
-        if (!g_renderOk) { note += "render table missing "; return nullptr; }
-        std::string p = norm(path);
-        render::IO io;
-        io.read30 = read30x;
-        io.read10 = read10s;
-        render::Result r;
-        if (!render::transcodeBundle(g_render, io, std::string((const char*)data, n), "3:" + p.substr(0, p.find('/') + 1), r)) {
-            for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
-            note += "render FAILED ";
-            return nullptr;
-        }
-        {
-            std::lock_guard<std::mutex> lock(g_sessLock);
-            g_served[p] = r.mtb;   // the engine reopens bundles; transcode once
-        }
-        char buf[160];
-        sprintf_s(buf, "+materials(real %d same-sh %d generic %d, %u 1.0 textures) ", r.tiers["real"], r.tiers["same-sh"],
-                  r.tiers["generic"], (unsigned)r.textures10.size());
-        note += buf;
-        out = r.mtb;
-        return "mtb";
-    }
-    // a 1.0 playset avatar DNA that 3.0 ships only as its base DNA: the base, naming the 1.0 _PS model (npc::psDna30)
-    if (g_cfg.psdna30 && endsWith(path, "_ps.dnax")) {
-        std::string p = norm(path), base, why;
-        if (!read30(p.substr(0, p.size() - 8) + ".dnax", base)) return nullptr;
-        if (!npc::psDna30(std::string((const char*)data, n), base, out, &why)) { note += "psdna30: " + why + " "; return nullptr; }
-        note += "+psdna30(3.0 base, " + why + ") ";
-        return "psdna30";
-    }
-    // a particle package (trailer v12 -> v47; 3.0's loader rejects 1.0's, so nothing of it registered) and its meshes
-    if (g_cfg.vfx10 && endsWith(path, ".particledata")) {
-        vfx::Stats st;
-        vfx::ChanMap cm;
-        auto shaders = g_cfg.vfxChan10 ? particleShaders(norm(path), note) : std::vector<std::pair<std::string, std::string>>();
-        if (!shaders.empty())
-            cm = [&shaders](uint16_t mat, int n10, std::vector<int>& chans) {
-                return mat < shaders.size() && chan::layout({read10s, read30x}, shaders[mat], n10, chans);
-            };
-        if (!vfx::transcode(std::string((const char*)data, n), out, &st, &cm)) return nullptr;
-        note += "+particles(" + std::to_string(st.emitters) + " emitters, " + std::to_string(st.effects) + " effects, " +
-                std::to_string(st.params) + " params, " + std::to_string(st.keys) + " keys, " + std::to_string(st.meshes) +
-                " mesh emitters, " + std::to_string(st.rechanneled) + " re-channeled for their 3.0 shader, " +
-                std::to_string(st.constChans) + " constant channels) ";
-        return "particledata";
-    }
-    if (g_cfg.vfx10 && endsWith(path, ".p3d"))
-        return vfx::p3d30(std::string((const char*)data, n), out) ? "p3d" : nullptr;
-    // an expendables package: its 1.0 groups in the keys 3.0's group reader takes (sys::groups30)
-    if (g_cfg.rewards10 && norm(path).rfind("expendables_data/", 0) == 0 && endsWith(path, ".lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        int over = 0, sparks = 0;
-        int k = sys::groups30(std::string((const char*)data, n), out, &over, g_cfg.currency10 ? std::function<bool(const std::string&)>(isSpark10) : nullptr, &sparks);
-        if (k) {
-            note += "+groups30(" + std::to_string(k - sparks) + " groups" + (over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "") +
-                    (sparks ? ", " + std::to_string(sparks) + " spark pickups paying INV_SPARKS" : "") + ") ";
-            return "expgroups";
-        }
-    }
-    // a playset DataMap (Lua chunk): its entries into the path forms 3.0's handlers take (datamap.hpp, PS-2)
-    if (endsWith(path, "datamap.lua") && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        int k = luachunk::rewrite(std::string((const char*)data, n), out, [](std::string& s) {
-            if (g_cfg.choAlias10) g_choAlias.add(s);
-            sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
-            return datamap::normalise(s);
-        });
-        note += std::to_string(k) + " entries normalised ";
-        return k ? "datamap" : nullptr;
-    }
-    // a 1.0 Slang script (sx.hpp SX-1): 3.0's fix-up FUN_007366f0 takes only 0x100d containers
-    if (g_cfg.sx10 && endsWith(path, ".sx") && sx::is10(data, n)) {
-        std::string why;
-        int k = sx::transcode(data, n, norm(path), out, &why);
-        if (k < 0) { note += "sx: " + why + " "; return nullptr; }
-        note += "+sx(" + std::to_string(k) + " imports) ";
-        return "sx";
-    }
-    // a 1.0 behavior map / behavior tree (sx.hpp BMX-1 / BTX-1): 3.0's loaders drop tables without Version 763
-    bool isBmx = g_cfg.bmx10 && endsWith(path, ".bmx"), isBtx = g_cfg.btx10 && endsWith(path, ".btx");
-    if ((isBmx || isBtx) && n >= 4 && !memcmp(data, "\x1bLua", 4)) {
-        std::string why;
-        auto exists = [](const std::string& p) { std::string s; return read10s(p, s); };
-        int k = isBmx ? sx::ai::bmx(data, n, exists, out, &why) : sx::ai::btx(data, n, exists, out, &why);
-        if (k < 0) { note += std::string(isBmx ? "bmx: " : "btx: ") + why + " "; return nullptr; }
-        note += (isBmx ? "+bmx(" : "+btx(") + std::to_string(k) + (isBmx ? " behaviors) " : " tables) ");
-        return isBmx ? "bmx" : "btx";
-    }
-    return nullptr;
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    g_served[path] = bytes;
+}
+
+// A DataMap entry, before it is normalised: Cho aliases (choalias10) and the playset's GameDB tables (sys.hpp)
+static void dataMapEntry10(const std::string& s)
+{
+    if (g_cfg.choAlias10) g_choAlias.add(s);
+    sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
+}
+
+// The plugin's readers, tables and session for the transcode dispatch
+static di1::TranscodeIO transcodeIO10()
+{
+    di1::TranscodeIO io;
+    io.read10 = read10s;
+    io.read30x = read30x;
+    io.read30 = read30;
+    io.oct = octSteps10();
+    io.mer = g_merOk ? &g_mer : nullptr;
+    io.render = g_renderOk ? &g_render : nullptr;
+    io.lang30 = lang30;
+    io.keep = keepBundle;
+    io.renderProblem = [](const std::string& p, const std::string& pr) {
+        logf("render problem %s: %s", p.c_str(), pr.c_str());
+    };
+    if (g_cfg.vfxChan10) io.particleShaders = particleShaders;
+    if (g_cfg.currency10) io.isSpark = isSpark10;
+    io.dataMapEntry = dataMapEntry10;
+    return io;
 }
 
 static bool memtestMatch(const char* p)
@@ -2087,7 +1741,8 @@ static std::string currency10(const char* filter, const char* who)
     auto it = g_currency10.find(filter);
     if (it == g_currency10.end()) return {};
     static core::LogOnce<std::string> told;
-    if (told.first(std::string(who) + filter)) logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
+    if (told.first(std::string(who) + filter))
+        logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
     return it->second;
 }
 // The zone's: the zone manager's (*0x0225f548) string field inventoryFilter of its zone (+0x19c), read through
@@ -2152,43 +1807,39 @@ static uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
     if (info.L) ((ReleaseFn)rt(0x0130E4D0))(info.L, info.idx);
     return changed;
 }
+static bool world10(const std::string& zone) { return di1::worldInstalled(g_cfg.install10, zone); }
 static int zones10(std::string& t, const char* p)
 {
     if (norm(p) != "gamedb/core/zonelist.lua") return 0;
     std::string c10;
     if (!read10s("gamedb/core/zonelist.lua", c10)) { logf("zones10: no 1.0 zone list in the 1.0 install"); return 0; }
-    std::vector<gameplay::Playset10> ps;
+    di1::Zones10Options o;
+    o.add = g_cfg.zones10;
+    o.currencies = g_cfg.currency10;
+    o.world = world10;
+    di1::Zones10 z;
     try {
-        auto g = luachunk::eval(c10);
-        auto world = [](const std::string& zone) {   // the start world is in the 1.0 install: worlds\<zone>[.zip]
-            std::string w = std::string(g_cfg.install10) + "\\assets\\worlds\\" + zone;
-            return GetFileAttributesA((w + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA(w.c_str()) != INVALID_FILE_ATTRIBUTES;
-        };
-        ps = gameplay::playsets10(t, g["ZoneList"], g_cfg.zones10, world);
+        z = di1::zones10(t, c10, o);
         if (g_cfg.currency10) {
-            auto cur = gameplay::currencies10(g["ZoneList"]);
             std::string l;
-            for (auto& [f, c] : cur) l += " " + f + "=" + c;
+            for (auto& [f, c] : z.currencies) l += " " + f + "=" + c;
             logf("currency10: 1.0 playset currencies:%s", l.c_str());
             std::lock_guard<std::mutex> lk(g_currency10Lock);
-            g_currency10 = std::move(cur);
+            g_currency10 = std::move(z.currencies);
         }
     } catch (std::exception& e) {
         logf("zones10: 1.0 zone list not read (%s)", e.what());
         return 0;
     }
     int added = 0;
-    std::vector<std::string> pre;
-    for (auto& x : ps) {
+    std::vector<std::string> pre = di1::zonePrefixes(z.playsets);
+    for (auto& x : z.playsets) {
         added += x.added;
-        for (auto& z : x.zones)
-            if (z.find('_') != std::string::npos && std::find(pre.begin(), pre.end(), z.substr(0, z.find('_') + 1)) == pre.end())
-                pre.push_back(z.substr(0, z.find('_') + 1));
         if (x.added) logf("zones10: %s registered, PlaysetUniqueID %d, %u zones, start %s", x.name.c_str(), x.id, (unsigned)x.zones.size(), x.start.c_str());
         else logf("zones10: %s already in the 3.0 zone list (start %s)", x.name.c_str(), x.start.c_str());
     }
     std::lock_guard<std::mutex> l(g_playsets10Lock);
-    g_playsets10 = ps;
+    g_playsets10 = z.playsets;
     g_missionPrefix10 = pre;
     return added;
 }
@@ -3229,7 +2880,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
                     out.assign((const char*)data, n);
                     padSmallDxt(out);
                     codec = out.size() == n && memcmp(out.data(), data, n) ? "tbody" : nullptr;
-                } else codec = transcode(p, data, n, out, note, &mtc);
+                } else codec = di1::transcode({p, data, n}, {out, note, &mtc}, transcodeOptions10(), transcodeIO10());
                 // the .mtc request transcodes read10s(<same path>.mer): these bytes when nothing redirected the read
                 if (codec && !strcmp(codec, "mer") && !mtc.empty() && over.empty() && chal.empty()) {
                     std::lock_guard<std::mutex> lock(g_sessLock);
@@ -3300,14 +2951,21 @@ static std::mutex g_sh10Lock;
 static std::unordered_map<std::string, uint8_t*> g_sh10;                       // 'x'<GUID> -> finalized .shd (nullptr: failed)
 static std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> g_prog10;  // code -> engine id, table index
 
-static uint64_t fnv64(const std::string& s)
+static thread_local std::string g_compiling10;   // the shader shader10 is generating (debug views name it)
+// The shader cache's file at path, read into code: true when it holds DXBC (a whole header, "DXBC" first).
+static bool cachedDxbc(const std::string& path, std::string& code)
 {
-    uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : s) h = (h ^ c) * 1099511628211ull;
-    return h;
+    constexpr size_t kDxbcHeader = 32;   // magic, checksum, version, size and chunk count
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") || !f) return false;
+    char buf[65536];
+    size_t got;
+    code.clear();
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) code.append(buf, got);
+    fclose(f);
+    return code.size() > kDxbcHeader && !code.compare(0, 4, "DXBC");
 }
 
-static thread_local std::string g_compiling10;   // the shader shader10 is generating (debug views name it)
 static bool compile10(const std::string& hlsl0, const char* target, std::string& code, std::string& msg)
 {
     std::string idcolor;
@@ -3350,18 +3008,9 @@ static bool compile10(const std::string& hlsl0, const char* target, std::string&
     const std::string& hlsl = g_cfg.magenta10 && target[0] == 'p' ? magenta
         : !idcolor.empty() ? idcolor
         : g_cfg.bufview10 && target[0] == 'p' && hlsl0.find("tLight") != std::string::npos ? bufview[(g_cfg.bufview10 - 1) % 5] : hlsl0;
-    char name[40];
-    sprintf_s(name, "\\%016llx.dxbc", (unsigned long long)fnv64(std::string(target) + "\n" + hlsl));
-    std::string path = g_shaderCache + name;
+    std::string path = g_shaderCache + "\\" + hash::shaderCacheName(target, hlsl);
+    if (cachedDxbc(path, code)) return true;
     FILE* f = nullptr;
-    if (!fopen_s(&f, path.c_str(), "rb") && f) {
-        char buf[65536];
-        size_t got;
-        code.clear();
-        while ((got = fread(buf, 1, sizeof(buf), f)) > 0) code.append(buf, got);
-        fclose(f);
-        if (code.size() > 32 && !code.compare(0, 4, "DXBC")) return true;
-    }
     if (!g_d3dCompile) { msg = "no d3dcompiler_47"; return false; }
     Blob *c = nullptr, *e = nullptr;
     HRESULT hr = g_d3dCompile(hlsl.data(), hlsl.size(), "di1compat", nullptr, nullptr, "main", target, 0, 0, &c, &e);
@@ -3675,8 +3324,6 @@ extern "C" void __stdcall Pentane_Main()
     logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
          (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
          (unsigned)g_render.plans.size());
-    octx::g_slack = 4096;   // instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
-    octx::g_variantGroups = g_cfg.variant10;
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
     g_mer.events10 = g_cfg.events10;
     g_mer.portRefs = g_cfg.portRefs10;

@@ -7,16 +7,22 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
-#include "octx.hpp"
-#include "bent.hpp"
-#include "btd.hpp"
-#include "chd.hpp"
+#include "convert/assets.hpp"
+#include "convert/counts.hpp"
+#include "games/di1/associations.hpp"
+#include "games/di1/realms.hpp"
+#include "games/di1/bent.hpp"
+#include "formats/btd.hpp"
+#include "games/di1/btd.hpp"
+#include "formats/chd.hpp"
 #include "mer.hpp"
 #include "render.hpp"
-#include "arc30.hpp"
-#include "datamap.hpp"
-#include "dct.hpp"
-#include "luachunk.hpp"
+#include "formats/arc30.hpp"
+#include "core/readonly_file.hpp"
+#include "convert/datamap.hpp"
+#include "formats/dct.hpp"
+#include "base/hash.hpp"
+#include "formats/luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
@@ -27,11 +33,61 @@
 #include "games/di1/vfx.hpp"
 #include "games/di1/chan.hpp"
 #include "gameplay.hpp"
+#include "base/hash.hpp"
+#include "base/text.hpp"
+#include "games/di1/archives.hpp"
+#include "games/di1/options.hpp"
+#include "games/di1/zones.hpp"
+
+// The plugin's octx settings for this run: OCTX_SLACK, --variants (main); the defaults are the shipped-exact ones
+static octx::Options g_octx;
+
+// arc30::readMember of a member of the archive file at path
+static bool readArc30(const std::string& path, const std::string& member, std::string& out)
+{
+    core::ReadOnlyFile file(path);
+    if (!file.open()) return false;
+    const arc30::Source src{file.size(), [&file](uint64_t at, void* dst, size_t n) { return file.readAt(at, dst, n); }};
+    return arc30::readMember(src, member, out);
+}
 
 static std::string slurp(const std::filesystem::path& p)
 {
     std::ifstream in(p, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// An extract file's engine path: what follows the last "/assets/", lower case, '/' separators.
+static std::string enginePath(const std::filesystem::path& p)
+{
+    std::string s = p.generic_string();
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    size_t a = s.rfind("/assets/");
+    return a == std::string::npos ? s : s.substr(a + 8);
+}
+
+// The plugin's .oct steps at its cfg defaults (games/di1/options.hpp). Render, the 3.0 install and the engine's
+// surface table need the game, so octtest runs without them.
+static di1::OctSteps pluginOctSteps()
+{
+    di1::OctSteps o = di1::octStepsOf(di1::Config{});
+    o.transforms = g_octx;   // OCTX_SLACK and --variants, not the plugin's 4096
+    return o;
+}
+
+// One file through the plugin's transcode dispatch at its cfg defaults, with no readers: the rules that read files
+// beside it serve it raw. Returns the codec, or "-" when the 1.0 bytes would be served.
+static std::string pluginTranscode(const std::filesystem::path& in, std::string& out, std::string& note)
+{
+    std::string b = slurp(in), ep = enginePath(in);
+    di1::TranscodeIO io;
+    io.read10 = [](const std::string&, std::string&) { return false; };
+    io.read30x = io.read10;
+    io.read30 = io.read10;
+    io.oct = pluginOctSteps();
+    const char* codec = di1::transcode({ep.c_str(), b.data(), b.size()}, {out, note, nullptr},
+                                       di1::transcodeOptionsOf(di1::Config{}), io);
+    return codec ? codec : "-";
 }
 
 // --vfxchan <1.0 extract root> <3.0 extract root>: chan::layout against Disney's port. Every emitter hash in a 1.0
@@ -228,9 +284,9 @@ static int uiTest(char** a, int argc)
     check(add > 0 && !shadow && (int)d1.keys.size() == kept + add, "text10: " + std::to_string(add) + " 1.0 lang/main keys added, none a 3.0 key");
     auto probe = [&](std::string key) {   // the engine's probe (octtest --dct)
         for (char& c : key) c = (char)tolower((unsigned char)c);
-        uint32_t h = dct::lookup2((const uint8_t*)key.data(), key.size(), dct::u32(in, 8)), ns = dct::u32(in, 0x10);
-        for (uint32_t i = h % ns; dct::u32(in, 0x24 + 12 * i); i = (i + 1) % ns)
-            if (dct::u32(in, 0x20 + 12 * i) == h) return std::string(in.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(in, 0x24 + 12 * i));
+        uint32_t h = hash::lookup2((const uint8_t*)key.data(), key.size(), bytes::le32(in, 8)), ns = bytes::le32(in, 0x10);
+        for (uint32_t i = h % ns; bytes::le32(in, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (bytes::le32(in, 0x20 + 12 * i) == h) return std::string(in.c_str() + 0x25 + 12 * i + (int32_t)bytes::le32(in, 0x24 + 12 * i));
         return std::string();
     };
     int tips = 0;
@@ -265,44 +321,46 @@ static int renderTest(char** a)
     rentable::Table T;
     if (!T.load(slurp(a[3]))) { printf("table load failed\n"); return 2; }
     std::string ext30 = a[4], ext10 = a[5];
-    render::IO io;
     // ARC30_GAME=<3.0 install>: read donors from the install's archives as the plugin does (arc30), timed
     const char* game = getenv("ARC30_GAME");
     int reads = 0;
     double readMs = 0;
-    io.read30 = [&](const std::string& p, std::string& o) {   // '3:<extract path>'
+    di1::Read read30 = [&](const std::string& p, std::string& o) {   // '3:<extract path>'
         if (!game) { o = slurp(fs::path(ext30) / "assets" / p.substr(2)); return !o.empty(); }
         auto t = std::chrono::steady_clock::now();
         std::string rel = p.substr(2);
         size_t cut = rel.rfind('/');
-        bool ok = cut != std::string::npos && arc30::readMember(std::string(game) + "/assets/" + rel.substr(0, cut) + ".zip", rel.substr(cut + 1), o);
+        bool ok = cut != std::string::npos && readArc30(std::string(game) + "/assets/" + rel.substr(0, cut) + ".zip", rel.substr(cut + 1), o);
         readMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
         ++reads;
         return ok;
     };
-    io.verbose = getenv("RENDER_VERBOSE") != nullptr;
-    io.translate = getenv("RENDER_TRANSLATE") != nullptr;   // real 1.0 shaders (read10 finds shaders/shaders/<x>.shd)
-    io.skinLayout = getenv("RENDER_SKIN") != nullptr;       // cfg skinlayout10 (the Python oracle keeps 'main')
-    ssf::Format ssf10, ssf30;                                 // cfg scenesettings10 (RENDER_SSF): SSET re-laid and kept
-    if (getenv("RENDER_SSF") && ssf::parse(slurp(fs::path(ext10) / "assets/shaders/shaders/scenesettingsformat.ssf"), render::kSsfLayout10, ssf10) &&
-        ssf::parse(slurp(fs::path(ext30) / "assets/shaders/shaders/scenesettingsformat.ssf"), ssf::kLayout30, ssf30)) {
-        io.ssf10 = &ssf10;
-        io.ssf30 = &ssf30;
-    }
+    di1::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
     vtxf::VFormats vf10 = vtxf::formats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
-    io.skinned = [&](uint32_t vf) { auto f = vf10.find(vf); return f != vf10.end() && f->second.count("BLENDINDICES0"); };
+    vtxf::VFormats vf30 = vtxf::formats(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"));
     std::map<uint32_t, vtxf::ColourTail> tails;   // as the plugin serves vformat.vtxf
     int added = 0;
     vtxf::merge(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"),
                      slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"), added, tails);
-    io.tails10 = &tails;
+    // the plugin's render IO (games/di1/renderio.hpp), its cfg keys from the environment
+    di1::WorldRender w;
+    w.translate = getenv("RENDER_TRANSLATE") != nullptr;   // real 1.0 shaders (read10 finds shaders/shaders/<x>.shd)
+    w.skinLayout = getenv("RENDER_SKIN") != nullptr;       // cfg skinlayout10 (the Python oracle keeps 'main')
+    w.skinTr = getenv("RENDER_SKINTR") != nullptr;          // cfg skintr10
+    w.vf10 = &vf10;
+    w.vf30 = &vf30;
+    w.tails10 = &tails;
+    render::IO io = di1::worldIO(w, read10, read30);
+    io.verbose = getenv("RENDER_VERBOSE") != nullptr;
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
+    ssf::Format ssf10, ssf30;   // cfg scenesettings10 (RENDER_SSF): SSET re-laid and kept
+    if (getenv("RENDER_SSF") && di1::sceneSettings(read10, read30, ssf10, ssf30)) {
+        io.ssf10 = &ssf10;
+        io.ssf30 = &ssf30;
+    }
     auto t0 = std::chrono::steady_clock::now();
-    io.read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
-    // RENDER_SKINTR: cfg skintr10. RENDER_GENCHECK=<d3dcompiler cache dir>: a shader translates only if the plugin's
-    // generator makes it and every program compiles (the plugin's io.translatable); without it every one is assumed to
-    io.translateSkinned = getenv("RENDER_SKINTR") != nullptr;
-    vtxf::VFormats vf30 = vtxf::formats(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"));
+    // RENDER_GENCHECK=<d3dcompiler cache dir>: a shader translates only if the plugin's generator makes it and every
+    // program compiles (the plugin's io.translatable); without it every one is assumed to
     std::map<std::string, bool> made;
     typedef HRESULT(WINAPI * CompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, void**, void**);
     static CompileFn cf = nullptr;
@@ -316,11 +374,7 @@ static int renderTest(char** a)
             std::function<uint32_t(uint32_t)> st;
             if (io.translateSkinned) st = [&](uint32_t vf) { return render::skinTarget30(T, vf); };
             gen30::Compile comp = [&](const std::string& hlsl, const char* target, std::string& code, std::string& msg) {
-                uint64_t h = 1469598103934665603ull;
-                for (unsigned char c : std::string(target) + "\n" + hlsl) h = (h ^ c) * 1099511628211ull;
-                char nm[40];
-                sprintf_s(nm, "%016llx.dxbc", (unsigned long long)h);
-                fs::path path = fs::path(cacheDir) / nm;
+                fs::path path = fs::path(cacheDir) / hash::shaderCacheName(target, hlsl);   // the plugin's cache key
                 code = slurp(path);
                 if (code.size() > 32) return true;
                 void *c = nullptr, *e = nullptr;
@@ -404,8 +458,8 @@ static int vtxfTest(char** a, int argc)
 
 static bool isCountRecord(const std::string& n)
 {
-    for (auto c : octx::COUNTS_A) if (n == c) return true;
-    for (auto c : octx::COUNTS_B) if (n == c) return true;
+    for (auto c : octx::kCountsA) if (n == c) return true;
+    for (auto c : octx::kCountsB) if (n == c) return true;
     return n == "ConstantLayoutCount" || n == "VariableAccumulatedSize32" || n == "VariableAccumulatedSize64" ||
            n == "ConstantAccumulatedSize32" || n == "ConstantAccumulatedSize64" || n == "DefaultDataSize" ||
            n == "BaseDataNodeLinksAdditionalSize" || n == "LayerBindAdditionalSize";
@@ -449,7 +503,7 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
             if (g.recs[j].level == 3 && isCountRecord(g.name(g.recs[j])))
                 g.recs.erase(g.recs.begin() + j, g.recs.begin() + g.blockEnd(j));
         std::string why;
-        if (!octx::addCounts(g, i, &why)) { ++*skip; ++g_skipWhy[why]; continue; }
+        if (!octx::addCounts(g, i, g_octx, &why)) { ++*skip; ++g_skipWhy[why]; continue; }
         if (fits) {
             if (g.write() == b) ++*ok;
             else {
@@ -1055,15 +1109,10 @@ static int choConstTest(char** a)
             std::string b = slurp(p);
             if (!scene::tuple(b) || b.find(std::string("ProcessorNodePool\0", 18)) == std::string::npos) continue;
             oct::File f = oct::File::parse(b.data(), b.size());
-            octx::addAssetPool(f);
-            octx::skin30(f);
-            octx::locator30(f);
-            octx::collision30(f);
-            cho::clips30(f, nullptr);
-            cho::layout30(f);
-            cho::time30(f);
-            cho::anim30(f);
-            cho::scene30(f);
+            const di1::OctSteps steps = pluginOctSteps();
+            const std::string ep = enginePath(p);
+            std::string note;
+            di1::octSteps(ep, f, steps, note);   // the plugin's steps before const30
             // paths before const30, per SubNetwork: node / processor record order -> header path
             auto before = subnets(f);
             std::vector<std::vector<std::string>> pathsBefore;
@@ -1094,8 +1143,7 @@ static int choConstTest(char** a)
                             printf("assoc %s names Static '%s'\n", n.c_str(), nn.c_str());
                 }
             }
-            int conv = cho::const30(f);
-            octx::addAllCounts(f);
+            di1::octFinish(ep, f, steps, note);   // const30, then the counts
             std::string w = f.write();
             oct::File g = oct::File::parse(w.data(), w.size());
             if (g.write() != w) ++c["1.0: re-parse DIFFERS"];
@@ -1107,7 +1155,6 @@ static int choConstTest(char** a)
             auto S = subnets(g);
             std::vector<size_t> snRecs;
             for (size_t i = 0; i < g.recs.size(); ++i) if (g.recs[i].level == 2 && g.name(g.recs[i]) == "SubNetwork") snRecs.push_back(i);
-            (void)conv;
             std::vector<std::set<std::string>> mine(S.size());
             for (size_t k = 0; k < S.size() && k < before.size(); ++k) {
                 auto& s = S[k];
@@ -1211,7 +1258,7 @@ static int choConstTest(char** a)
     return bad ? 1 : 0;
 }
 
-// --variants <1.0 assets> <3.0 assets>: octx::g_variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
+// --variants <1.0 assets> <3.0 assets>: octx::Options::variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
 // the plugin's octx steps (addAssetPool, skin30, locator30, collision30, addAllCounts): every *VariantProcessor must sit
 // in a VariantGroup == [Input, Output], VariantGroupCount / VariantMemberCount must match the pool, the file must
 // re-parse identically. Twins: each group made for a 1.0 file must name, by DataNode header path, the members of a
@@ -1268,19 +1315,18 @@ static int variantsTest(char** a)
             }
         }
     };
-    auto convert = [](oct::File& f) {
-        octx::addAssetPool(f);
-        int n = octx::skin30(f) + octx::locator30(f);
-        octx::collision30(f);
-        octx::addAllCounts(f);
-        return n;
+    // the plugin's .oct pipeline; true when it redirected skin influences or locators
+    auto convert = [](oct::File& f, const std::filesystem::path& p) {
+        std::string note;
+        di1::transcodeOct(enginePath(p), f, pluginOctSteps(), note);
+        return note.find("+skin(") != std::string::npos || note.find("+locators(") != std::string::npos;
     };
     // 1.0 corpus
     for (auto& p : files(a[2], true)) {
         std::string b = slurp(p);
         if (!tuple(b)) continue;
         oct::File f = oct::File::parse(b.data(), b.size());
-        if (!convert(f)) continue;
+        if (!convert(f, p)) continue;
         ++c["1.0: files with redirected skin influences / locators"];
         std::string w = f.write();
         oct::File g = oct::File::parse(w.data(), w.size());
@@ -1297,7 +1343,7 @@ static int variantsTest(char** a)
             oct::File f = oct::File::parse(b.data(), b.size()), g = oct::File::parse(b3.data(), b3.size());
             std::vector<std::set<std::set<std::string>>> before, after, t30;
             check(f, "twin 1.0 raw", &before);
-            if (!convert(f)) continue;
+            if (!convert(f, p)) continue;
             check(f, "twin 1.0 converted", &after);
             check(g, "twin 3.0", &t30);
             for (size_t k = 0; k < after.size(); ++k)
@@ -2530,7 +2576,7 @@ int main(int argc, char** argv)
     // OCTX_SLACK=<n>: octx's arena slack; the plugin ships 4096 (Pentane_Main). Unset keeps the header's 0 (OT-08)
     char slack[16];
     DWORD slackLen = GetEnvironmentVariableA("OCTX_SLACK", slack, sizeof(slack));
-    if (slackLen && slackLen < sizeof(slack)) octx::g_slack = atoi(slack);
+    if (slackLen && slackLen < sizeof(slack)) g_octx.slack = atoi(slack);
     if (argc > 1 && std::string(argv[1]) == "--readable") return readableTest();
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
@@ -2548,19 +2594,12 @@ int main(int argc, char** argv)
         int groups = 0, over = 0, files = 0, sparks = 0;
         const char* dnaRoot = getenv("GROUPS30_DNA");
         std::function<bool(const std::string&)> isSpark;
-        if (dnaRoot) isSpark = [&](const std::string& d) {
-            std::string p = d;
-            for (char& c : p) c = (char)tolower((unsigned char)c);
-            if (p.empty() || p == "none") return false;
-            if (p.find('/') == std::string::npos) p = "expendables_data/dna/dna/" + p;
-            if (p.size() < 5 || p.compare(p.size() - 5, 5, ".dnax")) p += ".dnax";
-            std::string b = slurp(fs::path(dnaRoot) / p);
-            try {
-                auto G = luachunk::eval(b);
-                const luachunk::Value* fc = G.count("DNA") && G["DNA"].get("AgentGadgets") ? G["DNA"].get("AgentGadgets")->get("FastCoin") : nullptr;
-                const luachunk::Value* is = fc ? fc->get("IsSpark") : nullptr;
-                return is && is->t == luachunk::Value::BOOL && is->b;
-            } catch (std::exception&) { return false; }
+        if (dnaRoot) isSpark = [&](const std::string& d) {   // the plugin's rule (dnaPath, paysSparks)
+            std::string p = di1::dnaPath(d);
+            if (p.empty()) return false;
+            const std::string dnaDir = "expendables_data/dna/";   // the extract unpacks dna/dna.zip one folder deeper
+            if (p.rfind(dnaDir, 0) == 0) p.insert(dnaDir.size(), "dna/");
+            return di1::paysSparks(slurp(fs::path(dnaRoot) / p));
         };
         for (int i = 3; i < argc; ++i) {
             std::string out;
@@ -2686,7 +2725,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-anim") return choAnimTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-scene") return choSceneTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-const") return choConstTest(argv);
-    if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) octx::g_variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
+    if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) g_octx.variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
     if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
         std::string in = slurp(argv[2]), out;
         cho::Aliases al;
@@ -2761,10 +2800,10 @@ int main(int argc, char** argv)
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--mission") {   // --mission <1.0 mission .lua> <out.lua>: events, progress
-        std::string t = slurp(argv[2]);
-        int n = mission::luaEvents30(t), p = mission::progress30(t), tl = mission::taskLines30(t);
-        std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
-        printf("%d presentation events remapped, %d progress string, %d task lines\n", n, p, tl);
+        std::string out, note, codec = pluginTranscode(argv[2], out, note);   // the plugin's mission rules
+        if (codec == "-") out = slurp(argv[2]);
+        std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
+        printf("%s: %s\n", codec.c_str(), note.c_str());
         return 0;
     }
     if (argc > 2 && std::string(argv[1]) == "--mischain") {   // --mischain <1.0 mission .lua>...: transcode() chains gp's
@@ -2780,10 +2819,10 @@ int main(int argc, char** argv)
         return bad ? 1 : 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--missiongraph") {   // --missiongraph <1.0 __missiongraph.lua> <out.lua>
-        std::string t = slurp(argv[2]);
-        int n = mission::behaviour30(t);
-        std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
-        printf("%d behaviours 2 -> story/side\n", n);
+        std::string out, note, codec = pluginTranscode(argv[2], out, note);   // the plugin's missiongraph rule
+        if (codec == "-") out = slurp(argv[2]);
+        std::ofstream(argv[3], std::ios::binary).write(out.data(), out.size());
+        printf("%s: %s\n", codec.c_str(), note.c_str());
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--beaconmap") {   // --beaconmap <zonelist.lua> <out.lua>: beacon10
@@ -2802,26 +2841,26 @@ int main(int argc, char** argv)
         // the engine's probe: lowercase key, hash with the table's seed, slot = hash % slots, linear
         std::string k = argv[4];
         for (char& c : k) c = (char)tolower((unsigned char)c);
-        uint32_t h = dct::lookup2((const uint8_t*)k.data(), k.size(), dct::u32(raw, 8)), ns = dct::u32(raw, 0x10);
-        for (uint32_t i = h % ns; dct::u32(raw, 0x24 + 12 * i); i = (i + 1) % ns)
-            if (dct::u32(raw, 0x20 + 12 * i) == h) { printf("%s = \"%s\"\n", argv[4], raw.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(raw, 0x24 + 12 * i)); return 0; }
+        uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::le32(raw, 8)), ns = bytes::le32(raw, 0x10);
+        for (uint32_t i = h % ns; bytes::le32(raw, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (bytes::le32(raw, 0x20 + 12 * i) == h) { printf("%s = \"%s\"\n", argv[4], raw.c_str() + 0x25 + 12 * i + (int32_t)bytes::le32(raw, 0x24 + 12 * i)); return 0; }
         printf("%s not found\n", argv[4]);
         return 1;
     }
     if (argc > 3 && std::string(argv[1]) == "--btd") {   // --btd <1.0 .btd> <out .btd>: + <out>.btm beside it
         std::string b = slurp(argv[2]), o;
-        if (!btd::convert(b, o)) { printf("not the 1.0 block layout\n"); return 1; }
+        if (!di1::btd::convert(b, o)) { printf("not the 1.0 block layout\n"); return 1; }
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
         std::string m = btd::btm(o), mp = std::string(argv[3]);
         mp = mp.substr(0, mp.size() - 4) + ".btm";
         std::ofstream(mp, std::ios::binary).write(m.data(), m.size());
-        printf("%u blocks, %u B\n", (unsigned)btd::blocks(o, 3).size(), (unsigned)o.size());
+        printf("%u blocks, %u B\n", (unsigned)btd::blocks(o, btd::kLayout30).size(), (unsigned)o.size());
         return 0;
     }
     if (argc > 4 && std::string(argv[1]) == "--bent") {   // --bent <1.0 .bent> <engine path> <out>: 4.1 -> 4.1f
         std::string b = slurp(argv[2]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
-        if (!bent::transcode(f, argv[3], &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
+        if (!di1::bent::transcode(f, argv[3], &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         printf("wrote %zu B, %zu records\n", o.size(), f.recs.size());
@@ -2945,36 +2984,16 @@ int main(int argc, char** argv)
         for (auto& l : lines) printf("%s\n", l.c_str());
         return 0;
     }
-    if (argc > 3 && std::string(argv[1]) == "--oct") {   // --oct <1.0 .oct> <out>: the SubNetwork transforms only
-        std::string b = slurp(argv[2]);
+    if (argc > 3 && std::string(argv[1]) == "--oct") {   // --oct <1.0 .oct> <out>: the plugin's .oct steps
+        // at its cfg defaults, without the render, the 3.0 install's motion test and the engine's surface table; the
+        // realm and constant-section rules follow the extract path's engine path ([cho] is accepted, not needed)
+        std::string b = slurp(argv[2]), note;
         auto t0 = std::chrono::steady_clock::now();
-        auto lap = [&](const char* what, int n) {
-            auto t1 = std::chrono::steady_clock::now();
-            printf("%-28s %8d  %7.1f ms\n", what, n, std::chrono::duration<double, std::milli>(t1 - t0).count());
-            t0 = t1;
-        };
         oct::File f = oct::File::parse(b.data(), b.size());
-        lap("parse", 0);
-        lap("skin influences redirected", octx::skin30(f));
-        lap("locators redirected", octx::locator30(f));
-        lap("cameras given world twins", octx::camera30(f));
-        lap("asset pool added", (int)octx::addAssetPool(f));
-        lap("collision aggregates added", octx::collision30(f));
-        std::string src = argv[2];   // a realms\ asset gets the realm-file rule, as the plugin's realms/ paths
-        for (char& c : src) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
-        lap("lighting nodes converted", octx::realm30w(f, src.find("/realms/") != std::string::npos));
-        lap("curve associations bound", gameplay::curves30(f));
-        if (argc > 4 && std::string(argv[4]) == "cho") {   // the plugin's choreography steps too (transcodeCho, const30)
-            lap("clip blocks re-packed", cho::clips30(f, nullptr));
-            lap("layouts converted", cho::layout30(f));
-            lap("time ranges", cho::time30(f));
-            lap("anim inputs", cho::anim30(f));
-            lap("scene refs", cho::scene30(f));
-            lap("constant sections", cho::const30(f));
-        }
-        lap("subnetworks with counts", octx::addAllCounts(f));
+        bool changed = di1::transcodeOct(enginePath(argv[2]), f, pluginOctSteps(), note);
         std::string o = f.write();
-        lap("write", (int)o.size());
+        printf("%s %s\n%zu B, %.1f ms\n", changed ? "changed" : "unchanged", note.c_str(), o.size(),
+               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
         return 0;
     }
@@ -3158,13 +3177,12 @@ int main(int argc, char** argv)
         if (argc > 7 && vfx::isPd10(in)) {
             rentable::Table T;
             if (!T.load(slurp(argv[4]))) { printf("table load failed\n"); return 2; }
-            render::IO io;
-            io.read30 = r30;
-            io.read10 = r10;
-            render::Result r;
-            std::string p = argv[7], mtbFile = std::string(argv[2]).substr(0, strlen(argv[2]) - 13) + ".mtb";
-            if (!render::transcodeBundle(T, io, slurp(mtbFile), "3:" + p.substr(0, p.find('/') + 1), r)) { printf("bundle FAILED\n"); return 1; }
-            shaders = r.shaders;
+            std::string p = argv[7], suffix = ".particledata", note;
+            std::string mtbFile = std::string(argv[2]).substr(0, strlen(argv[2]) - suffix.size()) + ".mtb";
+            std::string mp = p.substr(0, p.size() - suffix.size()) + ".mtb";
+            di1::ParticleBundle pb = di1::particleBundle(T, di1::bundleIO(r10, r30), mp, slurp(mtbFile), note);
+            if (!pb.ok) { printf("bundle FAILED\n"); return 1; }
+            shaders = pb.shaders;
             cm = [&](uint16_t mat, int n10, std::vector<int>& chans) {
                 return mat < shaders.size() && chan::layout({r10, r30}, shaders[mat], n10, chans);
             };
@@ -3184,9 +3202,9 @@ int main(int argc, char** argv)
         rentable::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         std::string ext30 = argv[3], ext10 = argv[4], p = argv[6];
-        render::IO io;
-        io.read30 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / q.substr(2)); return !o.empty(); };
-        io.read10 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / q); return !o.empty(); };
+        di1::Read r30 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / q.substr(2)); return !o.empty(); };
+        di1::Read r10 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / q); return !o.empty(); };
+        render::IO io = di1::bundleIO(r10, r30);
         io.verbose = getenv("RENDER_VERBOSE") != nullptr;
         io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
         render::Result r;
@@ -3251,7 +3269,6 @@ int main(int argc, char** argv)
         HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
         CompileFn cf = dc ? (CompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
         if (!cf) { printf("no d3dcompiler_47\n"); return 2; }
-        auto fnv = [](const std::string& x) { uint64_t h = 1469598103934665603ull; for (unsigned char c : x) h = (h ^ c) * 1099511628211ull; return h; };
         size_t compiled = 0, cached = 0, failed = 0;
         auto blob = [](void* b, std::string& out) {
             void** vt = *(void***)b;
@@ -3259,9 +3276,7 @@ int main(int argc, char** argv)
             ((ULONG(__stdcall*)(void*))vt[2])(b);
         };
         gen30::Compile comp = [&](const std::string& hlsl, const char* target, std::string& code, std::string& msg) {
-            char nm[40];
-            sprintf_s(nm, "%016llx.dxbc", (unsigned long long)fnv(std::string(target) + "\n" + hlsl));
-            fs::path path = fs::path(cache) / nm;
+            fs::path path = fs::path(cache) / hash::shaderCacheName(target, hlsl);   // the plugin's cache key
             code = slurp(path);
             if (code.size() > 32) { ++cached; return true; }
             void *c = nullptr, *e = nullptr;
@@ -3302,26 +3317,26 @@ int main(int argc, char** argv)
         return failed ? 1 : 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--read10") {   // --read10 <1.0 install> <engine path>: read10's candidates
-        std::string p = argv[3];
-        for (char& c : p) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-        for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1)) {
-            std::string dir = p.substr(0, cut), member = p.substr(cut + 1), stem = member.substr(0, member.find('.'));
-            std::string zips[3] = {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip"};
-            for (auto& zr : zips) {
-                std::string full = std::string(argv[2]) + "\\assets\\" + zr;
-                for (char& c : full) if (c == '/') c = '\\';
-                mz_zip_archive z{};
-                bool ok = GetFileAttributesA(full.c_str()) != INVALID_FILE_ATTRIBUTES && mz_zip_reader_init_file(&z, full.c_str(), 0);
-                int i = ok ? mz_zip_reader_locate_file(&z, member.c_str(), nullptr, 0) : -2;
-                printf("%s : %s -> %d\n", zr.c_str(), member.c_str(), i);
-                if (ok) mz_zip_reader_end(&z);
-            }
-        }
+        // in the plugin's order (games/di1/archives.hpp, assetbufs10 and root10 at their defaults), each with the
+        // member's index in it (-1: not there, -2: no such archive); the first hit is what read10 serves
+        std::string p = text::norm(argv[3]);
+        auto probe = [&](const std::string& zr, const std::string& member) {
+            mz_zip_archive z{};
+            const std::string full = di1::archivePath(argv[2], zr);
+            bool ok = GetFileAttributesA(full.c_str()) != INVALID_FILE_ATTRIBUTES && mz_zip_reader_init_file(&z, full.c_str(), 0);
+            int i = ok ? mz_zip_reader_locate_file(&z, member.c_str(), nullptr, 0) : -2;
+            printf("%s : %s -> %d\n", zr.c_str(), member.c_str(), i);
+            if (ok) mz_zip_reader_end(&z);
+        };
+        for (size_t cut = p.rfind('/'); cut != std::string::npos && cut > 0; cut = p.rfind('/', cut - 1))
+            for (const std::string& zr : di1::candidateArchives(p, cut, di1::AssetBuffers::Search))
+                if (!zr.empty()) probe(zr, p.substr(cut + 1));
+        for (const char* zr : di1::kRootArchives) probe(zr, p);
         return 0;
     }
     if (argc > 3 && std::string(argv[1]) == "--member") {   // --member <archive> <name>: one read, its size
         std::string got;
-        bool r = arc30::readMember(argv[2], argv[3], got);
+        bool r = readArc30(argv[2], argv[3], got);
         printf("%s %zu B\n", r ? "ok" : "FAILED", got.size());
         return r ? 0 : 1;
     }
@@ -3339,12 +3354,11 @@ int main(int argc, char** argv)
         void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(&z, (mz_uint)i, &n, 0);
         if (d) { c10.assign((const char*)d, n); mz_free(d); }
         mz_zip_reader_end(&z);
-        auto world = [&](const std::string& zone) {
-            std::string w = std::string(inst) + "\\assets\\worlds\\" + zone;
-            return GetFileAttributesA((w + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA(w.c_str()) != INVALID_FILE_ATTRIBUTES;
-        };
         std::string opt = argc > 5 && !menu ? argv[5] : "";   // noadd: zones10 off; only: zones10 without the later steps
-        auto ps = gameplay::playsets10(t, luachunk::eval(c10)["ZoneList"], opt != "noadd", world);
+        di1::Zones10Options zo;   // the plugin's zones10 (games/di1/zones.hpp)
+        zo.add = opt != "noadd";
+        zo.world = [&](const std::string& zone) { return di1::worldInstalled(inst, zone); };
+        auto ps = di1::zones10(t, c10, zo).playsets;
         std::vector<std::pair<std::string, std::string>> list;
         for (auto& x : ps) {
             printf("%-16s %s id %d, start %s, zones %zu\n", x.name.c_str(), x.added ? "added" : "present", x.id, x.start.c_str(), x.zones.size());
@@ -3353,7 +3367,7 @@ int main(int argc, char** argv)
         std::string out;
         if (menu) {
             std::string in;
-            if (argc > 6 ? !arc30::readMember(argv[5], argv[6], in) : (in = slurp(argv[5])).empty()) return 1;
+            if (argc > 6 ? !readArc30(argv[5], argv[6], in) : (in = slurp(argv[5])).empty()) return 1;
             out = ui::playsetMenu10(in, list);
             printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
         } else {
@@ -3380,7 +3394,7 @@ int main(int argc, char** argv)
             size_t cut = rel.rfind('/');
             fprintf(stderr, "%s\n", x.c_str());
             std::string arc = std::string(argv[3]) + "/assets/" + rel.substr(0, cut) + ".zip";
-            bool r = arc30::readMember(arc, rel.substr(cut + 1), got);
+            bool r = readArc30(arc, rel.substr(cut + 1), got);
             fprintf(stderr, "  read %d %zu\n", (int)r, got.size());
             std::string ext = slurp(std::filesystem::path(argv[4]) / "assets" / rel);
             fprintf(stderr, "  extract %zu\n", ext.size());

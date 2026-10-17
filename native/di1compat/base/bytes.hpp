@@ -1,4 +1,4 @@
-// Bounds checks that cannot wrap, and little-endian reads and writes on file buffers. Standard library only.
+// File data helpers: overflow-safe bounds checks, little-endian reads and writes. Standard library only; any thread.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -44,5 +44,33 @@ inline void put16(std::string& s, size_t off, uint16_t v) { memcpy(&s[off], &v, 
 
 // x rounded up to a multiple of a, a power of two
 inline size_t alignUp(size_t x, size_t a) { return (x + a - 1) & ~(a - 1); }
+
+// The unsigned little-endian value of width (0-4) bytes at p. Unchecked: the caller proved the bytes are there.
+inline uint32_t le(const void* p, int width)
+{
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    uint32_t v = 0;
+    for (int i = 0; i < width; ++i) v |= (uint32_t)b[i] << (8 * i);
+    return v;
+}
+
+// le() of the 4 bytes at offset at of s. Unchecked.
+inline uint32_t le32(const std::string& s, size_t at) { return le(s.data() + at, 4); }
+
+// Appends the low width bytes of v, little-endian.
+inline void appendLe(std::string& s, uint32_t v, int width)
+{
+    for (int i = 0; i < width; ++i) s.push_back((char)(v >> (8 * i)));
+}
+
+// Overwrites the 4 or 8 bytes at offset at of s with v, little-endian. Unchecked.
+inline void setLe32(std::string& s, size_t at, uint32_t v)
+{
+    for (int i = 0; i < 4; ++i) s[at + i] = (char)(v >> (8 * i));
+}
+inline void setLe64(std::string& s, size_t at, uint64_t v)
+{
+    for (int i = 0; i < 8; ++i) s[at + i] = (char)(v >> (8 * i));
+}
 
 }  // namespace bytes

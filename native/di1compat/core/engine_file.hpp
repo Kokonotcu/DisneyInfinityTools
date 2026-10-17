@@ -1,5 +1,4 @@
-// Serving bytes to the engine: a Genie::MemFile stream built from memory, and an engine stream read whole.
-// core/hooks.hpp (rt). Any thread that opens files; the engine functions it calls are not prologue-checked (H4).
+// Engine file streams: a Genie::MemFile from memory, a stream read whole. core/hooks.hpp. Threads that open files.
 #pragma once
 #include <cstdint>
 #include <cstring>
@@ -8,6 +7,7 @@
 
 namespace core {
 
+// H4 open: these engine functions are called without a prologue check (docs/audit X-12)
 namespace eng {
 constexpr uint32_t kEngineNew = 0x00406E80;     // FUN_00406e80: the engine's operator new (cdecl)
 constexpr uint32_t kMemFileCtor = 0x012EC100;   // FUN_012ec100: Genie::MemFile(grow) (thiscall)
@@ -23,8 +23,7 @@ constexpr int kFileDestroy = 11;  // +0x2c (flags)
 constexpr uint32_t kDestroyFree = 1;   // kFileDestroy's flag: also free the object
 }  // namespace eng
 
-// A Genie::MemFile holding a copy of data, built the way the engine builds one (0x0041d... reader path):
-// new(0x20), ctor FUN_012ec100(0x400), vtable+0x0c setSize(n, 0), fill data (+0x18), vtable+0x08 seek(0, 0, 0).
+// A Genie::MemFile holding a copy of data, built in the order the engine's reader path (0x0041d...) uses.
 inline int* memFile(const void* data, size_t n)
 {
     typedef void*(__cdecl * NewFn)(size_t);
@@ -41,8 +40,7 @@ inline int* memFile(const void* data, size_t n)
     return (int*)f;
 }
 
-// Reads a whole engine stream through the Genie::File interface (+0x10 size, +0x14 read, +0x2c destroy); the
-// stream is destroyed. False if the read came up short.
+// Reads a whole engine stream, then destroys it. False if the read came up short.
 inline bool readStream(int* s, std::string& buf)
 {
     typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
