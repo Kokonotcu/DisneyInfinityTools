@@ -43,13 +43,14 @@ files below refer to `684539b`: the code has since moved into the layout of `CLA
 - A-06: `renderdoc10` and `hide_ps` work without their diagnostic switch.
 - A-12: a 1.0 archive whose open failed transiently is retried. A-35: the first 10 access violations are logged.
 - A-37: text that does not fit its buffer is cut, not a fail-fast. A-38: asset defs are built with no lock held.
-- AU-42: audio's x131 hash sign-extends like the engine. AU-30: a reused FMOD handle no longer stops the newer play
-  (measured: FMOD Ex 4.44 handles already carry a reuse counter, so the guard rarely acts).
+- AU-42: audio's x131 hash sign-extends like the engine. AU-30 was applied, then reverted on the owner's call: FMOD Ex
+  4.44 handles carry a reuse counter, so a late stop never reaches a newer play.
+- NR-01: gamedb30 builds a playset's supplement before it replaces the old one.
 - OT-02/03/04/24: octtest usage text, exit codes and bad-input handling.
 
 **Still open.**
-- BEHAVIOUR-CHANGE findings not approved, NR-01 first: `prepare()` deletes `g_db` before building its replacement
-  (rulecheck's only whole-tree finding). Others such as CO-24 and CO-28 are in the area files.
+- BEHAVIOUR-CHANGE findings not approved, such as CO-24 and CO-28: see the area files. rulecheck's whole-tree run
+  reports 0.
 - Timing changes that need a game run first: the lock scopes of B-07, RE-39, RE-N1, A-11, NR-02, AU-06/07/18, and
   the rest of CO-13.
 - Build changes that change code bytes: `/permissive-` (OT-28), LTCG (OT-30), one CRT for octtest (OT-31/32).
