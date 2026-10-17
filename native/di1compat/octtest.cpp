@@ -14,7 +14,7 @@
 #include "mer.hpp"
 #include "render.hpp"
 #include "arc30.hpp"
-#include "datamap.hpp"
+#include "convert/datamap.hpp"
 #include "formats/dct.hpp"
 #include "base/hash.hpp"
 #include "luachunk.hpp"

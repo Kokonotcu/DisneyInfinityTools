@@ -41,7 +41,7 @@
 #include "mernode.hpp"
 #include "render.hpp"
 #include "arc30.hpp"
-#include "datamap.hpp"
+#include "convert/datamap.hpp"
 #include "formats/dct.hpp"
 #include "luachunk.hpp"
 #include "sx.hpp"
