@@ -181,14 +181,14 @@ inline bool hashes(const std::string& raw, std::unordered_set<uint32_t>& out)
     return true;
 }
 
-// raw plus raw10's keys (named by ids10) that neither raw nor have answers -> keys added; -1: no table.
-inline int supplement(std::string& raw, const std::string& raw10, const std::string& ids10,
+// raw plus other's keys (named by otherIds) that neither raw nor have answers -> keys added; -1: no table.
+inline int supplement(std::string& raw, const std::string& other, const std::string& otherIds,
                       const std::unordered_set<uint32_t>& have)
 {
     // 1.0 loaded lang/main for every playset; 3,154 of 9,467 named english keys are in no 3.0 table
     Dict d, s, ids;
     if (!load(raw, d) || d.initval != SEED30) return -1;
-    if (!load(raw10, s) || !load(ids10, ids)) return -1;
+    if (!load(other, s) || !load(otherIds, ids)) return -1;
     std::unordered_set<uint32_t> own;
     for (const auto& k : d.keys) own.insert(k.first);
     const auto names = detail::namesByHash(ids);
