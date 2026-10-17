@@ -15,7 +15,7 @@
 #include "base/bytes.hpp"
 #include "base/hash.hpp"
 #include "oct.hpp"
-#include "gen30.hpp"
+#include "games/di1/gen30.hpp"
 #include "formats/bndl.hpp"
 #include "formats/rentable.hpp"
 #include "formats/ssf.hpp"

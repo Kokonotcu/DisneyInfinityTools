@@ -1,4 +1,4 @@
-// Name hashes the engines use, bit-exact. Standard library only; any thread.
+// Name hashes the engines use and zlib's CRC-32, bit-exact. Standard library only; any thread.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -39,6 +39,18 @@ inline uint32_t ehashLower(std::string s)
     for (char& c : s)
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
     return ehash(s);
+}
+
+// zlib.crc32: IEEE polynomial, reflected, bit by bit
+inline uint32_t crc32Zlib(const std::string& s)
+{
+    constexpr uint32_t kInit = 0xffffffff, kPolynomial = 0xedb88320;
+    uint32_t c = kInit;
+    for (unsigned char ch : s) {
+        c ^= ch;
+        for (int bit = 0; bit < 8; ++bit) c = (c >> 1) ^ (kPolynomial & (0u - (c & 1)));
+    }
+    return ~c;
 }
 
 }  // namespace hash

@@ -30,6 +30,7 @@ constexpr int kFirstSlotRegister = 5;   // material slot i is t(5 + i) in 821 of
 constexpr uint32_t kConstantBuffers = 5;   // the engine binds b0..b4 (gen30.py globals30, RDEF)
 inline constexpr const char* kConstantBufferNames[kConstantBuffers] = {"perFrame", "perView", "perDraw",
                                                                        "perMaterial", "perInstance"};
+constexpr int kPerFrame = 0, kPerMaterial = 3, kPerInstance = 4;   // block B is perMaterial, block A perInstance
 
 // 3.0 pass word fields (gen30.py: depth 3..5, blend 6..9, cull 10..11, X 12..15, Y 16..19)
 inline uint32_t depthField(uint32_t w) { return (w >> 3) & 7; }

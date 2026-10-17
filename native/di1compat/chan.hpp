@@ -14,7 +14,7 @@
 #include <vector>
 #include "convert/chanroles.hpp"
 #include "formats/shd.hpp"
-#include "gen30.hpp"
+#include "games/di1/gen30.hpp"
 
 namespace chan {
 
