@@ -137,6 +137,8 @@ struct Registry {
     std::string dir;                                         // the language folder in use
     std::map<std::string, std::unique_ptr<DlgBank>> banks;   // lower-case file; kept (posts hold their pointer)
     std::map<uint16_t, Speaker> speakers;
+    // every header ever published, start -> size: live, non-empty, so never overlapping (AU-20)
+    std::map<const uint8_t*, size_t> headers;
 };
 
 // What the transcoded scripts left: event names, sequences, line events, the blobs handed to the engine.
@@ -245,6 +247,7 @@ inline void publish(uint16_t prefix)
     std::vector<dbnk::Source> src;
     for (DlgBank* b : sp.banks) src.push_back({b->idx(), (uint32_t)(uintptr_t)b});
     sp.hdrs.push_back(std::make_unique<std::vector<uint8_t>>(dbnk::fromNames(prefix, src)));
+    s.reg.headers[sp.hdrs.back()->data()] = sp.hdrs.back()->size();
     if (!map) return;   // octtest: no engine
     if (!sp.slot) {
         sp.slot = (uint8_t*)calloc(1, eng::kSlotSize);
@@ -586,16 +589,15 @@ inline DlgBank* bank(const std::string& file)
 inline bool media(const void* p, DlgBank** bank, int* sub)
 {
     detail::State& s = detail::g_state;
+    const uint8_t* at = (const uint8_t*)p;
     std::lock_guard<std::recursive_mutex> l(s.mx);
-    for (auto& sp : s.reg.speakers)
-        for (auto& h : sp.second.hdrs) {
-            const uint8_t* b = h->data();
-            if (p < b || p >= b + h->size()) continue;
-            memcpy(bank, p, sizeof *bank);
-            memcpy(sub, (const uint8_t*)p + sizeof(uint32_t), sizeof *sub);
-            return *bank && (*bank)->snd;
-        }
-    return false;
+    auto it = s.reg.headers.upper_bound(at);   // the last header starting at or before p
+    if (it == s.reg.headers.begin()) return false;
+    --it;
+    if (at >= it->first + it->second) return false;
+    memcpy(bank, p, sizeof *bank);
+    memcpy(sub, at + sizeof(uint32_t), sizeof *sub);
+    return *bank && (*bank)->snd;
 }
 
 // Not retried: built is set before the scan.
