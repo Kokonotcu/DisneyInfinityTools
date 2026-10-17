@@ -33,7 +33,8 @@ struct MaterialInput {
 
 namespace detail {
 
-struct Src { bndl::Bundle b; int i; };   // one material of a source bundle (merge input)
+// One material of the merge and the TEXB its slot indices point into; the TEXB outlives the call
+struct Src { const std::vector<std::string>* textures; bndl::Material m; };
 
 // The bytes of h as lower-case hex, high nibble first
 inline std::string hex8(const std::string& h)
@@ -59,10 +60,10 @@ inline bool hasMaterial(const bndl::Bundle& b, const rentable::Ref& ref, std::ve
 inline bool texturesInRange(const std::vector<Src>& srcs, std::vector<std::string>& problems)
 {
     for (const Src& s : srcs) {
-        const bndl::Material& m = s.b.mats[s.i];
+        const bndl::Material& m = s.m;
         for (int k = 0; k < m.slots; ++k) {
-            const uint32_t t = s.b.slot(m, k);
-            if (t == bndl::kUnset || t < s.b.textures.size()) continue;
+            const uint32_t t = bndl::Bundle::slot(m, k);
+            if (t == bndl::kUnset || t < s.textures->size()) continue;
             problems.push_back(m.name + ": texture index " + std::to_string(t) + " past the bundle's TEXB");
             return false;
         }
@@ -201,10 +202,7 @@ inline bool skinTranslates(const MaterialRun& run, const bndl::Material& m10, co
 // dm, holding the 1.0 bundle's textures, as a merge source
 inline void addOwnSource(MaterialRun& run, const bndl::Material& dm)
 {
-    bndl::Bundle one;
-    one.textures = run.b10.textures;
-    one.mats.push_back(dm);
-    run.srcs.push_back({one, 0});
+    run.srcs.push_back({&run.b10.textures, dm});
 }
 
 inline void placeTranslated(MaterialRun& run, int k, const bndl::Material& m10, const gen30::Shd10& s10, SkinUse u)
@@ -261,7 +259,7 @@ inline bool addReal(MaterialRun& run, const bndl::Material& m10, const rentable:
         std::string l = "real " + m10.name + " " + ref.extract + " 1.0:" + slotTextures(run.b10, m10);
         run.io.log(l + " 3.0:" + slotTextures(*bnd, bnd->mats[ref.idx]));
     }
-    run.srcs.push_back({*bnd, ref.idx});
+    run.srcs.push_back({&bnd->textures, bnd->mats[ref.idx]});
     run.r.tiers["real"]++;
     return true;
 }
@@ -489,7 +487,7 @@ inline void placeMaterial(MaterialRun& run, int k, std::map<int, const std::set<
     const std::set<uint32_t>* formats = dk != run.in.drawn.end() ? &dk->second : nullptr;
     if (tryTranslated(run, k, m10, formats)) return;
     if (!placeOnDonor(run, m10, formats)) return;
-    const bndl::Material& fin = run.srcs.back().b.mats[run.srcs.back().i];
+    const bndl::Material& fin = run.srcs.back().m;
     run.r.shaders.push_back({m10.shader, fin.shader});
     shaderVf[k] = &run.T.shaders.at(fin.shader).vf;
 }
@@ -508,11 +506,11 @@ inline std::vector<bndl::Material> mergeSources(const std::vector<Src>& srcs, st
 {
     std::vector<bndl::Material> mats;
     for (auto& s : srcs) {
-        bndl::Material m = s.b.mats[s.i];
+        bndl::Material m = s.m;
         for (int k = 0; k < m.slots; ++k) {
-            uint32_t t = s.b.slot(m, k);
+            const uint32_t t = bndl::Bundle::slot(m, k);
             if (t == bndl::kUnset) continue;
-            bytes::put32(m.B, m.stride * k, textureIndex(tex, s.b.textures[t]));
+            bytes::put32(m.B, m.stride * k, textureIndex(tex, (*s.textures)[t]));
         }
         mats.push_back(m);
     }

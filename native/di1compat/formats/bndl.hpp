@@ -20,7 +20,7 @@ struct Bundle {
     std::vector<std::string> textures;                // 8-byte name hashes
     std::vector<Material> mats;
     std::vector<std::string> ssetNames, ssetBlocks;   // the SSET chunk: scene settings (ssf.py), a block per name
-    uint32_t slot(const Material& m, int s) const { return bytes::u32At((const uint8_t*)m.B.data() + m.stride * s); }
+    static uint32_t slot(const Material& m, int s) { return bytes::u32At((const uint8_t*)m.B.data() + m.stride * s); }
 };
 
 // sizes(shader, A, B, slots): a shader's block sizes and texture slot count; false if unknown
