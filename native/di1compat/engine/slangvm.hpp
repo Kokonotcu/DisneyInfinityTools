@@ -153,8 +153,8 @@ inline void __cdecl stub(uint8_t* ctx)
     Vm v{ctx};
     v.top() -= n->args;
     for (int i = 0; i < n->results; ++i) v.pushInt(0);
-    if (_InterlockedIncrement(&n->hits) == 1)
-        core::logf("sx stub %s first called (pops %d, pushes %d zero)", n->name, n->args, n->results);
+    const long hits = _InterlockedIncrement(&n->hits);
+    if (hits == 1) core::logf("sx stub %s first called (pops %d, pushes %d zero)", n->name, n->args, n->results);
 }
 
 namespace detail {

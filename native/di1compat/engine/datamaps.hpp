@@ -64,7 +64,7 @@ inline uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
     return r;
 }
 
-// FUN_0070df70, thiscall (name; ret 4); its one caller (0x01440F1C) ignores EAX. Per playset unload.
+// FUN_0070df70, thiscall (name; ret 4); its one caller (0x01440F1C) ignores EAX. Load threads, per unload.
 inline void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
 {
     g_state.g_playsetUnload(self, nullptr, name);

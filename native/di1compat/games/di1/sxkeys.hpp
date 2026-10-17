@@ -168,7 +168,8 @@ inline int keyId(const char* name)
     if (k != end && !strcmp(k->name, name)) return k->id;
     int id = keyFallback(name);
     detail::State& s = detail::g_state;
-    if (s.unpaired.first(id) && s.log) core::logf("sx key '%s': not in the 3.0 enum, id %#x", name, id);
+    const bool first = s.unpaired.first(id);   // recorded even before install(), as the old set was
+    if (first && s.log) core::logf("sx key '%s': not in the 3.0 enum, id %#x", name, id);
     return id;
 }
 
