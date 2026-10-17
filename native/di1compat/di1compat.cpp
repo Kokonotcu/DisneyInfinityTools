@@ -42,7 +42,8 @@
 #include "games/di1/zones.hpp"
 #include "formats/oct.hpp"
 #include "formats/chd.hpp"
-#include "mer.hpp"
+#include "formats/mer.hpp"
+#include "games/di1/mer.hpp"
 #include "mission.hpp"
 #include "mernode.hpp"
 #include "render.hpp"
@@ -1899,7 +1900,7 @@ static void __cdecl hkMerRegistry()
             ((RegFn)rt(a.templateVa))(a.name);
             logf("meridian: 1.0 class %s registered with the template of %s", a.name, a.twin);
         }
-        mer::addAliases(g_mer);
+        di1::mer::addAliases(g_mer);
     }
     if (g_cfg.native10) {
         if (g_probeClass < 0)
@@ -3327,12 +3328,6 @@ extern "C" void __stdcall Pentane_Main()
          (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
          (unsigned)g_render.plans.size());
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
-    g_mer.events10 = g_cfg.events10;
-    g_mer.portRefs = g_cfg.portRefs10;
-    g_mer.ports10 = g_cfg.ports10;
-    g_mer.pins10 = g_cfg.pins10;
-    g_mer.gate10 = g_cfg.gate10;
-    g_mer.toggleType10 = g_cfg.toggleType10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
     if (g_cfg.shaders10) {

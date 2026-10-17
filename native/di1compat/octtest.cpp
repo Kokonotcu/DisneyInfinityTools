@@ -15,7 +15,7 @@
 #include "formats/btd.hpp"
 #include "games/di1/btd.hpp"
 #include "formats/chd.hpp"
-#include "mer.hpp"
+#include "games/di1/mer.hpp"
 #include "render.hpp"
 #include "formats/arc30.hpp"
 #include "core/readonly_file.hpp"
@@ -2777,20 +2777,21 @@ int main(int argc, char** argv)
     }
     if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc] [flags]
         mer::Table T;
+        di1::mer::Rules R;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         for (std::string a; argc > 5 && (a = argv[argc - 1]).rfind("--", 0) == 0; --argc) {   // trailing flags, any order
-            if (a == "--noportrefs") T.portRefs = false;     // cfg portrefs10=0
-            else if (a == "--noports") T.ports10 = false;    // cfg ports10=0
-            else if (a == "--nopins") T.pins10 = false;      // cfg pins10=0
-            else if (a == "--noevents") T.events10 = false;  // cfg events10=0
-            else if (a == "--nogate") T.gate10 = false;      // cfg gate10=0
-            else if (a == "--notoggletype") T.toggleType10 = false;   // cfg toggletype10=0
-            else if (a == "--aliases") mer::addAliases(T);   // as after hkMerRegistry
+            if (a == "--noportrefs") R.portRefs = false;     // cfg portrefs10=0
+            else if (a == "--noports") R.ports10 = false;    // cfg ports10=0
+            else if (a == "--nopins") R.pins10 = false;      // cfg pins10=0
+            else if (a == "--noevents") R.events10 = false;  // cfg events10=0
+            else if (a == "--nogate") R.gate10 = false;      // cfg gate10=0
+            else if (a == "--notoggletype") R.toggleType10 = false;   // cfg toggletype10=0
+            else if (a == "--aliases") di1::mer::addAliases(T);   // as after hkMerRegistry
         }
         std::string b = slurp(argv[3]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
-        mer::Stats st;
-        if (!mer::transcode(T, f, &st, &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
+        di1::mer::Stats st;
+        if (!di1::mer::transcode(T, R, f, &st, &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         if (argc > 5) { std::string m = mer::mtc(f); std::ofstream(argv[5], std::ios::binary).write(m.data(), m.size()); }
@@ -3035,9 +3036,9 @@ int main(int argc, char** argv)
                 if (!k) { printf("mer %-52s unchanged\n", name.c_str()); continue; }
                 std::string pre = f.write();
                 std::ofstream(fs::path(argv[3]) / (in.stem().string() + ".pre.mer"), std::ios::binary).write(pre.data(), pre.size());
-                mer::Stats st;
+                di1::mer::Stats st;
                 std::string why;
-                bool ok = mer::transcode(T, f, &st, &why);
+                bool ok = di1::mer::transcode(T, di1::mer::Rules(), f, &st, &why);
                 std::string o = f.write();
                 std::ofstream(outp, std::ios::binary).write(o.data(), o.size());
                 printf("mer %-52s %d nodes, %d rerouted, %d dropped; mer %s: %d nodes %d stubs %d links %d dropped\n", name.c_str(), k, re, dr,

@@ -544,7 +544,7 @@ Code: `native/di1compat/bldrt.hpp` (cfg `building10`, probe `spawntrace10`). Mea
 - Not decoded: 3.0's twins of the owner hand-over FUN_00d1bd60 and of 1.0's object flag 8.
 
 ### 5.8 1.0 graphs in 3.0 form
-Code: `native/di1compat` `mer.hpp` (`mer::transcode`, `mer::mtc`), the class table `di1compat_mer.txt` (`mertable.py`). Plan MER-2/MER-4; research verify-meridian and `mer.py`.
+Code: `native/di1compat` `games/di1/mer.hpp` (`di1::mer::transcode`, its cfg switches in `di1::mer::Rules`) over `formats/mer.hpp` (graph view, links, parameters, `mer::mtc`, the class table `di1compat_mer.txt` from `mertable.py`). Plan MER-2/MER-4; research verify-meridian and `mer.py`.
 
 3.0 reads node parameters only through `Mer_ParameterDescription` (FUN_006b2700 -> FUN_006a9740, default on a miss) and links only in version 3 (FUN_006ab3d0: namespace-relative 6-byte rows). 1.0 stores parameters as named fields per node (a data pin's constant as `<pin>_value`) and links with global node indices. The conversion is additive: every 1.0 record stays (3.0 reads fields by name hash and ignores the rest), and the 3.0 form is added:
 
@@ -810,7 +810,7 @@ Code: `zones.py`. The member `gamedb/core/zonelist.lua` of `assets/startup2.zip`
 - Other zone keys the README names: `WorldIsIntro` (defaults to false), `OverrideInitialCreation` / `OverrideCreation` (choose the avatar creation). None of them places the player.
 
 ### 10.3 1.0 missions in 3.0 terms
-Code: `native/di1compat` `mission.hpp` (plan MIS-*; notes `_research/impl-mis.md`), applied at load time.
+Code: `native/di1compat` `games/di1/mission.hpp` (plan MIS-*; notes `_research/impl-mis.md`), applied at load time.
 
 - **Presentation events** (cfg `events10`). Both engines key a presentation list (mission `.lua` `Presentations[].Data.Event`, the MissionPresentationList node's `Event` parameter) by an int of the mission event enum, and the enum changed:
   - 1.0 FUN_00fa7220 (presentationData name -> int): Available 0, Activate 1, Update 2, Encounter 3, Generic 4, Success 5, Fail 6, Abort 7, Requirement 8, CelebrationAudio 9, FailedAudio 10, ForceActivate 11, CheatActivate 12, CheatSuccess 13.

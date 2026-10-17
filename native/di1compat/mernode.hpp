@@ -36,7 +36,7 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "mer.hpp"
+#include "formats/mer.hpp"
 
 namespace mernode {
 

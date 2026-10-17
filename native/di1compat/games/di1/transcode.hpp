@@ -20,7 +20,7 @@
 #include "../../formats/dct.hpp"
 #include "../../formats/luachunk.hpp"
 #include "../../formats/oct.hpp"
-#include "../../mer.hpp"
+#include "mer.hpp"
 #include "mission.hpp"
 #include "../../npc.hpp"
 #include "../../render.hpp"
@@ -49,6 +49,7 @@ struct TranscodeOptions {
     bool sx = false;          // sx10
     bool bmx = false;         // bmx10
     bool btx = false;         // btx10
+    mer::Rules merRules;      // .mer: events10, portrefs10, ports10, pins10, gate10, toggletype10
 };
 
 using Shaders = std::vector<std::pair<std::string, std::string>>;   // per material: (1.0 shader, served shader)
@@ -370,7 +371,7 @@ inline Verdict merGraph(Request& r)
         r.note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) +
                   " participant links, " + std::to_string(actDrop) + " dropped) ";
     mer::Stats st;
-    if (!mer::transcode(*r.io.mer, f, &st, &why)) return raw(r, "mer: " + why + " ");
+    if (!mer::transcode(*r.io.mer, r.o.merRules, f, &st, &why)) return raw(r, "mer: " + why + " ");
     // never cut: 136 characters and 11 numbers of at most 11
     char buf[300];
     snprintf(buf, sizeof(buf), "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, "
@@ -378,8 +379,8 @@ inline Verdict merGraph(Request& r)
              st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches, st.netSync,
              st.typed);
     r.note += buf;
-    r.out = isMtc ? mer::mtc(f) : f.write();
-    if (!isMtc && r.mtc) *r.mtc = mer::mtc(f);
+    r.out = isMtc ? ::mer::mtc(f) : f.write();
+    if (!isMtc && r.mtc) *r.mtc = ::mer::mtc(f);
     return isMtc ? "mtc" : "mer";
 }
 
