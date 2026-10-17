@@ -1,6 +1,4 @@
-// Checked reads of memory the plugin does not own (CLAUDE.md H8): readability checks and guarded string copies.
-// sys::readable (working set first, fast) is the default check; vqReadable gives different answers and keeps its name.
-// Windows and sys.hpp (for sys::readable). Any thread; vqReadable and readableWords also inside the VEHs (H9).
+// Checked reads of memory the plugin does not own (H8). Windows, sys.hpp. Any thread; vq* and readableWords in VEHs.
 #pragma once
 #include <windows.h>
 #include <algorithm>
@@ -11,22 +9,33 @@
 
 namespace core {
 
-// Whether [p, p+n) is readable, by VirtualQuery alone. Unlike sys::readable it demands a read permission (an
-// execute-only page fails), is true for n == 0 and queries low addresses; it is slow on big regions (sys.hpp), so
-// only the diagnostic stack walks use it. Pre-check, don't fault: every fault reaches Pentane's and CrabeLoader's
-// handlers.
-// ponytail: query-then-read can race a protection change; never seen.
+namespace detail {
+// The protections vqReadable reads through: an execute-only page has none of them.
+constexpr DWORD kReadProtect = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+inline bool readableRegion(const MEMORY_BASIC_INFORMATION& mbi)
+{
+    const bool committed = mbi.State == MEM_COMMIT;
+    const bool blocked = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+    const bool read = (mbi.Protect & kReadProtect) != 0;
+    return committed && !blocked && read;
+}
+}  // namespace detail
+
+// Whether [p, p+n) is readable, by VirtualQuery alone: slow on big regions, so only diagnostic stack walks use it.
 inline bool vqReadable(const void* p, size_t n)
 {
     const uint8_t* a = (const uint8_t*)p;
     MEMORY_BASIC_INFORMATION mbi;
+    // n == 0 is readable and low addresses are queried: sys::readable answers both differently
     while (n) {
-        if (!VirtualQuery(a, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))
-            || !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-            return false;
+        // ponytail: query-then-read can race a protection change; never seen.
+        if (!VirtualQuery(a, &mbi, sizeof(mbi)) || !detail::readableRegion(mbi)) return false;
         size_t room = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize - a;
         if (room >= n) return true;
-        a += room; n -= room;
+        a += room;
+        n -= room;
     }
     return true;
 }
@@ -47,8 +56,7 @@ inline int readableWords(const uint32_t* sp, int max)
 // Copies a C string the engine handed us without trusting the pointer.
 inline void safeCopy(char* out, size_t cap, const char* src)
 {
-    // trace hooks pass values that may not be pointers; check first, so no first-chance AV reaches the vectored
-    // handlers (CrabeLoader writes a dump per AV even when the __try below handles it)
+    // trace hooks may pass non-pointers: check first, as CrabeLoader dumps every AV, even one the __try handles
     if (!sys::readable(src, 1)) {
         if (cap) out[0] = 0;
         return;
@@ -58,6 +66,7 @@ inline void safeCopy(char* out, size_t cap, const char* src)
         for (; src && i + 1 < cap && src[i]; ++i) out[i] = src[i];
         out[i] = 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // strcpy_s kept (N21): a cap under 13 fail-fasts, where snprintf would cut; callers' caps are not all checked
         strcpy_s(out, cap, "<unreadable>");
     }
 }

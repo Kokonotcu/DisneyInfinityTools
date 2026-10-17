@@ -1,8 +1,10 @@
-// Hashes the engine computes over names, so values match its tables. Uses base/bytes.hpp only; any thread.
+// Hashes with fixed results: the engine's name hashes and the names of files on disk. base/bytes.hpp; any thread.
 #pragma once
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <string>
 #include "bytes.hpp"
 
 namespace hash {
@@ -44,6 +46,24 @@ inline uint32_t lookup2(const uint8_t* k, size_t n, uint32_t c)
     c += (uint32_t)n + ((rest > 8 ? detail::word(k + i + 8, rest - 8) : 0) << 8);
     detail::mix(a, b, c);
     return c;
+}
+
+// FNV-1a 64 from a shortened start value: it names the shader cache's files, so it stays (CO-19).
+inline uint64_t fnv64(const std::string& s)
+{
+    constexpr uint64_t kStart = 1469598103934665603ull;   // the standard basis is 14695981039346656037
+    constexpr uint64_t kPrime = 1099511628211ull;         // the FNV 64-bit prime
+    uint64_t h = kStart;
+    for (unsigned char c : s) h = (h ^ c) * kPrime;
+    return h;
+}
+
+// The shader cache's file for one compile: "<16 hex digits>.dxbc" of fnv64(target + "\n" + hlsl) (docs/audit OT-10).
+inline std::string shaderCacheName(const char* target, const std::string& hlsl)
+{
+    char name[24];
+    snprintf(name, sizeof(name), "%016llx.dxbc", (unsigned long long)fnv64(std::string(target) + "\n" + hlsl));
+    return name;
 }
 
 }  // namespace hash

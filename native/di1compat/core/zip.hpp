@@ -1,5 +1,4 @@
-// Zip archives read in place (miniz): open one, find and inflate a member. miniz reads an archive through one
-// cursor, so callers serialise every use of one archive. Windows and miniz only.
+// Zip archives read in place (miniz). One cursor per archive: callers serialise each archive's use. Windows, miniz.
 #pragma once
 #include <windows.h>
 #include <cstddef>
@@ -18,8 +17,7 @@ inline std::unique_ptr<mz_zip_archive> openZip(const std::string& path)
     return z;
 }
 
-// A member's bytes on the heap (mz_free them) and their size, or null when there is no such member or it does not
-// inflate. Member names match case-insensitively.
+// A member's bytes on the heap (mz_free them) and size; null if missing or not inflating. Names ignore case.
 inline void* extractZipMember(mz_zip_archive* z, const char* member, size_t* size)
 {
     int i = mz_zip_reader_locate_file(z, member, nullptr, 0);
