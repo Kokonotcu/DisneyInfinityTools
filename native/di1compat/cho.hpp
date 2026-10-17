@@ -116,6 +116,7 @@
 #include <optional>
 #include <map>
 #include <set>
+#include <string_view>
 #include "base/bytes.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
@@ -706,6 +707,7 @@ struct ConstScan {
     std::vector<long> pn;              // ProcessorNode Header records
     std::vector<ConstProc> procs;
     std::set<int> convRefs;            // BasisConversion DataNodeRefs and ConnectionMapUsedDataNodes
+    std::vector<std::string> strs;     // HeaderStrings, as const30 extends them
 };
 
 inline void lastTypeOrName(const oct::File&, size_t i, ConstScan& s) { s.after = (std::max)(s.after, (long)i); }
@@ -827,8 +829,8 @@ inline std::string pathOf(const HeaderTree& t, int h)
     return s;
 }
 
-// Every processor attribute 3.0 ships with a Static node (FORMATS.md 4.10, staticrefs.py)
-inline constexpr const char* kStaticInputs30[] = {
+// Every processor attribute 3.0 ships with a Static node (FORMATS.md 4.10, staticrefs.py), sorted for the search
+inline constexpr std::string_view kStaticInputs30[] = {
     "AimConstraintProcessorNode.AlignReference", "AimConstraintProcessorNode.Offset",
     "AimConstraintProcessorNode.UpReference", "ClipProcessor.ClipData", "DilationOrientationConnection.RotateOffset",
     "DilationTranslationConnection.TranslateOffset", "DilationTranslationOrientationConnection.RotateOffset",
@@ -840,18 +842,19 @@ inline constexpr const char* kStaticInputs30[] = {
     "IK2BRPLengthSquashZConstraint.InputStartInitialPosition",
     "IK2BRPLengthSquashZConstraint.InputStartLocalToParentInitialOrientation",
     "IK2BRPLengthSquashZConstraint.InputStartLocalToStartParentInitialOrientation", "IkLean2LinkProcessor.Axis",
-    "MotionPathOrientationProcessor.Spline", "MotionPathPositionProcessor.Spline", "SplineInputProcessor.Spline",
-    "Position3dOffsetProcessor.Offset", "Position3dWeightedAverageProcessor.TargetWeight",
-    "RadialBasisApplyFloat.Neutral", "RadialBasisApplyFloat.Weights", "RadialBasisPosition.ControllerKeys",
-    "RadialBasisPosition.StandardDeviationValues", "RelationshipProcessor.RelationshipData",
+    "MotionPathOrientationProcessor.Spline", "MotionPathPositionProcessor.Spline", "Position3dOffsetProcessor.Offset",
+    "Position3dWeightedAverageProcessor.TargetWeight", "RadialBasisApplyFloat.Neutral", "RadialBasisApplyFloat.Weights",
+    "RadialBasisPosition.ControllerKeys", "RadialBasisPosition.StandardDeviationValues",
+    "RelationshipProcessor.RelationshipData", "SplineInputProcessor.Spline",
     "TransformTranslationOrientationConnection.RotateOffset",
     "TransformTranslationOrientationScaleConnection.TranslateOffset", "UnitRotor3dOffsetProcessor.Offset",
     "UnitRotor3dWeightedAverageProcessor.TargetWeight"};
 
 inline bool staticInput30(const std::string& typeDotAttribute)
 {
-    return std::any_of(std::begin(kStaticInputs30), std::end(kStaticInputs30),
-                       [&](const char* s) { return typeDotAttribute == s; });
+    auto less = [](std::string_view a, const std::string& b) { return a < std::string_view(b); };
+    auto it = std::lower_bound(std::begin(kStaticInputs30), std::end(kStaticInputs30), typeDotAttribute, less);
+    return it != std::end(kStaticInputs30) && typeDotAttribute == *it;
 }
 
 // The DataNodes some processor takes through an input 3.0 never feeds from a Static node
@@ -874,6 +877,12 @@ inline void demote(oct::File& f, ConstNode& d)
     d.stat = false;
 }
 
+// True when an Association binds header h's path (named: the SubNetwork's bound paths, null for none)
+inline bool boundHeader(const HeaderTree& t, int h, const std::set<std::string>* named)
+{
+    return h > 0 && named && named->count(pathOf(t, h));
+}
+
 // Static nodes of a shape 3.0 never keeps Static become variable (FORMATS.md 4.10); named: Association paths
 inline void demoteStatics(oct::File& f, ConstScan& s, const HeaderTree& t, const std::set<std::string>* named)
 {
@@ -884,10 +893,12 @@ inline void demoteStatics(oct::File& f, ConstScan& s, const HeaderTree& t, const
         const int h = headerOf(f, t, d.hd);
         const bool neverStatic = d.type == "Bool" || d.type == "Int" || d.type == "Visibility";
         const bool external = d.ext && d.type != "ClipData";
-        const bool shape = neverStatic || external;
-        const bool bound = h > 0 && named && named->count(pathOf(t, h));
-        const bool used = bound || s.convRefs.count((int)di) || offList[di];
-        if (shape || used) demote(f, d);
+        if (neverStatic || external) {
+            demote(f, d);
+            continue;
+        }
+        const bool listed = s.convRefs.count((int)di) || offList[di];
+        if (listed || boundHeader(t, h, named)) demote(f, d);   // boundHeader last: it builds the path
     }
 }
 
@@ -1019,10 +1030,10 @@ inline ConstLayout numberHeaders(const HeaderTree& t, const ConstTrie& c, const 
 }
 
 // The header records rewritten to the new numbering, strings appended as needed; then ConstantHeaderCount
-inline void rewriteHeaders(oct::File& f, const ConstScan& s, const HeaderTree& t, const ConstTrie& c,
+inline void rewriteHeaders(oct::File& f, ConstScan& s, const HeaderTree& t, const ConstTrie& c,
                            const ConstLayout& L)
 {
-    std::vector<std::string> strs = f.nameValues(f.recs[s.hs]);
+    std::vector<std::string>& strs = s.strs;
     std::vector<int32_t> newIdx;
     for (size_t h = 1; h < L.newName.size(); ++h) {
         auto it = std::find(strs.begin(), strs.end(), L.newName[h]);   // the first match
@@ -1069,8 +1080,8 @@ inline std::optional<std::set<std::string>> constSubNetwork(oct::File& f, size_t
     if (s.counted || !usable) return std::nullopt;
     const oct::Spec hsSpec = oct::spec(f.recs[s.hs].type);
     if (hsSpec.kind != oct::NAME || hsSpec.keyed) return std::nullopt;
-    const std::optional<HeaderTree> t =
-        headerTree(f.nameValues(f.recs[s.hs]), f.ints(f.recs[s.hsi]), f.ints(f.recs[s.hl]));
+    s.strs = f.nameValues(f.recs[s.hs]);
+    const std::optional<HeaderTree> t = headerTree(s.strs, f.ints(f.recs[s.hsi]), f.ints(f.recs[s.hl]));
     if (!t) return std::nullopt;
     demoteStatics(f, s, *t, named);
     dropClashes(f, s, *t);
