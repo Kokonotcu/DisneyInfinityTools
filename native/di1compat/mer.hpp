@@ -25,31 +25,25 @@
 //   NetSync     MasterNetSync links from Link_Out leave from Private, the output 3.0 fires locally (Table::gate10)
 //   ToggleType  Collision/Visibility/ColVisToggle describe 'Type' = their class, 3.0's mode switch (Table::toggleType10)
 #pragma once
+#include <cstdint>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <set>
 #include <sstream>
-#include "oct.hpp"
+#include <string>
+#include <vector>
+#include "base/hash.hpp"
+#include "convert/records.hpp"
+#include "formats/oct.hpp"
 #include "mission.hpp"
 
 namespace mer {
 
+// Meridian's name hash: lookup2 with seed 0 (FORMATS.md 5.3), the same function as dct's (GR-11)
 inline uint32_t lookup2(const std::string& s, uint32_t seed = 0)
 {
-    auto mix = [](uint32_t& a, uint32_t& b, uint32_t& c) {
-        a -= b; a -= c; a ^= c >> 13;  b -= c; b -= a; b ^= a << 8;  c -= a; c -= b; c ^= b >> 13;
-        a -= b; a -= c; a ^= c >> 12;  b -= c; b -= a; b ^= a << 16; c -= a; c -= b; c ^= b >> 5;
-        a -= b; a -= c; a ^= c >> 3;   b -= c; b -= a; b ^= a << 10; c -= a; c -= b; c ^= b >> 15;
-    };
-    const uint8_t* k = (const uint8_t*)s.data();
-    uint32_t n = (uint32_t)s.size(), a = 0x9e3779b9, b = a, c = seed, len = n;
-    auto w = [&](const uint8_t* p) { return oct::u(p, 4); };
-    for (; len >= 12; k += 12, len -= 12) { a += w(k); b += w(k + 4); c += w(k + 8); mix(a, b, c); }
-    uint8_t t[12] = {};
-    memcpy(t, k, len);
-    a += w(t); b += w(t + 4); c += n + (w(t + 8) << 8);
-    mix(a, b, c);
-    return c;
+    return hash::lookup2((const uint8_t*)s.data(), s.size(), seed);
 }
 
 enum { T_BOOL = 0, T_INT = 1, T_FLOAT = 2, T_STRING = 3, T_VEC3 = 4 };
@@ -103,14 +97,6 @@ inline bool isGeneric(const std::string& n)
     return g.count(n) > 0;
 }
 
-inline oct::Rec blob(oct::File& f, uint16_t level, const std::string& n, const std::string& data)
-{
-    int cw = data.size() < 0x100 ? 1 : data.size() < 0x10000 ? 2 : 3;
-    oct::Rec r{level, (uint16_t)(oct::SCALAR | oct::BYTE << 3 | (cw - 1) << 6), f.addName(n), {}};
-    oct::File::put(r.pay, (uint32_t)data.size(), cw);
-    r.pay += data;
-    return r;
-}
 
 // One parameter value from a 1.0 record as the given 3.0 type; false if the record cannot be read so.
 inline bool encode(const oct::File& f, const oct::Rec& r, int type, std::string& val, std::string& strings)
@@ -259,8 +245,12 @@ inline bool dropsReadable(const oct::File& f, const std::vector<Node>& nodes, ui
 inline oct::Rec relinked(oct::File& f, size_t i, const std::vector<Out>& newLinks)
 {
     oct::Rec r = f.recs[i];
-    for (auto& L : newLinks)
-        if (L.at == i) { oct::Rec b = blob(f, r.level, "Data", L.data); b.name = r.name; r = b; }
+    for (auto& L : newLinks) {
+        if (L.at != i) continue;
+        oct::Rec b = octx::blobRec(f, r.level, "Data", L.data);
+        b.name = r.name;
+        r = b;
+    }
     return r;
 }
 
@@ -724,7 +714,7 @@ inline void rebuildNode(Graph& g, size_t k)
         g.out.push_back(g.f.intScalar(g.fl, "LeafNameHash", (int32_t)lookup2(g.port[k])));
     g.out.push_back(g.f.intScalar(g.fl, "Mer_ParametersOffset", (int32_t)g.values[v.ns].size()));
     std::string d((const char*)&p.count, 4);
-    g.out.push_back(blob(g.f, g.fl, "Mer_ParameterDescription", d + p.desc));
+    g.out.push_back(octx::blobRec(g.f, g.fl, "Mer_ParameterDescription", d + p.desc));
     g.values[v.ns] += p.val;
     g.s.params += (int)p.count;
 }
@@ -735,8 +725,8 @@ inline void namespaceBlobs(Graph& g)
     oct::File& f = g.f;
     for (size_t q = g.nss.size(); q-- > 0;) {
         std::vector<oct::Rec> add = {f.intScalar(g.fl, "EnableNetworking", 1),
-                                     blob(f, g.fl, "ParameterValues", g.values[q]),
-                                     blob(f, g.fl, "ParameterStrings", g.strs[q])};
+                                     octx::blobRec(f, g.fl, "ParameterValues", g.values[q]),
+                                     octx::blobRec(f, g.fl, "ParameterStrings", g.strs[q])};
         const Node& b = g.nodes[g.nss[q].begin];
         long ref = field(f, b, g.fl, "ReferenceEmbeddedNamespace");
         if (ref >= 0 && field(f, b, g.fl, "MergedLayoutPath") < 0) {

@@ -2,6 +2,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -73,6 +74,13 @@ inline oct::Rec floatList(oct::File& f, uint16_t level, const std::string& n, co
     oct::Rec r{level, oct::makeType(oct::LIST, 0, oct::FLOAT), f.addName(n), {}};
     oct::File::put(r.pay, (uint32_t)v.size(), 1);
     r.pay.append((const char*)v.data(), v.size() * 4);
+    return r;
+}
+// A float scalar (FORMATS.md 3).
+inline oct::Rec floatRec(oct::File& f, uint16_t level, const std::string& n, float v)
+{
+    oct::Rec r{level, oct::makeType(oct::SCALAR, 0, oct::FLOAT), f.addName(n), std::string(4, '\0')};
+    memcpy(&r.pay[0], &v, 4);
     return r;
 }
 // A keyed node: name n, key the decimal text of key (pool entries: DataNode = ['3']).

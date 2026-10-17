@@ -421,13 +421,6 @@ inline int links30(oct::File& f)
 }
 
 // ---- time range ----
-inline oct::Rec floatRec(oct::File& f, const char* name, float v, uint16_t level = 3)
-{
-    oct::Rec r{level, (uint16_t)(oct::SCALAR | oct::FLOAT << 3), f.addName(name), std::string(4, '\0')};
-    memcpy(&r.pay[0], &v, 4);
-    return r;
-}
-
 namespace detail {
 
 // What time30 reads of one SubNetwork, and the play range of its clips and events
@@ -503,7 +496,7 @@ inline bool timeSubNetwork(oct::File& f, size_t sn)
     for (uint32_t off : s.evOffs) eachEventTime(s.nb, off, widen);
     if (!s.any) return false;
     size_t at = (size_t)(s.vgEnd >= 0 ? s.vgEnd : s.lbAt >= 0 ? s.lbAt : (long)end);   // where 3.0 writes them
-    std::vector<oct::Rec> t = {floatRec(f, "MinTime", s.mn), floatRec(f, "MaxTime", s.mx)};
+    std::vector<oct::Rec> t = {octx::floatRec(f, 3, "MinTime", s.mn), octx::floatRec(f, 3, "MaxTime", s.mx)};
     f.recs.insert(f.recs.begin() + at, t.begin(), t.end());
     return true;
 }
@@ -628,7 +621,7 @@ inline std::vector<oct::Rec> animNode(oct::File& f, const AnimScan& s, const std
     const TimeRange r = timeRange(f, s, dns, (int)d);
     if (!r.any) return {};
     return {f.recs[hd], f.nameScalar(5, f.recs[ty].name, "AnimState"), f.node(5, "Data"),
-            floatRec(f, "RangeMin", r.t0, 6), floatRec(f, "RangeMax", r.t1, 6)};
+            octx::floatRec(f, 6, "RangeMin", r.t0), octx::floatRec(f, 6, "RangeMax", r.t1)};
 }
 
 // HeaderStrings element s set to name index a in place (a non-keyed NAME list of u16, GR-34)
@@ -1276,13 +1269,6 @@ struct Aliases {
 };
 
 // ---- layout ----
-inline oct::Rec keyed(oct::File& f, uint16_t level, const std::string& n, int key)
-{
-    oct::Rec r{level, (uint16_t)(oct::NODE | 4), f.addName(n), {}};
-    wr(r.pay, f.addName(std::to_string(key)), 2);
-    return r;
-}
-
 namespace detail {
 
 // A pool entry's fields by name: record index, the last one of a repeated name
@@ -1401,7 +1387,7 @@ inline std::vector<oct::Rec> instanceNodes(oct::File& f, const std::vector<Entry
     for (auto& [old, k] : remap) {
         const Entry& c = ctx[old];
         int fl = entryInt(f, c, "Flags", 0), nf = 0;
-        inst.push_back(keyed(f, 4, "InstanceNode", k));
+        inst.push_back(octx::keyedNode(f, 4, "InstanceNode", k));
         if (c.count("Name")) inst.push_back(atLevel(f, c.at("Name"), 5));
         if (c.count("PlacementNodeRef"))
             inst.push_back(f.intScalar(5, "PlacementNodeRef", entryInt(f, c, "PlacementNodeRef", -1)));

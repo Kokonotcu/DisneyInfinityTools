@@ -955,7 +955,7 @@ static int choAnimTest(char** a)
             for (size_t q = anims.size(); q-- > 0;) {
                 size_t dn = anims[q];
                 std::vector<oct::Rec> t = {g.recs[kid(g, dn, "Header")], g.nameScalar(5, g.recs[kid(g, dn, "Type")].name, "Float"),
-                                           cho::floatRec(g, "Data", 0.f, 5)};
+                                           octx::floatRec(g, 5, "Data", 0.f)};
                 g.recs.erase(g.recs.begin() + dn + 1, g.recs.begin() + g.blockEnd(dn));
                 g.recs.insert(g.recs.begin() + dn + 1, t.begin(), t.end());
                 ++nodes;
