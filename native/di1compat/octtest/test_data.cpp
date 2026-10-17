@@ -12,7 +12,7 @@
 #include "../formats/gamedblua.hpp"
 #include "../gameplay.hpp"
 #include "../games/di1/mission.hpp"
-#include "../npc.hpp"
+#include "../base/text.hpp"
 #include "../third_party/miniz/miniz.h"
 #include "files.hpp"
 #include "modes.hpp"
@@ -164,7 +164,7 @@ void scanMember(mz_zip_archive& z, mz_uint i, const std::string& zipName, GpScan
 {
     char nm[kMemberNameMax];
     mz_zip_reader_get_filename(&z, i, nm, sizeof(nm));
-    const char* kind = memberKind(npc::lower(nm));
+    const char* kind = memberKind(text::lower(nm));
     if (!kind) return;
     size_t n = 0;
     void* d = mz_zip_reader_extract_to_heap(&z, i, &n, 0);

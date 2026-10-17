@@ -14,18 +14,22 @@
 #include "../games/di1/cho.hpp"
 #include "../convert/datamap.hpp"
 #include "../formats/chd.hpp"
+#include "../base/text.hpp"
+#include "../formats/datamap.hpp"
 #include "../games/di1/chestinfo.hpp"
 #include "../games/di1/gamedb.hpp"
 #include "../games/di1/groups.hpp"
 #include "../games/di1/perceptions.hpp"
+#include "../games/di1/psdna.hpp"
+#include "../games/di1/supplement.hpp"
 #include "../formats/luachunk.hpp"
 #include "../gameplay.hpp"
 #include "../formats/slang.hpp"
 #include "../games/di1/aitables.hpp"
+#include "../games/di1/avperc.hpp"
 #include "../games/di1/sxkeys.hpp"
 #include "../games/di1/sxnatives.hpp"
 #include "../games/di1/transcode.hpp"
-#include "../npc.hpp"
 #include "files.hpp"
 #include "modes.hpp"
 #include "run.hpp"
@@ -113,12 +117,12 @@ void transcodeScripts(const fs::path& out, const char* dir, SxRun& r)
 }
 
 // The comma-joined lower-case perception names of a list.
-std::string percNames(const npc::PercList& l)
+std::string percNames(const di1::avperc::PercList& l)
 {
     std::set<std::string> s;
     for (auto& e : l) {
-        if (!e.on.empty()) s.insert(npc::lower(e.on));
-        if (!e.off.empty()) s.insert(npc::lower(e.off));
+        if (!e.on.empty()) s.insert(text::lower(e.on));
+        if (!e.off.empty()) s.insert(text::lower(e.off));
     }
     std::string o;
     for (auto& n : s) o += (o.empty() ? "" : ",") + n;
@@ -130,13 +134,13 @@ template <class Adds>
 std::string percAdded(const Adds& adds)
 {
     std::map<std::string, std::string> a;
-    for (auto& [n, h] : adds) a[npc::lower(n)] = n + (h ? "|1" : "|0");
+    for (auto& [n, h] : adds) a[text::lower(n)] = n + (h ? "|1" : "|0");
     std::string s;
     for (auto& [k, v] : a) s += (s.empty() ? "" : ",") + v;
     return s;
 }
 
-bool dataMapOf(const char* path, npc::DataMap& m) { return npc::dataMap(slurp(path), m); }
+bool dataMapOf(const char* path, datamap::DataMap& m) { return datamap::parse(slurp(path), m); }
 
 }  // namespace
 
@@ -327,13 +331,13 @@ int convertChoAlias(const Args& a)
     return 0;
 }
 
-// npc::dataMap of each DataMap: one line per file and include.
+// datamap::parse of each DataMap: one line per file and include.
 int convertDmEval(const Args& a)
 {
     for (int k = 2; k < a.argc; ++k) {
-        npc::DataMap m;
+        datamap::DataMap m;
         std::string why;
-        if (!npc::dataMap(slurp(a.argv[k]), m, &why)) {
+        if (!datamap::parse(slurp(a.argv[k]), m, &why)) {
             printf("%s: FAILED %s\n", a.argv[k], why.c_str());
             return 1;
         }
@@ -348,29 +352,30 @@ int convertDmEval(const Args& a)
 // The playset's GameDB text; with a 1.0 CoreDataMap, its core expendables packages too.
 int convertPlayset(const Args& a)
 {
-    npc::DataMap m10, tb, other, core10;
+    datamap::DataMap m10, tb, other, core10;
     bool ok = dataMapOf(a.argv[2], m10) && dataMapOf(a.argv[3], tb) && dataMapOf(a.argv[4], other);
     if (ok && a.argc > 6) ok = dataMapOf(a.argv[6], core10);
     if (!ok) {
         printf("DataMap eval failed\n");
         return 1;
     }
-    std::string t = npc::playsetText(a.argv[5], npc::gamedb30(m10, tb).playset, tb, other, true,
-                                     npc::coreExpendables10(core10));
+    di1::supplement::PlaysetRecord rec{a.argv[5], di1::supplement::gamedb30(m10, tb).playset,
+                                       di1::supplement::coreExpendables10(core10), true};
+    std::string t = di1::supplement::playsetText(rec, tb, other);
     fwrite(t.data(), 1, t.size(), stdout);
     return 0;
 }
 
-// npc::percAdds: the perceptions each 3.0 avatar list gains from its 1.0 list in a zone.
+// di1::avperc::percAdds: the perceptions each 3.0 avatar list gains from its 1.0 list in a zone.
 int convertAvPerc(const Args& a)
 {
-    std::vector<npc::PercList> l10, l30;
+    std::vector<di1::avperc::PercList> l10, l30;
     std::string why;
-    if (!npc::percLists(slurp(a.argv[2]), l10, &why) || !npc::percLists(slurp(a.argv[3]), l30, &why)) {
+    if (!di1::avperc::percLists(slurp(a.argv[2]), l10, &why) || !di1::avperc::percLists(slurp(a.argv[3]), l30, &why)) {
         printf("btx eval failed: %s\n", why.c_str());
         return 1;
     }
-    auto adds = npc::percAdds(l10, l30, a.argv[4]);
+    auto adds = di1::avperc::percAdds(l10, l30, a.argv[4]);
     std::set<std::string> lines;
     for (size_t j = 0; j < l30.size(); ++j) {
         if (adds[j].first < 0) continue;
@@ -382,15 +387,15 @@ int convertAvPerc(const Args& a)
     return 0;
 }
 
-// npc::gamedb30: the 1.0 DataMap's playset and actor entries against 3.0's ToyBox.
+// di1::supplement::gamedb30: the 1.0 DataMap's playset and actor entries against 3.0's ToyBox.
 int convertGameDb(const Args& a)
 {
-    npc::DataMap m10, m30;
+    datamap::DataMap m10, m30;
     if (!dataMapOf(a.argv[2], m10) || !dataMapOf(a.argv[3], m30)) {
         printf("DataMap eval failed\n");
         return 1;
     }
-    npc::GameDb g = npc::gamedb30(m10, m30);
+    di1::supplement::GameDb g = di1::supplement::gamedb30(m10, m30);
     std::set<std::string> lines;
     for (auto& [t, p] : g.playset) lines.insert("P " + t + " " + p);
     for (auto& [actor, v] : g.actor)
@@ -410,7 +415,7 @@ int convertPsDna(const Args& a)
         fs::path base = fs::path(a.argv[3]) / (n.substr(0, n.size() - kPsDnaLen) + ".dnax");
         if (!fs::exists(base)) continue;
         std::string out, why;
-        bool r = npc::psDna30(slurp(e.path()), slurp(base), out, &why);
+        bool r = di1::psdna::psDna30(slurp(e.path()), slurp(base), out, &why);
         printf("%s: %s %s\n", n.c_str(), r ? "ok" : "kept 1.0", why.c_str());
         if (r) writeFile(fs::path(a.argv[4]) / n, out);
         (r ? ok : no)++;

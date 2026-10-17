@@ -10,7 +10,7 @@
 #include <vector>
 #include "../core/memcheck.hpp"
 #include "../formats/dct.hpp"
-#include "../npc.hpp"
+#include "../base/text.hpp"
 #include "../ui.hpp"
 #include "files.hpp"
 #include "modes.hpp"
@@ -152,7 +152,7 @@ void checkLoadingScreens(UiRun& r, const fs::path& e10, const fs::path& e30)
     std::string seq;
     bool movies = true;
     for (int i = 0; i < kLoads; ++i) {
-        std::string s = ui::loadingScreen10("LoadingScreen_Inc", counter), f = npc::lower(s);
+        std::string s = ui::loadingScreen10("LoadingScreen_Inc", counter), f = text::lower(s);
         seq += s.substr(sizeof kScreenPrefix - 1) + " ";
         movies &= fs::exists(e10 / "flash/loadingscreen/loadingscreen" / (f + ".gfx")) &&
                   !fs::exists(e30 / "flash/loadingscreen/loadingscreen" / (f + ".gfx"));
@@ -182,7 +182,7 @@ bool movieFound(const FlashScan& s, const fs::path& dir, const fs::path& sub, co
 
 void flashImage(FlashScan& s, const fs::path& dir, const fs::path& sub, const fs::path& file)
 {
-    const std::string n = npc::lower(file.filename().string());
+    const std::string n = text::lower(file.filename().string());
     std::string mv = ui::flashImageMovie("flash/" + dir.filename().string() + "/" + n);
     if (mv.empty()) return;
     ++s.imgs;
@@ -235,7 +235,7 @@ void checkTips(UiRun& r, const Args& a, const fs::path& e10, const fs::path& e30
     if (a.argc > 5) zl = slurp(a.argv[5]);
     zl.erase(std::remove(zl.begin(), zl.end(), '\r'), zl.end());
     auto isZone = [&](const std::string& k) {
-        std::string lk = npc::lower("\n" + k + "\n"), z = npc::lower("\n" + zl);
+        std::string lk = text::lower("\n" + k + "\n"), z = text::lower("\n" + zl);
         return z.find(lk) != std::string::npos;
     };
     std::string merged = t30;

@@ -278,4 +278,243 @@ inline bool evalStrict(const uint8_t* b, size_t n, const char* global, StrictChu
     return true;
 }
 
+// evalLoose's values: t 0 nil, 's', 'n', 'b' (n 0 / 1) or 't' (tab, a table index).
+struct LooseVal {
+    char t = 0;
+    std::string s;
+    double n = 0;
+    int tab = -1;
+};
+// A table's entries in first-store order; a key equal in kind, text and number keeps its place.
+struct LooseTable {
+    std::vector<std::pair<LooseVal, LooseVal>> kv;
+};
+
+namespace detail {
+
+constexpr size_t kLooseMinSize = 24;   // strings(): a header and the source name's size at least
+
+// The registers of evalLoose (maxstacksize + 1, .at() throws std::out_of_range) and where it writes.
+struct LooseRun {
+    std::vector<LooseTable>& tabs;
+    std::vector<std::pair<std::string, LooseVal>>& globals;
+    const std::vector<LooseVal>& K;
+    const uint8_t* code;
+    uint32_t ncode;
+    std::vector<LooseVal> R;
+
+    const LooseVal& rk(uint32_t x) { return x & kRkConstant ? K.at(x & 0xff) : R.at(x); }
+    void store(int tab, const LooseVal& k, const LooseVal& v)
+    {
+        for (auto& e : tabs[tab].kv) {
+            if (e.first.t != k.t || e.first.s != k.s || e.first.n != k.n) continue;
+            e.second = v;
+            return;
+        }
+        tabs[tab].kv.emplace_back(k, v);
+    }
+};
+
+// The header, the source name and function bytes (keeping maxstacksize), then where the code lies.
+inline const char* looseCode(Cursor& c, uint8_t& maxstack, Code& out)
+{
+    if (c.n < sizeof kHeader || memcmp(c.b, kHeader, sizeof kHeader)) return "not a Lua 5.1 x86 chunk";
+    c.at = sizeof kHeader;
+    uint32_t n;
+    if (!c.u32(n) || !bytes::fits(c.n, c.at, n) || !bytes::fits(c.n, c.at + n, kFunctionBytes)) return "header";
+    maxstack = c.b[c.at + n + kFunctionBytes - 1];
+    c.at += n + kFunctionBytes;
+    if (!c.u32(out.ncode) || out.ncode > c.n / kInstruction) return "code";
+    if (!bytes::fits(c.n, c.at, (size_t)out.ncode * kInstruction)) return "code";
+    out.code = c.b + c.at;
+    c.at += (size_t)out.ncode * kInstruction;
+    return nullptr;
+}
+
+// One constant; a boolean at the very end reads the string's terminator, as std::string's [] does.
+inline const char* looseConstant(Cursor& c, LooseVal& v)
+{
+    if (c.at >= c.n) return "constants";
+    const uint8_t t = c.b[c.at++];
+    if (t == kTagBool) {
+        v.t = 'b';
+        v.n = c.b[c.at++] != 0;
+        return nullptr;
+    }
+    if (t == kTagNumber) {
+        v.t = 'n';
+        if (!bytes::fits(c.n, c.at, kNumberBytes)) return "number";
+        memcpy(&v.n, c.b + c.at, kNumberBytes);
+        c.at += kNumberBytes;
+        return nullptr;
+    }
+    if (t == kTagString) {
+        uint32_t len;
+        if (!c.u32(len) || !bytes::fits(c.n, c.at, len)) return "string";
+        v.t = 's';
+        v.s.assign((const char*)c.b + c.at, len ? len - 1 : 0);
+        c.at += len;
+        return nullptr;
+    }
+    return t != kTagNil ? "constant type" : nullptr;
+}
+
+inline const char* looseConstants(Cursor& c, std::vector<LooseVal>& K)
+{
+    uint32_t nk;
+    if (!c.u32(nk)) return "constants";
+    for (uint32_t i = 0; i < nk; ++i) {
+        LooseVal v;
+        if (const char* bad = looseConstant(c, v)) return bad;
+        K.push_back(std::move(v));
+    }
+    return nullptr;
+}
+
+// SETLIST in 50s; C == 0 takes C from the next word, if any. The index wraps in 32 bits.
+inline const char* looseSetList(LooseRun& m, uint32_t& pc, const Ins& in)
+{
+    if (m.R[in.a].t != 't' || in.b == 0) return "SETLIST form";
+    uint32_t c = in.c;
+    if (c == 0) {
+        ++pc;
+        if (pc < m.ncode) memcpy(&c, m.code + kInstruction * pc, kInstruction);
+    }
+    for (uint32_t j = 1; j <= in.b; ++j)
+        m.store(m.R[in.a].tab, LooseVal{'n', "", (double)((c - 1) * kFieldsPerFlush + j)}, m.R.at(in.a + j));
+    return nullptr;
+}
+
+enum class Step { kGo, kDone, kFail };
+
+// The instruction at pc; bad gets the reason of kFail.
+inline Step looseStep(LooseRun& m, uint32_t& pc, const char*& bad)
+{
+    const Ins in = decode(m.code, pc);
+    bad = nullptr;
+    if (in.a >= m.R.size()) {
+        bad = "register";
+        return Step::kFail;
+    }
+    switch (in.op) {
+    case kLoadK:
+        m.R[in.a] = m.K.at(in.bx);
+        return Step::kGo;
+    case kLoadBool:
+        m.R[in.a] = LooseVal{'b', "", (double)(in.b != 0)};
+        pc += in.c ? 1 : 0;
+        return Step::kGo;
+    case kNewTable:
+        m.R[in.a] = LooseVal{'t', "", 0, (int)m.tabs.size()};
+        m.tabs.emplace_back();
+        return Step::kGo;
+    case kSetTable:
+        if (m.R[in.a].t != 't') bad = "SETTABLE on a non-table";
+        else m.store(m.R[in.a].tab, m.rk(in.b), m.rk(in.c));
+        return bad ? Step::kFail : Step::kGo;
+    case kSetList:
+        bad = looseSetList(m, pc, in);
+        return bad ? Step::kFail : Step::kGo;
+    case kSetGlobal:
+        m.globals.emplace_back(m.K.at(in.bx).s, m.R[in.a]);
+        return Step::kGo;
+    case kReturn:
+        return Step::kDone;
+    default:
+        bad = "opcode outside the constructor subset";
+        return Step::kFail;
+    }
+}
+
+// A string constant at c into ks; kidx gets its index. False if it does not fit.
+inline bool stringConstant(Cursor& c, std::vector<std::string>& ks, int& kidx)
+{
+    uint32_t len;
+    if (!c.u32(len) || !bytes::fits(c.n, c.at, len)) return false;
+    kidx = (int)ks.size();
+    ks.emplace_back((const char*)c.b + c.at, len ? len - 1 : 0);
+    c.at += len;
+    return true;
+}
+
+inline bool isBxOp(uint32_t op) { return op == kLoadK || op == 5 || op == kSetGlobal; }   // 5: GETGLOBAL
+// GETTABLE, SETTABLE, SELF, ADD .. POW, EQ, LT, LE: B and C are RK operands
+inline bool isRkOp(uint32_t op)
+{
+    const bool table = op == 6 || op == kSetTable || op == 11;
+    const bool arith = op >= 12 && op <= 17;
+    const bool compare = op >= 23 && op <= 25;
+    return table || arith || compare;
+}
+
+}  // namespace detail
+
+// The globals a one-function constructor chunk sets. Loose: any key, malformed register use throws out_of_range.
+inline bool evalLoose(const std::string& b, std::vector<LooseTable>& tabs,
+                      std::vector<std::pair<std::string, LooseVal>>& globals, std::string* why = nullptr)
+{
+    detail::Cursor c{(const uint8_t*)b.data(), b.size(), 0};
+    detail::Code code;
+    uint8_t maxstack = 0;
+    std::vector<LooseVal> K;
+    const char* bad = detail::looseCode(c, maxstack, code);
+    if (!bad) bad = detail::looseConstants(c, K);
+    if (bad) return detail::fail(why, bad);
+    detail::LooseRun m{tabs, globals, K, code.code, code.ncode, std::vector<LooseVal>(maxstack + 1)};
+    for (uint32_t pc = 0; pc < code.ncode; ++pc) {
+        const detail::Step s = detail::looseStep(m, pc, bad);
+        if (s == detail::Step::kDone) return true;
+        if (s == detail::Step::kFail) return detail::fail(why, bad);
+    }
+    return detail::fail(why, "no RETURN");
+}
+
+// A one-function chunk's string constants and how often its code names each; false if it does not read.
+inline bool strings(const std::string& b, std::vector<std::string>& ks, std::vector<int>& refs)
+{
+    detail::Cursor c{(const uint8_t*)b.data(), b.size(), 0};
+    if (b.size() < detail::kLooseMinSize) return false;
+    uint8_t maxstack = 0;
+    detail::Code code;
+    if (detail::looseCode(c, maxstack, code)) return false;
+    uint32_t nk;
+    if (!c.u32(nk)) return false;
+    std::vector<int> kidx;   // constant index -> string index, -1 if not a string
+    for (uint32_t i = 0; i < nk; ++i) {
+        if (c.at >= c.n) return false;
+        const uint8_t t = c.b[c.at++];
+        kidx.push_back(-1);
+        switch (t) {
+        case detail::kTagNil:
+            break;
+        case detail::kTagBool:
+            c.at += 1;
+            break;
+        case detail::kTagNumber:
+            c.at += detail::kNumberBytes;
+            break;
+        case detail::kTagString:
+            if (!detail::stringConstant(c, ks, kidx.back())) return false;
+            break;
+        default:
+            return false;
+        }
+    }
+    refs.assign(ks.size(), 0);
+    auto ref = [&](uint32_t k) {
+        if (k < kidx.size() && kidx[k] >= 0) ++refs[kidx[k]];
+    };
+    for (uint32_t pc = 0; pc < code.ncode; ++pc) {
+        const detail::Ins in = detail::decode(code.code, pc);
+        if (detail::isBxOp(in.op)) {
+            ref(in.bx);
+            continue;
+        }
+        if (!detail::isRkOp(in.op)) continue;
+        if (in.b & detail::kRkConstant) ref(in.b & 0xff);
+        if (in.c & detail::kRkConstant) ref(in.c & 0xff);
+    }
+    return true;
+}
+
 }  // namespace luaconst

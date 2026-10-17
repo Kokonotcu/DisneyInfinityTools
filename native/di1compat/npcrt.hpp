@@ -17,7 +17,11 @@
 #include "games/di1/config.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/vfs.hpp"
-#include "npc.hpp"
+#include "base/text.hpp"
+#include "formats/datamap.hpp"
+#include "games/di1/avperc.hpp"
+#include "games/di1/skin.hpp"
+#include "games/di1/supplement.hpp"
 
 namespace npcrt {
 
@@ -57,7 +61,7 @@ static IncludeFn g_include;
 static PlaysetUnloadFn g_playsetUnload;
 
 static std::mutex g_dbLock;
-static npc::GameDb* g_db;                                   // built for the 1.0 playset g_dbPlayset
+static di1::supplement::GameDb* g_db;                                   // built for the 1.0 playset g_dbPlayset
 static std::string g_dbPlayset;
 static bool g_dbActive;                                     // between its Playset include and unload
 static std::set<std::pair<std::string, std::string>> g_dbRouted;   // routed in this activation (repeat includes skip)
@@ -127,10 +131,10 @@ typedef uint32_t(__fastcall* PercFn)(uint8_t* self, void* edx, int a1, int a2, v
 typedef int(__fastcall* PercIdFn)(void* self, void* edx, const char* name);
 typedef void(__fastcall* PercOnFn)(void* comp, void* edx, int id);
 static PercFn g_percApply, g_percRemove;
-static std::vector<npc::PercList> g_pl10, g_pl30;                // distinct avatar.btx lists (loaded with the playset)
+static std::vector<di1::avperc::PercList> g_pl10, g_pl30;   // distinct avatar.btx lists (loaded with the playset)
 struct PercMod { const void* plain; const void* zone; int list; };
 static std::map<uint8_t*, PercMod> g_percMod;                     // modifier -> its 3.0 list (-1: none)
-static std::map<std::string, std::vector<npc::PercAdds>> g_percZone;   // zone -> additions per 3.0 list
+static std::map<std::string, std::vector<di1::avperc::PercAdds>> g_percZone;   // zone -> additions per 3.0 list
 static std::map<std::pair<void*, uint8_t*>, std::vector<std::vector<int>>> g_percOn;   // ids enabled per apply
 
 static std::string zoneName()
@@ -139,7 +143,7 @@ static std::string zoneName()
     if (!gm) return "";
     typedef const char*(__stdcall * ZoneNameFn)(uint32_t zone, uint32_t flag);
     const char* n = ((ZoneNameFn)rt(0x01391040))(*(uint32_t*)(gm + 0x19c), 1);   // as FUN_0154a470 reads it
-    return n ? npc::lower(n) : "";
+    return n ? text::lower(n) : "";
 }
 
 static int percId(const std::string& name)
@@ -186,8 +190,8 @@ static uint32_t __fastcall hkPercApply(uint8_t* self, void*, int a1, int a2, voi
         std::string z = zoneName();
         auto zi = g_percZone.find(z);
         if (zi == g_percZone.end()) {
-            zi = g_percZone.emplace(z, std::vector<npc::PercAdds>()).first;
-            for (auto& [from, add] : npc::percAdds(g_pl10, g_pl30, z)) {
+            zi = g_percZone.emplace(z, std::vector<di1::avperc::PercAdds>()).first;
+            for (auto& [from, add] : di1::avperc::percAdds(g_pl10, g_pl30, z)) {
                 zi->second.push_back(add);
                 if (add.empty()) continue;
                 std::string line;
@@ -258,20 +262,21 @@ static uint32_t __fastcall hkPercRemove(uint8_t* self, void*, int a1, int a2, vo
 static void prepare(void* self, const char* name)
 {
     const di1::Config& cfg = g_state.cfg;
-    std::string n = npc::lower(name);
+    std::string n = text::lower(name);
     // "Core" is 3.0's own boot-time GameDB include, not a 1.0 playset: 1.0's CoreDataMap.lua matched it, and the
     // DataMap route then ran before FUN_00693630's DAT_0228db60 exists -> AV at boot (in-game 2026-10-13)
     if (n == "core" || (g_db && g_dbPlayset == n)) return;
     LookupFn lookup = (LookupFn)rt(0x00705860);
     std::string b10, b30, why;
     if (lookup(self, nullptr, name, 0) || !read10s("GameDB/Core/" + std::string(name) + "DataMap.lua", b10)) return;
-    npc::DataMap m10, m30;
-    if (!npc::dataMap(b10, m10, &why) || !read30x("3:gamedb/core/core/toyboxdatamap.lua", b30) || !npc::dataMap(b30, m30, &why)) {
+    datamap::DataMap m10, m30;
+    if (!datamap::parse(b10, m10, &why) || !read30x("3:gamedb/core/core/toyboxdatamap.lua", b30) ||
+        !datamap::parse(b30, m30, &why)) {
         logf("gamedb30 %s: no supplement (%s)", name, why.empty() ? "ToyBox DataMap unreadable" : why.c_str());
         return;
     }
     delete g_db;
-    g_db = new npc::GameDb(npc::gamedb30(m10, m30));
+    g_db = new di1::supplement::GameDb(di1::supplement::gamedb30(m10, m30));
     g_dbPlayset = n;
     g_psPath.clear();
     logf("gamedb30 %s: 1.0 DataMap (%u records), %u Playset tables, %u actors with 3.0 tables", name, (unsigned)m10.size(),
@@ -280,8 +285,9 @@ static void prepare(void* self, const char* name)
     g_pl30.clear();
     if (cfg.avperc10) {   // the avatar trees: 1.0's from the 1.0 install, 3.0's (the one its DNA names) from 3.0
         std::string a10, a30;
-        if (!read10s("characters/avatar.btx", a10) || !read30("Characters/Avatar.btx", a30) || !npc::percLists(a10, g_pl10, &why) ||
-            !npc::percLists(a30, g_pl30, &why)) {
+        if (!read10s("characters/avatar.btx", a10) || !read30("Characters/Avatar.btx", a30) ||
+            !di1::avperc::percLists(a10, g_pl10, &why) ||
+            !di1::avperc::percLists(a30, g_pl30, &why)) {
             g_pl10.clear();
             g_pl30.clear();
             logf("avperc10: avatar.btx unreadable (%s)", why.c_str());
@@ -290,22 +296,22 @@ static void prepare(void* self, const char* name)
     // playset30: its Playset record as one more DataMap, served from the session (hkOpen) -- the playset-standard
     // includes not in Toy Box come from the smallest other 3.0 DataMap (identical in all 8 that define them)
     std::string bo;
-    npc::DataMap other;
-    if (cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && npc::dataMap(bo, other, &why)) {
+    datamap::DataMap other;
+    if (cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && datamap::parse(bo, other, &why)) {
         std::vector<std::string> pkgs;   // rewards10: the 1.0 core expendables packages 3.0 does not ship
         std::string c10;
-        npc::DataMap core10;
-        if (cfg.rewards10 && read10s("GameDB/Core/CoreDataMap.lua", c10) && npc::dataMap(c10, core10, &why))
-            for (auto& f : npc::coreExpendables10(core10)) {
+        datamap::DataMap core10;
+        if (cfg.rewards10 && read10s("GameDB/Core/CoreDataMap.lua", c10) && datamap::parse(c10, core10, &why))
+            for (auto& f : di1::supplement::coreExpendables10(core10)) {
                 int* s = engine::assets::open(f.substr(12).c_str(), 0, 0, 0, nullptr);   // unhooked
                 if (s) ((void(__fastcall*)(void*, void*, uint32_t))(*(void***)s)[11])(s, nullptr, 1);
                 else pkgs.push_back(f);
             }
         if (cfg.rewards10) logf("rewards10 %s: 1.0 core expendables packages in the Playset record: %s", name,
                                   [&] { std::string l; for (auto& f : pkgs) l += f.substr(12) + " "; return l.empty() ? std::string("none") : l; }().c_str());
-        std::string t = npc::playsetText(n, g_db->playset, m30, other, cfg.hudMarker10, pkgs);
+        std::string t = di1::supplement::playsetText({n, g_db->playset, pkgs, cfg.hudMarker10}, m30, other);
         g_psPath = "GameDB/Core/" + std::string(name) + "DataMap30.lua";
-        di1::session::keep({{npc::lower(g_psPath), t}});
+        di1::session::keep({{text::lower(g_psPath), t}});
         logf("playset30 %s: Playset record (%u B of Lua) at %s, hudmarker10=%d (compass screen %s)", name, (unsigned)t.size(),
              g_psPath.c_str(), cfg.hudMarker10,
              t.find("\"hudmarker_inc|Include\"") != std::string::npos ? "included" : "absent");
@@ -336,7 +342,7 @@ static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
             } catch (std::exception& e) {   // never unwind into engine code (luaEval's .at() on a malformed chunk)
                 logf("gamedb30 %s: supplement failed: %s", name, e.what());
             }
-            if (g_db && g_dbPlayset == npc::lower(name)) {
+            if (g_db && g_dbPlayset == text::lower(name)) {
                 g_dbActive = true;
                 todo = g_db->playset;
                 what = "Playset ";
@@ -345,7 +351,7 @@ static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
         }
         if (g_db && g_dbActive) {                           // actors this record includes (itself, Includes)
             std::set<std::pair<std::string, std::string>> seen;
-            npc::reach(g_db->m10, {KINDS[kind], npc::lower(name)}, seen);
+            datamap::reach(g_db->m10, {KINDS[kind], text::lower(name)}, seen);
             int actors = 0;
             for (auto& k : seen) {
                 auto a = k.first == "actor" ? g_db->actor.find(k.second) : g_db->actor.end();
@@ -384,7 +390,7 @@ static void __fastcall hkPlaysetUnload(void* self, void*, const char* name)
     std::string psMap;
     {
         std::lock_guard<std::mutex> lock(g_dbLock);
-        if (!name || !g_db || g_dbPlayset != npc::lower(name)) return;
+        if (!name || !g_db || g_dbPlayset != text::lower(name)) return;
         g_dbActive = false;
         g_dbRouted.clear();
         g_percMod.clear();
@@ -430,15 +436,15 @@ static void* __cdecl hkQbFactory(int type, int param)
 static std::string skin10(oct::File& f, std::string& vbuf, const std::string& ibuf)
 {
     static std::once_flag once;
-    static npc::SkinLayouts L;
+    static di1::skin::SkinLayouts L;
     std::call_once(once, [] {
         std::string t;
-        if (read10s("shaders/vformat.vtxf", t)) L = npc::skinLayouts(t);
+        if (read10s("shaders/vformat.vtxf", t)) L = di1::skin::skinLayouts(t);
         logf("skin10: %u skinned 1.0 vertex formats", (unsigned)L.size());
     });
     if (vbuf.empty() || ibuf.empty() || L.empty()) return "";
     std::string why;
-    int n = npc::skinRemap(f, vbuf, ibuf, L, &why);
+    int n = di1::skin::skinRemap(f, vbuf, ibuf, L, &why);
     return n || !why.empty() ? "+skinremap(" + std::to_string(n) + (why.empty() ? "" : ": " + why) + ") " : "";
 }
 

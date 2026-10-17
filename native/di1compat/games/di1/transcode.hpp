@@ -24,7 +24,7 @@
 #include "aitables.hpp"
 #include "mer.hpp"
 #include "mission.hpp"
-#include "../../npc.hpp"
+#include "psdna.hpp"
 #include "rendermtb.hpp"
 #include "../../ui.hpp"
 #include "vfx.hpp"
@@ -517,12 +517,13 @@ inline Verdict materialBundle(Request& r)
 
 inline bool psDnaMatches(const Request& r) { return r.o.psdna && ends(r, "_ps.dnax"); }
 
-// A 1.0 playset avatar DNA 3.0 ships only as its base: the base, naming the 1.0 _PS model (npc::psDna30)
+// A 1.0 playset avatar DNA 3.0 ships only as its base: the base, naming the 1.0 _PS model (psdna::psDna30)
 inline Verdict playsetDna(Request& r)
 {
     std::string base, why;
     if (!r.io.read30(dropSuffix(r, "_ps.dnax") + ".dnax", base)) return kRaw;
-    if (!npc::psDna30(std::string((const char*)r.data, r.n), base, r.out, &why)) return raw(r, "psdna30: " + why + " ");
+    if (!psdna::psDna30(std::string((const char*)r.data, r.n), base, r.out, &why))
+        return raw(r, "psdna30: " + why + " ");
     r.note += "+psdna30(3.0 base, " + why + ") ";
     return "psdna30";
 }

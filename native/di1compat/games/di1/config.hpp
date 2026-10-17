@@ -57,13 +57,13 @@ struct Config {
     bool econ10 = true;              // sys: .ap SpawnEconomyOnDeath read as in 1.0 (NPC-8)
     bool perc10 = true;              // sys: the 1.0 perceptions 3.0 lacks through 3.0's perceptions loader (GLB-1)
     bool deliv10 = true;             // sys: 1.0 RewardType Delivery registered with 3.0's Multi reward (SYS-12)
-    bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (npc.hpp, OCT-8); 0: NavMeshPool dropped
+    bool navmesh10 = true;           // 1.0 navmeshes in the 3.0 layout (navmesh.hpp, OCT-8); 0: NavMeshPool dropped
     bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
     bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 includes) as a DataMap
-    bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
+    bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass (supplement.hpp)
     bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (groups.hpp)
     bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType (gameplay.hpp)
-    bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
+    bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (skin.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
     bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory lacks type 10 (npcrt.hpp)

@@ -13,6 +13,13 @@ inline bool endsWith(const char* s, const char* suffix)
     return a >= b && _stricmp(s + a - b, suffix) == 0;
 }
 
+// s lower-cased by the CRT (ASCII only in the "C" locale).
+inline std::string lower(std::string s)
+{
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
 // An engine path as a lookup key: '\' -> '/', lower case, one leading "assets/" removed (not idempotent, A-22).
 inline std::string norm(const char* path)
 {
