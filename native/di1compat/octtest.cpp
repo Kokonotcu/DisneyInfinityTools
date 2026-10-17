@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include "octtest/modes.hpp"
 #include "octtest/run.hpp"
 
@@ -129,10 +130,10 @@ octx::Options octxFromEnv()
     return o;
 }
 
-}  // namespace
+constexpr int kException = 3;   // the exit code of a run an exception ended (OT-03)
 
 // No arguments, an unknown mode or too few arguments: usage on stderr, exit kUsageError (OT-02).
-int main(int argc, char** argv)
+int runMode(int argc, char** argv)
 {
     const octtest::Args args{argc, argv, octxFromEnv()};
     if (argc < 2) {
@@ -150,4 +151,19 @@ int main(int argc, char** argv)
         return octtest::kUsageError;
     }
     return m ? m->run(args) : octtest::testRoundTrip(args);   // <root>...: the tuple round trip
+}
+
+}  // namespace
+
+// An exception no mode catches ends the run with its message and exit kException, not an abort.
+int main(int argc, char** argv)
+{
+    try {
+        return runMode(argc, argv);
+    } catch (std::exception& e) {
+        printf("EXCEPTION %s\n", e.what());
+    } catch (...) {
+        printf("EXCEPTION (not a std::exception)\n");
+    }
+    return kException;
 }
