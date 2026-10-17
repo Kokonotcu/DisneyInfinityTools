@@ -43,7 +43,8 @@ files below refer to `684539b`: the code has since moved into the layout of `CLA
 - A-06: `renderdoc10` and `hide_ps` work without their diagnostic switch.
 - A-12: a 1.0 archive whose open failed transiently is retried. A-35: the first 10 access violations are logged.
 - A-37: text that does not fit its buffer is cut, not a fail-fast. A-38: asset defs are built with no lock held.
-- AU-42: audio's x131 hash sign-extends like the engine. AU-30: a reused FMOD handle no longer stops the newer play.
+- AU-42: audio's x131 hash sign-extends like the engine. AU-30: a reused FMOD handle no longer stops the newer play
+  (measured: FMOD Ex 4.44 handles already carry a reuse counter, so the guard rarely acts).
 - OT-02/03/04/24: octtest usage text, exit codes and bad-input handling.
 
 **Still open.**
@@ -69,7 +70,10 @@ refactor:
 11. Capsules appear at a distance.
 12. `building10`: buildings stand on their lots.
 13. `universal10` particles (`vfx: 1.0 universal package ...`).
-14. CORE4's three narrowed lock scopes (merge `11ab5e7`): a zone loads and plays with no stall.
+14. CORE4's three narrowed lock scopes: npcrt's `playset30 ... Playset record` line (logged after the session lock),
+    the render transcode's keys (built outside the lock), the lipsync `where` text (set after the archive lock). A zone
+    loads and plays with no stall; the lines read as before.
+15. `vfxchan10`: 1.0 particles take their re-laid channels (golden reaches `chan` only through octtest).
 
 ## How this was produced
 
