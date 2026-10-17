@@ -10,7 +10,7 @@
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
-#include "chd.hpp"
+#include "formats/chd.hpp"
 #include "mer.hpp"
 #include "render.hpp"
 #include "arc30.hpp"
