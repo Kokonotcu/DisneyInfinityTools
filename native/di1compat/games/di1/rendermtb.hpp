@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -75,6 +76,22 @@ constexpr int kSlotStride10 = (int)gen30::kSlot10Bytes, kSlotStride30 = (int)gen
 constexpr uint32_t kTranslatedHashXor = 0x9E3779B9u;
 constexpr size_t kParamBytes = 16;   // one float4 parameter of block A
 
+// File reads by path; nullopt: the read failed
+using ReadMemo = std::map<std::string, std::optional<std::string>>;
+
+// path through read, once per memo; null when it does not read
+inline const std::string* readOnce(ReadMemo& memo, const std::function<bool(const std::string&, std::string&)>& read,
+                                   const std::string& path)
+{
+    auto it = memo.find(path);
+    if (it == memo.end()) {
+        std::string raw;
+        const bool ok = read(path, raw);
+        it = memo.emplace(path, ok ? std::optional<std::string>(std::move(raw)) : std::nullopt).first;
+    }
+    return it->second ? &*it->second : nullptr;
+}
+
 // One transcodeMaterials call: inputs, the 1.0 bundle, the 3.0 bundles read so far, the merge sources
 struct MaterialRun {
     const rentable::Table& T;
@@ -85,7 +102,18 @@ struct MaterialRun {
     std::map<std::string, bndl::Bundle> cache30;   // by extract path, for this call only
     std::vector<Src> srcs;
     std::string err;                          // the last bundle parse failure
+    ReadMemo shd10, shd30;                    // .shd reads, for this call only (RE-10)
 };
+
+// A 1.0 or 3.0 shader's .shd, read once per call; null when it does not read
+inline const std::string* shd10(MaterialRun& run, const std::string& shader)
+{
+    return readOnce(run.shd10, run.io.read10, "shaders/shaders/" + shader + ".shd");
+}
+inline const std::string* shd30(MaterialRun& run, const std::string& shader)
+{
+    return readOnce(run.shd30, run.io.read30, "3:shaders/shaders/" + shader + ".shd");
+}
 
 inline bool blockSizes30(const rentable::Table& T, const std::string& sh, int& A, int& B, int& slots)
 {
@@ -99,7 +127,7 @@ inline bool blockSizes30(const rentable::Table& T, const std::string& sh, int& A
 
 // A 1.0 shader's block sizes and B's slot count from its .shd descriptors, read once per call
 struct BlockSizes10 {
-    const IO& io;
+    MaterialRun& run;
     std::map<std::string, std::array<int, 3>> memo;
     bool get(const std::string& sh, int& A, int& B, int& slots);
 };
@@ -108,14 +136,13 @@ inline bool BlockSizes10::get(const std::string& sh, int& A, int& B, int& slots)
 {
     auto it = memo.find(sh);
     if (it == memo.end()) {
-        std::string b;
         const shd::Layout& L = gen30::kShd10;
         const size_t descriptor = shd::kBlockSize + sizeof(uint16_t);
-        const bool read = io.read10("shaders/shaders/" + sh + ".shd", b);
-        if (!read || !bytes::fits(b.size(), L.blockB, descriptor)) return false;
-        const int sizeA = bytes::u16OrZero(b, L.blockA + shd::kBlockSize);
-        const int sizeB = bytes::u16OrZero(b, L.blockB + shd::kBlockSize);
-        const int slotsB = (uint8_t)b[L.blockB + shd::kBlockSlots];
+        const std::string* b = shd10(run, sh);
+        if (!b || !bytes::fits(b->size(), L.blockB, descriptor)) return false;
+        const int sizeA = bytes::u16OrZero(*b, L.blockA + shd::kBlockSize);
+        const int sizeB = bytes::u16OrZero(*b, L.blockB + shd::kBlockSize);
+        const int slotsB = (uint8_t)(*b)[L.blockB + shd::kBlockSlots];
         it = memo.emplace(sh, std::array<int, 3>{sizeA, sizeB, slotsB}).first;
     }
     A = it->second[0];
@@ -207,9 +234,9 @@ inline bool tryTranslated(MaterialRun& run, int k, const bndl::Material& m10, co
     const SkinUse u = skinUse(io, formats);
     if (!io.translate) return false;
     if (u.skin && !skinTranslates(run, m10, *formats, u)) return false;
-    std::string raw10;
+    const std::string* raw10 = shd10(run, m10.shader);
     gen30::Shd10 s10;
-    if (!io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) || !gen30::parse10(raw10, s10)) return false;
+    if (!raw10 || !gen30::parse10(*raw10, s10)) return false;
     if (io.translatable && !io.translatable(m10.shader)) return false;   // generates and registers the shader
     placeTranslated(run, k, m10, s10, u);
     return true;
@@ -253,12 +280,12 @@ inline std::vector<std::set<uint32_t>> twinSets(const rentable::Table& T, const 
 }
 
 // The 1.0 shader's block B slot names
-inline std::set<uint32_t> slotNames10(const IO& io, const std::string& shader)
+inline std::set<uint32_t> slotNames10(MaterialRun& run, const std::string& shader)
 {
     std::set<uint32_t> names;
-    std::string raw;
+    const std::string* raw = shd10(run, shader);
     gen30::Shd10 s;
-    if (io.read10("shaders/shaders/" + shader + ".shd", raw) && gen30::parse10(raw, s))
+    if (raw && gen30::parse10(*raw, s))
         names.insert(s.slotsB.begin(), s.slotsB.end());
     return names;
 }
@@ -303,11 +330,10 @@ inline std::optional<int> colourBufferRoles(const rentable::Table& T, const std:
 }
 
 // The generic tier: the most common 3.0 shader taking a twin of every drawn format; colour-buffer readers first
-inline const rentable::Ref* genericDonor(const MaterialRun& run, const bndl::Material& m10,
-                                        const std::set<uint32_t>* formats)
+inline const rentable::Ref* genericDonor(MaterialRun& run, const bndl::Material& m10, const std::set<uint32_t>* formats)
 {
     const std::vector<std::set<uint32_t>> need = twinSets(run.T, formats);
-    const std::set<uint32_t> slots10 = slotNames10(run.io, m10.shader);
+    const std::set<uint32_t> slots10 = slotNames10(run, m10.shader);
     Candidate best;
     for (int pass = readsRole(slots10, "colorBuffer") ? 0 : 1; pass < 2 && !best.ref; ++pass)
         for (auto& [sh, ref] : run.T.donors) {
@@ -377,23 +403,24 @@ inline std::vector<uint32_t> substituteSlots(const rentable::Table& T, const bnd
 }
 
 // The donor's 3.0 shader's block A, when it reads and fits the donor material's block
-inline std::optional<shd::BlockA> donorBlockA(const IO& io, const bndl::Material& dm)
+inline std::optional<shd::BlockA> donorBlockA(MaterialRun& run, const bndl::Material& dm)
 {
-    if (!io.read30) return std::nullopt;
-    std::string raw30;
+    if (!run.io.read30) return std::nullopt;
+    const std::string* raw30 = shd30(run, dm.shader);
     shd::BlockA a30;
-    if (!io.read30("3:shaders/shaders/" + dm.shader + ".shd", raw30)) return std::nullopt;
-    if (!shd::parseBlockA(raw30, a30) || (int)dm.A.size() != a30.sizeA) return std::nullopt;
+    if (!raw30) return std::nullopt;
+    if (!shd::parseBlockA(*raw30, a30) || (int)dm.A.size() != a30.sizeA) return std::nullopt;
     return a30;
 }
 
 // 3.0's defaults, then each 1.0 block A parameter at 3.0's offset for its name
-inline std::string blockAByName(const IO& io, const bndl::Material& m10, const shd::BlockA& a30)
+inline std::string blockAByName(MaterialRun& run, const bndl::Material& m10, const shd::BlockA& a30)
 {
     const std::string& a10 = m10.A;
-    std::string A = a30.defA, raw10;
+    std::string A = a30.defA;
+    const std::string* raw10 = shd10(run, m10.shader);
     gen30::Shd10 s10;
-    if (!io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) || !gen30::parse10(raw10, s10)) return A;
+    if (!raw10 || !gen30::parse10(*raw10, s10)) return A;
     for (auto& p : s10.params) {
         auto q = a30.off.find(p.hash);
         if (!p.A || q == a30.off.end()) continue;
@@ -405,11 +432,11 @@ inline std::string blockAByName(const IO& io, const bndl::Material& m10, const s
 }
 
 // Block A by parameter name: copied raw, 1.0's layout put parameters 3.0 moved at the wrong offsets
-inline void relayBlockA(const IO& io, const bndl::Material& m10, bndl::Material& dm)
+inline void relayBlockA(MaterialRun& run, const bndl::Material& m10, bndl::Material& dm)
 {
     const std::string& a10 = m10.A;
     const bool firstParam = a10.size() >= kParamBytes && dm.A.size() >= kParamBytes;
-    if (const std::optional<shd::BlockA> a30 = donorBlockA(io, dm)) dm.A = blockAByName(io, m10, *a30);
+    if (const std::optional<shd::BlockA> a30 = donorBlockA(run, dm)) dm.A = blockAByName(run, m10, *a30);
     else if (dm.shader == m10.shader && a10.size() <= dm.A.size()) dm.A = a10 + dm.A.substr(a10.size());
     else if (firstParam) dm.A = a10.substr(0, kParamBytes) + dm.A.substr(kParamBytes);
 }
@@ -437,7 +464,7 @@ inline bool addSubstitute(MaterialRun& run, const bndl::Material& m10, const Don
     if (!bnd || !hasMaterial(*bnd, *pick.ref, run.r.problems)) return false;
     bndl::Material dm = bnd->mats[pick.ref->idx];
     const std::vector<uint32_t> used = substituteSlots(run.T, run.b10, m10, dm);
-    relayBlockA(run.io, m10, dm);
+    relayBlockA(run, m10, dm);
     if (run.io.verbose) logSubstitute(run, pick.tier, m10, dm, used);
     dm.name = m10.name;
     dm.hash = m10.hash;
@@ -512,7 +539,7 @@ inline bool transcodeMaterials(const rentable::Table& T, const IO& io, const Mat
                                std::map<int, const std::set<uint32_t>*>& shaderVf)
 {
     detail::MaterialRun run{T, io, in, r, {}, {}, {}, {}};
-    detail::BlockSizes10 sizes10{io, {}};
+    detail::BlockSizes10 sizes10{run, {}};
     const auto sizes1 = [&](const std::string& sh, int& A, int& B, int& slots) { return sizes10.get(sh, A, B, slots); };
     if (!bndl::parse(in.mtb10, run.b10, detail::kSlotStride10, sizes1, &run.err)) {
         r.problems.push_back("1.0 bundle: " + run.err);
