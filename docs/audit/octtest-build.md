@@ -106,6 +106,7 @@ a gate does see a crash as a failure; what it cannot see is wrong bytes.
 - **Fix (behaviour-preserving):** Before touching the plugin, write a local manifest (script) of every mode with real arguments and the env-var variants of OT-18; record exit code, stdout with OT-22 masking, stderr, and sha256 of every written file, from today's build; re-run and diff after each refactor step.
 - **Refactor risk:** None. Keep the manifest outside CI (it needs game data).
 - **Verification:** CONFIRMED.
+- **Done:** `golden.py` (record/check, baseline `base-23514ce`) runs every runnable mode plus the static source facts.
 
 ### OT-01 `main` is a 900-line if-chain dispatcher with 45 inline modes
 - **Where:** `native/di1compat/octtest.cpp:2528-3427`
@@ -160,6 +161,7 @@ a gate does see a crash as a failure; what it cannot see is wrong bytes.
 - **Fix (behaviour-preserving):** `inline constexpr int kPluginSlack = 4096;` in `octx.hpp`, plugin assigns it; octtest gets an opt-in `--slack N` / env var for the `addAllCounts` modes (no default change). Record a baseline with slack 4096.
 - **Refactor risk:** Low.
 - **Verification:** CORRECTED: severity High → Med (a handful of branch lines; golden output at slack 0 still covers the rest; the fix is trivial).
+- **Done:** octtest reads `OCTX_SLACK=<n>`; golden.py runs `--counts`, `--oct`, `--cho-const` and `--variants` at 0 and 4096.
 
 ### OT-09 `--read10` is a stale copy of `read10`'s archive lookup
 - **Where:** `native/di1compat/octtest.cpp:3300-3317`; `native/di1compat/di1compat.cpp:395-403`, `405-451`
@@ -231,6 +233,7 @@ a gate does see a crash as a failure; what it cannot see is wrong bytes.
 - **Fix (behaviour-preserving):** List each combination in the OT-27 manifest.
 - **Refactor risk:** None.
 - **Verification:** CONFIRMED.
+- **Done:** golden.py's manifest runs each of these env vars and extra arguments as its own case.
 
 ### OT-20 11 oracle scripts named by octtest or its headers are not in the repo
 - **Where:** `native/di1compat/octtest.cpp:240-241, 1744, 2582, 2589, 2606, 2628, 2827, 2978, 3044, 3059`; `native/di1compat/npcrt.hpp:394`, `npc.hpp:162`; `native/di1compat/sm3.hpp:2`
@@ -249,6 +252,7 @@ a gate does see a crash as a failure; what it cannot see is wrong bytes.
 - **Fix (behaviour-preserving):** In the harness, mask numeric `ms`/`us` fields and sort the `EV` lines; keep stderr separate.
 - **Refactor risk:** None.
 - **Verification:** CONFIRMED.
+- **Done:** golden.py masks timings per case, sorts unordered lines (`EV`, `--arc`), keeps stdout and stderr apart.
 
 ### OT-28 No warning level (cl runs at /W1), no `/WX`, no `/permissive-`
 - **Where:** `native/di1compat/CMakeLists.txt:1-12`
