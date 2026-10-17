@@ -155,14 +155,12 @@ inline void encode(const vtxf::ElementType& v, const double* vals, char* out)
     for (int i = 0; i < v.n; ++i) out = detail::putComponent(v.code, detail::rounded(v, vals[i]), out);
 }
 
-// One vertex through plan p, appended to the destination streams per[0..p.ds.size())
+// One vertex through plan p into its slot of the destination streams per[0..p.ds.size()), zeroed already
 inline void convertVertex(const std::vector<const uint8_t*>& src, const rentable::Plan& p,
-                          std::vector<std::string>& per)
+                          std::vector<std::string>& per, size_t slot)
 {
-    for (size_t s = 0; s < p.ds.size(); ++s) per[s].append(p.ds[s], '\0');
     for (const rentable::Op& o : p.ops) {
-        std::string& ds = per[o.dsi];
-        char* d = &ds[ds.size() - p.ds[o.dsi] + o.doff];
+        char* d = &per[o.dsi][slot * p.ds[o.dsi] + o.doff];
         if (o.kind == rentable::kConstant) {
             memcpy(d, o.bytes.data(), o.size < (int)o.bytes.size() ? o.size : o.bytes.size());
             continue;
@@ -227,12 +225,13 @@ inline const char* convertPrim(const rentable::Plan& plan, const std::vector<int
     for (size_t s = 0; s < plan.ss.size() && !order.empty(); ++s)
         if (!vertexFits(vdataOffset(vda, s), plan.ss[s], last, vbuf.size())) return "vertex past the vbuf";
     per.assign(plan.ds.size(), std::string());
-    for (size_t s = 0; s < plan.ds.size(); ++s) per[s].reserve(order.size() * (size_t)plan.ds[s]);
-    std::vector<const uint8_t*> srcp(plan.ss.size());
-    const uint8_t* vb = (const uint8_t*)vbuf.data();
-    for (uint32_t v : order) {
-        for (size_t s = 0; s < plan.ss.size(); ++s) srcp[s] = vb + (size_t)vdataOffset(vda, s) + (size_t)v * plan.ss[s];
-        convertVertex(srcp, plan, per);
+    for (size_t s = 0; s < plan.ds.size(); ++s) per[s].assign(order.size() * (size_t)plan.ds[s], '\0');
+    if (order.empty()) return nullptr;   // the offsets were checked only for a primitive with vertices
+    std::vector<const uint8_t*> streams(plan.ss.size()), srcp(plan.ss.size());
+    for (size_t s = 0; s < plan.ss.size(); ++s) streams[s] = (const uint8_t*)vbuf.data() + vdataOffset(vda, s);
+    for (size_t i = 0; i < order.size(); ++i) {
+        for (size_t s = 0; s < plan.ss.size(); ++s) srcp[s] = streams[s] + (size_t)order[i] * plan.ss[s];
+        convertVertex(srcp, plan, per, i);
     }
     return nullptr;
 }
