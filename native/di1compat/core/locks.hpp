@@ -39,7 +39,7 @@ inline constexpr LockNesting kLockOrder[] = {
     {"di1::currency mx", "its LogOnce", "currency10"},
 };
 
-// Every other plugin lock and every LogOnce lock is a leaf. The log lock (core/log.hpp) is the last of all.
+// Every other plugin lock, LogOnce's and LogCount's too, is a leaf. The log lock (core/log.hpp) is the last of all.
 
 // Fibers (B-09): a std::mutex held across a yielding engine call deadlocks its own thread. Add none here.
 inline constexpr const char* kHeldAcrossEngineCalls[] = {
