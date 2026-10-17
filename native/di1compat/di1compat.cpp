@@ -34,6 +34,7 @@
 #include "core/stack.hpp"
 #include "core/veh.hpp"
 #include "core/zip.hpp"
+#include "engine/assets.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/gamedb.hpp"
@@ -109,6 +110,8 @@ using core::memFile;
 using core::readStream;
 using hash::fnv64;
 using text::endsWith;
+using engine::assets::read30;
+using engine::assets::read30x;
 using text::norm;
 using trace::loadprof::frameNo;
 using trace::loadprof::noteOpenThread;
@@ -175,37 +178,13 @@ static bool read10s(const std::string& path, std::string& out)
     return true;
 }
 
-typedef int*(__cdecl* OpenFn)(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5);
-static OpenFn g_open;
-
-// A 3.0 asset through the engine's own open (archives, keys, index), read whole; the stream is destroyed.
-static bool read30(const std::string& path, std::string& out)
+// npcrt calls the engine's own open by this name (its internals move in a later lane).
+static int* g_open(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
 {
-    typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
-    typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
-    typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
-    int* s = g_open(path.c_str(), 0, 0, 0, nullptr);
-    if (!s) return false;
-    void** vt = *(void***)s;
-    uint32_t n = ((SizeFn)vt[4])(s, nullptr);
-    out.assign(n, '\0');
-    uint32_t got = n ? ((ReadFn)vt[5])(s, nullptr, &out[0], n) : 0;
-    ((DtorFn)vt[11])(s, nullptr, 1);
-    return got == n;
+    return engine::assets::open(path, flags, a3, a4, a5);
 }
 
-// A 3.0 asset by its extract path ('3:X/name/member' = member of <game>/assets/X/name.zip, the extract.py layout),
-// read straight from the install's archive (arc30.hpp) -- the engine's own path conventions vary by asset kind.
-static std::string g_gameDir;
-static bool read30x(const std::string& extract, std::string& out)
-{
-    std::string rel = extract.substr(2);
-    size_t cut = rel.rfind('/');
-    if (cut == std::string::npos) return false;
-    std::string arc = g_gameDir + "/assets/" + rel.substr(0, cut) + ".zip";
-    for (char& c : arc) if (c == '/') c = '\\';
-    return arc30::readMember(arc, rel.substr(cut + 1), out);
-}
+static std::string g_gameDir;   // the 3.0 install; set once in Pentane_Main, before any hook
 
 // The key hashes of every 3.0 table of language `lang` (english_ntsc ...: _win32 and _pc_con of each package under
 // <game>\assets\lang), read from the archives once (text10: 3.0's keys are never shadowed).
@@ -519,7 +498,6 @@ typedef const char*(__fastcall* AssetDefFn)(void* self, void* edx, const char* k
 static AssetDefFn g_assetDef;
 static std::map<std::string, std::string>* g_defs;   // lowercase DefID -> FileName (Cho entries)
 static std::mutex g_defsMx;
-static bool read30(const std::string& path, std::string& out);
 static const char* fallbackDef(const char* key)
 {
     std::lock_guard<std::mutex> l(g_defsMx);
@@ -1115,7 +1093,7 @@ struct Open {
 };
 
 // The engine's own open with the same arguments (a stage that consumed r answers this).
-static int* reopen(const Open& o) { return g_open(o.path, o.flags, o.a3, o.a4, o.a5); }
+static int* reopen(const Open& o) { return engine::assets::open(o.path, o.flags, o.a3, o.a4, o.a5); }
 
 // r read whole as read30 reads it: no Read when empty, the full size kept on a short read.
 static bool readKeep(int* r, std::string& t)
@@ -1530,7 +1508,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
         o.tIn = nowMs();
         noteOpenThread();
     }
-    o.r = g_open(path, flags, a3, a4, a5);
+    o.r = engine::assets::open(path, flags, a3, a4, a5);
     if (o.prof) o.t30 = nowMs() - o.tIn;
     safeCopy(o.p, sizeof(o.p), path);
     for (OpenStage stage : kOpenStages) {
@@ -1541,13 +1519,6 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     return o.r;
 }
 
-// The asset open hook (H1). Code outside hkOpen calls its original, so a refused AssetOpen installs nothing else.
-static bool installAssetOpen(const di1::Config&)
-{
-    if (hook("AssetOpen", 0x0041CB10, "6AFF68????????", (void*)&hkOpen, (void**)&g_open)) return true;
-    logf("feature AssetOpen off: no other hook installed, the game runs as plain 3.0");
-    return false;
-}
 
 // ---- real 1.0 shaders at runtime (gen30.hpp; plan in DI3Tools/gen30.py) ----
 // The engine loads its whole shader package once, at boot (renderer init FUN_00479470: shaders.list ->
@@ -2052,7 +2023,7 @@ extern "C" void __stdcall Pentane_Main()
 
     // the modules' hooks in install order (B3): a hook is live once enabled
     if (!startHooks()) return;
-    if (!installAssetOpen(g_cfg)) return;
+    if (!engine::assets::install({(void*)&hkOpen, g_gameDir})) return;
     di1::gamedb::install(g_cfg);
     installEcon(g_cfg);
     installExpPkg(g_cfg);
