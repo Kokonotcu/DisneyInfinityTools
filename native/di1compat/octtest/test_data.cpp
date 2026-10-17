@@ -10,7 +10,7 @@
 #include "../formats/chd.hpp"
 #include "../formats/dct.hpp"
 #include "../gameplay.hpp"
-#include "../mission.hpp"
+#include "../games/di1/mission.hpp"
 #include "../npc.hpp"
 #include "../sys.hpp"
 #include "../third_party/miniz/miniz.h"
@@ -261,8 +261,8 @@ int testMissionChain(const Args& a)
     int both = 0, bad = 0;
     for (int i = 2; i < a.argc; ++i) {
         std::string t = slurp(a.argv[i]), x = t, y = t;
-        int a1 = gameplay::activityTasks30(x), e1 = isMission(x) ? mission::luaEvents30(x) : 0;
-        int e2 = isMission(y) ? mission::luaEvents30(y) : 0, a2 = gameplay::activityTasks30(y);
+        int a1 = gameplay::activityTasks30(x), e1 = isMission(x) ? di1::mission::luaEvents30(x) : 0;
+        int e2 = isMission(y) ? di1::mission::luaEvents30(y) : 0, a2 = gameplay::activityTasks30(y);
         if (x != y || a1 != a2 || e1 != e2) {
             ++bad;
             printf("ORDER MATTERS %s\n", a.argv[i]);

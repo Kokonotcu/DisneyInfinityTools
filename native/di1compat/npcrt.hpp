@@ -1,7 +1,39 @@
-// NPC track, runtime side (hooks). Included by di1compat.cpp after its helpers (logf, hook, g_cfg, read10s, read30x).
+// NPC runtime: gamedb30, avperc10, spawner10 hooks and skin10. core, engine/assets, games/di1. Engine threads.
 #pragma once
+#include <windows.h>
+#include <algorithm>
+#include <cstdint>
+#include <exception>
+#include <map>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+#include "core/hooks.hpp"
+#include "core/log.hpp"
+#include "engine/assets.hpp"
+#include "formats/oct.hpp"
+#include "games/di1/config.hpp"
+#include "games/di1/session.hpp"
+#include "games/di1/vfs.hpp"
+#include "npc.hpp"
 
 namespace npcrt {
+
+// The services this file calls by their short names (declarations: N26 forbids only using namespace)
+using core::hook;
+using core::installFeature;
+using core::logf;
+using core::rt;
+using di1::vfs::read10s;
+using engine::assets::read30;
+using engine::assets::read30x;
+
+struct State {
+    di1::Config cfg;   // the keys its hooks read: set once in install(), before them
+};
+inline State g_state;
 
 // ---- gamedb30: the 3.0 GameDB tables of a playset served a 1.0 DataMap (npc::gamedb30) ----
 // Pressing E on an NPC faulted in the spinlock FUN_00412ef0 (write to 0x30). Minidump crash-20261013-044617-2 stack:
@@ -225,6 +257,7 @@ static uint32_t __fastcall hkPercRemove(uint8_t* self, void*, int a1, int a2, vo
 // The 1.0 DataMap of playset 'name' with no Playset record in the engine: build its supplement (once per playset).
 static void prepare(void* self, const char* name)
 {
+    const di1::Config& cfg = g_state.cfg;
     std::string n = npc::lower(name);
     // "Core" is 3.0's own boot-time GameDB include, not a 1.0 playset: 1.0's CoreDataMap.lua matched it, and the
     // DataMap route then ran before FUN_00693630's DAT_0228db60 exists -> AV at boot (in-game 2026-10-13)
@@ -245,7 +278,7 @@ static void prepare(void* self, const char* name)
          (unsigned)g_db->playset.size(), (unsigned)g_db->actor.size());
     g_pl10.clear();
     g_pl30.clear();
-    if (g_cfg.avperc10) {   // the avatar trees: 1.0's from the 1.0 install, 3.0's (the one its DNA names) from 3.0
+    if (cfg.avperc10) {   // the avatar trees: 1.0's from the 1.0 install, 3.0's (the one its DNA names) from 3.0
         std::string a10, a30;
         if (!read10s("characters/avatar.btx", a10) || !read30("Characters/Avatar.btx", a30) || !npc::percLists(a10, g_pl10, &why) ||
             !npc::percLists(a30, g_pl30, &why)) {
@@ -258,25 +291,26 @@ static void prepare(void* self, const char* name)
     // includes not in Toy Box come from the smallest other 3.0 DataMap (identical in all 8 that define them)
     std::string bo;
     npc::DataMap other;
-    if (g_cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && npc::dataMap(bo, other, &why)) {
+    if (cfg.playset30 && read30x("3:gamedb/core/core/dorydatamap.lua", bo) && npc::dataMap(bo, other, &why)) {
         std::vector<std::string> pkgs;   // rewards10: the 1.0 core expendables packages 3.0 does not ship
         std::string c10;
         npc::DataMap core10;
-        if (g_cfg.rewards10 && read10s("GameDB/Core/CoreDataMap.lua", c10) && npc::dataMap(c10, core10, &why))
+        if (cfg.rewards10 && read10s("GameDB/Core/CoreDataMap.lua", c10) && npc::dataMap(c10, core10, &why))
             for (auto& f : npc::coreExpendables10(core10)) {
-                int* s = g_open(f.substr(12).c_str(), 0, 0, 0, nullptr);   // the engine's own open, unhooked
+                int* s = engine::assets::open(f.substr(12).c_str(), 0, 0, 0, nullptr);   // unhooked
                 if (s) ((void(__fastcall*)(void*, void*, uint32_t))(*(void***)s)[11])(s, nullptr, 1);
                 else pkgs.push_back(f);
             }
-        if (g_cfg.rewards10) logf("rewards10 %s: 1.0 core expendables packages in the Playset record: %s", name,
+        if (cfg.rewards10) logf("rewards10 %s: 1.0 core expendables packages in the Playset record: %s", name,
                                   [&] { std::string l; for (auto& f : pkgs) l += f.substr(12) + " "; return l.empty() ? std::string("none") : l; }().c_str());
-        std::string t = npc::playsetText(n, g_db->playset, m30, other, g_cfg.hudMarker10, pkgs);
+        std::string t = npc::playsetText(n, g_db->playset, m30, other, cfg.hudMarker10, pkgs);
         g_psPath = "GameDB/Core/" + std::string(name) + "DataMap30.lua";
-        std::lock_guard<std::mutex> l2(g_sessLock);
-        g_served[npc::lower(g_psPath)] = t;
+        di1::session::keep({{npc::lower(g_psPath), t}});
         logf("playset30 %s: Playset record (%u B of Lua) at %s, hudmarker10=%d (compass screen %s)", name, (unsigned)t.size(),
-             g_psPath.c_str(), g_cfg.hudMarker10, t.find("\"hudmarker_inc|Include\"") != std::string::npos ? "included" : "absent");
-    } else if (g_cfg.playset30) logf("playset30 %s: no Playset record (%s)", name, why.empty() ? "Dory DataMap unreadable" : why.c_str());
+             g_psPath.c_str(), cfg.hudMarker10,
+             t.find("\"hudmarker_inc|Include\"") != std::string::npos ? "included" : "absent");
+    } else if (cfg.playset30) logf("playset30 %s: no Playset record (%s)", name,
+                                   why.empty() ? "Dory DataMap unreadable" : why.c_str());
 }
 
 // the DataMap router call FUN_0143acc0 makes for a playset's DataMap (vtable[1] "DataMap", path, 0, 0; vtable[2] unloads)
@@ -296,7 +330,7 @@ static uint8_t __fastcall hkInclude(void* self, void*, const char* name, int kin
     std::string what, psMap;
     if (name && kind >= 0 && kind <= 12) {
         std::lock_guard<std::mutex> lock(g_dbLock);
-        if (kind == 0 && g_cfg.serve10) {
+        if (kind == 0 && g_state.cfg.serve10) {
             try {
                 prepare(self, name);
             } catch (std::exception& e) {   // never unwind into engine code (luaEval's .at() on a malformed chunk)
@@ -408,24 +442,29 @@ static std::string skin10(oct::File& f, std::string& vbuf, const std::string& ib
     return n || !why.empty() ? "+skinremap(" + std::to_string(n) + (why.empty() ? "" : ": " + why) + ") " : "";
 }
 
-inline void install()
+// The NPC runtime's hooks (H1); avperc10 works on the GameDb that gamedb30 builds, so it needs gamedb30's hooks.
+inline bool install(const di1::Config& c)
 {
-    if (g_cfg.spawner10)
-        hook("quarterback factory (spawner10)", 0x010C2F70, "64A1000000006AFF68????????50", (void*)&hkQbFactory, (void**)&g_qbFactory);
-    if (!g_cfg.gamedb30) return;
-    bool db = installFeature("gamedb30", {
+    g_state.cfg = c;
+    bool ok = true;
+    if (c.spawner10)
+        ok &= hook("quarterback factory (spawner10)", 0x010C2F70, "64A1000000006AFF68????????50", (void*)&hkQbFactory,
+                   (void**)&g_qbFactory);
+    if (!c.gamedb30) return ok;
+    const bool db = installFeature("gamedb30", {
         {"DataMap record include (gamedb30)", 0x0070D730, "6AFF68????????64A100000000", (void*)&hkInclude,
          (void**)&g_include},
         {"DataMap playset unload (gamedb30)", 0x0070DF70, "566A0068????????8BF1", (void*)&hkPlaysetUnload,
          (void**)&g_playsetUnload},
     });
-    if (db && g_cfg.avperc10)   // avperc10 works on the GameDb that gamedb30 builds
-        installFeature("avperc10", {
+    if (db && c.avperc10)
+        ok &= installFeature("avperc10", {
             {"perception mode apply (avperc10)", 0x0152AE80, "51837C240CF9578BF9", (void*)&hkPercApply,
              (void**)&g_percApply},
             {"perception mode remove (avperc10)", 0x0152AFA0, "837C2408F9568BF1", (void*)&hkPercRemove,
              (void**)&g_percRemove},
         });
+    return ok && db;
 }
 
 }  // namespace npcrt

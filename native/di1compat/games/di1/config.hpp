@@ -11,7 +11,7 @@ namespace di1 {
 struct Config {
     char install10[MAX_PATH] = "";   // the 1.0 install (its assets\ holds plain zips)
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
-    bool trace = false;              // diagnostic: log every open, 26 probe hooks (incl. hkInst, hide_ps, DR0 watch)
+    bool trace = false;              // diagnostic: log every open, 26 probe hooks (incl. hkInst, DR0 watch)
     bool missionTrace = false;       // log 1.0 playset mission context state changes (one cheap hook)
     bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
     bool breakTrace = false;         // probe: clip evaluation clocks, exploder hits and explodes (log only)
@@ -29,17 +29,17 @@ struct Config {
     bool fpsLog10 = false;           // test: each second, frame time and the main thread's wait on rendering
     bool loadProf10 = false;         // diagnostic: per-open timings + a sampling profile of the busiest threads
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
-    bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
+    bool hidePs = false;             // experiment: actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
     bool progress10 = true;          // mission .lua: 1.0's generated objective line -> ProgressString "<default>"
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
     bool lockTrace10 = false;        // diagnostic: log control locks, contexts, choreography play/end, messages
-    bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (Table::portRefs)
+    bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer::Rules::portRefs)
     bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them
-    bool pins10 = true;              // .mer: complete pin tables on every instance (Table::pins10)
-    bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (Table::gate10)
-    bool toggleType10 = true;        // .mer: Collision/VisibilityToggle keep their 1.0 mode (Table::toggleType10)
+    bool pins10 = true;              // .mer: complete pin tables on every instance (mer::Rules::pins10)
+    bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (mer::Rules::gate10)
+    bool toggleType10 = true;        // .mer: Collision/VisibilityToggle keep their 1.0 mode (mer::Rules::toggleType10)
     bool beacon10 = true;            // zonelist.lua: 1.0 BeaconMap rows in 3.0's row form (mission::beaconMap30)
     bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
     bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
@@ -71,10 +71,10 @@ struct Config {
     bool choAnim10 = true;           // cho.hpp: Float 'Global.Time' clip/event input -> AnimState 'AnimState'
     bool choScene10 = true;          // cho.hpp: SceneTreeNodeRef on PlacementNode Associations
     bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
-    bool choConst10 = true;          // cho.hpp: Static nodes of choreography graphs stay Static under constant headers
+    bool choConst10 = true;          // choconst.hpp: choreography Static nodes stay Static under constant headers
     bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
     bool realmFile10 = true;         // octx.hpp: a 1.0 realm file's RealmDataPool as 3.0's RealmData node
-    bool choLayout10 = true;         // cho.hpp: ContextNodes -> InstanceNodes (choreography actors and clips instanced)
+    bool choLayout10 = true;         // cholayout.hpp: ContextNodes -> InstanceNodes (actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
     bool clip10Ids = true;           // cho.hpp: 3.0 port ids on motion clips of templates 3.0 owns; 1.0 model links

@@ -1,4 +1,4 @@
-// Acceptance tests of cho::const30 with the counts' constant mode, and of octx's variant groups.
+// Acceptance tests of di1::cho::const30 with the counts' constant mode, and of octx's variant groups.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -9,7 +9,7 @@
 #include <set>
 #include <string>
 #include <vector>
-#include "../cho.hpp"
+#include "../convert/records.hpp"
 #include "chotree.hpp"
 #include "files.hpp"
 #include "run.hpp"
@@ -44,7 +44,7 @@ std::vector<size_t> staticNodes(const oct::File& f, const SubNet& s)
     std::vector<size_t> v;
     for (size_t d : s.dataNodes) {
         long st = child(f, d, "Static");
-        if (st >= 0 && cho::first(f, f.recs[st], 0)) v.push_back(d);
+        if (st >= 0 && octx::firstInt(f, f.recs[st], 0)) v.push_back(d);
     }
     return v;
 }
@@ -53,20 +53,20 @@ std::vector<size_t> staticNodes(const oct::File& f, const SubNet& s)
 int snCount(const oct::File& f, size_t sn, const char* k)
 {
     long r = child(f, sn, k);
-    return r < 0 ? -1 : cho::first(f, f.recs[r], -1);
+    return r < 0 ? -1 : octx::firstInt(f, f.recs[r], -1);
 }
 
 // An association's SubNetwork index (SubNetworkRef), -1 without one.
 int assocSubnet(const oct::File& f, size_t i)
 {
     long sr = child(f, i, "SubNetworkRef");
-    return sr < 0 ? -1 : cho::first(f, f.recs[sr], -1);
+    return sr < 0 ? -1 : octx::firstInt(f, f.recs[sr], -1);
 }
 
 int headerNumber(const oct::File& g, size_t rec)
 {
     long h = child(g, rec, "Header");
-    return h < 0 ? -1 : cho::first(g, g.recs[h], -1);
+    return h < 0 ? -1 : octx::firstInt(g, g.recs[h], -1);
 }
 
 // ---- Static node uses: measured on the 3.0 corpus, checked on the 1.0 output ----
@@ -101,7 +101,7 @@ void visitStaticNodes(const oct::File& f, const SubNet& s, const std::set<size_t
     for (size_t q : s.processors) varPaths.push_back(headerPath(f, s, q));
     for (size_t d : st) {
         long ex = child(f, d, "External");
-        const bool external = ex >= 0 && cho::first(f, f.recs[ex], 0);
+        const bool external = ex >= 0 && octx::firstInt(f, f.recs[ex], 0);
         visit(StaticUse::Shape, childName(f, d, "Type") + (external ? " External" : ""));
         if (anyBelow(varPaths, headerPath(f, s, d) + "/")) visit(StaticUse::VariableBelow, "");
     }
@@ -131,7 +131,7 @@ void visitStaticRefs(const oct::File& f, const SubNet& s, const std::set<size_t>
     }
     for (size_t j = s.at + 1, e = f.blockEnd(s.at); j < e; ++j) {
         if (f.recs[j].level != 5 || f.name(f.recs[j]) != "DataNodeRef") continue;
-        if (isStaticRef(s, st, cho::first(f, f.recs[j], -1))) visit(StaticUse::Conversion, "");
+        if (isStaticRef(s, st, octx::firstInt(f, f.recs[j], -1))) visit(StaticUse::Conversion, "");
     }
 }
 
@@ -497,8 +497,8 @@ VariantPools variantPools(const oct::File& f, size_t sn)
         const oct::Rec& r = f.recs[j];
         if (r.level == 3) {
             pool = f.name(r);
-            if (pool == "VariantGroupCount") v.groupCount = cho::first(f, r, -1);
-            else if (pool == "VariantMemberCount") v.memberCount = cho::first(f, r, -1);
+            if (pool == "VariantGroupCount") v.groupCount = octx::firstInt(f, r, -1);
+            else if (pool == "VariantMemberCount") v.memberCount = octx::firstInt(f, r, -1);
         } else if (r.level == 4 && pool == "VariantGroupPool") v.groups.push_back(f.ints(r));
     }
     return v;

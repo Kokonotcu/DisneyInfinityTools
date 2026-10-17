@@ -23,6 +23,9 @@ inline bool readableRegion(const MEMORY_BASIC_INFORMATION& mbi)
 }
 }  // namespace detail
 
+// Whether [p, p+n) can be read without a fault: sys::readable, the fast check hooks use before every read (H8).
+inline bool readable(const void* p, size_t n) { return sys::readable(p, n); }
+
 // Whether [p, p+n) is readable, by VirtualQuery alone: slow on big regions, so only diagnostic stack walks use it.
 inline bool vqReadable(const void* p, size_t n)
 {

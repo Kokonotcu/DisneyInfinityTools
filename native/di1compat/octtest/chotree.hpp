@@ -7,7 +7,7 @@
 #include <map>
 #include <string>
 #include <vector>
-#include "../cho.hpp"
+#include "../convert/records.hpp"
 #include "../formats/oct.hpp"
 #include "files.hpp"
 #include "tuples.hpp"
@@ -174,7 +174,7 @@ inline std::string childName(const oct::File& f, size_t i, const char* n)
 inline std::string headerPath(const oct::File& f, const SubNet& s, size_t node)
 {
     long h = child(f, node, "Header");
-    int k = h < 0 ? -1 : cho::first(f, f.recs[h], -1);
+    int k = h < 0 ? -1 : octx::firstInt(f, f.recs[h], -1);
     return k >= 0 && (size_t)k < s.paths.size() ? s.paths[k] : "?";
 }
 

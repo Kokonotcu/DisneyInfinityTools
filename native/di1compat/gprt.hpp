@@ -1,7 +1,38 @@
-// gp track, runtime side (hooks). Included by di1compat.cpp after its helpers (logf, hook, rt, g_cfg).
+// Gameplay and menu runtime: selectmenu10, actionmap10, focus10, keys10, accept10, tools10. core, games/di1.
+// Game thread.
 #pragma once
+#include <windows.h>
+#include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <vector>
+#include "core/hooks.hpp"
+#include "core/log.hpp"
+#include "core/memcheck.hpp"
+#include "core/zip.hpp"
+#include "gameplay.hpp"
+#include "games/di1/config.hpp"
+#include "games/di1/session.hpp"
+#include "games/di1/vfs.hpp"
+#include "sys.hpp"
+#include "third_party/miniz/miniz.h"
 
 namespace gprt {
+
+// core's services this file calls by their short names (declarations: N26 forbids only using namespace)
+using core::hook;
+using core::installFeature;
+using core::logf;
+using core::rt;
+using core::safeCopy;
+
+struct State {
+    di1::Config cfg;   // the keys its hooks read: set once in install(), before them
+};
+inline State g_state;
 
 // ---- selectmenu10: the 1.0 playset ribbon, the way to the Toy Store (plan KIO-1) ----
 // The story needs the Toy Store right after DockFire: Investigate_Explosions waits on Eval_LockState
@@ -119,7 +150,7 @@ static int __fastcall hkLuaAddScreen(uint8_t* screen, void* edx, void* L)
         safeCopy(caller, sizeof(caller), *(const char**)(screen + 0xc));
         for (char* c = caller; *c; ++c) *c = (char)tolower((unsigned char)*c);
         bool from10;
-        { std::lock_guard<std::mutex> lock(g_sessLock); from10 = g_screens10.count(caller) != 0; }
+        from10 = di1::session::screenServed(caller);
         const char* name = ((LuaToStringFn)rt(0x0130D5A0))(L, 2, nullptr);
         if (from10 && name && *name) {
             int player = *(int*)(screen + 0x50);
@@ -165,8 +196,7 @@ static bool movie10(const uint8_t* screen)
     if (!*m) return false;
     std::string k = std::string("flash/") + m;
     for (char& c : k) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
-    std::lock_guard<std::mutex> lock(g_sessLock);
-    return g_movies10.count(k) != 0;
+    return di1::session::movieServed(k);
 }
 
 static const char* gfxString(const uint8_t* v)   // a GFx Value (type +0xc: 6 string, bit 6 managed = one more hop)
@@ -188,14 +218,14 @@ static uint8_t* screenOfCall(const uint8_t* args, char* lua, size_t cap)   // ar
 }
 
 static volatile LONG g_inputLines;   // probe budget (locktrace10): movie calls, focus, delivery gates, actions
-static bool inputRoom() { return g_cfg.lockTrace10 && InterlockedIncrement(&g_inputLines) <= 600; }
+static bool inputRoom() { return g_state.cfg.lockTrace10 && InterlockedIncrement(&g_inputLines) <= 600; }
 
 static void __cdecl hkFlashCall(void* a1, void* a2, const char* name, uint8_t* args, void* argc)
 {
     char lua[64] = "";
     uint8_t* s = name && args ? screenOfCall(args, lua, sizeof(lua)) : nullptr;
     bool ten = s && movie10(s);
-    if (ten && !strcmp(name, "UsesActionMap") && g_cfg.actionMap10) {
+    if (ten && !strcmp(name, "UsesActionMap") && g_state.cfg.actionMap10) {
         if (void* map = *(void**)s) (*(ActionMapClearFn**)map)[1](map, nullptr);   // vt[1] FUN_007f3640: empty it
         logf("actionmap10: %s (1.0 movie) UsesActionMap -> its map is the movie's list", lua);
         name = "AppendActionMap";
@@ -277,8 +307,7 @@ static bool script10(const uint8_t* screen)
     char t[64] = "";
     safeCopy(t, sizeof(t), *(const char* const*)(screen + 0xc));
     for (char* c = t; *c; ++c) *c = (char)tolower((unsigned char)*c);
-    std::lock_guard<std::mutex> lock(g_sessLock);
-    return g_screens10.count(t) != 0;
+    return di1::session::screenServed(t);
 }
 
 static char __fastcall hkMapState(void* map, void* edx, int i, uint32_t* key, uint8_t* down, uint8_t* up)
@@ -288,7 +317,7 @@ static char __fastcall hkMapState(void* map, void* edx, int i, uint32_t* key, ui
         char name[64] = "";
         safeCopy(name, sizeof(name), *(const char**)(g_keysScreen + 0x10));
         bool sent = false;
-        if (*down && g_keysMovie && g_cfg.keys10) {
+        if (*down && g_keysMovie && g_state.cfg.keys10) {
             // as FUN_007f3320 fills its KeyDown (0x007f3451..0x007f3480): type 5, modifiers, keyCode, +0xc and +0x14 =
             // the player slot (its arg 1; here the map's slot +0x20, which FUN_00b48250 queries), +0x10 = 0
             uint32_t slot = *(const uint8_t*)((const uint8_t*)map + 0x20);
@@ -307,7 +336,7 @@ static char __fastcall hkMapState(void* map, void* edx, int i, uint32_t* key, ui
 static void __fastcall hkDeliver(uint8_t* screen, void* edx, void* a1, void* a2)
 {
     bool ten = screen && movie10(screen);
-    if (ten && g_cfg.lockTrace10) {
+    if (ten && g_state.cfg.lockTrace10) {
         static uint8_t* last;
         static uint32_t lastGates = ~0u;
         void* map = *(void**)screen;
@@ -397,7 +426,7 @@ static void __fastcall hkVehicleCtl(uint8_t* ctl, void* edx, void* vehicle)
 {
     void* old = ctl ? *(void**)(ctl + 0xF0) : nullptr;
     g_vehicleCtl(ctl, edx, vehicle);
-    if (!g_cfg.lockTrace10 || !zonePlayset10() || !inputRoom()) return;
+    if (!g_state.cfg.lockTrace10 || !zonePlayset10() || !inputRoom()) return;
     void* zm = *(void**)rt(0x0225F548);
     char toy = zm ? ((ZoneFlagFn)rt(0x0139E6E0))(zm, nullptr, 0) : 0;
     logf("vehicle10: player control %p takes vehicle %p (was %p); zone PlaysetProperties ToyBox %d -> 3.0 %s Allow_UIRibbon "
@@ -423,16 +452,14 @@ static const std::map<std::string, std::vector<std::string>>& toolLevels10()
 {
     static const auto t = [] {   // read once (thread-safe static init): later calls take no lock on the game thread
         std::map<std::string, std::vector<std::string>> m;
-        std::lock_guard<std::mutex> lock(g_zipLock);
-        if (mz_zip_archive* z = zipFor("startup5.zip")) {
-            int i = mz_zip_reader_locate_file(z, "var/toolset/toolset.bin", nullptr, 0);
+        di1::vfs::withArchive("startup5.zip", [&m](mz_zip_archive* z) {
             size_t n = 0;
-            if (void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) {
+            if (void* d = z ? core::extractZipMember(z, "var/toolset/toolset.bin", &n) : nullptr) {
                 m = gameplay::toolLevels10((const uint8_t*)d, n);
                 mz_free(d);
             }
-        }
-        logf("tools10: %u 1.0 tool records from startup5.zip:var/toolset/toolset.bin", (unsigned)m.size());
+            logf("tools10: %u 1.0 tool records from startup5.zip:var/toolset/toolset.bin", (unsigned)m.size());
+        });
         return m;
     }();
     return t;
@@ -457,17 +484,22 @@ static uint32_t __fastcall hkToolGate(uint8_t* tool, void* edx, const uint8_t* p
     return r;
 }
 
-static void install()
+// The gameplay and menu runtime's hooks (H1).
+inline bool install(const di1::Config& c)
 {
-    if (g_cfg.lockTrace10)
-        hook("vehicle control takeover (vehicle10 probe)", 0x00D612A0, "6AFF68????????64A100000000", (void*)&hkVehicleCtl,
-             (void**)&g_vehicleCtl);
-    if (g_cfg.accept10)
-        hook("mission activation (accept10)", 0x015BCC10, "83EC14568BF18A86DB03000084C0", (void*)&hkMissionActivate,
-             (void**)&g_missionActivate);
-    if (g_cfg.tools10) hook("tool level gate (1.0 lists)", 0x0150F7D0, "538BD9837B74FF", (void*)&hkToolGate, (void**)&g_toolGate);
-    if (g_cfg.selectMenu10)
-        installFeature("selectmenu10", {
+    g_state.cfg = c;
+    bool ok = true;
+    if (c.lockTrace10)
+        ok &= hook("vehicle control takeover (vehicle10 probe)", 0x00D612A0, "6AFF68????????64A100000000",
+                   (void*)&hkVehicleCtl, (void**)&g_vehicleCtl);
+    if (c.accept10)
+        ok &= hook("mission activation (accept10)", 0x015BCC10, "83EC14568BF18A86DB03000084C0",
+                   (void*)&hkMissionActivate, (void**)&g_missionActivate);
+    if (c.tools10)
+        ok &= hook("tool level gate (1.0 lists)", 0x0150F7D0, "538BD9837B74FF", (void*)&hkToolGate,
+                   (void**)&g_toolGate);
+    if (c.selectMenu10)
+        ok &= installFeature("selectmenu10", {
             {"ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&hkRibbonName,
              (void**)&g_ribbonName},
             {"ribbon open (1.0 SelectMenu)", 0x00B68F60, "6AFF68????????64A100000000", (void*)&hkShowRibbon,
@@ -478,25 +510,26 @@ static void install()
              (void*)&hkLuaAddScreen,
              (void**)&g_luaAddScreen},
         });
-    if (g_cfg.actionMap10 || g_cfg.lockTrace10)
-        hook("movie ExternalInterface call (1.0 UsesActionMap; input10 probe)", 0x01564790,
-             "64A1000000006AFF68????????506489250000000081ECC8000000", (void*)&hkFlashCall, (void**)&g_flashCall);
-    if (g_cfg.focus10)
-        installFeature("focus10", {
+    if (c.actionMap10 || c.lockTrace10)
+        ok &= hook("movie ExternalInterface call (1.0 UsesActionMap; input10 probe)", 0x01564790,
+                   "64A1000000006AFF68????????506489250000000081ECC8000000", (void*)&hkFlashCall, (void**)&g_flashCall);
+    if (c.focus10)
+        ok &= installFeature("focus10", {
             {"screen focus gain (1.0 movies)", 0x01559480, "568B742408578BF98B4E50C1E105", (void*)&hkFocusGain,
              (void**)&g_focusGain},
             {"screen focus loss (1.0 movies)", 0x01554590, "64A1000000006AFF68????????506489250000000083EC28",
              (void*)&hkFocusLoss,
              (void**)&g_focusLoss},
         });
-    if (g_cfg.lockTrace10 || g_cfg.keys10)
-        installFeature("keys10", {
+    if (c.lockTrace10 || c.keys10)
+        ok &= installFeature("keys10", {
             {"screen action delivery (keys10; input10 probe)", 0x01565330,
              "64A1000000006AFF68????????506489250000000083EC44",
              (void*)&hkDeliver, (void**)&g_deliver},
             {"action map entry state (keys10)", 0x00B48250, "8B44240456578BF1508D4E04", (void*)&hkMapState,
              (void**)&g_mapState},
         });
+    return ok;
 }
 
 }   // namespace gprt

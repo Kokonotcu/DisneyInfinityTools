@@ -9,7 +9,9 @@
 #include <set>
 #include <string>
 #include <vector>
-#include "../cho.hpp"
+#include "../convert/clips.hpp"
+#include "../games/di1/cho.hpp"
+#include "../games/di1/cholayout.hpp"
 #include "chotree.hpp"
 #include "files.hpp"
 #include "run.hpp"
@@ -21,18 +23,18 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// A ClipDataBlock as cho::clipBlock30 reads it: u16 counts, u32 constant offset, a u32 offset per descriptor.
+// A ClipDataBlock as di1::cho::clipBlock30 reads it: u16 counts, u32 constant offset, a u32 offset per descriptor.
 constexpr size_t kDescCountAt = 8, kSectionCountAt = 10, kConstOffsetAt = 12, kOffsetsAt = 0x10, kOffsetBytes = 4;
 // A descriptor: u16 input count at +2, the u16 inputs, u16 X (its constant table), then the sampled table.
 constexpr size_t kInputCountAt = 2, kInputsAt = 4, kSampledAt = 6, kU16Bytes = 2;
 // A 3.0 output table: u16 count, u16 heads (comps in bits 13-15, port id below), then the comps.
 constexpr int kCompShift = 13;
 constexpr uint32_t kIdMask = 0x1fff;
-constexpr uint32_t kPastEnd = 0xffffffffu;   // cho::rd past the payload
+constexpr uint32_t kPastEnd = 0xffffffffu;   // clips::rd past the payload
 constexpr size_t kShapeShown = 300;          // characters of a block shape printed
 
-uint32_t rd16(const std::string& d, size_t o) { return cho::rd(d, o, 2); }
-uint32_t rd32(const std::string& d, size_t o) { return cho::rd(d, o, 4); }
+uint32_t rd16(const std::string& d, size_t o) { return clips::rd(d, o, 2); }
+uint32_t rd32(const std::string& d, size_t o) { return clips::rd(d, o, 4); }
 
 // A comp's bytes: code kinds 1 and 2 (top nibble) carry 8, the rest 4.
 size_t compBytes(uint32_t code)
@@ -111,7 +113,7 @@ void clipTwinBlock(const std::string& name10, const std::vector<std::string>& A,
                    size_t i, ClipTally& t)
 {
     std::string out;
-    if (!cho::clipBlock30(A[i], out)) {
+    if (!di1::cho::clipBlock30(A[i], out)) {
         ++t.failed;
         return;
     }
@@ -231,7 +233,7 @@ TwinBlocks twinBlocks(const oct::File& B)
 }
 
 // A motion clip block at position at, through its port map, against the twin's block there.
-void clipIdsBlock(const oct::Rec& r, size_t at, const cho::PortMap& pm, const TwinBlocks& tb, Tally& c)
+void clipIdsBlock(const oct::Rec& r, size_t at, const di1::cho::PortMap& pm, const TwinBlocks& tb, Tally& c)
 {
     ++c[std::string("blocks on ") + pm.tmpl];
     if (_stricmp(tb.tmpl.c_str(), pm.tmpl)) {
@@ -243,7 +245,7 @@ void clipIdsBlock(const oct::Rec& r, size_t at, const cho::PortMap& pm, const Tw
         return;
     }
     std::string d = blobData(r), ours, kept;
-    if (!cho::clipBlock30(d, ours, &pm) || !cho::clipBlock30(d, kept)) {
+    if (!di1::cho::clipBlock30(d, ours, &pm) || !di1::cho::clipBlock30(d, kept)) {
         countBoth(c, pm.tmpl, "  NOT CONVERTED");
         return;
     }
@@ -259,11 +261,11 @@ void clipIdsBlock(const oct::Rec& r, size_t at, const cho::PortMap& pm, const Tw
 void clipIdsFile(const oct::File& A, const oct::File& B, Tally& c)
 {
     const TwinBlocks tb = twinBlocks(B);
-    const cho::PortMap* pm = nullptr;
+    const di1::cho::PortMap* pm = nullptr;
     size_t k = 0;
     for (size_t i = 0; i < A.recs.size(); ++i) {
         if (A.recs[i].level == 2 && A.name(A.recs[i]) == "SubNetwork") {
-            pm = cho::clipPorts(A, i);
+            pm = di1::cho::clipPorts(A, i);
             continue;
         }
         if (A.name(A.recs[i]) != "ClipDataBlock") continue;
@@ -322,9 +324,12 @@ int clipsWithIds(const std::string& b, oct::File& f, int& failed, ChoFileTotals&
 {
     int ren = 0;
     oct::File g0 = parse(b);
-    cho::clips30(g0, everyMotion);
-    const int nc = cho::clips30(f, everyMotion, &failed, true, &ren);
-    const int nk = cho::links30(f);
+    di1::cho::clips30(g0, {everyMotion});
+    const di1::cho::ClipCounts cc = di1::cho::clips30(f, {everyMotion, true});
+    failed = cc.failed;
+    ren = cc.renumbered;
+    const int nc = cc.repacked;
+    const int nk = di1::cho::links30(f);
     if (f.write() != g0.write()) ++(ren || nk ? t.changedIds : t.changedElse);
     t.renumbered += ren;
     t.linksRenumbered += nk;
@@ -343,7 +348,7 @@ void sceneClips(const std::string& b, const std::string& path, ChoFileTotals& t)
         if (r.level == 3 && g1.name(r) == "Type") clipSn = g1.nameValues(r) == std::vector<std::string>{"Clip"};
         if (g1.name(r) == "ClipDataBlock" && !clipSn) ++scene;
     }
-    int n1 = cho::clips30(g1, noMotion);
+    int n1 = di1::cho::clips30(g1, {noMotion}).repacked;
     t.sceneBlocks += scene;
     if (n1 >= scene) return;
     ++t.sceneMiss;
@@ -359,7 +364,8 @@ void choFileOne(const std::string& path, ChoFileRun& run)
     int failed = 0, inst = 0;
     const int nc = clipsWithIds(b, f, failed, run.t);
     sceneClips(b, path, run.t);
-    const int nl = cho::layout30(f, &inst), nt = cho::time30(f), na = cho::anim30(f), ns = cho::scene30(f);
+    const int nl = di1::cho::layout30(f, &inst), nt = di1::cho::time30(f);
+    const int na = di1::cho::anim30(f), ns = di1::cho::scene30(f);
     const std::string w = f.write();
     if (run.outDir) writeFile(fs::path(run.outDir) / fs::path(path).filename(), w);
     oct::File g = parse(w);
@@ -524,7 +530,7 @@ void banmPair(const std::string& line, BanmTally& t)
     if (b2 == std::string::npos) return;
     std::string b = slurp(line.substr(0, b1));
     oct::File f = parse(b);
-    if (!cho::banm30(f, line.substr(b2 + 1))) {
+    if (!di1::cho::banm30(f, line.substr(b2 + 1))) {
         ++t.rejected;
         return;
     }

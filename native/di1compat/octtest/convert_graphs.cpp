@@ -6,14 +6,14 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "../cho.hpp"
+#include "../games/di1/cho.hpp"
 #include "../formats/btd.hpp"
 #include "../gameplay.hpp"
 #include "../games/di1/bent.hpp"
 #include "../games/di1/btd.hpp"
 #include "../games/di1/zones.hpp"
-#include "../mer.hpp"
-#include "../mission.hpp"
+#include "../games/di1/mer.hpp"
+#include "../games/di1/mission.hpp"
 #include "../npc.hpp"
 #include "../third_party/miniz/miniz.h"
 #include "../ui.hpp"
@@ -33,26 +33,26 @@ constexpr size_t kExtLen = 4;   // ".mtb", ".btd": the extension a sibling outpu
 
 // ---- --mer ----
 
-// A trailing flag sets one cfg switch to 0 (mer::Table's defaults equal the cfg's).
+// A trailing flag sets one cfg switch to 0 (di1::mer::Rules' defaults equal the cfg's).
 struct MerFlag {
     const char* flag;
-    bool mer::Table::*off;
+    bool di1::mer::Rules::*off;
 };
-constexpr MerFlag kMerFlags[] = {{"--noportrefs", &mer::Table::portRefs},
-                                 {"--noports", &mer::Table::ports10},
-                                 {"--nopins", &mer::Table::pins10},
-                                 {"--noevents", &mer::Table::events10},
-                                 {"--nogate", &mer::Table::gate10},
-                                 {"--notoggletype", &mer::Table::toggleType10}};
+constexpr MerFlag kMerFlags[] = {{"--noportrefs", &di1::mer::Rules::portRefs},
+                                 {"--noports", &di1::mer::Rules::ports10},
+                                 {"--nopins", &di1::mer::Rules::pins10},
+                                 {"--noevents", &di1::mer::Rules::events10},
+                                 {"--nogate", &di1::mer::Rules::gate10},
+                                 {"--notoggletype", &di1::mer::Rules::toggleType10}};
 
-void applyMerFlag(mer::Table& T, const std::string& flag)
+void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
 {
     for (const MerFlag& f : kMerFlags) {
         if (flag != f.flag) continue;
-        T.*f.off = false;
+        R.*f.off = false;
         return;
     }
-    if (flag == "--aliases") mer::addAliases(T);   // as after hkMerRegistry
+    if (flag == "--aliases") di1::mer::addAliases(T);   // as after hkMerRegistry
 }
 
 // ---- --challenge ----
@@ -104,7 +104,7 @@ ChallengeKind challengeKind(const std::string& name, const fs::path& in)
 
 // ---- --activity ----
 
-// activityGraph30 (<name>.pre.mer), then mer::transcode (<name>.mer).
+// activityGraph30 (<name>.pre.mer), then di1::mer::transcode at the default rules (<name>.mer).
 void activityMer(const mer::Table& T, const fs::path& in, const fs::path& outDir)
 {
     std::string t = slurp(in), name = in.filename().string();
@@ -115,9 +115,9 @@ void activityMer(const mer::Table& T, const fs::path& in, const fs::path& outDir
         return;
     }
     writeFile(outDir / (in.stem().string() + ".pre.mer"), f.write());
-    mer::Stats st;
+    di1::mer::Stats st;
     std::string why;
-    bool ok = mer::transcode(T, f, &st, &why);
+    bool ok = di1::mer::transcode(T, di1::mer::Rules(), f, &st, &why);
     writeFile(outDir / name, f.write());
     printf("mer %-52s %d nodes, %d rerouted, %d dropped; mer %s: %d nodes %d stubs %d links %d dropped\n", name.c_str(),
            k, re, dr, ok ? "ok" : why.c_str(), st.nodes, st.stubs, st.links, st.linksDropped);
@@ -202,10 +202,11 @@ int convertByPlugin(const Args& a)
     return 0;
 }
 
-// mer::transcode of one 1.0 graph at the table's defaults, then the trailing flags'; [out.mtc] mer::mtc.
+// di1::mer::transcode of one 1.0 graph at the default rules, then the trailing flags'; [out.mtc] mer::mtc.
 int convertMer(const Args& a)
 {
     mer::Table T;
+    di1::mer::Rules R;
     if (!T.load(slurp(a.argv[2]))) {
         printf("table load failed\n");
         return 2;
@@ -214,12 +215,12 @@ int convertMer(const Args& a)
     for (; argc > 5; --argc) {   // trailing flags, any order
         const std::string flag = a.argv[argc - 1];
         if (flag.rfind("--", 0) != 0) break;
-        applyMerFlag(T, flag);
+        applyMerFlag(T, R, flag);
     }
     std::string b = slurp(a.argv[3]), why;
     oct::File f = parse(b);
-    mer::Stats st;
-    if (!mer::transcode(T, f, &st, &why)) {
+    di1::mer::Stats st;
+    if (!di1::mer::transcode(T, R, f, &st, &why)) {
         printf("not transcoded: %s\n", why.c_str());
         return 1;
     }
@@ -281,7 +282,7 @@ int convertChallenge(const Args& a)
 int convertBeaconMap(const Args& a)
 {
     std::string t = slurp(a.argv[2]);
-    int aliases = 0, n = mission::beaconMap30(t, &aliases);
+    int aliases = 0, n = di1::mission::beaconMap30(t, &aliases);
     writeFile(a.argv[3], t);
     printf("%d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added\n", n, aliases);
     return 0;
@@ -294,7 +295,7 @@ int convertZones10(const Args& a)
     Zones z;
     if (!zones10(a.argv[2], a.argv[3], opt, z)) return 1;
     if (opt != "only") {
-        int k = gameplay::zonelist30(z.t), ka = 0, kb = mission::beaconMap30(z.t, &ka);
+        int k = gameplay::zonelist30(z.t), ka = 0, kb = di1::mission::beaconMap30(z.t, &ka);
         printf("zonelist30 %d records, beaconMap30 %d rows (+%d)\n", k, kb, ka);
     }
     writeFile(a.argv[4], z.t);
@@ -451,7 +452,7 @@ int convertClipDump(const Args& a)
     for (auto& r : f.recs) {
         if (f.name(r) != "ClipDataBlock") continue;
         std::string out;
-        if (!cho::clipBlock30(blobData(r), out)) out = "FAIL";
+        if (!di1::cho::clipBlock30(blobData(r), out)) out = "FAIL";
         all += out;
     }
     writeFile(a.argv[3], all);

@@ -9,7 +9,9 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "../cho.hpp"
+#include "../convert/records.hpp"
+#include "../games/di1/cho.hpp"
+#include "../games/di1/cholayout.hpp"
 #include "chotree.hpp"
 #include "files.hpp"
 #include "run.hpp"
@@ -84,7 +86,7 @@ void retimeCheck(const fs::path& p, TimeTally& t)
     if (!hasName(b, "SubNetworkPool")) return;
     oct::File f = parse(b);
     if (stripTimeRanges(f)) ++t.with;
-    cho::time30(f);
+    di1::cho::time30(f);
     if (f.write() == b) {
         ++t.same;
         return;
@@ -130,7 +132,7 @@ void time10Twin(const std::string& n, const fs::path& p10, const fs::path& p30, 
 {
     std::string b = slurp(p10), b3 = slurp(p30);
     oct::File f = parse(b), g = parse(b3);
-    cho::time30(f);
+    di1::cho::time30(f);
     auto x = timeRanges(f), y = timeRanges(g);
     if (x.empty() && y.empty()) {
         ++t.none;
@@ -229,8 +231,8 @@ void animTwinProcessor(const AnimTwin& w, size_t k, size_t pn, Tally& c)
 
 void animTwin(const std::string& n, oct::File& f, const oct::File& g, Tally& c)
 {
-    cho::time30(f);
-    cho::anim30(f);
+    di1::cho::time30(f);
+    di1::cho::anim30(f);
     const AnimTwin w{n, f, g, subnets(f), subnets(g)};
     for (size_t k = 0; k < w.s.size(); ++k)
         for (size_t pn : w.s[k].processors) animTwinProcessor(w, k, pn, c);
@@ -297,9 +299,9 @@ void animCorpusFile10(const fs::path& p, Tally& c)
     std::string b = slurp(p);
     if (!isTuple(b)) return;
     oct::File f = parse(b);
-    cho::time30(f);
+    di1::cho::time30(f);
     const auto before = subnets(f);
-    int sns = 0, nodes = cho::anim30(f, &sns);
+    int sns = 0, nodes = di1::cho::anim30(f, &sns);
     c["1.0 corpus: nodes converted"] += nodes;
     c["1.0 corpus: subnetworks converted"] += sns;
     const std::string w = f.write();
@@ -371,7 +373,7 @@ int toFloatForm(oct::File& g, const std::vector<size_t>& anims)
         size_t dn = anims[q];
         std::vector<oct::Rec> t = {g.recs[child(g, dn, "Header")],
                                    g.nameScalar(kNodeFieldLevel, g.recs[child(g, dn, "Type")].name, "Float"),
-                                   cho::floatRec(g, "Data", 0.f, kNodeFieldLevel)};
+                                   octx::floatRec(g, kNodeFieldLevel, "Data", 0.f)};
         g.recs.erase(g.recs.begin() + dn + 1, g.recs.begin() + g.blockEnd(dn));
         g.recs.insert(g.recs.begin() + dn + 1, t.begin(), t.end());
         ++nodes;
@@ -397,7 +399,7 @@ void animRoundTrip30(const fs::path& p, Tally& c)
         }
         nodes += toFloatForm(g, anims);
     }
-    int got = cho::anim30(g);
+    int got = di1::cho::anim30(g);
     bool same = got == nodes && canonRecords(g) == want;
     c["3.0 corpus: AnimState nodes regenerated"] += nodes;
     ++c[same ? "3.0 corpus: files identical after the round trip" : "3.0 corpus: files DIFFER after the round trip"];
@@ -424,7 +426,8 @@ std::vector<Placement> placements(const oct::File& f)
     for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i) {
         if (f.recs[i].level != 2 || childName(f, i, "Type") != "PlacementNode") continue;
         long s = child(f, i, "SceneTreeNodeRef");
-        v.push_back({childName(f, i, "NodeName"), s < 0 ? kNoSceneRecord : cho::first(f, f.recs[s], kNoSceneRecord)});
+        const int scene = s < 0 ? kNoSceneRecord : octx::firstInt(f, f.recs[s], kNoSceneRecord);
+        v.push_back({childName(f, i, "NodeName"), scene});
     }
     return v;
 }
@@ -468,7 +471,7 @@ void scene30File(const fs::path& p, Tally& c)
     if (pool < 0) return;
     const size_t stripped = stripSceneRefs(f, pool);
     if (!stripped) return;
-    int got = cho::scene30(f);
+    int got = di1::cho::scene30(f);
     bool same = got == (int)stripped && f.write() == b;
     c["3.0: placements regenerated"] += stripped;
     ++c[same ? "3.0: files byte-identical" : "3.0: files DIFFER"];
@@ -478,7 +481,7 @@ void scene30File(const fs::path& p, Tally& c)
 // (2) The scene node scene30 names for each 1.0 placement against the one the 3.0 twin names.
 void sceneTwin(const std::string& n, oct::File& f, const oct::File& g, Tally& c)
 {
-    cho::scene30(f);
+    di1::cho::scene30(f);
     auto s10 = sceneNames(f), s30 = sceneNames(g);
     std::map<std::string, int> by30;
     for (auto& q : placements(g)) by30.emplace(q.name, q.scene);
@@ -503,7 +506,7 @@ void scene10File(const fs::path& p, Tally& c)
     std::string b = slurp(p);
     if (!isTuple(b)) return;
     oct::File f = parse(b);
-    if (!cho::scene30(f)) return;
+    if (!di1::cho::scene30(f)) return;
     const std::string w = f.write();
     oct::File g = parse(w);
     if (g.write() != w) ++c["1.0: re-parse DIFFERS"];
@@ -534,7 +537,7 @@ int testChoLayout(const Args& a)
         oct::File f = parse(b);
         std::string b3 = slurp(twin->second);
         oct::File g = parse(b3);
-        cho::layout30(f);
+        di1::cho::layout30(f);
         for (const char* k : {"PlacementNode", "InstanceNode", "Attachment"}) {
             bool ok = layoutDump(f, k) == layoutDump(g, k);
             ++c[std::string(k) + (ok ? " same" : " differ")];

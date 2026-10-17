@@ -11,7 +11,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include "../cho.hpp"
+#include "../games/di1/cho.hpp"
 #include "../convert/datamap.hpp"
 #include "../formats/chd.hpp"
 #include "../formats/luachunk.hpp"
@@ -299,11 +299,11 @@ int convertDbTriggers(const Args& a)
     return 0;
 }
 
-// cho::Aliases as the plugin feeds it from a DataMap, then each engine path resolved.
+// di1::cho::Aliases as the plugin feeds it from a DataMap, then each engine path resolved.
 int convertChoAlias(const Args& a)
 {
     std::string in = slurp(a.argv[2]), out;
-    cho::Aliases al;
+    di1::cho::Aliases al;
     luachunk::rewrite(in, out, [&](std::string& s) {
         al.add(s);
         return datamap::normalise(s);

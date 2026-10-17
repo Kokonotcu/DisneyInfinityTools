@@ -5,7 +5,9 @@
 #include <string>
 #include <vector>
 #include "../../base/text.hpp"
-#include "../../cho.hpp"
+#include "cho.hpp"
+#include "choconst.hpp"
+#include "cholayout.hpp"
 #include "../../gameplay.hpp"
 #include "../../convert/assets.hpp"
 #include "../../convert/counts.hpp"
@@ -49,20 +51,21 @@ inline bool noted(std::string& note, int n, const char* head, const char* tail)
 // Clip tables re-packed (cho.hpp); a motion clip only when its template's folder is not in the 3.0 install.
 inline bool clipSteps(oct::File& f, const OctSteps& o, std::string& note)
 {
-    std::function<bool(const std::string&)> motion;
+    cho::ClipSettings s;
+    s.portIds = o.clipIds;
     if (o.installed30)
-        motion = [&o](const std::string& t) {
-            size_t s = t.find_last_of("/\\");
-            return s != std::string::npos && !o.installed30(t.substr(0, s));
+        s.motion = [&o](const std::string& t) {
+            size_t sep = t.find_last_of("/\\");
+            return sep != std::string::npos && !o.installed30(t.substr(0, sep));
         };
-    int failed = 0, ren = 0;
+    const cho::ClipCounts c = cho::clips30(f, s);
     bool changed = false;
-    if (int n = cho::clips30(f, motion, &failed, o.clipIds, &ren)) {
-        std::string ids = ren ? ", " + std::to_string(ren) + " with 3.0 port ids" : std::string();
-        note += "+clips(" + std::to_string(n) + ids + ") ";
+    if (c.repacked) {
+        std::string ids = c.renumbered ? ", " + std::to_string(c.renumbered) + " with 3.0 port ids" : std::string();
+        note += "+clips(" + std::to_string(c.repacked) + ids + ") ";
         changed = true;
     }
-    if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
+    if (c.failed) note += "clips not in the 1.0 layout(" + std::to_string(c.failed) + ") ";
     return changed;
 }
 

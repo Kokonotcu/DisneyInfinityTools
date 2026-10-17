@@ -497,6 +497,17 @@ bool __cdecl standInHook(const char*, const std::vector<core::HookSpec>& feature
 }
 uintptr_t standInAddress(uint32_t) { return (uintptr_t)state.hostMemory; }
 
+// audio::install's config at its defaults, with the stand-ins for hooks and engine addresses.
+audio::Cfg standInCfg(const char* install10)
+{
+    audio::Cfg cfg;
+    cfg.install10 = install10;
+    cfg.game30 = ".";
+    cfg.installFeature = standInHook;
+    cfg.rt = standInAddress;
+    return cfg;
+}
+
 }  // namespace
 
 int testFmod(const Args& a)
@@ -569,8 +580,9 @@ int testHost(const Args& a)
         printf("HOST lock failed\n");
         return 1;
     }
+    const audio::Cfg cfg = standInCfg(a.argv[2]);
     DWORD t0 = GetTickCount();
-    bool ok = audio::install(standInHook, standInAddress, a.argv[2], ".");
+    bool ok = audio::install(cfg);
     DWORD tInstall = GetTickCount() - t0;
     DWORD w = WaitForSingleObject(audio::hostStart.done, kHostWaitMs);
     unlock(0, cookie);

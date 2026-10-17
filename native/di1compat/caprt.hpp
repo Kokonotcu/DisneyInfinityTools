@@ -37,8 +37,31 @@
 // Run 2 (2026-10-15 11:24, Metroville): 80 nodes, 64 base spawns, all async; the creator log's 150-line cap filled
 // with other creators in 55 ms, so whether a capsule actor was made stayed open. Run 3 logs the completion instead.
 #pragma once
+#include <windows.h>
+#include <cstdint>
+#include <iterator>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include "core/hooks.hpp"
+#include "core/log.hpp"
+#include "core/memcheck.hpp"
+#include "games/di1/config.hpp"
+#include "sys.hpp"
 
 namespace caprt {
+
+// core's services this file calls by their short names (declarations: N26 forbids only using namespace)
+using core::installFeature;
+using core::logf;
+using core::rt;
+using core::safeCopy;
+
+struct State {
+    di1::Config cfg;   // the keys its hooks read: set once in install(), before them
+};
+inline State g_state;
 
 typedef uint32_t(__fastcall* ReqFn)(void* self, void* edx, uint8_t* req, uint32_t a2);
 typedef uint32_t*(__fastcall* SpawnFn)(uint8_t* def, void* edx, uint32_t* out, const float* t, uint8_t* params);
@@ -97,7 +120,7 @@ static void keep(uint32_t h, const uint8_t* def)
         void* comp = ((CompFn)rt(0x0069ECD0))(h, *(uint16_t*)rt(0x0228E56C));
         if (comp && g_renderShut) g_renderShut(comp, nullptr, 0);   // null while the shutdown10 feature is off
     }
-    if (g_cfg.capsuleTrace10 && InterlockedIncrement(&g_keptLogged) <= 300) {
+    if (g_state.cfg.capsuleTrace10 && InterlockedIncrement(&g_keptLogged) <= 300) {
         char d[96], mo[96];
         defText(def, d, mo);
         logf("shutdown10: actor %08X '%s' (%s) drawn while shut down%s", h, d, mo, a && (a[0x10c] & 8) ? " (was shut down: shown)" : "");
@@ -126,13 +149,13 @@ static void __cdecl hkDone(uint32_t handle, uint8_t* record)
     }
     bool is10 = def10(def);
     g_done(handle, record);   // frees the record
-    if (is10 && g_cfg.capsuleTrace10 && InterlockedIncrement(&g_doneLogged) <= 300) {
+    if (is10 && g_state.cfg.capsuleTrace10 && InterlockedIncrement(&g_doneLogged) <= 300) {
         char d[96], mo[96];
         defText(def, d, mo);
         logf("capsuletrace10: async spawn of '%s' (%s) done: handle %08X -> actor %p%s", d, mo, handle,
              ((ActorFn)rt(0x0074B200))(handle), killed ? ", killed (pending record cancelled)" : "");
     }
-    if (is10 && !killed && g_cfg.shutdown10) keep(handle, def);
+    if (is10 && !killed && g_state.cfg.shutdown10) keep(handle, def);
 }
 
 // ---- capsuletrace10 ----
@@ -184,13 +207,13 @@ static uint32_t* __fastcall hkBase(uint8_t* def, void*, uint32_t* out, const flo
     uint32_t* r = g_base(def, nullptr, out, t, params);
     if (!def10(def)) return r;
     uint32_t h = out ? *out : 0;   // 0: queued (async), the completion marks it
-    if (g_cfg.capsuleTrace10 && InterlockedIncrement(&g_spawnLogged) <= 300) {
+    if (g_state.cfg.capsuleTrace10 && InterlockedIncrement(&g_spawnLogged) <= 300) {
         char d[96], mo[96];
         defText(def, d, mo);
         logf("capsuletrace10: base spawn '%s' model '%s' at (%.1f, %.1f, %.1f), %s -> handle %08X", d, mo, t ? t[4] : 0.f,
              t ? t[5] : 0.f, t ? t[6] : 0.f, mode(params), h);
     }
-    if (h && g_cfg.shutdown10) keep(h, def);
+    if (h && g_state.cfg.shutdown10) keep(h, def);
     return r;
 }
 static uint32_t __fastcall hkByName(void* self, void*, const char* name, const float* t, uint32_t a3, uint32_t a4)
@@ -199,24 +222,27 @@ static uint32_t __fastcall hkByName(void* self, void*, const char* name, const f
     return g_byName(self, nullptr, name, t, a3, a4);
 }
 
-static void install()
+// The 1.0 expendables runtime's hooks (H1); capsuletrace10 hooks the two spawns itself when shutdown10 did not.
+inline bool install(const di1::Config& c)
 {
-    if (g_cfg.shutdown10 && !g_cfg.popin10) logf("shutdown10: off, it finds 1.0 definitions by popin10's stamp");
-    bool keep10 = g_cfg.shutdown10 && g_cfg.popin10;
+    g_state.cfg = c;
+    if (c.shutdown10 && !c.popin10) logf("shutdown10: off, it finds 1.0 definitions by popin10's stamp");
+    const bool keep10 = c.shutdown10 && c.popin10;
     const core::HookSpec spawn = {"expendable base spawn (shutdown10)", 0x0160A3E0, "558BEC83E4F06AFF68????????64A1",
                                   (void*)&hkBase, (void**)&g_base};
     const core::HookSpec done = {"expendable async spawn done (shutdown10)", 0x0160A270, "8B0D????????568B74240C",
                                  (void*)&hkDone, (void**)&g_done};
-    bool spawnsHooked = keep10 && installFeature("shutdown10", {
+    const bool spawnsHooked = keep10 && installFeature("shutdown10", {
         {"actor shutdown apply (shutdown10)", 0x007534C0, "568B7424088B4604578BF9", (void*)&hkShut, (void**)&g_shut},
         {"render component shutdown (shutdown10)", 0x01860B40, "83EC08E8????????85C0745C", (void*)&hkRenderShut,
          (void**)&g_renderShut},
         spawn,
         done,
     });
-    if (!g_cfg.capsuleTrace10) return;
-    if (!spawnsHooked) installFeature("capsuletrace10 spawns", {spawn, done});
-    installFeature("capsuletrace10", {
+    bool ok = spawnsHooked || !keep10;
+    if (!c.capsuleTrace10) return ok;
+    if (!spawnsHooked) ok = installFeature("capsuletrace10 spawns", {spawn, done}) && ok;
+    ok &= installFeature("capsuletrace10", {
         {"SpawnExpendable Link_In (capsuletrace10)", 0x017BF050, "6AFF68????????64A100000000", (void*)&hkNode,
          (void**)&g_node},
         {"expendable spawn request (capsuletrace10)", 0x0160EBD0, "6AFF68????????64A100000000", (void*)&hkReq,
@@ -226,6 +252,7 @@ static void install()
         {"expendable spawn by name (capsuletrace10)", 0x0160F370, "6AFF68????????64A100000000", (void*)&hkByName,
          (void**)&g_byName},
     });
+    return ok;
 }
 
 }   // namespace caprt

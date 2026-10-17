@@ -23,8 +23,28 @@
 // Only the node's call site (0x0118559A) is completed: 3.0's construction timer (FUN_00cfd750) calls the same spawn.
 // Not ported (unknown 3.0 twins): 1.0's owner hand-over FUN_00d1bd60 and the object flag 8 (FUN_00d10890(8, 1)).
 #pragma once
+#include <windows.h>
+#include <intrin.h>
+#include <cstdint>
+#include "core/hooks.hpp"
+#include "core/log.hpp"
+#include "core/memcheck.hpp"
+#include "games/di1/config.hpp"
+#include "sys.hpp"
 
 namespace bldrt {
+
+// core's services this file calls by their short names (declarations: N26 forbids only using namespace)
+using core::hook;
+using core::installFeature;
+using core::logf;
+using core::rt;
+using core::safeCopy;
+
+struct State {
+    di1::Config cfg;   // the keys its hooks read: set once in install(), before them
+};
+inline State g_state;
 
 typedef uint32_t*(__fastcall* LotSpawnFn)(void* self, void* edx, uint32_t* out, int lot, const char* name, uint32_t useOwn);
 typedef void*(__fastcall* LotMatrixFn)(void* self, void* edx, float* out, int lot);                              // FUN_00cd2150
@@ -80,10 +100,10 @@ static uint32_t* __fastcall hkLotSpawn(void* self, void*, uint32_t* out, int lot
     bool node = _ReturnAddress() == (void*)rt(0x0118559A);   // the SpawnBuilding node's call (FUN_011854b0)
     uint32_t* r = g_lotSpawn(self, nullptr, out, lot, name, useOwn);
     uint32_t h = out ? *out : 0;
-    if (g_cfg.spawnTrace10)
+    if (g_state.cfg.spawnTrace10)
         logf("spawntrace10: lot spawn '%s' lot %d own matrix %u from %s -> handle %08X", n, lot, useOwn & 0xff,
              node ? "SpawnBuilding node" : "other caller", h);
-    if (g_cfg.building10 && node && out && !h && lot >= 0 && !(useOwn & 0xff) && n[0]) *out = buildOnLot(lot, n);
+    if (g_state.cfg.building10 && node && out && !h && lot >= 0 && !(useOwn & 0xff) && n[0]) *out = buildOnLot(lot, n);
     return r;
 }
 
@@ -102,17 +122,22 @@ static void __cdecl hkNode(void* call)
     g_node(call);
 }
 
-static void install()
+// The building runtime's hooks (H1).
+inline bool install(const di1::Config& c)
 {
-    if (g_cfg.building10 || g_cfg.spawnTrace10)
-        hook("building lot spawn (building10)", 0x00CEF120, "538BDC83EC0883E4F083C404558B6B04", (void*)&hkLotSpawn, (void**)&g_lotSpawn);
-    if (g_cfg.spawnTrace10)
-        installFeature("spawntrace10 buildings", {
+    g_state.cfg = c;
+    bool ok = true;
+    if (c.building10 || c.spawnTrace10)
+        ok &= hook("building lot spawn (building10)", 0x00CEF120, "538BDC83EC0883E4F083C404558B6B04",
+                   (void*)&hkLotSpawn, (void**)&g_lotSpawn);
+    if (c.spawnTrace10)
+        ok &= installFeature("spawntrace10 buildings", {
             {"lot state register (spawntrace10)", 0x00CEFE60, "538B5C2408555657", (void*)&hkLotState,
              (void**)&g_lotState},
             {"SpawnBuilding Link_In (spawntrace10)", 0x011854B0, "6AFF68????????64A100000000", (void*)&hkNode,
              (void**)&g_node},
         });
+    return ok;
 }
 
 }   // namespace bldrt
