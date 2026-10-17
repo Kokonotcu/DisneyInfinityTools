@@ -88,7 +88,7 @@ struct Config {
     bool resident10 = true;          // the 1.0 startup*.zip members are served by their full paths (resident in 1.0)
     bool tutorial10 = true;          // ui: tutorial element 61 (1.0's SelectMenu ribbon) is answered by 3.0's ribbon
     bool context10 = true;           // ui: a 1.0 controller-context list keeps 3.0's extra gates of its actions
-    bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (audio.hpp)
+    bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (games/di1/audio.hpp)
     bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
     bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
     bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it

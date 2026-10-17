@@ -84,7 +84,7 @@
 #include "npc.hpp"
 #include "games/di1/cho.hpp"
 #include "ui.hpp"
-#include "audio.hpp"
+#include "games/di1/audio.hpp"
 #include "games/di1/vfx.hpp"
 #include "games/di1/chan.hpp"
 #include "gameplay.hpp"
@@ -453,14 +453,16 @@ static bool memtestMatch(const char* p)
     return false;
 }
 
-// The choreography start hook: cinesync10 starts 1.0's audio-sync sound event (audio.hpp); breaktrace logs.
+// The choreography start hook: cinesync10 starts 1.0's audio-sync sound event (engine/audio); breaktrace logs.
 static bool installChoStart(const di1::Config& c)
 {
     engine::choreography::Config cho;
     if (c.breakTrace) cho.starting = trace::breaktrace::choreographyStart;
     const bool cineSync = c.audio10 && c.cineSync10;
     if (cineSync)
-        cho.started = [](const uint8_t*, const char* name, uint32_t flags) { audio::choreographyStarted(name, flags); };
+        cho.started = [](const uint8_t*, const char* name, uint32_t flags) {
+            engine::audio::host::choreographyStarted(name, flags);
+        };
     return engine::choreography::install(cho);
 }
 
@@ -788,12 +790,12 @@ static void* read10StandIn(const Open& o, const std::string& np, size_t* n, std:
     return read10(w.c_str(), n, where);
 }
 
-// vo10: a 1.0 dialog line's lipsync (audio.hpp annoSource), read from its zip under g_zipLock.
+// vo10: a 1.0 dialog line's lipsync (di1::audio::annoSource), read from its zip under g_zipLock.
 static void* read10Lipsync(const char* p, size_t* n, std::string* where)
 {
     std::string annoZip, annoMember;
     const bool vo = g_cfg.audio10 && g_cfg.vo10;
-    if (!vo || !audio::annoSource(p, annoZip, annoMember)) return nullptr;
+    if (!vo || !di1::audio::annoSource(p, annoZip, annoMember)) return nullptr;
     std::lock_guard<std::mutex> lock(g_zipLock);
     mz_zip_archive* z = zipFor(annoZip);
     int i = z ? mz_zip_reader_locate_file(z, annoMember.c_str(), nullptr, 0) : -1;
@@ -1047,12 +1049,12 @@ static bool installSx(const di1::Config& c)
     return installFeature("sxnatives10", natives);
 }
 
-// audio10's hooks (audio::install) need the 1.0 install; its log goes in first.
+// audio10's hooks (di1::audio::install) need the 1.0 install; its log goes in first.
 static bool installAudio(const di1::Config& c)
 {
     if (!c.audio10 || !c.install10[0]) return true;
-    audio::logfn = logf;
-    audio::Cfg a;
+    di1::audio::Cfg a;
+    a.log = logf;
     a.music = c.music10;
     a.vo = c.vo10;
     a.trace = c.audioTrace10;
@@ -1061,7 +1063,7 @@ static bool installAudio(const di1::Config& c)
     a.game30 = g_gameDir;
     a.installFeature = installFeature;
     a.rt = rt;
-    if (audio::install(a)) return true;
+    if (di1::audio::install(a)) return true;
     logf("audio10: off (FMOD host failed)");
     return false;
 }

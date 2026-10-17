@@ -32,10 +32,10 @@ inline constexpr LockNesting kLockOrder[] = {
     {"sceneSettingsIO's mx", "g_zipLock", "read10s"},
     {"sceneSettingsIO's mx", "arc30's cipherLock", "read30x"},
     {"lang30's mx", "arc30's cipherLock", "read30x"},
-    {"the engine's DialogueManager lock (+0x58)", "vo.mx", "audio.hpp"},
-    {"vo.mx", "g.mx", "audio.hpp"},
-    {"g.mx", "posMx", "audio.hpp"},
-    {"g.mx", "doneMx", "audio.hpp"},
+    {"the engine's DialogueManager lock (+0x58)", "engine::audio::dialogue mx", "aliasScripts"},
+    {"engine::audio::dialogue mx", "engine::audio::system mx", "open, unload, seqTick, hkPostExt"},
+    {"engine::audio::system mx", "engine::audio::positions mx", "place, tick, stopObject, hkQueuedPost"},
+    {"engine::audio::system mx", "engine::audio::finished mx", "playLine, act, tick and FMOD's callback in it"},
     {"di1::currency mx", "its LogOnce", "currency10"},
 };
 

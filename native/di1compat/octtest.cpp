@@ -30,7 +30,7 @@
 #include "games/di1/choconst.hpp"
 #include "games/di1/cholayout.hpp"
 #include "ui.hpp"
-#include "audio.hpp"
+#include "games/di1/audio.hpp"
 #include <cstdarg>
 #include "games/di1/vfx.hpp"
 #include "games/di1/chan.hpp"
@@ -1807,7 +1807,7 @@ static int choClipDump(char** a)
     return 0;
 }
 
-// octtest --fmod <1.0 install> <names.tsv> <fev>...  AUD-2 offline acceptance: the plugin's FMOD host (audio.hpp) loads
+// octtest --fmod <1.0 install> <names.tsv> <fev>...  AUD-2 offline acceptance: the plugin's FMOD host (engine/audio) loads
 // the unmodified 1.0 FMOD DLLs with no output, loads Initialize.fev:Permanent and the given FEVs with 1.0's load and
 // registration rules, then resolves every name of names.tsv (kind, source, name, uses: the graph references from the
 // research catalogues) as a posted event or, for cues, through the playset's Music_<X>.fev. EV lines list every
@@ -1821,13 +1821,37 @@ static void stdoutLog(const char* fmt, ...)
     printf("\n");
 }
 
+// The audio modules' state, as the offline audio modes look into it (docs/audit AU-04).
+static engine::audio::host::detail::State& g_host = engine::audio::host::detail::g_state;
+static engine::audio::system::detail::State& g_sys = engine::audio::system::detail::g_state;
+static engine::audio::dialogue::detail::State& g_vo = engine::audio::dialogue::detail::g_state;
+
+// The plugin's audio config on a 1.0 install with FMOD's no-sound output, for the modes that run the host here.
+static engine::audio::wwise::Config offlineAudio(const std::string& inst10)
+{
+    di1::audio::Cfg c;
+    c.install10 = inst10;
+    c.log = stdoutLog;
+    engine::audio::wwise::Config w = di1::audio::config(c);
+    w.systemCfg.nosound = true;
+    return w;
+}
+
+// Every audio module configured, then FMOD up on this thread (no hook, no host thread).
+static bool offlineHost(const engine::audio::wwise::Config& w)
+{
+    engine::audio::wwise::configure(w);
+    return engine::audio::system::init();
+}
+
 static int fmodTest(int argc, char** argv)
 {
-    audio::logfn = stdoutLog;
+    engine::audio::setLog(stdoutLog);
     std::map<std::string, std::string> dropped;
-    audio::g.dropped = &dropped;
+    engine::audio::wwise::Config ac = offlineAudio(argv[2]);
+    ac.hostCfg.dropped = &dropped;
     if (getenv("FMOD_CAPS")) {   // the default device's speaker mode, as the plugin's init reads it (nothing is played)
-        audio::Api& f = audio::g.f;   // before init, as Host::init asks it (getDriverCaps answers only then)
+        engine::audio::fmod::Api& f = g_sys.f;   // before init, as Host::init asks it (getDriverCaps answers only then)
         void *es = nullptr, *sys = nullptr;
         unsigned caps = 0;
         int mode = -1;
@@ -1836,17 +1860,17 @@ static int fmodTest(int argc, char** argv)
         printf("FMODCAPS caps %x speaker mode %d (2 stereo, 3 quad, 4 surround, 5 5.1, 6 7.1)\n", caps, mode);
         return 0;
     }
-    if (const char* sm = getenv("FMOD_SPEAKERS")) audio::g.testSpeakerMode = atoi(sm);
-    if (!audio::g.init(argv[2], true)) return 1;
-    audio::g.loadTree("Initialize.fev", "Permanent");
+    if (const char* sm = getenv("FMOD_SPEAKERS")) ac.systemCfg.testSpeakerMode = atoi(sm);
+    if (!offlineHost(ac)) return 1;
+    engine::audio::host::loadTree("Initialize.fev", "Permanent");
     for (int i = 4; i < argc; ++i) {
-        std::string n = audio::g.name10(argv[i]);
+        std::string n = engine::audio::system::installedName(argv[i]);
         if (n.empty()) printf("NOFILE %s\n", argv[i]);
-        else audio::g.loadTree(n, nullptr);
+        else engine::audio::host::loadTree(n, nullptr);
     }
     std::map<void*, std::string> projName;
-    for (auto& p : audio::g.projects) projName[p.second.p] = p.first;
-    for (auto& e : audio::g.byId) printf("EV\t%s\t%s\t%u\n", projName[e.second.proj].c_str(), e.second.name.c_str(), e.second.flags);
+    for (auto& p : g_host.projects) projName[p.second.p] = p.first;
+    for (auto& e : g_host.byId) printf("EV\t%s\t%s\t%u\n", projName[e.second.proj].c_str(), e.second.name.c_str(), e.second.flags);
     std::ifstream in(argv[3]);
     std::string line;
     std::map<std::string, int> tally;
@@ -1859,18 +1883,18 @@ static int fmodTest(int argc, char** argv)
             size_t u = name.find('_');
             std::string x = u == std::string::npos ? "" : name.substr(0, u);
             unsigned id = 0;
-            if (!x.empty() && audio::music.ensure(x))
-                verdict = audio::Music::cue(name.c_str(), &id) ? "OK " + audio::music.file : "MISS (not a cue of " + audio::music.file + ")";
-            else if (!audio::music.file.empty() && audio::Music::cue(name.c_str(), &id)) {   // 1.0: the playset's loaded project
+            if (!x.empty() && engine::audio::music::ensure(x))
+                verdict = engine::audio::music::cue(name.c_str(), &id) ? "OK " + engine::audio::music::file() : "MISS (not a cue of " + engine::audio::music::file() + ")";
+            else if (!engine::audio::music::file().empty() && engine::audio::music::cue(name.c_str(), &id)) {   // 1.0: the playset's loaded project
                 struct Entity { const char* name; unsigned id; };
                 struct Iter { const Entity* value; const char* filter; } ci{};
-                audio::g.f.MusicSystem_GetCues(audio::g.ms, &ci, name.c_str());
-                verdict = "OK " + audio::music.file + " as " + (ci.value ? ci.value->name : "?");
+                g_sys.f.MusicSystem_GetCues(g_sys.ms, &ci, name.c_str());
+                verdict = "OK " + engine::audio::music::file() + " as " + (ci.value ? ci.value->name : "?");
             } else
                 verdict = "MISS (no Music_" + x + ".fev)";
         } else {
-            auto it = audio::g.byId.find(audio::fnv1(name));
-            if (it != audio::g.byId.end()) verdict = "OK " + projName[it->second.proj] + " flags " + std::to_string(it->second.flags);
+            auto it = g_host.byId.find(hash::fnv1Lower(name));
+            if (it != g_host.byId.end()) verdict = "OK " + projName[it->second.proj] + " flags " + std::to_string(it->second.flags);
             else if (dropped.count(name)) verdict = "MISS (left out by the 1.0 rule: " + dropped[name] + ")";
             else verdict = "MISS";
         }
@@ -1880,48 +1904,48 @@ static int fmodTest(int argc, char** argv)
     // the Music_<X>.fev loaded last: its full cue list (fevcheck.py compares it with the file's cues chunk)
     struct Entity { const char* name; unsigned id; };
     struct Iter { const Entity* value; const char* filter; } it{};
-    if (audio::g.ms && !audio::g.f.MusicSystem_GetCues(audio::g.ms, &it, nullptr))
-        for (; it.value; audio::g.f.MusicSystem_GetNextCue(audio::g.ms, &it)) printf("CUE\t%s\t%u\n", it.value->name, it.value->id);
+    if (g_sys.ms && !g_sys.f.MusicSystem_GetCues(g_sys.ms, &it, nullptr))
+        for (; it.value; g_sys.f.MusicSystem_GetNextCue(g_sys.ms, &it)) printf("CUE\t%s\t%u\n", it.value->name, it.value->id);
     for (auto& t : tally) printf("TALLY %s %d\n", t.first.c_str(), t.second);
 
     // lifecycle (needs IN_City.fev): a one-shot ends by itself and calls back once, a loop runs until stopped, a music
     // cue's prompt turns active and ends; what the plugin's tick thread delivers, run here on the main thread
     static int calls = 0;
     static uint32_t lastPid = 0;
-    audio::AkCallback cb = [](uint32_t type, void* info) { calls += type == 1; lastPid = ((uint32_t*)info)[2]; };
-    uint32_t one = audio::g.play(audio::fnv1("billboardStart"), 7, 1, (void*)cb, nullptr);
-    uint32_t loop = audio::g.play(audio::fnv1("fire_loop"), 7, 1, (void*)cb, nullptr);
-    auto run = [](int ms) { for (int t = 0; t < ms; t += 16) { Sleep(16); audio::tickAndDeliver(); } };
+    engine::audio::wwise::detail::AkCallback cb = [](uint32_t type, void* info) { calls += type == 1; lastPid = ((uint32_t*)info)[2]; };
+    uint32_t one = engine::audio::host::play({hash::fnv1Lower("billboardStart"), 7, 1, (void*)cb, nullptr});
+    uint32_t loop = engine::audio::host::play({hash::fnv1Lower("fire_loop"), 7, 1, (void*)cb, nullptr});
+    auto run = [](int ms) { for (int t = 0; t < ms; t += 16) { Sleep(16); engine::audio::wwise::tick(); } };
     run(6000);
     int afterOne = calls;
     uint32_t pidOne = lastPid;
-    audio::g.act(loop, 0);
+    engine::audio::host::act(loop, 0);
     run(2000);
     printf("LIFE one-shot id %u: %d callback(s) in 6 s (pid %u); loop id %u: %s before its stop, %d after\n", one, afterOne,
            pidOne, loop, afterOne == 1 ? "running" : "ENDED", calls - afterOne);
     int active = -1, activeAfter = -1;
-    if (audio::music.ensure("Inc") && audio::music.begin("Inc_mx_Metroville")) {
+    if (engine::audio::music::ensure("Inc") && engine::audio::music::begin("Inc_mx_Metroville")) {
         run(1000);
-        audio::g.f.MusicPrompt_IsActive(audio::music.prompt, &active);
-        audio::music.endPrompt();
-        audio::g.f.MusicSystem_Reset(audio::g.ms);
+        g_sys.f.MusicPrompt_IsActive(engine::audio::music::prompt(), &active);
+        engine::audio::music::endPrompt();
+        g_sys.f.MusicSystem_Reset(g_sys.ms);
         run(500);
         unsigned id;
         void* p = nullptr;
-        if (audio::Music::cue("Inc_mx_Metroville", &id)) audio::g.f.MusicSystem_PrepareCue(audio::g.ms, id, &p);
-        if (p) { audio::g.f.MusicPrompt_IsActive(p, &activeAfter); audio::g.f.MusicPrompt_Release(p); }
+        if (engine::audio::music::cue("Inc_mx_Metroville", &id)) g_sys.f.MusicSystem_PrepareCue(g_sys.ms, id, &p);
+        if (p) { g_sys.f.MusicPrompt_IsActive(p, &activeAfter); g_sys.f.MusicPrompt_Release(p); }
     }
     printf("LIFE music Inc_mx_Metroville: active %d after 1 s, fresh prompt active %d after end+reset\n", active, activeAfter);
     // cinesync10 (needs IN_City.fev): an audio-synced choreography starts the 1.0 event of its leaf name, nothing else does
-    if (audio::g.byId.count(audio::fnv1("INC_CIN_OpeningA"))) {
-        audio::hostState = 1;   // octtest runs the host on this thread
+    if (g_host.byId.count(hash::fnv1Lower("INC_CIN_OpeningA"))) {
+        g_sys.up = 1;   // octtest runs the host on this thread
         const char* cin = "Choreographies/INC_CIN_OpeningA/INC_CIN_OpeningA";
-        size_t n0 = audio::g.plays.size();
-        audio::choreographyStarted(cin, 0x8);                    // no audio sync
-        audio::choreographyStarted("Choreographies/INC_Dock_Explode/INC_Dock_Explode", 0x20);   // no event of that name
-        size_t n1 = audio::g.plays.size();
-        audio::choreographyStarted(cin, 0x44128);                // INC_CIN_OpeningA's flags in-game
-        size_t n2 = audio::g.plays.size();
+        size_t n0 = g_host.plays.size();
+        engine::audio::host::choreographyStarted(cin, 0x8);                    // no audio sync
+        engine::audio::host::choreographyStarted("Choreographies/INC_Dock_Explode/INC_Dock_Explode", 0x20);   // no event of that name
+        size_t n1 = g_host.plays.size();
+        engine::audio::host::choreographyStarted(cin, 0x44128);                // INC_CIN_OpeningA's flags in-game
+        size_t n2 = g_host.plays.size();
         printf("CINESYNC unsynced / unnamed: %s; synced: %s\n", n1 == n0 ? "nothing started" : "STARTED", n2 == n1 + 1 ? "event started" : "NOTHING");
         run(200);
     }
@@ -1931,14 +1955,14 @@ static int fmodTest(int argc, char** argv)
         int secs = 120;
         size_t colon = c.find(':');
         if (colon != std::string::npos) { secs = atoi(c.c_str() + colon + 1); c.resize(colon); }
-        audio::music.endPrompt();
-        audio::g.f.MusicSystem_Reset(audio::g.ms);
-        if (audio::music.ensure("Inc") && audio::music.begin(c.c_str())) {
+        engine::audio::music::endPrompt();
+        g_sys.f.MusicSystem_Reset(g_sys.ms);
+        if (engine::audio::music::ensure("Inc") && engine::audio::music::begin(c.c_str())) {
             int was = -1;
             for (int t = 0; t <= secs * 1000; t += 250) {
                 run(250);
                 int a = -1;
-                audio::g.f.MusicPrompt_IsActive(audio::music.prompt, &a);
+                g_sys.f.MusicPrompt_IsActive(engine::audio::music::prompt(), &a);
                 if (a != was) { printf("CUERUN %s at %.2f s: active %d\n", c.c_str(), t / 1000.0, a); was = a; }
             }
             printf("CUERUN %s done after %d s, active %d\n", c.c_str(), secs, was);
@@ -1948,21 +1972,21 @@ static int fmodTest(int argc, char** argv)
     // EV_RUN=<event>[,<event>...]: play each 15 units in front of the listener, as the dock cutscene's blasts are
     // in-game; report its volume, 3D range, category chain and FMOD state (8 playing, 0x10 channels active) over 3 s
     if (const char* er = getenv("EV_RUN")) {
-        typedef audio::FR(__stdcall* StateFn)(void*, unsigned*);
+        typedef engine::audio::fmod::Result(__stdcall* StateFn)(void*, unsigned*);
         StateFn getState = (StateFn)GetProcAddress(GetModuleHandleA("fmod_event.dll"), "FMOD_Event_GetState");
-        audio::oListener = [](const float*, uint32_t) { return 1; };
-        audio::oSetPos = [](uint32_t, const float*) { return 1; };
+        engine::audio::wwise::setOriginals([](const float*, uint32_t) { return 1; },
+                                           [](uint32_t, const float*) { return 1; });
         const float lis[9] = {0, 0, 1, 0, 1, 0, 0, 0, 0}, at[6] = {0, 0, -15, 0, 0, 1};   // Wwise z = -engine z
-        audio::hkListener(lis, 0);
-        audio::hkSetPos(200, at);
+        engine::audio::wwise::hkListener(lis, 0);
+        engine::audio::wwise::hkSetPos(200, at);
         // EV_GEOM=lx,ly,lz,fx,fy,fz,ux,uy,uz,sx,sy,sz: listener and source in engine space, as audiotrace10 logs them
         if (const char* gm = getenv("EV_GEOM")) {
             float v[12] = {};
             if (sscanf_s(gm, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f", v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6, v + 7, v + 8,
                          v + 9, v + 10, v + 11) == 12) {
-                std::lock_guard<std::mutex> p(audio::g.posMx);
-                memcpy(audio::g.lpos, v, 12); memcpy(audio::g.lfwd, v + 3, 12); memcpy(audio::g.lup, v + 6, 12);
-                memcpy(audio::g.pos[200].v, v + 9, 12);
+                std::lock_guard<std::mutex> p(engine::audio::positions::detail::g_state.mx);
+                memcpy(engine::audio::positions::detail::g_state.lpos, v, 12); memcpy(engine::audio::positions::detail::g_state.lfwd, v + 3, 12); memcpy(engine::audio::positions::detail::g_state.lup, v + 6, 12);
+                memcpy(engine::audio::positions::detail::g_state.pos[200].v, v + 9, 12);
             }
         }
         // EV_LOAD=<event>:<count>: that many instances of a loop playing 300 units away first, as in-game traffic does
@@ -1972,13 +1996,13 @@ static int fmodTest(int argc, char** argv)
             int cnt = c == std::string::npos ? 70 : atoi(s.c_str() + c + 1), got = 0;
             const float away[6] = {0, 0, -300, 0, 0, 1};
             for (int i = 0; i < cnt; ++i) {
-                audio::hkSetPos(1000 + i, away);
-                got += audio::g.play(audio::fnv1(s.substr(0, c)), 1000 + i, 0, nullptr, nullptr) != 0;
+                engine::audio::wwise::hkSetPos(1000 + i, away);
+                got += engine::audio::host::play({hash::fnv1Lower(s.substr(0, c)), (uint32_t)(1000 + i), 0, nullptr, nullptr}) != 0;
             }
             run(500);
             int playing = -1;
-            typedef audio::FR(__stdcall* ChFn)(void*, int*);
-            if (auto ch = (ChFn)GetProcAddress(GetModuleHandleA("fmodex.dll"), "FMOD_System_GetChannelsPlaying")) ch(audio::g.sys, &playing);
+            typedef engine::audio::fmod::Result(__stdcall* ChFn)(void*, int*);
+            if (auto ch = (ChFn)GetProcAddress(GetModuleHandleA("fmodex.dll"), "FMOD_System_GetChannelsPlaying")) ch(g_sys.sys, &playing);
             printf("EVLOAD %s: %d of %d started at 300 units; FMOD channels playing %d\n", s.substr(0, c).c_str(), got, cnt, playing);
         }
         std::string all = er;
@@ -1986,30 +2010,30 @@ static int fmodTest(int argc, char** argv)
             e = all.find(',', b);
             if (e == std::string::npos) e = all.size();
             std::string n = all.substr(b, e - b);
-            uint32_t id = audio::g.play(audio::fnv1(n), 200, 1, (void*)cb, nullptr);
+            uint32_t id = engine::audio::host::play({hash::fnv1Lower(n), 200, 1, (void*)cb, nullptr});
             void* ev = nullptr;
             std::string chain;
             float vol = -1, dmin = -1, dmax = -1;
             int prio = -1;
             {
-                std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-                auto it = audio::g.plays.find(id);
-                if (it != audio::g.plays.end()) ev = it->second.ev;
+                std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+                auto it = g_host.plays.find(id);
+                if (it != g_host.plays.end()) ev = it->second.ev;
                 if (ev) {
-                    audio::g.f.Event_GetPropertyByIndex(ev, 1, &vol, 1);    // FMOD_EVENTPROPERTY_VOLUME
-                    audio::g.f.Event_GetPropertyByIndex(ev, 17, &dmin, 1);  // 3D_MINDISTANCE
-                    audio::g.f.Event_GetPropertyByIndex(ev, 18, &dmax, 1);  // 3D_MAXDISTANCE
-                    audio::g.f.Event_GetPropertyByIndex(ev, 11, &prio, 1);  // PRIORITY (0 highest)
+                    g_sys.f.Event_GetPropertyByIndex(ev, 1, &vol, 1);    // FMOD_EVENTPROPERTY_VOLUME
+                    g_sys.f.Event_GetPropertyByIndex(ev, 17, &dmin, 1);  // 3D_MINDISTANCE
+                    g_sys.f.Event_GetPropertyByIndex(ev, 18, &dmax, 1);  // 3D_MAXDISTANCE
+                    g_sys.f.Event_GetPropertyByIndex(ev, 11, &prio, 1);  // PRIORITY (0 highest)
                     void* c = nullptr;
-                    audio::g.f.Event_GetCategory(ev, &c);
+                    g_sys.f.Event_GetCategory(ev, &c);
                     for (int d = 0; c && d < 8; ++d) {
                         char* cn = nullptr;
                         float cv = -1;
-                        audio::g.f.EventCategory_GetInfo(c, nullptr, &cn);
-                        audio::g.f.EventCategory_GetVolume(c, &cv);
+                        g_sys.f.EventCategory_GetInfo(c, nullptr, &cn);
+                        g_sys.f.EventCategory_GetVolume(c, &cv);
                         chain += std::string(chain.empty() ? "" : " < ") + (cn ? cn : "?") + " " + std::to_string(cv).substr(0, 4);
                         void* parent = nullptr;
-                        if (audio::g.f.EventCategory_GetParentCategory(c, &parent)) break;
+                        if (g_sys.f.EventCategory_GetParentCategory(c, &parent)) break;
                         c = parent;
                     }
                 }
@@ -2017,18 +2041,18 @@ static int fmodTest(int argc, char** argv)
             printf("EVRUN %s: id %u, volume %.2f, priority %d, 3D %.1f..%.1f, categories %s\n", n.c_str(), id, vol, prio, dmin,
                    dmax, chain.c_str());
             {   // its parameters: one whose default sits where a volume curve is 0 plays in silence
-                typedef audio::FR(__stdcall* NumFn)(void*, int*);
-                typedef audio::FR(__stdcall* ByIdxFn)(void*, int, void**);
-                typedef audio::FR(__stdcall* InfoFn)(void*, int*, char**);
-                typedef audio::FR(__stdcall* ValFn)(void*, float*);
-                typedef audio::FR(__stdcall* RangeFn)(void*, float*, float*);
+                typedef engine::audio::fmod::Result(__stdcall* NumFn)(void*, int*);
+                typedef engine::audio::fmod::Result(__stdcall* ByIdxFn)(void*, int, void**);
+                typedef engine::audio::fmod::Result(__stdcall* InfoFn)(void*, int*, char**);
+                typedef engine::audio::fmod::Result(__stdcall* ValFn)(void*, float*);
+                typedef engine::audio::fmod::Result(__stdcall* RangeFn)(void*, float*, float*);
                 HMODULE em = GetModuleHandleA("fmod_event.dll");
                 auto num = (NumFn)GetProcAddress(em, "FMOD_Event_GetNumParameters");
                 auto byIdx = (ByIdxFn)GetProcAddress(em, "FMOD_Event_GetParameterByIndex");
                 auto info = (InfoFn)GetProcAddress(em, "FMOD_EventParameter_GetInfo");
                 auto val = (ValFn)GetProcAddress(em, "FMOD_EventParameter_GetValue");
                 auto range = (RangeFn)GetProcAddress(em, "FMOD_EventParameter_GetRange");
-                std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+                std::lock_guard<std::recursive_mutex> l(g_sys.mx);
                 int np = 0;
                 if (ev && num && byIdx && info && val && range && !num(ev, &np))
                     for (int i = 0; i < np; ++i) {
@@ -2043,7 +2067,7 @@ static int fmodTest(int argc, char** argv)
                     }
             }
             // what FMOD actually mixes: peak of the master output (System::getWaveData, both channels) over its run
-            typedef audio::FR(__stdcall* WaveFn)(void*, float*, int, int);
+            typedef engine::audio::fmod::Result(__stdcall* WaveFn)(void*, float*, int, int);
             auto wave = (WaveFn)GetProcAddress(GetModuleHandleA("fmodex.dll"), "FMOD_System_GetWaveData");
             float peak = 0, ch[8] = {};
             unsigned was = 0xffffffff;
@@ -2052,13 +2076,13 @@ static int fmodTest(int argc, char** argv)
             for (int t = 0; t <= window && ev; t += 50) {
                 unsigned st = 0;
                 {
-                    std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-                    auto it = audio::g.plays.find(id);
-                    if (it == audio::g.plays.end() || !it->second.ev) { printf("EVRUN %s ended at %d ms\n", n.c_str(), t); break; }
+                    std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+                    auto it = g_host.plays.find(id);
+                    if (it == g_host.plays.end() || !it->second.ev) { printf("EVRUN %s ended at %d ms\n", n.c_str(), t); break; }
                     if (getState) getState(ev, &st);
                     float buf[512];
                     for (int c = 0; c < 8 && wave; ++c)
-                        if (!wave(audio::g.sys, buf, 512, c))
+                        if (!wave(g_sys.sys, buf, 512, c))
                             for (float s : buf) ch[c] = (std::max)(ch[c], fabsf(s)), peak = (std::max)(peak, fabsf(s));
                 }
                 if (st != was) { printf("EVRUN %s at %d ms: state %x\n", n.c_str(), t, st); was = st; }
@@ -2075,123 +2099,124 @@ static int fmodTest(int argc, char** argv)
     // listener at the origin and the limit filled at 10 m, a post at 30 m fails and one at 2 m gets a voice by stealing
     // one of the 10 m sounds -- judged where each sound plays only if the info-only instance is placed first (1.0
     // FUN_01136520); the info-only instance otherwise stays where the last post left it
-    auto fire = audio::g.byId.find(audio::fnv1("fire_loop"));
-    if (fire != audio::g.byId.end() && (fire->second.flags & 1)) {
+    auto fire = g_host.byId.find(hash::fnv1Lower("fire_loop"));
+    if (fire != g_host.byId.end() && (fire->second.flags & 1)) {
         void* info = nullptr;
         int maxPb = 0;
         float dmin = 0, dmax = 0;
-        audio::g.f.EventSystem_GetEventBySystemID(audio::g.es, fire->second.sysId, 4, &info);
+        g_sys.f.EventSystem_GetEventBySystemID(g_sys.es, fire->second.sysId, 4, &info);
         if (info) {
-            audio::g.f.Event_GetPropertyByIndex(info, 12, &maxPb, 0);   // FMOD_EVENTPROPERTY_MAX_PLAYBACKS
-            audio::g.f.Event_GetPropertyByIndex(info, 17, &dmin, 0);    // 3D_MINDISTANCE (1.0 FUN_01136520 sets 0x11)
-            audio::g.f.Event_GetPropertyByIndex(info, 18, &dmax, 0);    // 3D_MAXDISTANCE (0x12)
+            g_sys.f.Event_GetPropertyByIndex(info, 12, &maxPb, 0);   // FMOD_EVENTPROPERTY_MAX_PLAYBACKS
+            g_sys.f.Event_GetPropertyByIndex(info, 17, &dmin, 0);    // 3D_MINDISTANCE (1.0 FUN_01136520 sets 0x11)
+            g_sys.f.Event_GetPropertyByIndex(info, 18, &dmax, 0);    // 3D_MAXDISTANCE (0x12)
         }
         float dFill = dmin + 0.5f * (dmax - dmin), dFar = dmin + 0.9f * (dmax - dmin), dNear = dmin * 0.5f;
         printf("VIRT fire_loop 3D min %.1f max %.1f: limit filled at %.1f, posts at %.1f and %.1f\n", dmin, dmax, dFill, dFar, dNear);
         {   // through the hooks, as the engine sets them (listener at the origin); no Wwise behind them here
-            audio::oListener = [](const float*, uint32_t) { return 1; };
-            audio::oSetPos = [](uint32_t, const float*) { return 1; };
+            engine::audio::wwise::setOriginals([](const float*, uint32_t) { return 1; },
+                                               [](uint32_t, const float*) { return 1; });
             const float lis[9] = {0, 0, 1, 0, 1, 0, 0, 0, 0};
-            audio::hkListener(lis, 0);
+            engine::audio::wwise::hkListener(lis, 0);
             for (int i = 0; i < 40; ++i) {
                 const float p[6] = {0, 0, -(i < 32 ? dFill : i == 32 ? dFar : dNear), 0, 0, 1};   // Wwise z = -engine z
-                audio::hkSetPos(100 + i, p);
+                engine::audio::wwise::hkSetPos(100 + i, p);
             }
         }
         calls = 0;
         std::vector<uint32_t> ids;
         int got = 0;
         for (int i = 0; i < maxPb && i < 32; ++i) {
-            uint32_t id = audio::g.play(fire->first, 100 + i, 1, (void*)cb, nullptr);
+            uint32_t id = engine::audio::host::play({fire->first, (uint32_t)(100 + i), 1, (void*)cb, nullptr});
             got += id != 0;
             ids.push_back(id);
             run(32);
         }
         run(200);
-        uint32_t farId = audio::g.play(fire->first, 132, 1, (void*)cb, nullptr);
+        uint32_t farId = engine::audio::host::play({fire->first, 132, 1, (void*)cb, nullptr});
         run(200);
         // control: without the placement (the info-only instance still where the far post put it), FMOD judges the
         // near sound as if it were far
         void* raw = nullptr;
-        audio::FR rr;
+        engine::audio::fmod::Result rr;
         {
-            std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-            rr = audio::g.f.EventSystem_GetEventBySystemID(audio::g.es, fire->second.sysId, 0, &raw);
-            if (!rr && raw) audio::g.f.Event_Stop(raw, 1);
+            std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+            rr = g_sys.f.EventSystem_GetEventBySystemID(g_sys.es, fire->second.sysId, 0, &raw);
+            if (!rr && raw) g_sys.f.Event_Stop(raw, 1);
         }
         printf("VIRT control: near request with the info-only instance left at the far position -> %s (FMOD %d)\n",
                !rr && raw ? "granted" : "refused", (int)rr);
         run(200);
-        uint32_t nearId = audio::g.play(fire->first, 133, 1, (void*)cb, nullptr);
+        uint32_t nearId = engine::audio::host::play({fire->first, 133, 1, (void*)cb, nullptr});
         run(500);
         printf("VIRT fire_loop max playbacks %d: %d of %d started at the fill distance; far post %s; near post %s, %d stolen end(s)\n",
                maxPb, got, (int)ids.size(), farId ? "STARTED (wrong)" : "failed", nearId ? "started" : "FAILED (wrong)", calls);
-        for (uint32_t id : ids) audio::g.act(id, 0);
-        if (nearId) audio::g.act(nearId, 0);
-        if (farId) audio::g.act(farId, 0);
+        for (uint32_t id : ids) engine::audio::host::act(id, 0);
+        if (nearId) engine::audio::host::act(nearId, 0);
+        if (farId) engine::audio::host::act(farId, 0);
         run(500);
     }
     return 0;
 }
 
-// octtest --mixer <1.0 install>  mixer10 offline acceptance (audio.hpp): the 'Mixer' entry of 1.0's core datamap, its
+// octtest --mixer <1.0 install>  mixer10 offline acceptance (games/di1/mixer.hpp): the 'Mixer' entry of 1.0's core datamap, its
 // Lua table read from the install's root archives, the at-rest 'Mixer' source per group (mixercheck.py recomputes it
 // from the file on its own), then applied through the real FMOD DLLs (no output) with Initialize, IN_City and
 // Music_Inc loaded: every group's category volume read back, and where the music system's own category sits.
 static int mixerTest(char** argv)
 {
-    audio::logfn = stdoutLog;
+    engine::audio::setLog(stdoutLog);
     std::string inst = argv[2], core, lua;
-    if (!audio::readRoot10(inst, "GameDB/Core/CoreDataMap.lua", core)) { printf("MIXER no core datamap\n"); return 1; }
-    std::vector<std::string> paths = audio::mixerPaths(core);
+    const di1::mixer::RootArchives zips(inst);
+    if (!zips.read("GameDB/Core/CoreDataMap.lua", core)) { printf("MIXER no core datamap\n"); return 1; }
+    std::vector<std::string> paths = di1::mixer::mixerPaths(core);
     for (auto& p : paths) printf("MIXER datamap entry %s\n", p.c_str());
-    if (paths.empty() || !audio::readRoot10(inst, paths[0], lua)) { printf("MIXER no mixer file\n"); return 1; }
-    audio::MixerRest rest;
+    if (paths.empty() || !zips.read(paths[0], lua)) { printf("MIXER no mixer file\n"); return 1; }
+    di1::mixer::MixerRest rest;
     std::string err;
-    if (!audio::mixerRest(lua, rest, &err)) { printf("MIXER parse failed: %s\n", err.c_str()); return 1; }
+    if (!di1::mixer::mixerRest(lua, rest, &err)) { printf("MIXER parse failed: %s\n", err.c_str()); return 1; }
     for (auto& a : rest.active) printf("MIXER active %s\n", a.c_str());
     for (auto& v : rest.vol) printf("MIXER group %s %.6f\n", v.first.c_str(), v.second);
     printf("MIXER pitch sum %.6f\n", rest.pitchSum);
-    if (!audio::g.init(inst, true)) return 1;
-    audio::g.loadTree("Initialize.fev", "Permanent");
-    audio::g.loadTree("IN_City.fev", nullptr);
-    audio::music.ensure("Inc");
+    if (!offlineHost(offlineAudio(inst))) return 1;
+    engine::audio::host::loadTree("Initialize.fev", "Permanent");
+    engine::audio::host::loadTree("IN_City.fev", nullptr);
+    engine::audio::music::ensure("Inc");
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        audio::g.mixer = rest.vol;
-        audio::g.faders["music"]["Options"] = 0.5f;   // a 3.0 option fader on top: music categories at 0.5 x mixer
-        audio::g.applyVolumes();
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        g_host.mixer = rest.vol;
+        g_host.faderValues["music"]["Options"] = 0.5f;   // a 3.0 option fader on top: music categories at 0.5 x mixer
+        engine::audio::host::applyVolumes();
     }
     for (const char* c : {"sfx", "music", "dialog", "ui/sfx", "ui/songs", "ui/dialog", "sfx_sfx2d", "sfx_sfx3d_ambience",
                           "sfx_sfx3d_ship", "sfx_sfx3d_ambience_waterfall_virtual", "master"}) {
         void* cat = nullptr;
         float v = -1;
-        bool has = !audio::g.f.EventSystem_GetCategory(audio::g.es, c, &cat) && cat;
-        if (has) audio::g.f.EventCategory_GetVolume(cat, &v);
+        bool has = !g_sys.f.EventSystem_GetCategory(g_sys.es, c, &cat) && cat;
+        if (has) g_sys.f.EventCategory_GetVolume(cat, &v);
         printf("CAT %s %s %.6f\n", c, has ? "exists" : "absent", v);
     }
     void* mc = nullptr;
-    if (!audio::g.f.EventSystem_GetMusicCategory(audio::g.es, &mc) && mc) {
+    if (!g_sys.f.EventSystem_GetMusicCategory(g_sys.es, &mc) && mc) {
         std::string chain;
         for (void* c = mc; c;) {
             char* n = nullptr;
-            audio::g.f.EventCategory_GetInfo(c, nullptr, &n);
+            g_sys.f.EventCategory_GetInfo(c, nullptr, &n);
             chain += std::string(chain.empty() ? "" : " < ") + (n ? n : "?");
             void* parent = nullptr;
-            if (audio::g.f.EventCategory_GetParentCategory(c, &parent)) parent = nullptr;
+            if (g_sys.f.EventCategory_GetParentCategory(c, &parent)) parent = nullptr;
             c = parent;
         }
         void* music = nullptr;
-        audio::g.f.EventSystem_GetCategory(audio::g.es, "music", &music);
+        g_sys.f.EventSystem_GetCategory(g_sys.es, "music", &music);
         float v = -1;
-        audio::g.f.EventCategory_GetVolume(mc, &v);
+        g_sys.f.EventCategory_GetVolume(mc, &v);
         printf("MUSICCAT %s (same object as 'music': %s) volume %.6f\n", chain.c_str(), mc == music ? "yes" : "no", v);
     } else
         printf("MUSICCAT none\n");
     return 0;
 }
 
-// octtest --vo <1.0 install> <out dir> [<dir of decrypted 3.0 scripts>]  vo10 offline acceptance (audio.hpp), real
+// octtest --vo <1.0 install> <out dir> [<dir of decrypted 3.0 scripts>]  vo10 offline acceptance (engine/audio/dialogue.hpp), real
 // FMOD DLLs, no output:
 //  DLG   every 1.0 DLG v11 script through dlgTranscode -> <out>\<name>.dlg30, and with 3.0's script of the same name
 //        when given -> <name>.merged.dlg30 (vocheck.py resolves every 1.0 line and named entry, and every 3.0 one
@@ -2207,46 +2232,45 @@ static int mixerTest(char** argv)
 // (position, length, channels playing, instances, audibility) until it ends or 4 s pass: whether a line is mixed.
 static int voPlay(int argc, char** argv)
 {
-    audio::logfn = stdoutLog;
+    engine::audio::setLog(stdoutLog);
     std::string inst = argv[2];
-    if (!audio::g.init(inst, true)) return 1;
-    audio::g.loadTree("Initialize.fev", "Permanent");
+    if (!offlineHost(offlineAudio(inst))) return 1;
+    engine::audio::host::loadTree("Initialize.fev", "Permanent");
     for (std::string l = argv[3]; !l.empty();) {
         size_t c = l.find(',');
-        std::string n = audio::g.name10(l.substr(0, c));
+        std::string n = engine::audio::system::installedName(l.substr(0, c));
         if (n.empty()) printf("NOFILE %s\n", l.substr(0, c).c_str());
-        else audio::g.loadTree(n, nullptr);
+        else engine::audio::host::loadTree(n, nullptr);
         l = c == std::string::npos ? "" : l.substr(c + 1);
     }
-    audio::vo.root10 = inst + "\\assets\\sound\\dialog";
-    audio::vo.pickLanguage();
-    if (!audio::vo.load(argv[5])) { printf("NOBANK %s\n", argv[5]); return 1; }
-    audio::DlgBank* b = audio::vo.banks[audio::lower(argv[5])].get();
+    engine::audio::dialogue::pickLanguage();
+    if (!engine::audio::dialogue::load(argv[5])) { printf("NOBANK %s\n", argv[5]); return 1; }
+    engine::audio::dialogue::DlgBank* b = engine::audio::dialogue::bank(argv[5]);
     int sub = -1;
     for (uint32_t i = 0; i < b->idx().subs() && sub < 0; ++i)
         if (!_strnicmp(b->idx().subName(i), argv[6], strlen(argv[6]))) sub = (int)i;
     if (sub < 0) { printf("NOLINE %s\n", argv[6]); return 1; }
     float lp[3] = {0, 0, 0}, fwd[3] = {0, 0, 1}, up[3] = {0, 1, 0};
-    audio::g.f.EventSystem_Set3DListenerAttributes(audio::g.es, 0, lp, nullptr, fwd, up);
+    g_sys.f.EventSystem_Set3DListenerAttributes(g_sys.es, 0, lp, nullptr, fwd, up);
     uint32_t obj = 7;
     if (argc > 9) {
-        audio::V3 p;
+        engine::audio::positions::V3 p;
         for (int k = 0; k < 3; ++k) p.v[k] = (float)atof(argv[7 + k]);
-        std::lock_guard<std::mutex> l(audio::g.posMx);
-        audio::g.pos[obj] = p;
+        std::lock_guard<std::mutex> l(engine::audio::positions::detail::g_state.mx);
+        engine::audio::positions::detail::g_state.pos[obj] = p;
     }
-    uint32_t evId = audio::fnv1(argv[4]);
-    auto it = audio::g.byId.find(evId);
-    if (it == audio::g.byId.end()) { printf("NOEVENT %s\n", argv[4]); return 1; }
-    uint32_t id = audio::g.playLine(evId, obj, 0, nullptr, nullptr, b->snd, sub);
+    uint32_t evId = hash::fnv1Lower(argv[4]);
+    auto it = g_host.byId.find(evId);
+    if (it == g_host.byId.end()) { printf("NOEVENT %s\n", argv[4]); return 1; }
+    uint32_t id = engine::audio::host::playLine({evId, obj, 0, nullptr, nullptr}, b->snd, sub);
     void* ev = nullptr;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        if (audio::g.plays.count(id)) ev = audio::g.plays[id].ev;
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        if (g_host.plays.count(id)) ev = g_host.plays[id].ev;
     }
     printf("PLAYLINE %s %s (sub %d) event %s flags %u -> id %u ev %p\n", argv[5], b->idx().subName(sub), sub, argv[4], it->second.flags, id, ev);
     if (!ev) return 1;
-    auto& f = audio::g.f;
+    auto& f = g_sys.f;
     unsigned mode = 0;
     float vol = -1, mn = -1, mx = -1;
     int pos3d = -1;
@@ -2278,22 +2302,22 @@ static int voPlay(int argc, char** argv)
     printf("PROPS mode %x volume %.3f min %.1f max %.1f 3dpos %d categories %s\n", mode, vol, mn, mx, pos3d, chain.c_str());
     unsigned subMs = 0;   // read before the post: getSubSound on a streamed bank seeks it and ends the line playing
     {
-        std::lock_guard<std::mutex> d(audio::g.doneMx);   // playLine's AK_Duration record, read before any tick
-        for (auto& x : audio::g.durs) if (x.first == id) subMs = (unsigned)x.second;
+        std::lock_guard<std::mutex> d(engine::audio::finished::detail::g_state.mx);   // playLine's AK_Duration record, read before any tick
+        for (auto& x : engine::audio::finished::detail::g_state.durs) if (x.first == id) subMs = (unsigned)x.second;
     }
     printf("SUBSOUND length %u ms (the event ends with it when the subsound is what plays)\n", subMs);
     for (int t = 0; t <= 15000; t += 250) {
         uint8_t info[0x80] = {};
         bool live;
         {
-            std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-            live = audio::g.plays.count(id) && audio::g.plays[id].ev;
+            std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+            live = g_host.plays.count(id) && g_host.plays[id].ev;
         }
         if (!live) { printf("INFO t %d ended\n", t); break; }
         f.Event_GetInfo(ev, nullptr, nullptr, info);
         printf("INFO t %d pos %d len %d channels %d instances %d audibility %.3f\n", t, *(int*)(info + 4), *(int*)(info + 8),
                *(int*)(info + 12), *(int*)(info + 16), *(float*)(info + 36));
-        for (int k = 0; k < 250; k += 16) { Sleep(16); audio::tickAndDeliver(); }
+        for (int k = 0; k < 250; k += 16) { Sleep(16); engine::audio::wwise::tick(); }
     }
     return 0;
 }
@@ -2301,23 +2325,22 @@ static int voPlay(int argc, char** argv)
 static int voTest(char** argv)
 {
     namespace fs = std::filesystem;
-    audio::logfn = stdoutLog;
+    engine::audio::setLog(stdoutLog);
     std::string inst = argv[2], outDir = argv[3];
-    if (!audio::g.init(inst, true)) return 1;
-    audio::vo.root10 = inst + "\\assets\\sound\\dialog";
-    audio::vo.pickLanguage();   // no engine: ENU
-    audio::vo.buildEvNames(audio::g.sound10);
+    if (!offlineHost(offlineAudio(inst))) return 1;
+    engine::audio::dialogue::pickLanguage();   // no engine: ENU
+    engine::audio::dialogue::buildEvNames();
     int bad = 0;
     for (auto& e : fs::directory_iterator(inst + "\\assets\\sound\\dialog")) {
         if (e.path().extension() != ".dlg") continue;
         std::string file = e.path().filename().string();
         std::vector<uint8_t> in, out;
-        audio::slurp(e.path().string(), in);
+        core::readFile(e.path().string(), in);
         uint32_t ver = in.size() >= 4 ? *(uint32_t*)in.data() : 0;
         if (ver != 11) { printf("DLG %s skipped (v%u)\n", file.c_str(), ver); continue; }
-        audio::DlgStats st;
+        di1::dlg::DlgStats st;
         std::string err;
-        bool ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err, nullptr, nullptr, &audio::vo.lineEvents);
+        bool ok = di1::dlg::dlgTranscode({in, g_vo.scripts.evNames, nullptr, nullptr, &g_vo.scripts.lineEvents}, out, &st, &err);
         bad += !ok;
         printf("DLG %s %s classes %d lines %d dup %d ranges %d named %d events %d unresolved %d %s\n", file.c_str(), ok ? "ok" : "FAIL",
                st.classes, st.lines, st.dupLines, st.ranges, st.named, st.events, st.unresolved, err.c_str());
@@ -2325,8 +2348,8 @@ static int voTest(char** argv)
         std::string stem = e.path().stem().string();   // with 3.0's own script of the name (decrypted copies in argv[4])
         for (char& c : stem) c = (char)tolower((unsigned char)c);
         std::vector<uint8_t> b30;
-        if (argv[4] && audio::slurp(std::string(argv[4]) + "\\3.0_assets_sound_dialog_" + stem + ".dlg", b30)) {
-            ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err, &b30);
+        if (argv[4] && core::readFile(std::string(argv[4]) + "\\3.0_assets_sound_dialog_" + stem + ".dlg", b30)) {
+            ok = di1::dlg::dlgTranscode({in, g_vo.scripts.evNames, &b30}, out, &st, &err);
             bad += !ok;
             printf("DLG %s +3.0 %s classes %d named %d events %d kept30 %d lines30 %d %s\n", file.c_str(), ok ? "ok" : "FAIL", st.classes,
                    st.named, st.events, st.kept30, st.lines30, err.c_str());
@@ -2337,21 +2360,21 @@ static int voTest(char** argv)
     // dialog_default_2d class; Inc's ED047 in dialog_intercom
     for (auto [pfx, num, want] : {std::tuple<const char*, int, const char*>{"SN", 13, "dialog_default_2d"}, {"SP", 14, "dialog_default_2d"},
                                   {"ED", 47, "dialog_intercom"}}) {
-        auto le = audio::vo.lineEvents.find(audio::dlgLineKey((uint32_t)(uint8_t)pfx[0] | (uint32_t)(uint8_t)pfx[1] << 8, (uint16_t)num));
-        bool ok = le != audio::vo.lineEvents.end() && le->second == want;
+        auto le = g_vo.scripts.lineEvents.find(engine::audio::dlgscript::dlgLineKey((uint32_t)(uint8_t)pfx[0] | (uint32_t)(uint8_t)pfx[1] << 8, (uint16_t)num));
+        bool ok = le != g_vo.scripts.lineEvents.end() && le->second == want;
         bad += !ok;
-        printf("LINEEVENT %s%03d -> %s (%s)\n", pfx, num, le != audio::vo.lineEvents.end() ? le->second.c_str() : "-", ok ? "ok" : "BAD");
+        printf("LINEEVENT %s%03d -> %s (%s)\n", pfx, num, le != g_vo.scripts.lineEvents.end() ? le->second.c_str() : "-", ok ? "ok" : "BAD");
     }
-    printf("LINEEVENTS %zu lines\n", audio::vo.lineEvents.size());
+    printf("LINEEVENTS %zu lines\n", g_vo.scripts.lineEvents.size());
     auto mediaOf = [](const uint8_t* d, uint32_t m) {   // FUN_0182c000 / FUN_0182d2f0's view of media m
         return (const uint32_t*)(d + 0x20 + ((size_t)*(const uint16_t*)(d + 0x14) + (size_t)m * 3) * 4);
     };
-    for (auto& e : fs::directory_iterator(audio::vo.dir10)) {
+    for (auto& e : fs::directory_iterator(g_vo.reg.dir)) {
         if (e.path().extension() != ".fsb") continue;
         std::string file = e.path().filename().string();
-        audio::DlgBank* b = audio::vo.open(file);
+        engine::audio::dialogue::DlgBank* b = engine::audio::dialogue::open(file);
         if (!b) { printf("BANK %s FAIL\n", file.c_str()); ++bad; continue; }
-        std::vector<uint8_t> h = audio::dbnkFromName10(b->idx().prefix(), {b});
+        std::vector<uint8_t> h = dbnk::fromNames(b->idx().prefix(), {{b->idx(), (uint32_t)(uintptr_t)b}});
         const uint8_t* d = h.data();
         uint16_t lo = *(const uint16_t*)(d + 0x10), hi = *(const uint16_t*)(d + 0x12);
         int lines = 0;
@@ -2363,41 +2386,41 @@ static int voTest(char** argv)
                 const uint32_t* me = mediaOf(d, *(const uint16_t*)(le + 2) + v);
                 bool inMem = *(const uint32_t*)(d + 0x18) > me[1] && me[2] == 8;
                 const uint32_t* rec = (const uint32_t*)(d + me[1]);
-                bool ok = inMem && me[0] && (audio::DlgBank*)(uintptr_t)rec[0] == b && rec[1] < b->idx().subs();
+                bool ok = inMem && me[0] && (engine::audio::dialogue::DlgBank*)(uintptr_t)rec[0] == b && rec[1] < b->idx().subs();
                 bad += !ok;
                 printf("NAME %s %c%c%03u %d %s %u %s\n", file.c_str(), d[8], d[9], l, v, me[0] ? (const char*)d + me[0] : "-", rec[1], ok ? "ok" : "BAD");
             }
         }
         printf("BANK %s ok prefix %c%c lines %d subsounds %u header %u B\n", file.c_str(), d[8], d[9], lines, b->idx().subs(), (unsigned)h.size());
-        audio::vo.unload(file);
+        engine::audio::dialogue::unload(file);
     }
-    audio::g.load("Edna.fev");
-    if (!audio::vo.load("Edna_str.fsb")) { printf("PLAY no Edna_str.fsb\n"); return 1; }   // vo.mgr null: no registry step
-    const uint8_t* d = audio::vo.speakers[audio::vo.banks["edna_str.fsb"]->idx().prefix()].hdrs.back()->data();
+    engine::audio::host::load("Edna.fev");
+    if (!engine::audio::dialogue::load("Edna_str.fsb")) { printf("PLAY no Edna_str.fsb\n"); return 1; }   // vo.mgr null: no registry step
+    const uint8_t* d = g_vo.reg.speakers[engine::audio::dialogue::bank("edna_str.fsb")->idx().prefix()].hdrs.back()->data();
     const uint8_t* le = d + 0x20 + (19 - *(const uint16_t*)(d + 0x10)) * 4;
     const uint32_t* me = mediaOf(d, *(const uint16_t*)(le + 2));
-    audio::DlgBank* b = nullptr;
+    engine::audio::dialogue::DlgBank* b = nullptr;
     int sub = -1;
-    bool found = audio::vo.media(d + me[1], &b, &sub);
+    bool found = engine::audio::dialogue::media(d + me[1], &b, &sub);
     static float dur = -1;
     static int ends = 0;
     static DWORD endAt = 0;
-    audio::AkCallback cb = [](uint32_t type, void* info) {
+    engine::audio::wwise::detail::AkCallback cb = [](uint32_t type, void* info) {
         if (type == 8) dur = ((float*)info)[4];
         if (type == 1) { ++ends; endAt = GetTickCount(); }
     };
     DWORD t0 = GetTickCount();
-    uint32_t id = found ? audio::g.playLine(audio::fnv1("dialog_edna"), 7, 1 | 4 | 8, (void*)cb, nullptr, b->snd, sub) : 0;
+    uint32_t id = found ? engine::audio::host::playLine({hash::fnv1Lower("dialog_edna"), 7, 1 | 4 | 8, (void*)cb, nullptr}, b->snd, sub) : 0;
     // GetSourcePlayPosition through the hook (the lipsync player's clock, FUN_014cb180): sampled each second it must
     // grow with the wall clock while the line plays
     std::vector<std::pair<DWORD, int>> posAt;
     DWORD lastSample = 0;
     for (int t = 0; t < 20000 && !ends; t += 16) {
         Sleep(16);
-        audio::tickAndDeliver();
+        engine::audio::wwise::tick();
         int pos = -1;
         DWORD now = GetTickCount() - t0;
-        if (!ends && now >= lastSample + 1000 && audio::hkSrcPos(id, &pos, 1) == 1) { posAt.emplace_back(now, pos); lastSample = now; }
+        if (!ends && now >= lastSample + 1000 && engine::audio::wwise::hkSrcPos(id, &pos, 1) == 1) { posAt.emplace_back(now, pos); lastSample = now; }
     }
     int posBad = 0, prev = -1;
     for (auto& p : posAt) {
@@ -2409,29 +2432,29 @@ static int voTest(char** argv)
     bad += posAt.size() < 5 || posBad;
     unsigned ms = 0;
     void* s = nullptr;
-    if (b && b->snd && !audio::g.f.Sound_GetSubSound(b->snd, sub, &s) && s) audio::g.f.Sound_GetLength(s, &ms, 1);
+    if (b && b->snd && !g_sys.f.Sound_GetSubSound(b->snd, sub, &s) && s) g_sys.f.Sound_GetLength(s, &ms, 1);
     printf("PLAY ED019 media %s sub %d (%s) id %u: duration cb %.0f ms (subsound %u ms), end cb %d after %lu ms\n", found ? "ours" : "NOT FOUND",
            sub, found ? b->idx().subName(sub) : "-", id, dur, ms, ends, (unsigned long)(endAt - t0));
     bad += !found || !id || ends != 1 || dur != (float)ms;
     // the next line of the same bank while one plays (3.0 FUN_01830370 posts it before stopping the old one): the old
     // ends once, at once; the new one keeps playing after 3.0's StopPlayingID of the old id
     int endsBefore = ends;
-    uint32_t a = audio::g.playLine(audio::fnv1("dialog_edna"), 7, 1, (void*)cb, nullptr, b->snd, sub);
-    for (int t = 0; t < 500; t += 16) { Sleep(16); audio::tickAndDeliver(); }
-    uint32_t c = audio::g.playLine(audio::fnv1("dialog_edna"), 7, 1, (void*)cb, nullptr, b->snd, sub + 1);
-    audio::g.act(a, 0);
-    for (int t = 0; t < 500; t += 16) { Sleep(16); audio::tickAndDeliver(); }
+    uint32_t a = engine::audio::host::playLine({hash::fnv1Lower("dialog_edna"), 7, 1, (void*)cb, nullptr}, b->snd, sub);
+    for (int t = 0; t < 500; t += 16) { Sleep(16); engine::audio::wwise::tick(); }
+    uint32_t c = engine::audio::host::playLine({hash::fnv1Lower("dialog_edna"), 7, 1, (void*)cb, nullptr}, b->snd, sub + 1);
+    engine::audio::host::act(a, 0);
+    for (int t = 0; t < 500; t += 16) { Sleep(16); engine::audio::wwise::tick(); }
     bool cAlive;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        cAlive = audio::g.plays.count(c) && audio::g.plays[c].ev;
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        cAlive = g_host.plays.count(c) && g_host.plays[c].ev;
     }
     printf("PLAY overlap: old id %u ended %d time(s), new id %u %s\n", a, ends - endsBefore, c, cAlive ? "still playing" : "ENDED");
     bad += ends - endsBefore != 1 || !cAlive;
     // lipsync: the path 3.0 FUN_014c5550 builds from that media name -> 1.0's Edna.zip member (vocheck.py: 19023 of
     // 19026 subsounds of the 1.0 characters with a zip have theirs)
     std::string zr, mem, ap = std::string("sound/dialog/enu/ED/") + (found ? b->idx().subName(sub) : "") + ".anno";
-    bool anno = audio::annoSource(ap.c_str(), zr, mem);
+    bool anno = di1::audio::annoSource(ap.c_str(), zr, mem);
     printf("ANNO %s -> %s : %s\n", ap.c_str(), anno ? zr.c_str() : "-", anno ? mem.c_str() : "-");
     bad += !anno || zr != "sound/dialog/ENU/Edna.zip";
     printf("VO bad %d\n", bad);
@@ -2443,30 +2466,30 @@ static int voTest(char** argv)
 static int fevDeps(char** argv)
 {
     namespace fs = std::filesystem;
-    audio::logfn = stdoutLog;
-    if (!audio::g.init(argv[2], true)) return 1;
-    for (auto& e : fs::directory_iterator(audio::g.sound10)) {
+    engine::audio::setLog(stdoutLog);
+    if (!offlineHost(offlineAudio(argv[2]))) return 1;
+    for (auto& e : fs::directory_iterator(g_sys.cfg.soundDir)) {
         if (e.path().extension() != ".fev") continue;
         std::string file = e.path().filename().string();
         void* p = nullptr;
-        if (audio::g.f.EventSystem_Load(audio::g.es, file.c_str(), nullptr, &p) || !p) { printf("DEPS %s LOADFAIL\n", file.c_str()); continue; }
-        audio::Project pr;
+        if (g_sys.f.EventSystem_Load(g_sys.es, file.c_str(), nullptr, &p) || !p) { printf("DEPS %s LOADFAIL\n", file.c_str()); continue; }
+        engine::audio::host::Project pr;
         pr.p = p;
         std::string list;
-        for (auto& d : audio::g.depsOf(pr, e.path().stem().string())) list += (list.empty() ? "" : "|") + d;
+        for (auto& d : engine::audio::host::depsOf(pr, e.path().stem().string())) list += (list.empty() ? "" : "|") + d;
         printf("DEPS %s %s\n", file.c_str(), list.c_str());
-        audio::g.f.EventProject_Release(p);
+        g_sys.f.EventProject_Release(p);
     }
     return 0;
 }
 
-// octtest --host <1.0 install>: audio::install as Pentane_Main runs it, i.e. inside Pentane.dll's DllMain, with the
+// octtest --host <1.0 install>: di1::audio::install as Pentane_Main runs it, i.e. inside Pentane.dll's DllMain, with the
 // loader lock held (taken here through ntdll's LdrLockLoaderLock). install must return at once (no hook is patched:
 // the hook and address functions are stand-ins); the host thread cannot start while the lock is held; after the
 // release, ready() sees FMOD up with Initialize.fev and the 1.0 mixer loaded on the host thread.
 static int hostTest(char** argv)
 {
-    audio::logfn = stdoutLog;
+    engine::audio::setLog(stdoutLog);
     typedef LONG(NTAPI * LockFn)(ULONG, ULONG*, ULONG_PTR*);
     typedef LONG(NTAPI * UnlockFn)(ULONG, ULONG_PTR);
     HMODULE nt = GetModuleHandleA("ntdll.dll");
@@ -2477,27 +2500,29 @@ static int hostTest(char** argv)
     static int hooks = 0;
     auto hook = [](const char*, const std::vector<core::HookSpec>& feature) { hooks += (int)feature.size(); return true; };
     auto rt = [](uint32_t) { return (uintptr_t)dummy; };
-    audio::hostStart.nosound = true;
     ULONG state = 0;
     ULONG_PTR cookie = 0;
     if (lock(0, &state, &cookie) < 0) { printf("HOST lock failed\n"); return 1; }
     DWORD t0 = GetTickCount();
-    audio::Cfg cfg;
+    di1::audio::Cfg cfg;
     cfg.install10 = argv[2];
     cfg.game30 = ".";
     cfg.installFeature = hook;
     cfg.rt = rt;
-    bool ok = audio::install(cfg);
+    cfg.log = stdoutLog;
+    engine::audio::wwise::Config ac = di1::audio::config(cfg);
+    ac.systemCfg.nosound = true;
+    bool ok = engine::audio::wwise::install(ac);
     DWORD tInstall = GetTickCount() - t0;
-    DWORD w = WaitForSingleObject(audio::hostStart.done, 2000);   // the old install waited here (20 s)
+    DWORD w = WaitForSingleObject(g_sys.done, 2000);   // the old install waited here (20 s)
     unlock(0, cookie);
-    bool up = audio::ready();
+    bool up = engine::audio::system::ready();
     DWORD tUp = GetTickCount() - t0;
     bool init = false, mixer = false;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        init = audio::g.projects.count("initialize.fev") != 0;
-        mixer = audio::g.mixer.count("sfx") && fabs(audio::g.mixer["sfx"] - 0.707946f) < 1e-5f;
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        init = g_host.projects.count("initialize.fev") != 0;
+        mixer = g_host.mixer.count("sfx") && fabs(g_host.mixer["sfx"] - 0.707946f) < 1e-5f;
     }
     printf("HOST install under the loader lock: %s in %lu ms, %d hooks; host init while locked: %s; ready %d after %lu ms; "
            "Initialize.fev %s; mixer sfx %s\n", ok ? "returned" : "FAILED", (unsigned long)tInstall, hooks,
