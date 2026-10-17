@@ -102,17 +102,21 @@ static void __cdecl hkNode(void* call)
     g_node(call);
 }
 
-static void install()
+// The building runtime's hooks (H1).
+inline bool install(const di1::Config& c)
 {
-    if (g_cfg.building10 || g_cfg.spawnTrace10)
-        hook("building lot spawn (building10)", 0x00CEF120, "538BDC83EC0883E4F083C404558B6B04", (void*)&hkLotSpawn, (void**)&g_lotSpawn);
-    if (g_cfg.spawnTrace10)
-        installFeature("spawntrace10 buildings", {
+    bool ok = true;
+    if (c.building10 || c.spawnTrace10)
+        ok &= hook("building lot spawn (building10)", 0x00CEF120, "538BDC83EC0883E4F083C404558B6B04",
+                   (void*)&hkLotSpawn, (void**)&g_lotSpawn);
+    if (c.spawnTrace10)
+        ok &= installFeature("spawntrace10 buildings", {
             {"lot state register (spawntrace10)", 0x00CEFE60, "538B5C2408555657", (void*)&hkLotState,
              (void**)&g_lotState},
             {"SpawnBuilding Link_In (spawntrace10)", 0x011854B0, "6AFF68????????64A100000000", (void*)&hkNode,
              (void**)&g_node},
         });
+    return ok;
 }
 
 }   // namespace bldrt

@@ -2477,7 +2477,12 @@ static int hostTest(char** argv)
     ULONG_PTR cookie = 0;
     if (lock(0, &state, &cookie) < 0) { printf("HOST lock failed\n"); return 1; }
     DWORD t0 = GetTickCount();
-    bool ok = audio::install(hook, rt, argv[2], ".");
+    audio::Cfg cfg;
+    cfg.install10 = argv[2];
+    cfg.game30 = ".";
+    cfg.installFeature = hook;
+    cfg.rt = rt;
+    bool ok = audio::install(cfg);
     DWORD tInstall = GetTickCount() - t0;
     DWORD w = WaitForSingleObject(audio::hostStart.done, 2000);   // the old install waited here (20 s)
     unlock(0, cookie);
