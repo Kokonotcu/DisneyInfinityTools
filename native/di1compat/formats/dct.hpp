@@ -30,8 +30,8 @@ inline constexpr size_t kSlotValueAt = 4;   // within a slot: u32 hash, rel -> v
 inline bool headerOk(const std::string& raw)
 {
     if (raw.size() < kHeader || raw.compare(0, 4, "DICT")) return false;
-    const bool fixed = bytes::le32(raw, kVersionAt) == kVersion && bytes::le32(raw, kSlotsRelAt) == kSlotsRel;
-    const bool noContainers = bytes::le32(raw, kOneAt) == 1 && !bytes::le32(raw, kContainersAt);
+    const bool fixed = bytes::u32At(raw, kVersionAt) == kVersion && bytes::u32At(raw, kSlotsRelAt) == kSlotsRel;
+    const bool noContainers = bytes::u32At(raw, kOneAt) == 1 && !bytes::u32At(raw, kContainersAt);
     return fixed && noContainers;
 }
 
@@ -112,11 +112,11 @@ inline bool rehash(const std::unordered_map<uint32_t, const std::string*>& names
 inline bool load(const std::string& raw, Dict& d)
 {
     if (!detail::headerOk(raw)) return false;
-    const uint32_t ns = bytes::le32(raw, detail::kSlotsAt);
+    const uint32_t ns = bytes::u32At(raw, detail::kSlotsAt);
     if (!ns || detail::kHeader + (uint64_t)detail::kSlotBytes * ns > raw.size()) return false;
-    d.initval = bytes::le32(raw, detail::kSeedAt);
+    d.initval = bytes::u32At(raw, detail::kSeedAt);
     d.keys.clear();
-    auto rel = [&](uint32_t slot) { return bytes::le32(raw, detail::kHeader + detail::kSlotBytes * slot + 4); };
+    auto rel = [&](uint32_t slot) { return bytes::u32At(raw, detail::kHeader + detail::kSlotBytes * slot + 4); };
     uint32_t empty = 0;   // slots > keys, so there is one
     while (empty < ns && rel(empty)) ++empty;
     if (empty == ns) return false;
@@ -127,7 +127,7 @@ inline bool load(const std::string& raw, Dict& d)
         const size_t p = detail::kHeader + detail::kSlotBytes * (size_t)i + detail::kSlotValueAt + 1 + r;
         const size_t end = raw.find('\0', p);
         if (p >= raw.size() || end == std::string::npos) return false;
-        d.keys.emplace_back(bytes::le32(raw, detail::kHeader + detail::kSlotBytes * i), raw.substr(p, end - p));
+        d.keys.emplace_back(bytes::u32At(raw, detail::kHeader + detail::kSlotBytes * i), raw.substr(p, end - p));
     }
     return true;
 }

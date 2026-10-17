@@ -110,10 +110,10 @@ struct File {
         for (const std::string& s : names) namesSize += s.size() + 1;
         for (const Rec& r : recs) dataSize += kRecordHead + r.pay.size();
         std::string out = hdr;
-        bytes::setLe32(out, kNamesSizeAt, (uint32_t)namesSize);
-        bytes::setLe32(out, kDataSizeAt, (uint32_t)dataSize);
+        bytes::put32(out, kNamesSizeAt, (uint32_t)namesSize);
+        bytes::put32(out, kDataSizeAt, (uint32_t)dataSize);
         // the engine allocates from the record count (FORMATS.md 3)
-        bytes::setLe32(out, kRecordCountAt, recordCount == 0 ? 0u : (uint32_t)recs.size());
+        bytes::put32(out, kRecordCountAt, recordCount == 0 ? 0u : (uint32_t)recs.size());
         out.reserve(out.size() + namesSize + dataSize);
         for (const std::string& s : names) {
             out += s;
