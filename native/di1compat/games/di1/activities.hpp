@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <optional>
@@ -239,7 +240,8 @@ inline void rewriteLinkBuffer(ActGraph& g, oct::Rec& r)
 inline void rewriteLinks(ActGraph& g)
 {
     oct::File& f = g.f;
-    for (size_t i = g.lpool + 1; i < f.blockEnd(g.lpool); ++i) {
+    // the rewrite changes payloads only, so the pool's end holds (GP-23)
+    for (size_t i = g.lpool + 1, end = f.blockEnd(g.lpool); i < end; ++i) {
         if (f.name(f.recs[i]) != "Data" || !inLinksBuffer(g, i)) continue;
         rewriteLinkBuffer(g, f.recs[i]);
     }
@@ -288,7 +290,7 @@ inline bool renameField(ActGraph& g, const ActClass& c, oct::Rec& r, const std::
     if (nm == "Type") {
         setNameValue(f, r, firstType ? c.cls30 : c.eval30);
         firstType = false;
-    } else if (nm == "Uuid" && g.smUuid.empty() && std::string(c.cls10) == "MissionTask_ActivityStateMachine") {
+    } else if (nm == "Uuid" && g.smUuid.empty() && !strcmp(c.cls10, "MissionTask_ActivityStateMachine")) {
         g.smUuid = r.pay;
     }
     bool drop = false;
@@ -319,7 +321,7 @@ inline void rewriteNode(ActGraph& g, size_t k, std::vector<oct::Rec>& out)
         if (c && field && !renameField(g, *c, r, nm, firstType)) continue;
         out.push_back(r);
     }
-    if (c && std::string(c->cls30) == "MissionTask_ChallengeStateMachine")
+    if (c && !strcmp(c->cls30, "MissionTask_ChallengeStateMachine"))
         out.push_back(f.nameScalar(g.fl, f.addName("ChallengeZone"), "NONE"));   // 53/61 shipped graphs
 }
 
@@ -441,7 +443,7 @@ inline int activityTasks30(std::string& lua)
         const detail::KeyTable tb = detail::tableAround(toks, k);
         detail::renameParams(lua, toks, tb, *c, edits);
         // 61 of 61 shipped 3.0 state machine tables carry ChallengeZone
-        if (std::string(c->cls30) == "MissionTask_ChallengeStateMachine" && tb.close < toks.size())
+        if (!strcmp(c->cls30, "MissionTask_ChallengeStateMachine") && tb.close < toks.size())
             edits.push_back({toks[tb.close].at, 0, "\tChallengeZone = \"NONE\",\n"});
         ++n;
     }
