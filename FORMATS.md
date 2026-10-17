@@ -339,6 +339,31 @@ Code: `expl30.py`
 - `ranges.py` lists values and per-file counts above the shipped maximum (`shippedranges.json`).
 - `conv.check_foreign(s, kind, allow)` asserts that none are left except the ones a tool keeps on purpose (`native30`: `ExpendablePool`, `ExpendableNodeRef`).
 
+### 4.10 1.0 choreographies in 3.0 form
+Code: `native/di1compat` `cho.hpp` (plan CHO-1, NPC-6), each step behind its own cfg key; the step order is `games/di1/octsteps.hpp`'s.
+
+#### Constant sections (`const30`, cfg `choconst10`)
+The Static DataNodes of a processor SubNetwork go under constant headers, as 3.0 ships them.
+- 3.0 never has a variable ClipData or EventList node (processor graphs: 8,389 + 7,811 Static, 0 not; `statics.py`). Its reader keeps them in the constant arena (FUN_0050d8d0: Static -> +0x84) under constant headers 1..CHC (FUN_004fe4d0 builds them from the first `ConstantLayoutCount` layout ints), which instances share.
+- `octx::addCounts` alone made 1.0 Static nodes variable: constant nodes under variable headers were relocated into wild pointers when instanced.
+- A variable ClipData breaks instancing another way. Its block buffer is a separate counted allocation in the arena (FUN_00516c00 -> FUN_00412150, pointer at node+0x3c). The instance clone relocates nodes only through vtable+0x28 = FUN_004cf8d0, which re-registers the node and leaves +0x3c on the template's buffer, and the clone's dtor (FUN_005080f0) then deletes the template's buffer against the template arena: one count too few per destroyed instance. The arena (tracker at `*(0x021B73A0)`, FUN_00416840) is freed while its last object is still in its dtor (in-game 2026-10-14, TS_WaterSplashdown: placement node at arena+0x324, arena count 2 = its two header entries; the second entry's delete freed the arena under the node -> AV 004EDDBB).
+- **Rule**, on every 3.0 processor SubNetwork with Static nodes (6,798/6,798, `construle.py`):
+  - Static nodes' headers are 1..CHC and no other node's or processor's.
+  - The constant headers are exactly the prefixes of the Static nodes' paths. `ConstantLayoutCount` = the layout ints of headers 1..CHC.
+  - A Static node's path is the variable path with its root prefixed `Constant` (`ConstantANC_X/ClipData`; a root-level node keeps its name, 111 SubNetworks), and the variable tree no longer has it.
+  - Pool order is not part of it (111 shipped SubNetworks interleave).
+- **Written so**: constant headers first, the remaining headers after, `Header` fields renumbered, and a `ConstantHeaderCount` record that `octx::addCounts` turns into the constant counts (it then keeps Static). A Static node's variable header is dropped unless another node or processor uses it or a kept header lies below it.
+  - The constant headers are numbered in the order the constant trie creates them, a parent's children consecutively. That equals breadth first whenever no Static path is 3 or more headers deep (docs/audit GR-22b); which order 3.0 uses for deeper paths is not checked, and `octtest --cho-const` checks sets and paths, not the numbering.
+- **AltNodeName**: 3.0's Transform Association names the constant twin of its node as `AltNodeName` exactly when the SubNetwork has a `Constant`+NodeName header (9,203 of 9,204 Transform Associations with one, 0 of 24,496 without; `altname.py`).
+- **Static shapes 3.0 ships** (`staticflags.py`, processor graphs). Only these stay Static; the other Static nodes become variable:
+  - types 3.0 never keeps Static: Bool (3,743), Visibility (37,917), Int (4), all variable;
+  - External ones: 3.0 has no Static External node but ClipData (1.0: 1,451 Static External Floats);
+  - nodes listed in `ConnectionMapUsedDataNodes` (3.0: 0 Static; 1.0: 439, all Static External Floats). The reader puts those nodes in a NodeHandleArray in the variable arena (FUN_00500ac0 reads the list, hash 0x2cb3247b at 00500ecb, -> FUN_004e25d0), which an instance clones and relocates by the instance offset (FUN_004ff0e0 -> NodeHandleArray vtable+0xc = FUN_004cf950 -> FUN_0049c5e0): a constant node there becomes a wild pointer (in-game 2026-10-14 02:03, inc_dock_explode instanced at IN_City load: AV writing 00240028 under FUN_004cf950; its list holds the Static External Floats ScaleMultiplier / GrowShrink);
+  - nodes an Association binds (it writes them: the Surge ticker's `InputSurge` Bool, 1.0 Static, 3.0 variable + Peeked);
+  - BasisConversion `DataNodeRefs` (3.0: never Static; 1.0: 11; the same container relocation risk);
+  - nodes a processor takes through an input 3.0 never feeds from a Static node (FloatConnection / FloatNegate / FloatMultiply Input, RelationshipProcessor Input, ClipProcessor Input, RadialBasisOrientation ...). `staticrefs.py`: `kStaticInputs30` in `cho.hpp` is every processor attribute 3.0 ships with a Static node;
+  - nodes whose header has a variable node or processor on or below it (3.0: 0 of 17,981 Static nodes; 1.0: 11), repeated until none is left.
+
 ---
 
 ## 5. Meridian graphs
