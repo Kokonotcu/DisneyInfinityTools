@@ -9,3 +9,4 @@ filledroles.json
 shippedassociations.json
 native/**/build/
 /build/
+/harness-shots/
