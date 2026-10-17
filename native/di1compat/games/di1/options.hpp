@@ -45,6 +45,12 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
     o.sx = c.sx10;
     o.bmx = c.bmx10;
     o.btx = c.btx10;
+    o.merRules.events10 = c.events10;
+    o.merRules.portRefs = c.portRefs10;
+    o.merRules.ports10 = c.ports10;
+    o.merRules.pins10 = c.pins10;
+    o.merRules.gate10 = c.gate10;
+    o.merRules.toggleType10 = c.toggleType10;
     return o;
 }
 

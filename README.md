@@ -64,13 +64,13 @@ the translated result to the engine as an in-memory file. The translations by fo
 | 1.0 data | Translation | Source |
 |---|---|---|
 | Scene and processor graphs (`.oct`) | Pool counts, header layouts and constants in 3.0's form | `octx.hpp`, `oct.hpp` |
-| Choreographies | Clip blocks re-packed; motion-clip output ids renumbered to 3.0's skeleton ports; play ranges and layout attachments | `cho.hpp`, `ports10.hpp` |
-| Meridian graphs (`.mer`, `.mtc`) | Parameter tables, pin tables, links; 1.0-only node classes registered natively | `mer.hpp`, `mernode.hpp` |
+| Choreographies | Clip blocks re-packed; motion-clip output ids renumbered to 3.0's skeleton ports; play ranges and layout attachments | `games/di1/cho.hpp`, `choconst.hpp`, `cholayout.hpp`, `ports10.hpp`, `convert/clips.hpp` |
+| Meridian graphs (`.mer`, `.mtc`) | Parameter tables, pin tables, links; 1.0-only node classes registered natively | `formats/mer.hpp`, `games/di1/mer.hpp`, `engine/mernode.hpp` |
 | Materials and shaders (`.mtb`, `.shd`) | Resolved to identical 3.0 materials, or 1.0 shaders translated at load (compiled once, then cached) | `render.hpp`, `gen30.hpp`, `sm3.hpp` |
 | Entities (`.bent`) | Rewritten in 3.0's 4.1 layout | `bent.hpp` |
 | Game database (DataMap Lua, `.chd`, zone list) | Paths and records in 3.0's form; CHD compiled from Lua | `datamap.hpp`, `chd.hpp`, `gameplay.hpp` |
 | Scripts and AI (Slang, behaviour maps and trees, navmeshes) | 3.0 containers, with natives bound to their 1.0 semantics | `sx.hpp`, `npc.hpp`, `npcrt.hpp` |
-| Missions and UI | Event enums, beacons, loading screens, menus | `mission.hpp`, `ui.hpp` |
+| Missions and UI | Event enums, beacons, loading screens, menus | `games/di1/mission.hpp`, `ui.hpp` |
 | Collision (`.btd`), localisation (`.dct`) | 3.0 block layout; 1.0 dictionaries | `btd.hpp`, `dct.hpp` |
 | Audio (FMOD Ex events, music, dialogue) | A 1.0 FMOD event system runs beside 3.0's Wwise. Posts for 1.0 events, music cues and dialogue lines are routed to it | `audio.hpp` |
 
@@ -219,7 +219,7 @@ Unless dated otherwise, each check was run on the stock Steam 3.0 Gold installat
 |---|---|---|
 | `mer.py` | Meridian graphs: `show`, `catalogue`, `mtc` (class manifest) | 428,387 parameters and 117,117 links over 584 graphs; 584 / 584 `.mtc` byte-exact |
 | `graph.py` | Meridian graph sizing per geometry node | All 1,367 shipped SubNetworks of the generated shape |
-| `portmap.py` | 1.0 to 3.0 port numbering for the skeleton templates both games own; writes `ports10.hpp` | 105,708 motion-clip ids at the 3.0 twin's position; 5,963 / 5,963 model ports |
+| `portmap.py` | 1.0 to 3.0 port numbering for the skeleton templates both games own; writes `games/di1/ports10.hpp` | 105,708 motion-clip ids at the 3.0 twin's position; 5,963 / 5,963 model ports |
 | `nodedump.py`, `streamlayout.py` | One node's records; vertex-buffer stream layout | 4,915 / 4,915 multi-primitive nodes stream-major |
 
 **Materials, shaders and geometry**

@@ -4,27 +4,27 @@
 #include <string>
 #include "../../core/log.hpp"
 #include "../../core/paths.hpp"
+#include "../../formats/mer.hpp"
 #include "../../formats/rentable.hpp"
-#include "../../mer.hpp"
 #include "config.hpp"
 
 namespace di1::tables {
 
-// Loads both tables from the plugin's folder, the Meridian one with c's keys, and logs each; installs no hook.
+// Loads both tables from the plugin's folder and logs each; installs no hook.
 inline bool install(const Config& c);
 // The render table as it loaded: empty or partial when renderOk() is false.
 inline const rentable::Table& render();
 // Whether the render table loaded.
 inline bool renderOk();
 // The Meridian table; nullptr when it did not load.
-inline mer::Table* mer();
+inline ::mer::Table* mer();
 
 namespace detail {
 
 struct State {
     rentable::Table render;   // set once in install()
     bool renderOk = false;    // set once in install()
-    mer::Table mer;           // set once in install(); di1::meridian adds 1.0's classes at boot, before any transcode
+    ::mer::Table mer;         // set once in install(); di1::meridian adds 1.0's classes at boot, before any transcode
     bool merOk = false;       // set once in install()
 };
 inline State g_state;
@@ -48,9 +48,10 @@ inline const rentable::Table& render() { return detail::g_state.render; }
 
 inline bool renderOk() { return detail::g_state.renderOk; }
 
-inline mer::Table* mer() { return detail::g_state.merOk ? &detail::g_state.mer : nullptr; }
+inline ::mer::Table* mer() { return detail::g_state.merOk ? &detail::g_state.mer : nullptr; }
 
-inline bool install(const Config& c)
+// The Meridian rules' keys are not the table's: TranscodeOptions carries them (di1::mer::Rules).
+inline bool install(const Config&)
 {
     detail::State& s = detail::g_state;
     const std::string dir = core::pluginDir();
@@ -59,12 +60,6 @@ inline bool install(const Config& c)
                s.renderOk ? "ok" : "MISSING", (unsigned)s.render.shaders.size(), (unsigned)s.render.donors.size(),
                (unsigned)s.render.matindex.size(), (unsigned)s.render.plans.size());
     s.merOk = s.mer.load(detail::slurpFile(dir, "di1compat_mer.txt"));
-    s.mer.events10 = c.events10;
-    s.mer.portRefs = c.portRefs10;
-    s.mer.ports10 = c.ports10;
-    s.mer.pins10 = c.pins10;
-    s.mer.gate10 = c.gate10;
-    s.mer.toggleType10 = c.toggleType10;
     core::logf("meridian table: %s (%u registered classes, %u described)", s.merOk ? "ok" : "MISSING",
                (unsigned)s.mer.registered.size(), (unsigned)s.mer.classes.size());
     return s.renderOk && s.merOk;

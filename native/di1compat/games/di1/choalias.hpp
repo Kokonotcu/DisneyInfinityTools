@@ -1,7 +1,7 @@
 // choalias10: Cho DataMap paths outside choreographies/<n>/<n>, as 1.0 DataMaps list them. cho. Any thread.
 #pragma once
 #include <string>
-#include "../../cho.hpp"
+#include "cho.hpp"
 #include "config.hpp"
 
 namespace di1::choalias {

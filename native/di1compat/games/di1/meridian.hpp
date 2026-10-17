@@ -4,9 +4,10 @@
 #include <cstdint>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
-#include "../../mer.hpp"
-#include "../../mernode.hpp"
-#include "../../mission.hpp"
+#include "../../formats/mer.hpp"
+#include "../../engine/mernode.hpp"
+#include "mer.hpp"
+#include "mission.hpp"
 
 namespace di1::meridian {
 
