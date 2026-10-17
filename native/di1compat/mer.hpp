@@ -36,7 +36,7 @@
 #include "base/hash.hpp"
 #include "convert/records.hpp"
 #include "formats/oct.hpp"
-#include "mission.hpp"
+#include "games/di1/mission.hpp"
 
 namespace mer {
 
@@ -82,7 +82,7 @@ struct Table {
 // mission.hpp kAliases as registered classes, each with its 3.0 twin's pins and parameter types added
 inline void addAliases(Table& T)
 {
-    for (auto& a : mission::kAliases) {
+    for (auto& a : di1::mission::kAliases) {
         T.registered.insert(a.name);
         Class &c = T.classes[a.name], &t = T.classes[a.twin];
         c.pins.insert(t.pins.begin(), t.pins.end());
@@ -642,7 +642,7 @@ inline void describeField(Graph& g, const NodeView& v, const Field& fd, NodePara
     const bool presentation = !v.n.type.compare(0, 23, "MissionPresentationList");   // 23 = its length
     const bool presentEvent = pn == "Event" && presentation;
     if (g.T.events10 && type == T_INT && presentEvent) {
-        int32_t e = mission::presentEvent30((int32_t)oct::u((const uint8_t*)p.val.data() + off, 4));
+        int32_t e = di1::mission::presentEvent30((int32_t)oct::u((const uint8_t*)p.val.data() + off, 4));
         memcpy(&p.val[off], &e, 4);
         ++g.s.events;
     }

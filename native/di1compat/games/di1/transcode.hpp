@@ -21,7 +21,7 @@
 #include "../../formats/luachunk.hpp"
 #include "../../formats/oct.hpp"
 #include "../../mer.hpp"
-#include "../../mission.hpp"
+#include "mission.hpp"
 #include "../../npc.hpp"
 #include "../../render.hpp"
 #include "../../sx.hpp"

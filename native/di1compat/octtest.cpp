@@ -2810,8 +2810,8 @@ int main(int argc, char** argv)
         int both = 0, bad = 0;                                    // activityTasks30 into mis's luaEvents30; the order must not
         for (int a = 2; a < argc; ++a) {                          // matter (disjoint keys): both orders give the same bytes
             std::string t = slurp(argv[a]), x = t, y = t;
-            int a1 = gameplay::activityTasks30(x), e1 = x.compare(0, 9, "Mission =") ? 0 : mission::luaEvents30(x);
-            int e2 = y.compare(0, 9, "Mission =") ? 0 : mission::luaEvents30(y), a2 = gameplay::activityTasks30(y);
+            int a1 = gameplay::activityTasks30(x), e1 = x.compare(0, 9, "Mission =") ? 0 : di1::mission::luaEvents30(x);
+            int e2 = y.compare(0, 9, "Mission =") ? 0 : di1::mission::luaEvents30(y), a2 = gameplay::activityTasks30(y);
             if (x != y || a1 != a2 || e1 != e2) { ++bad; printf("ORDER MATTERS %s\n", argv[a]); }
             if (a1 && e1) { ++both; printf("both %s: %d activity tables, %d events\n", argv[a], a1, e1); }
         }
@@ -2827,7 +2827,7 @@ int main(int argc, char** argv)
     }
     if (argc > 3 && std::string(argv[1]) == "--beaconmap") {   // --beaconmap <zonelist.lua> <out.lua>: beacon10
         std::string t = slurp(argv[2]);
-        int aliases = 0, n = mission::beaconMap30(t, &aliases);
+        int aliases = 0, n = di1::mission::beaconMap30(t, &aliases);
         std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
         printf("%d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added\n", n, aliases);
         return 0;
@@ -3372,7 +3372,7 @@ int main(int argc, char** argv)
             printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
         } else {
             if (opt != "only") {
-                int k = gameplay::zonelist30(t), ka = 0, kb = mission::beaconMap30(t, &ka);
+                int k = gameplay::zonelist30(t), ka = 0, kb = di1::mission::beaconMap30(t, &ka);
                 printf("zonelist30 %d records, beaconMap30 %d rows (+%d)\n", k, kb, ka);
             }
             out = t;

@@ -43,6 +43,7 @@
 #include "formats/oct.hpp"
 #include "formats/chd.hpp"
 #include "mer.hpp"
+#include "mission.hpp"
 #include "mernode.hpp"
 #include "render.hpp"
 #include "formats/arc30.hpp"
