@@ -1,6 +1,4 @@
-// Hooks as data and their installer (CLAUDE.md H1, H2), and rt(): a static exe address in the running image.
-// MinHook and core/log.hpp. hook() and installFeature() run in Pentane_Main and install(), under the loader lock
-// (B-N1); rt() on any thread.
+// Hooks as data, their installer (H1, H2) and rt(). MinHook, core/log.hpp. Installing runs under the loader lock.
 #pragma once
 #include <windows.h>
 #include <cstdint>

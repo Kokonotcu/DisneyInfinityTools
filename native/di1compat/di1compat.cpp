@@ -1,9 +1,8 @@
-// di1compat: Pentane plugin that serves Disney Infinity 1.0 data to the 3.0 engine (research plan
-// D:\DI-Extract\_research\PLAN.md, INF-1/INF-6). The 1.0 files are read in place from the 1.0 install's own
-// zips and handed to the engine as Genie::MemFile streams through its asset open, FUN_0041cb10 (worlds,
-// textures, Lua ... all go through it, archive members included).
-// Log: <game dir>\di1compat.log (Pentane's own log function is not used: its calling convention is unverified).
-// Config: <plugin dir>\di1compat.cfg, "key = value" lines; every key and its default in games/di1/config.hpp.
+// di1compat: a Pentane plugin that serves Disney Infinity 1.0 data, read in place from its zips, to the 3.0 engine.
+
+// Files reach the engine as Genie::MemFile streams through its asset open, FUN_0041cb10.
+
+// Log: <game dir>\di1compat.log, not Pentane's (its calling convention is unverified). Config: games/di1/config.hpp.
 #include <windows.h>
 #include <tlhelp32.h>
 #include <intrin.h>
@@ -102,15 +101,13 @@ using text::norm;
 
 static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set once in Pentane_Main, before any hook
 
-// ---- VFS1 v0: the 1.0 install's own zips, read in place (never copied or rewritten) ----
-// An engine path <dir>/<name>/<rest> lives in assets\<dir>\<name>.zip as member <rest> (the layout extract.py
-// unpacks), and deeper or shallower splits are tried too (games/di1/archives.hpp). Archives open lazily; miniz is not
-// thread-safe.
+// ---- VFS1: the 1.0 install's own zips, read in place ----
+
+// The open archives, by path under assets; miniz is not thread-safe. Search order: games/di1/archives.hpp.
 static std::mutex g_zipLock;
 static std::map<std::string, std::unique_ptr<mz_zip_archive>> g_zips;   // guarded by g_zipLock; nullptr = no such zip
 
-// The 1.0 archive rel, opened on first use and kept open for the session (_setmaxstdio in Pentane_Main). A failed
-// open is kept too (A-12). Caller holds g_zipLock.
+// The archive rel, opened on first use and kept for the session; failures too (A-12). Caller holds g_zipLock.
 static mz_zip_archive* zipFor(const std::string& rel)
 {
     auto it = g_zips.find(rel);
@@ -1800,7 +1797,8 @@ static std::string currency10(const char* filter, const char* who)
     auto it = g_currency10.find(filter);
     if (it == g_currency10.end()) return {};
     static core::LogOnce<std::string> told;
-    if (told.first(std::string(who) + filter)) logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
+    if (told.first(std::string(who) + filter))
+        logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
     return it->second;
 }
 // The zone's: the zone manager's (*0x0225f548) string field inventoryFilter of its zone (+0x19c), read through
