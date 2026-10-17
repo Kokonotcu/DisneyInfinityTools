@@ -42,6 +42,7 @@
 #include "trace/breaktrace.hpp"
 #include "trace/fade.hpp"
 #include "trace/opacity.hpp"
+#include "trace/teardown.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -713,23 +714,6 @@ static void __fastcall hkAvRemove(void* self, void*, uint32_t a1)
     g_avRemove(self, nullptr, a1);
 }
 
-// Probe (teardowntrace): who frees a Layout-held DataNode's memory during its own dtor (in-game 2026-10-13: AV write
-// 004EDDBB in FUN_004edda0 after the dtor wrote node+0 on the same page; in between run FUN_004b2780(0) on the node's
-// hierarchy entry and, inside FUN_004edda0 between its read and its write of node+0xc when the handle has 0x80000,
-// FUN_004edcc0 -> FUN_004e1a40 freeing that entry). Logs, for each Zoo::Layout dtor (FUN_00787bc0): every
-// placement's +4 scene node and +0xc DataNode (vtable, RTTI, refcount word, page protection, handle, hierarchy entry
-// words and their tagged targets); then, while that dtor runs, each Samurai::Node dtor (FUN_004ee5f0), entry release
-// (FUN_004b2780) and entry free (FUN_004e1a40) with the page protection of the node being destroyed before / after.
-// Reads only checked memory (CrabeLoader dumps every AV).
-static bool tdReadable(uintptr_t p, size_t n) { return sys::readable((const void*)p, n); }
-static uint32_t tdRd(uintptr_t p) { return tdReadable(p, 4) ? *(const uint32_t*)p : 0xDEADBEEF; }
-static uint32_t tdProt(uintptr_t p)
-{
-    MEMORY_BASIC_INFORMATION mbi;
-    return p >= 0x10000 && VirtualQuery((void*)p, &mbi, sizeof(mbi)) ? (mbi.State == MEM_COMMIT ? mbi.Protect : 0x10000000 | mbi.State) : 0;
-}
-static uint32_t tdStatic(uint32_t v) { return v >= g_base && v < g_base + 0x0209B000 ? v - (uint32_t)g_base + 0x400000u : v; }
-
 // FUN_01449390, thiscall on a choreography instance (+0x38 its path, +0x1b4 flags: 0x20 audio sync): its start.
 typedef void(__fastcall* BtStartFn)(uint8_t* self, void* edx);
 static BtStartFn g_choStart;
@@ -751,226 +735,6 @@ static bool installChoStart(const di1::Config& c)
     return hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart,
                 (void**)&g_choStart);
 }
-// "ptr vt=<static> <rtti> ref=<word> prot=<protect>"
-static void tdObj(char* out, size_t cap, uintptr_t p)
-{
-    if (!tdReadable(p, 8)) { sprintf_s(out, cap, "%08X (unreadable, prot %X)", (uint32_t)p, tdProt(p)); return; }
-    uint32_t vt = tdRd(p), col = tdRd(vt - 4), td = tdRd(col + 12);
-    char name[96] = "";
-    if (td != 0xDEADBEEF) safeCopy(name, sizeof(name), (const char*)(uintptr_t)(td + 8));
-    MEMORY_BASIC_INFORMATION mbi{};
-    VirtualQuery((void*)p, &mbi, sizeof(mbi));
-    sprintf_s(out, cap, "%08X vt=%08X %s ref=%08X prot=%X alloc=%08X", (uint32_t)p, tdStatic(vt), name, tdRd(p + 4), tdProt(p),
-              (uint32_t)(uintptr_t)mbi.AllocationBase);
-}
-// hierarchy entry of a node handle (FUN_004b46d0 / FUN_004b2800, table at *(0x021B739C)); 0 if none
-static uintptr_t tdEntry(uint32_t handle)
-{
-    uint32_t h = handle & 0x7ffff, t = tdRd(rt(0x021B739C)), e;
-    if (h == 0x7ffff || t == 0xDEADBEEF) return 0;
-    if (!(h & 0x40000)) e = tdRd(t + 0x18 + (h >> 12) * 4) + (h & 0xfff) * 0x14;
-    else e = tdRd(tdRd(t + 0x130 + (((h >> 3) & 0x1fff7fff) >> 9) * 4) + ((h >> 3) & 0x1ff) * 4) + (h & 7) * 0x14;
-    return tdReadable(e, 0x14) ? e : 0;
-}
-static void tdEntryLog(const char* what, uintptr_t e)
-{
-    if (!e) { logf("td   %s entry: none", what); return; }
-    char a[200], b[200];
-    tdObj(a, sizeof(a), tdRd(e) & ~1u);
-    tdObj(b, sizeof(b), tdRd(e + 0x10) & ~1u);
-    logf("td   %s entry %08X: [0]=%08X [4]=%08X [8]=%08X [c]=%08X [10]=%08X; [0]-> %s; [10]-> %s", what, (uint32_t)e, tdRd(e),
-         tdRd(e + 4), tdRd(e + 8), tdRd(e + 12), tdRd(e + 0x10), a, b);
-}
-static __declspec(thread) int t_tdDepth;
-static __declspec(thread) uintptr_t t_tdNode;
-static __declspec(thread) uintptr_t t_tdOuter;   // placement 0 node of the Layout being destroyed
-static __declspec(thread) int t_tdFrees;          // tracker / heap free lines logged in this Layout dtor
-static void tdBlock(char* out, size_t cap, uintptr_t p);
-static volatile LONG g_tdLayouts, g_tdLines, g_tdEarly;
-static std::mutex g_tdWatchLock;
-static std::map<uintptr_t, uintptr_t> g_tdWatch;   // placement +0xc node -> Layout (hkPlBind)
-typedef uint32_t(__fastcall* TdDtorFn)(void* self, void* edx);
-typedef void(__fastcall* EntryRelFn)(void* self, void* edx, uint32_t a1);
-static TdDtorFn g_layoutDtor, g_nodeDtor;
-static EntryRelFn g_entryRel;
-static uint32_t __fastcall hkLayoutDtor(void* self, void*)
-{
-    bool on = InterlockedIncrement(&g_tdLayouts) <= 3000;
-    if (on) {
-        uintptr_t L = (uintptr_t)self;
-        uint32_t arr = tdRd(L + 0x40), n = tdRd(L + 0x44);
-        logf("td layout %08X dtor: %u placements (array %08X)", (uint32_t)L, n, arr);
-        for (uint32_t k = 0; k < n && k < 8 && arr != 0xDEADBEEF; ++k) {
-            uintptr_t el = arr + 0x18 * k;
-            char s[200], d[200], nm[64] = "";
-            tdObj(s, sizeof(s), tdRd(el + 4));
-            tdObj(d, sizeof(d), tdRd(el + 0xc));
-            safeCopy(nm, sizeof(nm), (const char*)(uintptr_t)tdRd(el + 8));
-            uint32_t node = tdRd(el + 0xc);
-            bool watched;
-            { std::lock_guard<std::mutex> l(g_tdWatchLock); watched = g_tdWatch.count(node) != 0; }
-            logf("td  placement %u '%s' flags %X: scene %s; node %s handle %08X (bound and alive: %s)", k, nm, tdRd(el + 0x10), s, d,
-                 tdRd(node + 0xc), watched ? "yes" : "no/never bound");
-            if (node && node != 0xDEADBEEF) {
-                tdEntryLog("node", tdEntry(tdRd(node + 0xc)));
-                char b[160], eb[160];
-                tdBlock(b, sizeof(b), node);
-                tdBlock(eb, sizeof(eb), tdEntry(tdRd(node + 0xc)));
-                logf("td   node %s; its entry %s", b, eb);
-            }
-        }
-    }
-    uintptr_t outerPrev = t_tdOuter;
-    t_tdFrees = 0;
-    if (on) {
-        ++t_tdDepth;
-        uint32_t arr = tdRd((uintptr_t)self + 0x40), first = arr == 0xDEADBEEF ? 0 : tdRd(arr + 0xc);
-        t_tdOuter = first == 0xDEADBEEF ? 0 : first;   // placement 0's node: tracker / heap frees are logged against it
-    }
-    uint32_t r = g_layoutDtor(self, nullptr);
-    if (on) { --t_tdDepth; t_tdOuter = outerPrev; logf("td layout %08X dtor done", (uint32_t)(uintptr_t)self); }
-    return r;
-}
-// Placement nodes seen bound (FUN_0077d9c0, thiscall on the Layout when an instance binds its placements): a node
-// destroyed outside its Layout's dtor was released once too often somewhere; its stack names the releaser.
-typedef uint32_t(__fastcall* PlBindFn)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3);   // ret 0xc
-static PlBindFn g_plBind;
-static uint32_t __fastcall hkPlBind(void* self, void*, uint32_t a1, uint32_t a2, uint32_t a3)
-{
-    uintptr_t L = (uintptr_t)self;
-    uint32_t arr = tdRd(L + 0x40), n = tdRd(L + 0x44);
-    for (uint32_t k = 0; k < n && k < 64 && arr != 0xDEADBEEF; ++k) {
-        uint32_t node = tdRd(arr + 0x18 * k + 0xc);
-        if (!node || node == 0xDEADBEEF) continue;
-        std::lock_guard<std::mutex> l(g_tdWatchLock);
-        if (g_tdWatch.emplace(node, L).second && InterlockedIncrement(&g_tdLines) <= 30000) {
-            char o[200];
-            tdObj(o, sizeof(o), node);
-            logf("td bind layout %08X placement %u node %s", (uint32_t)L, k, o);
-        }
-    }
-    return g_plBind(self, nullptr, a1, a2, a3);
-}
-static uint32_t __fastcall hkNodeDtor(void* self, void*)
-{
-    uintptr_t prev = t_tdNode, layout = 0;
-    {
-        std::lock_guard<std::mutex> l(g_tdWatchLock);
-        auto it = g_tdWatch.find((uintptr_t)self);
-        if (it != g_tdWatch.end()) { layout = it->second; g_tdWatch.erase(it); }
-    }
-    if (layout && t_tdDepth <= 0 && InterlockedIncrement(&g_tdEarly) <= 200) {
-        char o[200], line[600];
-        tdObj(o, sizeof(o), (uintptr_t)self);
-        int len = sprintf_s(line, "td PLACEMENT NODE DESTROYED OUTSIDE ITS LAYOUT DTOR (layout %08X): %s, stack:", (uint32_t)layout, o);
-        stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 24);
-        logf("%s", line);
-    }
-    if (t_tdDepth > 0 && InterlockedIncrement(&g_tdLines) <= 30000) {
-        char o[200], b[160];
-        tdObj(o, sizeof(o), (uintptr_t)self);
-        tdBlock(b, sizeof(b), (uintptr_t)self);
-        logf("td  node dtor %s handle %08X %s", o, tdRd((uintptr_t)self + 0xc), b);
-        tdEntryLog("own", tdEntry(tdRd((uintptr_t)self + 0xc)));
-        t_tdNode = (uintptr_t)self;
-    }
-    uint32_t r = g_nodeDtor(self, nullptr);
-    t_tdNode = prev;
-    return r;
-}
-static void __fastcall hkEntryRel(void* self, void*, uint32_t a1)
-{
-    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 30000) { g_entryRel(self, nullptr, a1); return; }
-    uintptr_t e = (uintptr_t)self;
-    char o[200];
-    tdObj(o, sizeof(o), tdRd(e + 0x10) & ~1u);
-    logf("td   entry release %08X (arg %X) [10]=%08X -> %s; node %08X page prot %X", (uint32_t)e, a1, tdRd(e + 0x10), o,
-         (uint32_t)t_tdNode, tdProt(t_tdNode));
-    g_entryRel(self, nullptr, a1);
-    logf("td   entry release done; node %08X page prot %X", (uint32_t)t_tdNode, tdProt(t_tdNode));
-}
-// FUN_004e1a40 (thiscall on the entry table, arg = entry): frees a hierarchy entry; reached from the node dtor's
-// FUN_004edda0 -> FUN_004edcc0 between its read and its faulting write of node+0xc
-static EntryRelFn g_entryFree;
-// The allocation-block tracker at *(0x021B73A0) (FUN_00416840 / FUN_00412050): table at +0x10, u16 entry count at
-// table+2, entries at table+4, 0x10 bytes {count | flags (count = & 0x0fffffff), ?, size, base}. An object allocated
-// inside a tracked block (a SubNetwork arena) counts once; FUN_00416840 decrements on its delete and frees the block
-// (FUN_00409e10) at the last one. tdBlock: the tracked block holding p, "untracked" if none.
-static void tdBlock(char* out, size_t cap, uintptr_t p)
-{
-    uint32_t tr = tdRd(rt(0x021B73A0)), tbl = tr == 0xDEADBEEF ? 0xDEADBEEF : tdRd(tr + 0x10);
-    if (tbl == 0xDEADBEEF || !tbl || !tdReadable(tbl, 4)) { sprintf_s(out, cap, "blk(%08X)=no tracker", (uint32_t)p); return; }
-    uint32_t n = tdRd(tbl) >> 16;
-    if (!tdReadable(tbl + 4, (size_t)n * 0x10)) { sprintf_s(out, cap, "blk(%08X)=tracker unreadable", (uint32_t)p); return; }
-    const uint32_t* e = (const uint32_t*)(uintptr_t)(tbl + 4);
-    for (uint32_t i = 0; i < n; ++i, e += 4)
-        if (e[3] <= p && p < e[3] + e[2]) {
-            sprintf_s(out, cap, "blk(%08X)=[%08X +%X count %u flags %X]", (uint32_t)p, e[3], e[2], e[0] & 0x0fffffff, e[0] >> 28);
-            return;
-        }
-    sprintf_s(out, cap, "blk(%08X)=untracked (%u blocks)", (uint32_t)p, n);
-}
-static void __fastcall hkEntryFree(void* self, void*, uint32_t entry)
-{
-    if (t_tdDepth <= 0 || !t_tdNode || InterlockedIncrement(&g_tdLines) > 30000) { g_entryFree(self, nullptr, entry); return; }
-    char b[160];
-    tdBlock(b, sizeof(b), t_tdOuter);
-    tdEntryLog("freeing", tdReadable(entry, 0x14) ? entry : 0);
-    logf("td   entry free %08X; node %08X page prot %X; placement node %s", entry, (uint32_t)t_tdNode, tdProt(t_tdNode), b);
-    g_entryFree(self, nullptr, entry);
-    tdBlock(b, sizeof(b), t_tdOuter);
-    logf("td   entry free done; node %08X page prot %X; placement node %s page prot %X", (uint32_t)t_tdNode, tdProt(t_tdNode), b,
-         tdProt(t_tdOuter));
-}
-// FUN_00416840 (thiscall on the tracker, ret 0xc): an object's delete counted against its block
-typedef char(__fastcall* TrackFreeFn)(void* self, void* edx, uint32_t obj, uint32_t* base, int* remaining);
-static TrackFreeFn g_trackFree;
-static char __fastcall hkTrackFree(void* self, void*, uint32_t obj, uint32_t* base, int* remaining)
-{
-    if (t_tdDepth <= 0 || !t_tdOuter || ++t_tdFrees > 80 || InterlockedIncrement(&g_tdLines) > 30000) return g_trackFree(self, nullptr, obj, base, remaining);
-    char o[200], b[160], pb[160];
-    tdObj(o, sizeof(o), obj);
-    tdBlock(b, sizeof(b), obj);
-    char r = g_trackFree(self, nullptr, obj, base, remaining);
-    tdBlock(pb, sizeof(pb), t_tdOuter);
-    logf("td    tracker delete %s %s -> %d (block %08X, %d left); placement node %08X %s page prot %X", o, b, r, base ? *base : 0,
-         remaining ? *remaining : -1, (uint32_t)t_tdOuter, pb, tdProt(t_tdOuter));
-    return r;
-}
-// FUN_00409e10 (cdecl): a heap / block free
-typedef void(__cdecl* HeapFreeFn)(uint32_t p);
-static HeapFreeFn g_heapFree;
-static void __cdecl hkHeapFree(uint32_t p)
-{
-    if (t_tdDepth <= 0 || !t_tdOuter || ++t_tdFrees > 80 || InterlockedIncrement(&g_tdLines) > 30000) { g_heapFree(p); return; }
-    char b[160];
-    tdBlock(b, sizeof(b), p);
-    g_heapFree(p);
-    logf("td    heap free %08X (was %s); placement node %08X (node - p = %X) page prot %X", p, b, (uint32_t)t_tdOuter,
-         (uint32_t)(t_tdOuter - p), tdProt(t_tdOuter));
-}
-
-// teardowntrace's hooks (H1), all or none.
-static bool installTeardownTrace(const di1::Config& c)
-{
-    if (!c.teardownTrace) return true;
-    return installFeature("teardowntrace", {
-        {"Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor,
-         (void**)&g_layoutDtor},
-        {"Samurai::Node dtor (teardowntrace)", 0x004EE5F0, "6AFF68????????64A100000000", (void*)&hkNodeDtor,
-         (void**)&g_nodeDtor},
-        {"hierarchy entry release (teardowntrace)", 0x004B2780, "8B442404568D7110", (void*)&hkEntryRel,
-         (void**)&g_entryRel},
-        {"hierarchy entry free (teardowntrace)", 0x004E1A40, "83EC0853578B7C2414", (void*)&hkEntryFree,
-         (void**)&g_entryFree},
-        {"Layout placement bind (teardowntrace)", 0x0077D9C0, "6AFF68????????64A100000000", (void*)&hkPlBind,
-         (void**)&g_plBind},
-        {"block tracker delete" " (teardowntrace)", 0x00416840, "535556578BF9", (void*)&hkTrackFree,
-         (void**)&g_trackFree},
-        {"heap free (teardowntrace)", 0x00409E10, "8B4424046A0350E8", (void*)&hkHeapFree, (void**)&g_heapFree},
-    });
-}
-
 // Trace: the spawn choreography. FUN_00a9f080 asks the creation cho for 'Cho Controls' (FUN_014835c0, thiscall 2 args)
 // and only then registers FUN_00a8b670 on its 'ToyCreation_PlaceToy' event; that callback sets the per-player ready
 // flag (+0xd9) the finalize step waits for.
@@ -3420,7 +3184,7 @@ extern "C" void __stdcall Pentane_Main()
     installMissionTrace(g_cfg);
     installChoStart(g_cfg);
     trace::breaktrace::install({g_cfg.breakTrace});
-    installTeardownTrace(g_cfg);
+    trace::teardown::install({g_cfg.teardownTrace});
     installMerRegistry(g_cfg);
     installLockTrace(g_cfg);
     trace::opacity::install({g_cfg.opacityLog10});
