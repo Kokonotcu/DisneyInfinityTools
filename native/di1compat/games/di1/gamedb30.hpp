@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <exception>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -73,7 +74,7 @@ struct State {
     // the cfg keys the steps read: set once in install()
     bool serve10 = false, avperc10 = false, playset30 = false, rewards10 = false, hudMarker10 = false;
     std::mutex mx;                    // guards everything below; held across prepare's engine opens (NR-02)
-    supplement::GameDb* db = nullptr;   // owned; for the playset `playset`. Raw until NR-01 is decided (N19)
+    std::unique_ptr<supplement::GameDb> db;   // for the playset `playset`; replaced only once its successor is built
     std::string playset;
     bool active = false;              // between its Playset include and its unload
     std::set<Table> routed;           // routed in this activation: repeat includes skip them
@@ -185,8 +186,7 @@ inline void prepare(State& s, void* self, const char* name)
         core::logf("gamedb30 %s: no supplement (%s)", name, why.empty() ? "ToyBox DataMap unreadable" : why.c_str());
         return;
     }
-    delete s.db;
-    s.db = new supplement::GameDb(supplement::gamedb30(m10, m30));
+    s.db = std::make_unique<supplement::GameDb>(supplement::gamedb30(m10, m30));
     s.playset = n;
     s.psPath.clear();
     core::logf("gamedb30 %s: 1.0 DataMap (%u records), %u Playset tables, %u actors with 3.0 tables", name,
