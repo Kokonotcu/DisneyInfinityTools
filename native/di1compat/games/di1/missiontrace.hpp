@@ -1,4 +1,5 @@
 // missiontrace on 1.0's playset missions (zones10's prefixes); renderdoc10 arms on their tick. trace, playsets.
+// Boot thread installs.
 #pragma once
 #include "../../trace/mission.hpp"
 #include "../../trace/renderdoc.hpp"

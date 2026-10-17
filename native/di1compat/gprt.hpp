@@ -1,4 +1,5 @@
 // Gameplay and menu runtime: selectmenu10, actionmap10, focus10, keys10, accept10, tools10. core, games/di1.
+// Game thread.
 #pragma once
 #include <windows.h>
 #include <cctype>

@@ -1,4 +1,5 @@
 // The choreography start hook's users: cinesync10 (1.0's audio-sync sound event) and breaktrace. engine, audio, trace.
+// Boot thread installs.
 #pragma once
 #include <cstdint>
 #include "../../audio.hpp"

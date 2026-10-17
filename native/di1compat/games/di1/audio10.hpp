@@ -1,4 +1,5 @@
 // audio10: the FMOD host (audio.hpp) set up from the cfg's audio keys and both installs. core, engine/assets.
+// Boot thread.
 #pragma once
 #include "../../audio.hpp"
 #include "../../core/hooks.hpp"
