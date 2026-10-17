@@ -790,272 +790,473 @@ inline int32_t rendercaps30(int32_t v)
     return (v & 0xfff) | ((v & 0x1000) ? 0x200 : 0) | ((v & 0x2000) ? 0x400 : 0);
 }
 
-// The material half (autobundle.resolve): the 1.0 bundle's materials onto 3.0 shaders -> r.mtb, r.textures10.
-// drawn: material -> the 1.0 vformats it is drawn with (the generic tier needs a shader taking a twin of each);
-// donorPrefix: generic donors only from 3.0 bundles whose extract path starts with it ("" = any);
-// shaderVf: material -> the vformats its final shader declares.
-inline bool transcodeMaterials(const Table& T, const IO& io, const std::string& mtb10, const std::map<int, std::set<uint32_t>>& drawn,
-                               const std::string& donorPrefix, Result& r, std::map<int, const std::set<uint32_t>*>& shaderVf)
-{
-    auto sizes3 = [&](const std::string& sh, int& A, int& B, int& slots) {
-        auto it = T.shaders.find(sh);
-        if (it == T.shaders.end()) return false;
-        A = it->second.A; B = it->second.B; slots = it->second.slots;
-        return true;
-    };
-    std::map<std::string, std::array<int, 3>> shd10;
-    auto sizes1 = [&](const std::string& sh, int& A, int& B, int& slots) {
-        auto it = shd10.find(sh);
-        if (it == shd10.end()) {
-            std::string b;
-            if (!io.read10("shaders/shaders/" + sh + ".shd", b) || b.size() < 0x6c) return false;
-            const uint8_t* p = (const uint8_t*)b.data();
-            it = shd10.emplace(sh, std::array<int, 3>{(int)oct::u(p + 0x46, 2), (int)oct::u(p + 0x6a, 2), (int)p[0x69]}).first;
-        }
-        A = it->second[0]; B = it->second[1]; slots = it->second[2];
-        return true;
-    };
+// The material half's inputs
+struct MaterialInput {
+    const std::string& mtb10;
+    const std::map<int, std::set<uint32_t>>& drawn;   // material -> the 1.0 vformats it is drawn with
+    const std::string& donorPrefix;                   // generic donors' extract path starts with it ("" = any)
+};
 
-    std::string err;
+namespace detail {
+
+// 1.0 .shd block descriptors (FORMATS.md 6.1): A size, B slot count, B size
+constexpr size_t kShd10SizeA = 0x46, kShd10SlotsB = 0x69, kShd10SizeB = 0x6a;
+constexpr int kSlotStride10 = 4, kSlotStride30 = 8;   // a texture slot's bytes in block B (FORMATS.md 6.1)
+// own hash space: MATP load (FUN_00472590) reuses a material registered under the hash (FUN_00468500)
+constexpr uint32_t kTranslatedHashXor = 0x9E3779B9u;
+constexpr size_t kParamBytes = 16;   // one float4 parameter of block A
+
+// One transcodeMaterials call: inputs, the 1.0 bundle, the 3.0 bundles read so far, the merge sources
+struct MaterialRun {
+    const Table& T;
+    const IO& io;
+    const MaterialInput& in;
+    Result& r;
     Bundle b10;
-    if (!parseBundle(mtb10, b10, 4, sizes1, &err)) { r.problems.push_back("1.0 bundle: " + err); return false; }
-
-    std::map<std::string, Bundle> cache30;
-    auto bundle30 = [&](const Ref& ref, Bundle*& out) {
-        auto it = cache30.find(ref.extract);
-        if (it == cache30.end()) {
-            std::string raw;
-            Bundle b;
-            if (!io.read30(ref.extract, raw) || !parseBundle(raw, b, 8, sizes3, &err)) {
-                r.problems.push_back("3.0 bundle " + ref.extract + ": " + (raw.empty() ? std::string("unreadable") : err));
-                return false;
-            }
-            it = cache30.emplace(ref.extract, std::move(b)).first;
-        }
-        out = &it->second;
-        return true;
-    };
-
+    std::map<std::string, Bundle> cache30;   // by extract path, for this call only
     std::vector<Src> srcs;
-    for (size_t k = 0; k < b10.mats.size(); ++k) {
-        const Material& m10 = b10.mats[k];
-        Bundle* bnd = nullptr;
-        std::string raw10;
-        gen30::Shd10 s10;
-        bool skin = false, rigid = false;
-        if (auto dk = drawn.find((int)k); dk != drawn.end() && io.skinned)
-            for (uint32_t c : dk->second) (io.skinned(c) ? skin : rigid) = true;
-        // skinned: only when every format it is drawn with is skinned (the translated shader's passes take the 3.0
-        // skin target; a rigid primitive would need the 1.0 format) and each has a target, and not when Disney ships
-        // the material (the real tier: its 3.0 twin is drawn skinned already) -- this is for the ones that fell to a
-        // stand-in shader (same-sh / generic: pupils, translucent FX, screen-space water)
-        bool skinOk = io.translateSkinned && !rigid &&
-                      !(!m10.name.empty() && T.matindex.count(m10.name) && !T.notReal.count(m10.name));
-        if (skin && skinOk)
-            for (uint32_t c : drawn.at((int)k)) skinOk &= skinTarget30(T, c) != 0 && T.plans.count({c, skinTarget30(T, c)}) != 0;
-        if (io.translate && (!skin || skinOk) && io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) && gen30::parse10(raw10, s10) &&
-            (!io.translatable || io.translatable(m10.shader))) {
-            gen30::Layout L = gen30::layout(s10);
-            Material dm;
-            dm.name = m10.name;
-            dm.shader = "x" + m10.shader;
-            // MATP load (FUN_00472590) reuses any material already registered under the hash (FUN_00468500): the
-            // same 1.0 GUID converted onto a 3.0 shader in a choreography/exploder bundle loaded first replaced this
-            // one -- 3.0 shader, 1.0 block A, opacity 0 -> skipped, black (in-game 2026-10-13). Own hash space.
-            dm.hash = m10.hash ^ 0x9E3779B9u;
-            dm.stride = 8;
-            dm.slots = L.slots;
-            dm.A = m10.A;
-            dm.A.resize(L.sizeA, '\0');
-            dm.B = gen30::blockB30(m10.B, L);
-            Bundle one;
-            one.textures = b10.textures;
-            one.mats.push_back(dm);
-            srcs.push_back({one, 0});
-            r.tiers["translated"]++;
-            if (skin) r.tiers["translated skinned"]++;
-            if (io.verbose) io.log("translated " + m10.name + " [" + m10.shader + "]" + (skin ? " skinned" : ""));
-            r.translated.insert((int)k);
-            r.shaders.push_back({m10.shader, dm.shader});
-            continue;
-        }
-        auto mi = T.matindex.find(m10.name);
-        if (!m10.name.empty() && mi != T.matindex.end() && !T.notReal.count(m10.name)) {
-            if (!bundle30(mi->second, bnd) || !detail::hasMaterial(*bnd, mi->second, r.problems)) continue;
-            if (io.verbose) {   // the 1.0 material's textures vs the 3.0 material's (a GUID 3.0 reused shows as a mismatch)
-                const Material& m3 = bnd->mats[mi->second.idx];
-                std::string l = "real " + m10.name + " " + mi->second.extract + " 1.0:";
-                for (int s = 0; s < m10.slots; ++s) { uint32_t t = b10.slot(m10, s); l += " " + (t < b10.textures.size() ? hex8(b10.textures[t]) : std::string("-")); }
-                l += " 3.0:";
-                for (int s = 0; s < m3.slots; ++s) { uint32_t t = bnd->slot(m3, s); l += " " + (t < bnd->textures.size() ? hex8(bnd->textures[t]) : std::string("-")); }
-                io.log(l);
-            }
-            srcs.push_back({*bnd, mi->second.idx});
-            r.tiers["real"]++;
-        } else {
-            const Ref* donor = nullptr;
-            const char* tier = "same-sh";
-            auto di = T.donors.find(m10.shader);
-            if (di != T.donors.end()) donor = &di->second;
-            else {
-                // most common 3.0 shader accepting a twin of every format this material is drawn with:
-                // Python max over (count, shader, extract path, index)
-                tier = "generic";
-                std::vector<std::set<uint32_t>> need;
-                auto dk = drawn.find((int)k);
-                if (dk != drawn.end())
-                    for (uint32_t c : dk->second) {
-                        auto t = T.targets.find(c);
-                        need.emplace_back(t == T.targets.end() ? std::set<uint32_t>() : std::set<uint32_t>(t->second.begin(), t->second.end()));
-                    }
-                // A 1.0 shader that reads the scene colour buffer (refraction, distortion: the 'g_colorBuffer_sampler'
-                // slot) keeps a 3.0 shader that reads it, the one sharing most of its slot roles: on the most common
-                // (opaque G-buffer) shader the screen-water drops of ScreenFX_WaterA drew nothing (in-game 2026-10-15).
-                // Skinned meshes reach this tier because their 1.0 shader is not translated.
-                std::set<uint32_t> slots10;
-                {
-                    std::string raw;
-                    gen30::Shd10 s;
-                    if (io.read10("shaders/shaders/" + m10.shader + ".shd", raw) && gen30::parse10(raw, s))
-                        slots10.insert(s.slotsB.begin(), s.slotsB.end());
-                }
-                auto reads = [&](const std::string& role) { return slots10.count(gen30::ehash("g_" + role + "_sampler")) != 0; };
-                const bool colorBuffer = reads("colorBuffer");
-                const std::string* bestSh = nullptr;
-                int bestCommon = 0;
-                for (int pass = colorBuffer ? 0 : 1; pass < 2 && !donor; ++pass)
-                    for (auto& [sh, ref] : T.donors) {
-                        auto si = T.shaders.find(sh);
-                        if (si == T.shaders.end() || si->second.slots < 1) continue;
-                        if (ref.extract.compare(0, donorPrefix.size(), donorPrefix)) continue;
-                        bool ok = true;
-                        for (auto& c : need) {
-                            bool any = false;
-                            for (uint32_t x : c) if (si->second.vf.count(x)) { any = true; break; }
-                            if (!any) { ok = false; break; }
-                        }
-                        if (!ok) continue;
-                        int common = 0;   // pass 0: colour-buffer readers only, most roles in common first
-                        if (pass == 0) {
-                            const auto& rs = si->second.roles;
-                            if (std::find(rs.begin(), rs.end(), "colorBuffer") == rs.end()) continue;
-                            for (auto& role : rs) common += !role.empty() && reads(role);
-                        }
-                        auto key = [&](int cm, const std::string& s, const Ref& rr) { return std::make_tuple(cm, rr.count, s, rr.extract, rr.idx); };
-                        if (!bestSh || key(common, sh, ref) > key(bestCommon, *bestSh, *donor)) { bestSh = &sh; donor = &ref; bestCommon = common; }
-                    }
-                if (!donor) { r.problems.push_back(m10.name + ": no 3.0 shader accepts its vertex format"); continue; }
-            }
-            if (!bundle30(*donor, bnd) || !detail::hasMaterial(*bnd, *donor, r.problems)) continue;
-            // autobundle._substitute: the donor's blocks + the 1.0 material's own textures
-            Material dm = bnd->mats[donor->idx];
-            std::vector<uint32_t> used;
-            for (int s = 0; s < m10.slots; ++s) used.push_back(b10.slot(m10, s));
-            if (dm.shader != m10.shader) {
-                auto g = T.genericSlots.find(m10.shader);
-                if (g != T.genericSlots.end()) {
-                    std::vector<uint32_t> pick;
-                    for (int i : g->second) pick.push_back(i < (int)used.size() ? used[i] : UNSET);
-                    used = pick;
-                }
-                std::vector<uint32_t> set;
-                for (uint32_t t : used) if (t != UNSET) set.push_back(t);
-                std::vector<int> targets;
-                const auto& roles = T.shaders.at(dm.shader).roles;
-                for (size_t s = 0; s < roles.size(); ++s) if (!roles[s].empty() && T.filled.count(roles[s])) targets.push_back((int)s);
-                used.assign(dm.slots, UNSET);
-                for (int s = 0; s < dm.slots; ++s)
-                    for (size_t ti = 0; ti < targets.size(); ++ti)
-                        if (targets[ti] == s) { if (ti < set.size()) used[s] = set[ti]; break; }
-            }
-            for (int s = 0; s < dm.slots; ++s) {
-                uint32_t t = s < (int)used.size() ? used[s] : UNSET, w2 = t == UNSET ? UNSET : 0;
-                memcpy(&dm.B[dm.stride * s], &t, 4);
-                memcpy(&dm.B[dm.stride * s + 4], &w2, 4);
-            }
-            const std::string &a10 = m10.A;
-            // Block A by parameter name: the 3.0 shader's own defaults, then each parameter the 1.0 material has, at
-            // 3.0's offset. Copied raw, 1.0's layout misplaced what 3.0 moved: 3.0 put g_diffuse_hdrModifier at 0x10
-            // and the opacity parameter (+0x50 word, read by FUN_0044ad80) at 0x20, which then held the donor's 0 --
-            // every such piece was "transparent": depth only, never coloured, black (in-game 2026-10-13).
-            std::string raw30, raw10a;
-            gen30::ShdA30 a30;
-            gen30::Shd10 sa10;
-            if (io.read30 && io.read30("3:shaders/shaders/" + dm.shader + ".shd", raw30) && gen30::parseA30(raw30, a30) &&
-                (int)dm.A.size() == a30.sizeA) {
-                std::string A = a30.defA;
-                if (io.read10("shaders/shaders/" + m10.shader + ".shd", raw10a) && gen30::parse10(raw10a, sa10))
-                    for (auto& p : sa10.params) {
-                        auto q = a30.off.find(p.hash);
-                        if (!p.A || q == a30.off.end()) continue;
-                        size_t n = (std::min)({(size_t)16, a10.size() - (std::min)(a10.size(), (size_t)p.offset), A.size() - (size_t)q->second});
-                        A.replace(q->second, n, a10, p.offset, n);
-                    }
-                dm.A = A;
-            } else if (dm.shader == m10.shader && a10.size() <= dm.A.size()) dm.A = a10 + dm.A.substr(a10.size());
-            else if (a10.size() >= 16 && dm.A.size() >= 16) dm.A = a10.substr(0, 16) + dm.A.substr(16);
-            if (io.verbose) {   // octtest --render with RENDER_VERBOSE: which 1.0 texture went to which donor slot
-                std::string l = std::string(tier) + " " + m10.name + " [" + m10.shader + " -> " + dm.shader + "]";
-                const auto& roles = T.shaders.at(dm.shader).roles;
-                for (int s = 0; s < dm.slots; ++s) {
-                    uint32_t t = s < (int)used.size() ? used[s] : UNSET;
-                    l += " " + (s < (int)roles.size() && !roles[s].empty() ? roles[s] : std::string("-")) + "=" +
-                         (t == UNSET || t >= b10.textures.size() ? std::string("none") : hex8(b10.textures[t]));
-                }
-                io.log(l);
-            }
-            dm.name = m10.name;
-            dm.hash = m10.hash;
-            Bundle one;
-            one.textures = b10.textures;
-            one.mats.push_back(dm);
-            srcs.push_back({one, 0});
-            r.tiers[tier]++;
-        }
-        const Material& fin = srcs.back().b.mats[srcs.back().i];
-        r.shaders.push_back({m10.shader, fin.shader});
-        shaderVf[(int)k] = &T.shaders.at(fin.shader).vf;
-    }
-    if (!r.problems.empty() || !detail::texturesInRange(srcs, r.problems)) return false;
+    std::string err;                          // the last bundle parse failure
+};
 
-    // matp.merge: union TEXB in first-use order, slot indices rebased (index word only)
-    std::vector<std::string> tex;
+inline bool blockSizes30(const Table& T, const std::string& sh, int& A, int& B, int& slots)
+{
+    auto it = T.shaders.find(sh);
+    if (it == T.shaders.end()) return false;
+    A = it->second.A;
+    B = it->second.B;
+    slots = it->second.slots;
+    return true;
+}
+
+// A 1.0 shader's block sizes and B's slot count from its .shd descriptors, read once per call
+struct BlockSizes10 {
+    const IO& io;
+    std::map<std::string, std::array<int, 3>> memo;
+    bool get(const std::string& sh, int& A, int& B, int& slots);
+};
+
+inline bool BlockSizes10::get(const std::string& sh, int& A, int& B, int& slots)
+{
+    auto it = memo.find(sh);
+    if (it == memo.end()) {
+        std::string b;
+        if (!io.read10("shaders/shaders/" + sh + ".shd", b) || b.size() < kShd10SizeB + 2) return false;
+        const uint8_t* p = (const uint8_t*)b.data();
+        const int sizeA = (int)oct::u(p + kShd10SizeA, 2), sizeB = (int)oct::u(p + kShd10SizeB, 2);
+        it = memo.emplace(sh, std::array<int, 3>{sizeA, sizeB, (int)p[kShd10SlotsB]}).first;
+    }
+    A = it->second[0];
+    B = it->second[1];
+    slots = it->second[2];
+    return true;
+}
+
+// The 3.0 bundle at ref.extract, read once per call; null (and a problem) when it does not read
+inline Bundle* bundle30(MaterialRun& run, const Ref& ref)
+{
+    auto it = run.cache30.find(ref.extract);
+    if (it != run.cache30.end()) return &it->second;
+    std::string raw;
+    Bundle b;
+    const auto sizes3 = [&](const std::string& sh, int& A, int& B, int& slots) {
+        return blockSizes30(run.T, sh, A, B, slots);
+    };
+    if (!run.io.read30(ref.extract, raw) || !parseBundle(raw, b, kSlotStride30, sizes3, &run.err)) {
+        const std::string why = raw.empty() ? std::string("unreadable") : run.err;
+        run.r.problems.push_back("3.0 bundle " + ref.extract + ": " + why);
+        return nullptr;
+    }
+    return &run.cache30.emplace(ref.extract, std::move(b)).first->second;
+}
+
+// Disney ships this 1.0 material in 3.0 (the real tier)
+inline bool isReal(const Table& T, const std::string& name)
+{
+    return !name.empty() && T.matindex.count(name) && !T.notReal.count(name);
+}
+
+// skin: drawn with a skinned format; rigid: with an unskinned one
+struct SkinUse { bool skin = false, rigid = false; };
+
+inline SkinUse skinUse(const IO& io, const std::set<uint32_t>* formats)
+{
+    SkinUse u;
+    if (!formats || !io.skinned) return u;
+    for (uint32_t c : *formats) (io.skinned(c) ? u.skin : u.rigid) = true;
+    return u;
+}
+
+// skintr10: only when drawn skinned alone, each format with a planned 3.0 skin target, and not real
+inline bool skinTranslates(const MaterialRun& run, const Material& m10, const std::set<uint32_t>& formats, SkinUse u)
+{
+    if (!run.io.translateSkinned || u.rigid || isReal(run.T, m10.name)) return false;
+    for (uint32_t c : formats) {
+        const uint32_t target = skinTarget30(run.T, c);
+        if (target == 0 || !run.T.plans.count({c, target})) return false;
+    }
+    return true;
+}
+
+// dm, holding the 1.0 bundle's textures, as a merge source
+inline void addOwnSource(MaterialRun& run, const Material& dm)
+{
+    Bundle one;
+    one.textures = run.b10.textures;
+    one.mats.push_back(dm);
+    run.srcs.push_back({one, 0});
+}
+
+inline void placeTranslated(MaterialRun& run, int k, const Material& m10, const gen30::Shd10& s10, SkinUse u)
+{
+    gen30::Layout L = gen30::layout(s10);
+    Material dm;
+    dm.name = m10.name;
+    dm.shader = "x" + m10.shader;
+    dm.hash = m10.hash ^ kTranslatedHashXor;
+    dm.stride = kSlotStride30;
+    dm.slots = L.slots;
+    dm.A = m10.A;
+    dm.A.resize(L.sizeA, '\0');
+    dm.B = gen30::blockB30(m10.B, L);
+    addOwnSource(run, dm);
+    run.r.tiers["translated"]++;
+    if (u.skin) run.r.tiers["translated skinned"]++;
+    if (run.io.verbose) run.io.log("translated " + m10.name + " [" + m10.shader + "]" + (u.skin ? " skinned" : ""));
+    run.r.translated.insert(k);
+    run.r.shaders.push_back({m10.shader, dm.shader});
+}
+
+// The translated tier: the material keeps its 1.0 shader as 'x'<shader>, with its own blocks. false: another tier
+inline bool tryTranslated(MaterialRun& run, int k, const Material& m10, const std::set<uint32_t>* formats)
+{
+    const IO& io = run.io;
+    const SkinUse u = skinUse(io, formats);
+    if (!io.translate) return false;
+    if (u.skin && !skinTranslates(run, m10, *formats, u)) return false;
+    std::string raw10;
+    gen30::Shd10 s10;
+    if (!io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) || !gen30::parse10(raw10, s10)) return false;
+    if (io.translatable && !io.translatable(m10.shader)) return false;   // generates and registers the shader
+    placeTranslated(run, k, m10, s10, u);
+    return true;
+}
+
+inline std::string slotTextures(const Bundle& b, const Material& m)
+{
+    std::string l;
+    for (int s = 0; s < m.slots; ++s) {
+        uint32_t t = b.slot(m, s);
+        l += " " + (t < b.textures.size() ? hex8(b.textures[t]) : std::string("-"));
+    }
+    return l;
+}
+
+// The real tier: the 3.0 material as it ships. false: a problem says why
+inline bool addReal(MaterialRun& run, const Material& m10, const Ref& ref)
+{
+    Bundle* bnd = bundle30(run, ref);
+    if (!bnd || !hasMaterial(*bnd, ref, run.r.problems)) return false;
+    if (run.io.verbose) {   // the textures side by side: a GUID 3.0 reused shows as a mismatch
+        std::string l = "real " + m10.name + " " + ref.extract + " 1.0:" + slotTextures(run.b10, m10);
+        run.io.log(l + " 3.0:" + slotTextures(*bnd, bnd->mats[ref.idx]));
+    }
+    run.srcs.push_back({*bnd, ref.idx});
+    run.r.tiers["real"]++;
+    return true;
+}
+
+// The 3.0 targets of each format the material is drawn with
+inline std::vector<std::set<uint32_t>> twinSets(const Table& T, const std::set<uint32_t>* formats)
+{
+    std::vector<std::set<uint32_t>> need;
+    if (!formats) return need;
+    for (uint32_t c : *formats) {
+        auto t = T.targets.find(c);
+        need.emplace_back();
+        if (t != T.targets.end()) need.back().insert(t->second.begin(), t->second.end());
+    }
+    return need;
+}
+
+// The 1.0 shader's block B slot names
+inline std::set<uint32_t> slotNames10(const IO& io, const std::string& shader)
+{
+    std::set<uint32_t> names;
+    std::string raw;
+    gen30::Shd10 s;
+    if (io.read10("shaders/shaders/" + shader + ".shd", raw) && gen30::parse10(raw, s))
+        names.insert(s.slotsB.begin(), s.slotsB.end());
+    return names;
+}
+
+inline bool readsRole(const std::set<uint32_t>& slots10, const std::string& role)
+{
+    return slots10.count(gen30::ehash("g_" + role + "_sampler")) != 0;
+}
+
+// A generic donor candidate and its slot roles in common with the 1.0 shader
+struct Candidate { int common = 0; const std::string* shader = nullptr; const Ref* ref = nullptr; };
+
+// Python max over (roles in common, count, shader, extract path, index)
+inline bool better(const Candidate& a, const Candidate& b)
+{
+    return std::tie(a.common, a.ref->count, *a.shader, a.ref->extract, a.ref->idx) >
+           std::tie(b.common, b.ref->count, *b.shader, b.ref->extract, b.ref->idx);
+}
+
+// The donor's shader has slots, its bundle the prefix, and a twin of every format the material is drawn with
+inline bool donorFits(const MaterialRun& run, const Candidate& c, const std::vector<std::set<uint32_t>>& need)
+{
+    auto si = run.T.shaders.find(*c.shader);
+    if (si == run.T.shaders.end() || si->second.slots < 1) return false;
+    if (c.ref->extract.compare(0, run.in.donorPrefix.size(), run.in.donorPrefix)) return false;
+    const std::set<uint32_t>& vf = si->second.vf;
+    const auto declared = [&](uint32_t x) { return vf.count(x) != 0; };
+    for (auto& twins : need)
+        if (std::none_of(twins.begin(), twins.end(), declared)) return false;
+    return true;
+}
+
+// A colour-buffer reader (refraction, distortion) keeps a 3.0 one -> the slot roles they share; nullopt: no reader
+inline std::optional<int> colourBufferRoles(const Table& T, const std::set<uint32_t>& slots10,
+                                            const std::string& shader)
+{
+    const std::vector<std::string>& roles = T.shaders.at(shader).roles;
+    if (std::find(roles.begin(), roles.end(), "colorBuffer") == roles.end()) return std::nullopt;
+    int common = 0;
+    for (auto& role : roles) common += !role.empty() && readsRole(slots10, role);
+    return common;
+}
+
+// The generic tier: the most common 3.0 shader taking a twin of every drawn format; colour-buffer readers first
+inline const Ref* genericDonor(const MaterialRun& run, const Material& m10, const std::set<uint32_t>* formats)
+{
+    const std::vector<std::set<uint32_t>> need = twinSets(run.T, formats);
+    const std::set<uint32_t> slots10 = slotNames10(run.io, m10.shader);
+    Candidate best;
+    for (int pass = readsRole(slots10, "colorBuffer") ? 0 : 1; pass < 2 && !best.ref; ++pass)
+        for (auto& [sh, ref] : run.T.donors) {
+            Candidate c{0, &sh, &ref};
+            if (!donorFits(run, c, need)) continue;
+            const std::optional<int> common = pass == 0 ? colourBufferRoles(run.T, slots10, sh) : 0;
+            if (!common) continue;
+            c.common = *common;
+            if (!best.ref || better(c, best)) best = c;
+        }
+    return best.ref;
+}
+
+struct DonorPick { const Ref* ref = nullptr; const char* tier = "same-sh"; };
+
+// same-sh: the table's donor for the 1.0 shader; else generic. No donor: a problem
+inline DonorPick pickDonor(MaterialRun& run, const Material& m10, const std::set<uint32_t>* formats)
+{
+    DonorPick p;
+    auto di = run.T.donors.find(m10.shader);
+    if (di != run.T.donors.end()) {
+        p.ref = &di->second;
+        return p;
+    }
+    p.tier = "generic";
+    p.ref = genericDonor(run, m10, formats);
+    if (!p.ref) run.r.problems.push_back(m10.name + ": no 3.0 shader accepts its vertex format");
+    return p;
+}
+
+// On another shader the 1.0 textures go in order into the slots whose role materials fill (FORMATS.md 6.4)
+inline std::vector<uint32_t> genericSlots(const Table& T, const std::string& shader10, const Material& dm,
+                                          std::vector<uint32_t> used)
+{
+    auto g = T.genericSlots.find(shader10);
+    if (g != T.genericSlots.end()) {
+        std::vector<uint32_t> pick;
+        for (int i : g->second) pick.push_back(i < (int)used.size() ? used[i] : UNSET);
+        used = pick;
+    }
+    std::vector<uint32_t> set;
+    for (uint32_t t : used)
+        if (t != UNSET) set.push_back(t);
+    std::vector<int> targets;
+    const auto& roles = T.shaders.at(dm.shader).roles;
+    for (size_t s = 0; s < roles.size(); ++s)
+        if (!roles[s].empty() && T.filled.count(roles[s])) targets.push_back((int)s);
+    used.assign(dm.slots, UNSET);
+    for (size_t ti = 0; ti < targets.size() && ti < set.size(); ++ti)   // targets ascend: each slot once
+        if (targets[ti] < dm.slots) used[targets[ti]] = set[ti];
+    return used;
+}
+
+// The 1.0 material's textures into the donor's slots (whole 8-byte slots, FORMATS.md 6.2) -> the slot assignment
+inline std::vector<uint32_t> substituteSlots(const Table& T, const Bundle& b10, const Material& m10, Material& dm)
+{
+    std::vector<uint32_t> used;
+    for (int s = 0; s < m10.slots; ++s) used.push_back(b10.slot(m10, s));
+    if (dm.shader != m10.shader) used = genericSlots(T, m10.shader, dm, used);
+    for (int s = 0; s < dm.slots; ++s) {
+        uint32_t t = s < (int)used.size() ? used[s] : UNSET, w2 = t == UNSET ? UNSET : 0;
+        memcpy(&dm.B[dm.stride * s], &t, sizeof t);
+        memcpy(&dm.B[dm.stride * s + sizeof t], &w2, sizeof w2);
+    }
+    return used;
+}
+
+// The donor's 3.0 shader's block A, when it reads and fits the donor material's block
+inline std::optional<gen30::ShdA30> donorBlockA(const IO& io, const Material& dm)
+{
+    if (!io.read30) return std::nullopt;
+    std::string raw30;
+    gen30::ShdA30 a30;
+    if (!io.read30("3:shaders/shaders/" + dm.shader + ".shd", raw30)) return std::nullopt;
+    if (!gen30::parseA30(raw30, a30) || (int)dm.A.size() != a30.sizeA) return std::nullopt;
+    return a30;
+}
+
+// 3.0's defaults, then each 1.0 block A parameter at 3.0's offset for its name
+inline std::string blockAByName(const IO& io, const Material& m10, const gen30::ShdA30& a30)
+{
+    const std::string& a10 = m10.A;
+    std::string A = a30.defA, raw10;
+    gen30::Shd10 s10;
+    if (!io.read10("shaders/shaders/" + m10.shader + ".shd", raw10) || !gen30::parse10(raw10, s10)) return A;
+    for (auto& p : s10.params) {
+        auto q = a30.off.find(p.hash);
+        if (!p.A || q == a30.off.end()) continue;
+        const size_t left10 = a10.size() - (std::min)(a10.size(), (size_t)p.offset);
+        const size_t n = (std::min)({kParamBytes, left10, A.size() - (size_t)q->second});
+        A.replace(q->second, n, a10, p.offset, n);
+    }
+    return A;
+}
+
+// Block A by parameter name: copied raw, 1.0's layout put parameters 3.0 moved at the wrong offsets
+inline void relayBlockA(const IO& io, const Material& m10, Material& dm)
+{
+    const std::string& a10 = m10.A;
+    const bool firstParam = a10.size() >= kParamBytes && dm.A.size() >= kParamBytes;
+    if (const std::optional<gen30::ShdA30> a30 = donorBlockA(io, dm)) dm.A = blockAByName(io, m10, *a30);
+    else if (dm.shader == m10.shader && a10.size() <= dm.A.size()) dm.A = a10 + dm.A.substr(a10.size());
+    else if (firstParam) dm.A = a10.substr(0, kParamBytes) + dm.A.substr(kParamBytes);
+}
+
+// octtest --render with RENDER_VERBOSE: which 1.0 texture went to which donor slot
+inline void logSubstitute(const MaterialRun& run, const char* tier, const Material& m10, const Material& dm,
+                          const std::vector<uint32_t>& used)
+{
+    std::string l = std::string(tier) + " " + m10.name + " [" + m10.shader + " -> " + dm.shader + "]";
+    const auto& roles = run.T.shaders.at(dm.shader).roles;
+    for (int s = 0; s < dm.slots; ++s) {
+        uint32_t t = s < (int)used.size() ? used[s] : UNSET;
+        const bool named = s < (int)roles.size() && !roles[s].empty();
+        const bool none = t == UNSET || t >= run.b10.textures.size();
+        const std::string texture = none ? std::string("none") : hex8(run.b10.textures[t]);
+        l += " " + (named ? roles[s] : std::string("-")) + "=" + texture;
+    }
+    run.io.log(l);
+}
+
+// autobundle._substitute: the donor's blocks holding the 1.0 material's own textures. false: a problem says why
+inline bool addSubstitute(MaterialRun& run, const Material& m10, const DonorPick& pick)
+{
+    Bundle* bnd = bundle30(run, *pick.ref);
+    if (!bnd || !hasMaterial(*bnd, *pick.ref, run.r.problems)) return false;
+    Material dm = bnd->mats[pick.ref->idx];
+    const std::vector<uint32_t> used = substituteSlots(run.T, run.b10, m10, dm);
+    relayBlockA(run.io, m10, dm);
+    if (run.io.verbose) logSubstitute(run, pick.tier, m10, dm, used);
+    dm.name = m10.name;
+    dm.hash = m10.hash;
+    addOwnSource(run, dm);
+    run.r.tiers[pick.tier]++;
+    return true;
+}
+
+// The real tier, else a donor's (same-sh, generic). false: a problem says why
+inline bool placeOnDonor(MaterialRun& run, const Material& m10, const std::set<uint32_t>* formats)
+{
+    if (isReal(run.T, m10.name)) return addReal(run, m10, run.T.matindex.at(m10.name));
+    const DonorPick pick = pickDonor(run, m10, formats);
+    return pick.ref && addSubstitute(run, m10, pick);
+}
+
+// Material k onto its first tier; shaderVf gets the formats its final shader declares (not for translated ones)
+inline void placeMaterial(MaterialRun& run, int k, std::map<int, const std::set<uint32_t>*>& shaderVf)
+{
+    const Material& m10 = run.b10.mats[k];
+    auto dk = run.in.drawn.find(k);
+    const std::set<uint32_t>* formats = dk != run.in.drawn.end() ? &dk->second : nullptr;
+    if (tryTranslated(run, k, m10, formats)) return;
+    if (!placeOnDonor(run, m10, formats)) return;
+    const Material& fin = run.srcs.back().b.mats[run.srcs.back().i];
+    run.r.shaders.push_back({m10.shader, fin.shader});
+    shaderVf[k] = &run.T.shaders.at(fin.shader).vf;
+}
+
+// tex's index of texture h, appended on first use
+inline uint32_t textureIndex(std::vector<std::string>& tex, const std::string& h)
+{
+    uint32_t at = 0;
+    while (at < tex.size() && tex[at] != h) ++at;
+    if (at == tex.size()) tex.push_back(h);
+    return at;
+}
+
+// matp.merge: TEXB union in first-use order, slot indices rebased (index word only)
+inline std::vector<Material> mergeSources(const std::vector<Src>& srcs, std::vector<std::string>& tex)
+{
     std::vector<Material> mats;
     for (auto& s : srcs) {
         Material m = s.b.mats[s.i];
         for (int k = 0; k < m.slots; ++k) {
             uint32_t t = s.b.slot(m, k);
             if (t == UNSET) continue;
-            const std::string& h = s.b.textures[t];
-            uint32_t at = 0;
-            while (at < tex.size() && tex[at] != h) ++at;
-            if (at == tex.size()) tex.push_back(h);
-            memcpy(&m.B[m.stride * k], &at, 4);
+            uint32_t at = textureIndex(tex, s.b.textures[t]);
+            memcpy(&m.B[m.stride * k], &at, sizeof at);
         }
         mats.push_back(m);
     }
-    // scene settings: re-laid into 3.0's format; their textures (LUT, environment map) join the merged TEXB
+    return mats;
+}
+
+// Scene settings re-laid into 3.0's format; their textures (LUT, environment map) join the merged TEXB
+inline std::vector<std::string> relaySceneSettings(const IO& io, const Bundle& b10, std::vector<std::string>& tex)
+{
     std::vector<std::string> sset;
-    if (io.ssf10 && io.ssf30)
-        for (auto& blk : b10.ssetBlocks)
-            sset.push_back(ssfBlock30(*io.ssf10, *io.ssf30, blk, [&](uint32_t t) -> uint32_t {
-                if (t >= b10.textures.size()) return UNSET;
-                uint32_t at = 0;
-                while (at < tex.size() && tex[at] != b10.textures[t]) ++at;
-                if (at == tex.size()) tex.push_back(b10.textures[t]);
-                return at;
-            }));
+    if (!io.ssf10 || !io.ssf30) return sset;
+    const auto index = [&](uint32_t t) { return t < b10.textures.size() ? textureIndex(tex, b10.textures[t]) : UNSET; };
+    for (auto& blk : b10.ssetBlocks) sset.push_back(ssfBlock30(*io.ssf10, *io.ssf30, blk, index));
+    return sset;
+}
+
+}  // namespace detail
+
+// autobundle.resolve: the 1.0 materials onto 3.0 shaders -> r.mtb; shaderVf: material -> its shader's vformats
+inline bool transcodeMaterials(const Table& T, const IO& io, const MaterialInput& in, Result& r,
+                               std::map<int, const std::set<uint32_t>*>& shaderVf)
+{
+    detail::MaterialRun run{T, io, in, r, {}, {}, {}, {}};
+    detail::BlockSizes10 sizes10{io, {}};
+    const auto sizes1 = [&](const std::string& sh, int& A, int& B, int& slots) { return sizes10.get(sh, A, B, slots); };
+    if (!parseBundle(in.mtb10, run.b10, detail::kSlotStride10, sizes1, &run.err)) {
+        r.problems.push_back("1.0 bundle: " + run.err);
+        return false;
+    }
+    for (size_t k = 0; k < run.b10.mats.size(); ++k) detail::placeMaterial(run, (int)k, shaderVf);
+    if (!r.problems.empty() || !detail::texturesInRange(run.srcs, r.problems)) return false;
+    std::vector<std::string> tex;
+    const std::vector<Material> mats = detail::mergeSources(run.srcs, tex);
+    const std::vector<std::string> sset = detail::relaySceneSettings(io, run.b10, tex);
     r.sceneSettings = (int)sset.size();
     for (auto& t : tex) r.textures10.insert(hex8(t));
-    r.mtb = buildBundle(tex, mats, sset.empty() ? std::vector<std::string>() : b10.ssetNames, sset);
+    r.mtb = buildBundle(tex, mats, sset.empty() ? std::vector<std::string>() : run.b10.ssetNames, sset);
     return true;
 }
 
 // A material bundle without geometry of its own (particles/<x>.mtb): materials only, generic donors from donorPrefix.
 inline bool transcodeBundle(const Table& T, const IO& io, const std::string& mtb10, const std::string& donorPrefix, Result& r)
 {
+    const std::map<int, std::set<uint32_t>> drawn;
     std::map<int, const std::set<uint32_t>*> vf;
-    return transcodeMaterials(T, io, mtb10, {}, donorPrefix, r, vf);
+    return transcodeMaterials(T, io, {mtb10, drawn, donorPrefix}, r, vf);
 }
 
 namespace detail {
@@ -1621,7 +1822,8 @@ inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const Wor
 {
     detail::WorldRun w{T, io, r};
     if (const char* why = detail::primPairs(f, w.users, w.drawn)) return detail::fail(r, why);
-    if (!transcodeMaterials(T, io, w10.mtb, w.drawn, "", r, w.shaderVf)) return false;
+    const std::string anyDonor;   // generic donors from any 3.0 bundle
+    if (!transcodeMaterials(T, io, {w10.mtb, w.drawn, anyDonor}, r, w.shaderVf)) return false;
     detail::mapFormats(w);
     if (!r.problems.empty()) return false;
     detail::mapSkinFormats(w);
