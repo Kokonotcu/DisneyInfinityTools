@@ -39,6 +39,8 @@
 #include "games/di1/renderio.hpp"
 #include "games/di1/transcode.hpp"
 #include "games/di1/zones.hpp"
+#include "trace/fade.hpp"
+#include "trace/opacity.hpp"
 #include "octx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -1721,107 +1723,6 @@ static bool installLoadProf(const di1::Config& c)
     if (!profiler) return false;
     g_profPath = g_gameDir + "\\di1compat_prof.tsv";
     if (HANDLE h = CreateThread(nullptr, 0, profThread, nullptr, 0, nullptr); h) CloseHandle(h);
-    return ok;
-}
-// test (opacitylog10): FUN_0044ad80 -> bit i set = primitive i is "faded" (opacity param * object fade < 1) and the
-// opaque G-buffer list skips it (FUN_00461020); logs our skipped primitives with the values that decided it
-typedef uint32_t(__cdecl* OpacityMaskFn)(uint32_t n, float fade, uint32_t prims, uint32_t insts);
-static OpacityMaskFn g_opacityMask;
-static uint32_t __cdecl hkOpacityMask(uint32_t n, float fade, uint32_t prims, uint32_t insts)
-{
-    uint32_t r = g_opacityMask(n, fade, prims, insts);
-    static std::mutex m;
-    static std::set<std::string> seen;
-    uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1;
-    if (r && (r & all) != all) {   // one object, some primitives skipped and some kept: log all of them once
-        std::string line;
-        for (uint32_t i = 0; i < n && i < 32; ++i) {
-            uint32_t prim = *(uint32_t*)(uintptr_t)(prims + 4 * i);
-            uint8_t* shd = *(uint8_t**)(uintptr_t)(prim + 0x10);
-            uint32_t w = shd ? *(uint32_t*)(shd + 0x50) : 0;
-            float v = w ? *(float*)(uintptr_t)((w >> 16) + *(uint32_t*)(uintptr_t)(insts + 4 * i)) : 1.0f;
-            char e[96];
-            sprintf_s(e, " [%u %.8s w%08x v%.3f %s]", i, shd && *(const char**)shd ? *(const char**)shd : "?", w, v, (r >> i) & 1 ? "SKIP" : "keep");
-            line += e;
-        }
-        std::lock_guard<std::mutex> lock(m);
-        if (seen.size() < 300 && seen.insert(line).second) logf("opacity mixed: fade %.3f%s", fade, line.c_str());
-        static int dumped;
-        for (uint32_t i = 0; i < n && i < 32 && dumped < 6; ++i) {
-            if (!((r >> i) & 1)) continue;
-            uint32_t prim = *(uint32_t*)(uintptr_t)(prims + 4 * i);
-            uint8_t* shd = *(uint8_t**)(uintptr_t)(prim + 0x10);
-            float* inst = *(float**)(uintptr_t)(insts + 4 * i);
-            std::string f;
-            for (int k = 0; k < 12; ++k) { char e[16]; sprintf_s(e, " %.3f", inst[k]); f += e; }
-            std::string pr;
-            for (int k = 0; k < 12; ++k) { char e[16]; sprintf_s(e, " %08x", ((uint32_t*)(uintptr_t)prim)[k]); pr += e; }
-            logf("skipped primitive %s sizeA %u: instance floats%s | prim words%s", shd && *(const char**)shd ? *(const char**)shd : "?",
-                 shd ? *(uint16_t*)(shd + 0x6a) : 0, f.c_str(), pr.c_str());
-            ++dumped;
-        }
-    }
-    for (uint32_t i = 0; r && i < n && i < 32; ++i) {
-        uint32_t prim = *(uint32_t*)(uintptr_t)(prims + 4 * i);
-        uint8_t* shd = *(uint8_t**)(uintptr_t)(prim + 0x10);
-        const char* nm = shd ? *(const char**)shd : nullptr;
-        uint32_t w = shd ? *(uint32_t*)(shd + 0x50) : 0;
-        float v = w ? *(float*)(uintptr_t)((w >> 16) + *(uint32_t*)(uintptr_t)(insts + 4 * i)) : 1.0f;
-        char key[160];
-        sprintf_s(key, "%s %08x %.3f %.3f %u", nm ? nm : "(null)", w, v, fade, (r >> i) & 1);
-        std::lock_guard<std::mutex> lock(m);
-        if (seen.size() < 300 && seen.insert(key).second)
-            logf("opacity mask: %s (word %08x: value %.3f, object fade %.3f) skip %u", nm ? nm : "(null)", w, v, fade, (r >> i) & 1);
-    }
-    return r;
-}
-
-// test (fadeprobe10): where the object fade comes from. FUN_0044b8f0 (cdecl, 6 args: render node, world sphere
-// {x, y, z, r?}, ?, view params (view + 0x340), view mask, out) is the main-view visibility test of a node with
-// flag 8 (FUN_00459af0); out[1] is the object fade FUN_0044ad80 then compares (< 1: the primitive leaves the opaque
-// G-buffer list). Two terms: screen size (node byte +0xf bit 0: s = pi * sphere[3] / (z^2 * view[+0xd0]), culled
-// under view[+0x130], fade (s - [+0x130]) * [+0x170] up to [+0x150]) and distance (node +0xc bit 0x80: start
-// +0x10, end +0x14). Logs each faded node's inputs, once per node per 3 s, up to 800 lines. fadeprobe10 = 2 also
-// draws every visible faded object unfaded (out[1] = 1), to see whether the faded path is what draws black.
-typedef uint8_t(__cdecl* VisTestFn)(uint8_t* node, float* sphere, void* a3, uint8_t* view, uint8_t mask, float* out);
-static VisTestFn g_visTest;
-static uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t* view, uint8_t mask, float* out)
-{
-    uint8_t r = g_visTest(node, sphere, a3, view, mask, out);
-    if (!(r & 1) || !(mask & 1) || out[1] >= 0.999f) return r;
-    struct Unfade { float* o; bool on; ~Unfade() { if (on) o[1] = 1.0f; } } unfade{out, g_cfg.fadeProbe10 == 2};
-    static std::mutex m;
-    static std::unordered_map<uint8_t*, ULONGLONG> last;
-    static int lines;
-    ULONGLONG now = GetTickCount64();
-    {
-        std::lock_guard<std::mutex> lock(m);
-        if (lines >= 800) return r;
-        auto it = last.find(node);
-        if (it != last.end() && now - it->second < 3000) return r;
-        last[node] = now;
-        ++lines;
-    }
-    auto F = [&](size_t o) { return *(float*)(view + o); };
-    float z = F(0x70) * sphere[1] + F(0x50) * sphere[0] + F(0x90) * sphere[2] + F(0xb0);
-    float s = sphere[3] * 3.1415927f / (z * z * F(0xd0));
-    logf("fade probe: node %p id %08X flags %04X f %02X start %.2f end %.2f | sphere (%.2f %.2f %.2f) %.4f z %.2f | k %.6g "
-         "pop %.6g fadeEnd %.6g scale %.6g -> screen %.6g fade %.3f", node, *(uint32_t*)(node + 0x34), *(uint16_t*)(node + 0xc),
-         node[0xf], *(float*)(node + 0x10), *(float*)(node + 0x14), sphere[0], sphere[1], sphere[2], sphere[3], z, F(0xd0),
-         F(0x130), F(0x150), F(0x170), s, out[1]);
-    return r;
-}
-
-// The render probes' hooks (H1): opacitylog10 and fadeprobe10, each on its own.
-static bool installRenderProbes(const di1::Config& c)
-{
-    bool ok = true;
-    if (c.opacityLog10)
-        ok &= hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask,
-                   (void**)&g_opacityMask);
-    if (c.fadeProbe10)
-        ok &= hook("visibility test (fadeprobe10)", 0x0044B8F0, "8B5424088A442414F30F10620C", (void*)&hkVisTest,
-                   (void**)&g_visTest);
     return ok;
 }
 
@@ -3774,7 +3675,8 @@ extern "C" void __stdcall Pentane_Main()
     installTeardownTrace(g_cfg);
     installMerRegistry(g_cfg);
     installLockTrace(g_cfg);
-    installRenderProbes(g_cfg);
+    trace::opacity::install({g_cfg.opacityLog10});
+    trace::fade::install({g_cfg.fadeProbe10});
     installLoadProf(g_cfg);
     installAssetDefs(g_cfg);
     installCrt(g_cfg);
