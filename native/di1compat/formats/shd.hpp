@@ -37,23 +37,40 @@ inline uint32_t blendField(uint32_t w) { return (w >> 6) & 0xf; }
 inline uint32_t xField(uint32_t w) { return (w >> 12) & 0xf; }
 constexpr uint32_t kDepthFinal = 0, kDepthOnly = 1, kDepthGBuffer = 2;
 constexpr uint32_t kXLightBuffer = 3;   // with kDepthFinal: a light-buffer final pass
+constexpr uint32_t kBlendOpaqueLast = 1;   // blend values 0 and 1 draw unblended (gen30.py build_shd)
+
+// Fields within Layout::counts and within a block descriptor
+constexpr size_t kCountParams = 0, kCountPasses = 1, kCountTechs = 2;
+constexpr size_t kBlockParams = 0, kBlockSlots = 1, kBlockSize = 2;
+constexpr size_t kNameAlign = 4, kBlockAlign = 16;   // the name tables and the default blocks start aligned
+
+// Both games' packing (shd.py): a technique's u16 pass range, a parameter's u32 word
+inline int rangeFirst(uint16_t r) { return r & 0xff; }
+inline int rangeCount(uint16_t r) { return r >> 8; }
+inline uint16_t techRange(int first, int count) { return (uint16_t)(first | (count << 8)); }
+inline int wordType(uint32_t w) { return (int)(w & 0xffff); }
+inline int wordOffset(uint32_t w) { return (int)(w >> 16); }
+inline uint32_t paramWord(uint32_t type, uint32_t offset) { return type | (offset << 16); }
 
 // A 3.0 .shd's block A: parameter offsets by name hash, size, and the shader's default block (shd.parse(b, '3.0')).
 struct BlockA { std::map<uint32_t, int> off; int sizeA = 0; std::string defA; };
+// false: s may be partly written
 inline bool parseBlockA(const std::string& b, BlockA& s)
 {
     const Layout& L = kLayout30;
     if (b.size() < L.data) return false;
-    const int npar = (uint8_t)b[L.counts], npass = (uint8_t)b[L.counts + 1], ntech = (uint8_t)b[L.counts + 2];
-    const int nA = (uint8_t)b[L.blockA];
-    size_t o = bytes::alignUp(L.data + L.pass * (size_t)npass + 2 * (size_t)ntech, 4);
-    const size_t names = o, words = o + 4 * ((size_t)npar + ntech);
-    o = words + 4 * (size_t)npar + 4 * ((size_t)(uint8_t)b[L.blockA + 1] + (uint8_t)b[L.blockB + 1]);
-    o = bytes::alignUp(o, 16);
-    s.sizeA = bytes::u16OrZero(b, L.blockA + 2);
-    if (o + s.sizeA > b.size()) return false;
-    for (int i = 0; i < npar && i < nA; ++i)
-        s.off[bytes::u32OrZero(b, names + 4 * i)] = (int)(bytes::u32OrZero(b, words + 4 * i) >> 16);
+    const int npar = (uint8_t)b[L.counts + kCountParams], npass = (uint8_t)b[L.counts + kCountPasses];
+    const int ntech = (uint8_t)b[L.counts + kCountTechs], nA = (uint8_t)b[L.blockA + kBlockParams];
+    const size_t slots = (size_t)(uint8_t)b[L.blockA + kBlockSlots] + (uint8_t)b[L.blockB + kBlockSlots];
+    const size_t names = bytes::alignUp(L.data + L.pass * npass + sizeof(uint16_t) * ntech, kNameAlign);
+    const size_t words = names + sizeof(uint32_t) * ((size_t)npar + ntech);
+    const size_t o = bytes::alignUp(words + sizeof(uint32_t) * ((size_t)npar + slots), kBlockAlign);
+    s.sizeA = bytes::u16OrZero(b, L.blockA + kBlockSize);
+    if (!bytes::fits(b.size(), o, (size_t)s.sizeA)) return false;
+    for (int i = 0; i < npar && i < nA; ++i) {
+        const uint32_t word = bytes::u32OrZero(b, words + sizeof(uint32_t) * i);
+        s.off[bytes::u32OrZero(b, names + sizeof(uint32_t) * i)] = wordOffset(word);
+    }
     s.defA = b.substr(o, s.sizeA);
     return true;
 }
@@ -97,7 +114,7 @@ inline uint8_t passFlags(const std::vector<Pass>& passes)
 {
     uint8_t flags = 0;
     for (auto& p : passes) {
-        if (blendField(p.word) > 1) flags |= kFlagBlended;
+        if (blendField(p.word) > kBlendOpaqueLast) flags |= kFlagBlended;
         if (depthField(p.word) == kDepthFinal && xField(p.word) == kXLightBuffer) flags |= kFlagLightFinal;
     }
     return flags;
@@ -108,9 +125,9 @@ inline std::string header(const Shader& s)
     const Layout& L = kLayout30;
     std::string h(L.data, '\0');
     const int slots = (int)s.slots.size(), paramsB = (int)s.params.size() - s.paramsA;
-    h[L.counts] = (char)s.params.size();
-    h[L.counts + 1] = (char)s.passes.size();
-    h[L.counts + 2] = (char)s.techs.size();
+    h[L.counts + kCountParams] = (char)s.params.size();
+    h[L.counts + kCountPasses] = (char)s.passes.size();
+    h[L.counts + kCountTechs] = (char)s.techs.size();
     h[kSlotCount] = (char)slots;
     h[kFlags] = (char)passFlags(s.passes);
     if (s.paramsA) {
@@ -118,13 +135,13 @@ inline std::string header(const Shader& s)
         bytes::put32(h, kLastParamA, s.params[s.paramsA - 1].word);
     }
     memcpy(&h[kTechSlots], s.techSlots.data(), s.techSlots.size());
-    h[L.blockA] = (char)s.paramsA;
-    bytes::put16(h, L.blockA + 2, (uint16_t)s.sizeA);
+    h[L.blockA + kBlockParams] = (char)s.paramsA;
+    bytes::put16(h, L.blockA + kBlockSize, (uint16_t)s.sizeA);
     h[kLastRegisterA] = (char)(std::max)(s.sizeA / kRegisterBytes - 1, 0);
     memset(&h[kStagesA], kNoStage, kStagesACount);
-    h[L.blockB] = (char)paramsB;
-    h[L.blockB + 1] = (char)slots;
-    bytes::put16(h, L.blockB + 2, (uint16_t)s.sizeB);
+    h[L.blockB + kBlockParams] = (char)paramsB;
+    h[L.blockB + kBlockSlots] = (char)slots;
+    bytes::put16(h, L.blockB + kBlockSize, (uint16_t)s.sizeB);
     h[kFirstRegisterB] = (char)s.firstB;
     h[kRegistersB] = (char)(std::max)(s.sizeB / kRegisterBytes - s.firstB, 0);
     h[kSlotsB] = (char)slots;
@@ -159,17 +176,17 @@ inline std::string write(const Shader& s)
     std::string out = detail::header(s);
     for (const Pass& p : s.passes) out += detail::passRecord(p);
     for (auto& t : s.techs) {
-        const uint16_t v = (uint16_t)(t.first | (t.count << 8));
+        const uint16_t v = techRange(t.first, t.count);
         out.append((const char*)&v, sizeof v);
     }
-    out.resize(bytes::alignUp(out.size(), 4), '\0');
+    out.resize(bytes::alignUp(out.size(), kNameAlign), '\0');
     for (auto& p : s.params) detail::append32(out, p.hash);
     for (auto& t : s.techs) detail::append32(out, t.hash);
     for (auto& p : s.params) detail::append32(out, p.word);
     for (uint32_t x : s.slots) detail::append32(out, x);
-    out.resize(bytes::alignUp(out.size(), 16), '\0');
+    out.resize(bytes::alignUp(out.size(), kBlockAlign), '\0');
     out += s.defaultsA;
-    out.resize(bytes::alignUp(out.size(), 16), '\0');
+    out.resize(bytes::alignUp(out.size(), kBlockAlign), '\0');
     out += s.blockB;
     return out;
 }
