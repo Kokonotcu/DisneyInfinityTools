@@ -14,6 +14,10 @@
 #include "../games/di1/cho.hpp"
 #include "../convert/datamap.hpp"
 #include "../formats/chd.hpp"
+#include "../games/di1/chestinfo.hpp"
+#include "../games/di1/gamedb.hpp"
+#include "../games/di1/groups.hpp"
+#include "../games/di1/perceptions.hpp"
 #include "../formats/luachunk.hpp"
 #include "../gameplay.hpp"
 #include "../formats/slang.hpp"
@@ -22,7 +26,6 @@
 #include "../games/di1/sxnatives.hpp"
 #include "../games/di1/transcode.hpp"
 #include "../npc.hpp"
-#include "../sys.hpp"
 #include "files.hpp"
 #include "modes.hpp"
 #include "run.hpp"
@@ -137,7 +140,7 @@ bool dataMapOf(const char* path, npc::DataMap& m) { return npc::dataMap(slurp(pa
 
 }  // namespace
 
-// sys::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A package it throws on fails (OT-04).
+// di1::groups::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A throw fails it (OT-04).
 int convertGroups30(const Args& a)
 {
     int groups = 0, over = 0, files = 0, sparks = 0, failed = 0;
@@ -148,7 +151,7 @@ int convertGroups30(const Args& a)
         std::string out;
         int k = 0, s = 0;
         try {
-            k = sys::groups30(slurp(a.argv[i]), out, &over, isSpark, &s);
+            k = di1::groups::groups30(slurp(a.argv[i]), out, &over, isSpark, &s);
         } catch (std::exception& e) {
             ++failed;
             printf("%s: %s\n", a.argv[i], e.what());
@@ -224,7 +227,7 @@ int convertSx(const Args& a)
 int convertChest(const Args& a)
 {
     std::string out, why;
-    if (!sys::chestInfoLua(slurp(a.argv[2]), out, &why)) {
+    if (!di1::chestinfo::chestInfoLua(slurp(a.argv[2]), out, &why)) {
         printf("FAILED: %s\n", why.c_str());
         return 1;
     }
@@ -246,14 +249,14 @@ int convertPerc(const Args& a)
         if (!l.empty()) names.insert(l);
     for (std::string l; std::getline(gl, l);)
         if (l.find('\t') != std::string::npos) groups.emplace(l.substr(0, l.find('\t')), l.substr(l.find('\t') + 1));
-    sys::Perc30 p30{[&](const std::string& s) { return names.count(s) != 0; },
-                    [&](const std::string& s) {
-                        auto it = groups.find(s);
-                        return it == groups.end() ? std::string() : it->second;
-                    }};
+    di1::perceptions::Perc30 p30{[&](const std::string& s) { return names.count(s) != 0; },
+                                 [&](const std::string& s) {
+                                     auto it = groups.find(s);
+                                     return it == groups.end() ? std::string() : it->second;
+                                 }};
     std::string out, why;
     int added = 0;
-    if (!sys::perceptionInfoLua(slurp(a.argv[2]), p30, out, added, &why)) {
+    if (!di1::perceptions::perceptionInfoLua(slurp(a.argv[2]), p30, out, added, &why)) {
         printf("FAILED: %s\n", why.c_str());
         return 1;
     }
@@ -288,18 +291,19 @@ int convertDataMap(const Args& a)
 int convertDbTriggers(const Args& a)
 {
     const auto add = [](std::string& s) {
-        sys::dbTrigger10Add(s);
+        di1::gamedb::dbTrigger10Add(s);
         return datamap::normalise(s);
     };
     for (int i = 2; i < a.argc; ++i) {
         std::string in = slurp(a.argv[i]), out;
         luachunk::rewrite(in, out, add);
     }
-    for (auto& p : sys::dbTriggers10())
-        if (sys::dbTrigger10(p.c_str(), "locks__lua.lua") || sys::dbTrigger10(p.c_str(), "bitmasks.lua"))
+    for (auto& p : di1::gamedb::dbTriggers10())
+        if (di1::gamedb::dbTrigger10(p.c_str(), "locks__lua.lua") ||
+            di1::gamedb::dbTrigger10(p.c_str(), "bitmasks.lua"))
             printf("%s\n", p.c_str());
-    const bool match = sys::dbTrigger10("GameDB/Incredibles/locks__lua.lua", "locks__lua.lua") &&
-                       sys::dbTrigger10("GameDB/Incredibles/bitmasks.lua", "bitmasks.lua");
+    const bool match = di1::gamedb::dbTrigger10("GameDB/Incredibles/locks__lua.lua", "locks__lua.lua") &&
+                       di1::gamedb::dbTrigger10("GameDB/Incredibles/bitmasks.lua", "bitmasks.lua");
     printf("%s\n", match ? "the former Incredibles triggers match" : "the former Incredibles triggers DO NOT match");
     return 0;
 }

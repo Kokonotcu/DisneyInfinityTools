@@ -14,14 +14,17 @@
 #include "../../core/log.hpp"
 #include "../../core/stack.hpp"
 #include "../../core/zip.hpp"
+#include "../../formats/gamedblua.hpp"
 #include "../../formats/oct.hpp"
 #include "../../gameplay.hpp"
-#include "../../sys.hpp"
 #include "../../third_party/miniz/miniz.h"
 #include "../../trace/loadprof.hpp"
 #include "../../ui.hpp"
+#include "chestinfo.hpp"
 #include "config.hpp"
+#include "gamedb.hpp"
 #include "openstage.hpp"
+#include "perceptions.hpp"
 #include "session.hpp"
 #include "transcode.hpp"
 #include "transcodeio.hpp"
@@ -29,7 +32,7 @@
 
 namespace di1::serve {
 
-// serve10: a di1sys/ path is a GameDB supplement (sys.hpp), served only where 3.0 has no file.
+// serve10: a di1sys/ path is a GameDB supplement (gamedb.hpp), served only where 3.0 has no file.
 inline bool sysStage(openstage::Open& o, int*& out);
 // block10: a path under a listed prefix is never served from 1.0. Always passes on.
 inline bool blockStage(openstage::Open& o, int*& out);
@@ -82,7 +85,7 @@ inline int* serveRaw10(const char* p, const std::string& np, size_t pre)
 inline int* serveChest10(const char* p, const std::string& np, size_t pre)
 {
     std::string bin = np.substr(pre, np.size() - pre - kLuaSuffix) + ".bin", why, src, out;
-    bool ok = vfs::read10s(bin, src) && sys::chestInfoLua(src, out, &why);
+    bool ok = vfs::read10s(bin, src) && chestinfo::chestInfoLua(src, out, &why);
     core::logf("served %s from 1.0 %s (%u B) -> chestInfo Lua %u B%s%s", p, bin.c_str(), (unsigned)src.size(),
                (unsigned)out.size(), ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
     return ok ? core::memFile(out.data(), out.size()) : nullptr;
@@ -93,7 +96,7 @@ inline int* servePerc10(const char* p, const std::string& np, size_t pre)
 {
     std::string bin = np.substr(pre, np.size() - pre - kLuaSuffix) + ".bin", why, src, out;
     int added = 0;
-    bool ok = vfs::read10s(bin, src) && sys::perceptionInfoLua(src, sys::perc30(), out, added, &why);
+    bool ok = vfs::read10s(bin, src) && perceptions::perceptionInfoLua(src, gamedb::perc30(), out, added, &why);
     core::logf("served %s from 1.0 %s (%u B) -> perceptions Lua %u B, %d perceptions 3.0 lacks%s%s", p, bin.c_str(),
                (unsigned)src.size(), (unsigned)out.size(), added, ok ? "" : " FAILED: ",
                ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
@@ -108,9 +111,9 @@ inline int* serveLocks10(const char* p, const std::string& np, size_t pre)
         core::logf("supplement %s: no 1.0 table", p);
         return nullptr;
     }
-    std::set<uint32_t> have = sys::lockUids();
+    std::set<uint32_t> have = gamedb::lockUids();
     int kept = 0, total = 0;
-    bool ok = sys::keepRecords(src, [&](uint32_t u) { return !have.count(u); }, out, kept, total);
+    bool ok = gamedblua::keepRecords(src, [&](uint32_t u) { return !have.count(u); }, out, kept, total);
     core::logf("supplement %s: %d of %d 1.0 lock records (UIDs the Locks DB lacked; it held %u)%s", p, kept, total,
                (unsigned)have.size(), ok ? "" : " -- layout not found, not served");
     return ok ? core::memFile(out.data(), out.size()) : nullptr;
@@ -122,14 +125,14 @@ struct SysSupplement {
     SysServeFn serve;
 };
 
-// sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
+// The supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
 inline int* sysServe(const char* p)
 {
     // first match wins, in this order (C3)
-    const SysSupplement supplements[] = {{sys::kRaw10Prefix, false, serveRaw10},
-                                         {sys::kChest10Prefix, true, serveChest10},
-                                         {sys::kPerc10Prefix, true, servePerc10},
-                                         {sys::kLocks10Prefix, false, serveLocks10}};
+    const SysSupplement supplements[] = {{gamedb::kRaw10Prefix, false, serveRaw10},
+                                         {gamedb::kChest10Prefix, true, serveChest10},
+                                         {gamedb::kPerc10Prefix, true, servePerc10},
+                                         {gamedb::kLocks10Prefix, false, serveLocks10}};
     std::string np = text::norm(p);
     for (const SysSupplement& s : supplements) {
         size_t pre = strlen(s.prefix);

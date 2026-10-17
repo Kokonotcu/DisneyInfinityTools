@@ -7,9 +7,9 @@
 #include "../../engine/assets.hpp"
 #include "../../engine/langkeys.hpp"
 #include "../../engine/surfaces.hpp"
-#include "../../sys.hpp"
 #include "choalias.hpp"
 #include "config.hpp"
+#include "gamedb.hpp"
 #include "octsteps.hpp"
 #include "options.hpp"
 #include "render10.hpp"
@@ -66,11 +66,11 @@ inline bool isSpark10(const std::string& dnaFile)
 
 inline void keepBundle(const std::string& path, const std::string& bytes) { session::keep({{path, bytes}}); }
 
-// A DataMap entry, before it is normalised: Cho aliases (choalias10) and the playset's GameDB tables (sys.hpp)
+// A DataMap entry, before it is normalised: Cho aliases (choalias10) and the playset's GameDB tables (gamedb.hpp)
 inline void dataMapEntry10(const std::string& s)
 {
     choalias::add(s);
-    sys::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
+    gamedb::dbTrigger10Add(s);   // the playset's GameDB tables: the locks / bitMask supplements follow them
 }
 
 }  // namespace detail

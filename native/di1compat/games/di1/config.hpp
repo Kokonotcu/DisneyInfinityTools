@@ -61,7 +61,7 @@ struct Config {
     bool gamedb30 = true;            // the 3.0 GameDB tables a 1.0 DataMap cannot name (npcrt.hpp; the E-on-NPC crash)
     bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 includes) as a DataMap
     bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
-    bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (sys.hpp)
+    bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (groups.hpp)
     bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType (gameplay.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model

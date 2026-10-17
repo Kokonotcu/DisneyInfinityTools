@@ -26,10 +26,10 @@
 #include "mission.hpp"
 #include "../../npc.hpp"
 #include "rendermtb.hpp"
-#include "../../sys.hpp"
 #include "../../ui.hpp"
 #include "vfx.hpp"
 #include "bent.hpp"
+#include "groups.hpp"
 #include "btd.hpp"
 #include "octsteps.hpp"
 #include "renderio.hpp"
@@ -563,11 +563,11 @@ inline bool groupsMatches(const Request& r)
     return r.o.rewards && package && startsLua(r);
 }
 
-// An expendables package: its 1.0 groups in the keys 3.0's group reader takes (sys::groups30); none: passed on.
+// An expendables package: its 1.0 groups in the keys 3.0's group reader takes (groups::groups30); none: passed on.
 inline Verdict groups(Request& r)
 {
     int over = 0, sparks = 0;
-    int k = sys::groups30(std::string((const char*)r.data, r.n), r.out, &over, r.io.isSpark, &sparks);
+    int k = groups::groups30(std::string((const char*)r.data, r.n), r.out, &over, r.io.isSpark, &sparks);
     if (!k) return dispatch::kNext;
     std::string dropped = over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "";
     std::string paying = sparks ? ", " + std::to_string(sparks) + " spark pickups paying INV_SPARKS" : "";

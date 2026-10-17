@@ -9,10 +9,10 @@
 #include <string>
 #include "../formats/chd.hpp"
 #include "../formats/dct.hpp"
+#include "../formats/gamedblua.hpp"
 #include "../gameplay.hpp"
 #include "../games/di1/mission.hpp"
 #include "../npc.hpp"
-#include "../sys.hpp"
 #include "../third_party/miniz/miniz.h"
 #include "files.hpp"
 #include "modes.hpp"
@@ -27,7 +27,7 @@ namespace fs = std::filesystem;
 
 // ---- --keep ----
 
-// chd::V trees equal (the chd parser is independent of sys::keepRecords' scanner).
+// chd::V trees equal (the chd parser is independent of gamedblua::keepRecords' scanner).
 bool sameTree(const chd::V& a, const chd::V& b)
 {
     const bool sameScalar = a.t == b.t && a.i == b.i && !memcmp(&a.f, &b.f, sizeof a.f);
@@ -193,7 +193,7 @@ int testKeep(const Args& a)
     if (!uids30(a, excl)) return 2;
     std::string src = slurp(a.argv[2]), out;
     int kept = 0, total = 0;
-    if (!sys::keepRecords(src, [&](uint32_t u) { return !excl.count(u); }, out, kept, total)) {
+    if (!gamedblua::keepRecords(src, [&](uint32_t u) { return !excl.count(u); }, out, kept, total)) {
         printf("layout not found\n");
         return 1;
     }

@@ -158,6 +158,9 @@ struct Value {
         v.s = k;
         return get(v);
     }
+    // The same lookups on a table being edited (SY-10).
+    Value* get(const Value& k) { return const_cast<Value*>(static_cast<const Value&>(*this).get(k)); }
+    Value* get(const std::string& k) { return const_cast<Value*>(static_cast<const Value&>(*this).get(k)); }
     std::string str(const std::string& k) const
     {
         const Value* v = get(k);

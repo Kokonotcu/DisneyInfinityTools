@@ -48,7 +48,7 @@
 #include "core/log.hpp"
 #include "core/memcheck.hpp"
 #include "games/di1/config.hpp"
-#include "sys.hpp"
+#include "games/di1/popin.hpp"
 
 namespace caprt {
 
@@ -83,7 +83,7 @@ static __declspec(thread) int t_inCust, t_base, t_spark, t_keep;
 // a definition from a 1.0 package: popin10's stamp
 static bool def10(const uint8_t* def)
 {
-    return def && core::readable(def + 0x9c, 4) && *(const float*)(def + 0x9c) == sys::kPopin10 * sys::kPopin10;
+    return def && core::readable(def + 0x9c, 4) && di1::popin::isStamped(def);
 }
 static void defText(const uint8_t* def, char* data, char* model)
 {
