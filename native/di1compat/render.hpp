@@ -15,26 +15,14 @@
 #include <sstream>
 #include <unordered_map>
 #include "base/bytes.hpp"
+#include "base/hash.hpp"
 #include "oct.hpp"
 #include "gen30.hpp"
 #include "formats/bndl.hpp"
 #include "formats/ssf.hpp"
+#include "formats/vtxf.hpp"
 
 namespace render {
-
-// ---- vertex element types (vtxf.TYPES / decode / encode, Python's rounding exactly) ----
-struct VType { char code; int n, csize; double norm; };
-inline bool vtype(const std::string& t, VType& v)
-{
-    static const std::map<std::string, VType> T = {
-        {"FLOAT32_2", {'f', 2, 4, 0}}, {"FLOAT32_3", {'f', 3, 4, 0}}, {"FLOAT32_4", {'f', 4, 4, 0}},
-        {"FLOAT16_2", {'e', 2, 2, 0}}, {"FLOAT16_4", {'e', 4, 2, 0}}, {"U8_4_NORMALIZED", {'B', 4, 1, 255.0}},
-        {"S16_4_NORMALIZED", {'h', 4, 2, 32767.0}}, {"U8_4", {'B', 4, 1, 0}}, {"U16_2", {'H', 2, 2, 0}}};
-    auto it = T.find(t);
-    if (it == T.end()) return false;
-    v = it->second;
-    return true;
-}
 
 // ---- the table ----
 struct Shader { int A = 0, B = 0, slots = 0; std::set<uint32_t> vf; std::vector<std::string> roles; };
@@ -43,7 +31,7 @@ struct Op {
     char kind = 0;
     int ssi = 0, soff = 0;
     std::string st, dt;
-    VType sv{}, dv{};
+    vtxf::ElementType sv{}, dv{};
     std::vector<double> dflt;
     std::string bytes;
 };
@@ -193,7 +181,7 @@ inline bool loadOp(std::istringstream& t, size_t limit, Op& o)
         if (!countOk(m, limit)) return false;
         o.dflt.resize(m);
         for (auto& d : o.dflt) t >> d;
-        const bool types = vtype(o.st, o.sv) && vtype(o.dt, o.dv);
+        const bool types = vtxf::elementType(o.st, o.sv) && vtxf::elementType(o.dt, o.dv);
         return types && o.sv.n <= 4 && o.dv.n <= 4;
     }
     std::string hex;
@@ -313,7 +301,7 @@ inline uint16_t doubleToHalf(double x)
 }
 
 // One element of type v at b -> out[0..v.n).
-inline void decode(const VType& v, const uint8_t* b, double* out)
+inline void decode(const vtxf::ElementType& v, const uint8_t* b, double* out)
 {
     for (int i = 0; i < v.n; ++i) {
         const uint8_t* p = b + i * v.csize;
@@ -331,7 +319,7 @@ inline void decode(const VType& v, const uint8_t* b, double* out)
 }
 
 // vals[0..v.n) as one element of type v at out (v.n * v.csize bytes).
-inline void encode(const VType& v, const double* vals, char* out)
+inline void encode(const vtxf::ElementType& v, const double* vals, char* out)
 {
     for (int i = 0; i < v.n; ++i) {
         double x = vals[i];
@@ -380,7 +368,7 @@ inline constexpr ssf::Layout kSsfLayout10 = {0x64, 0x1c, 0x40, 4, 4, gen30::kShd
 // The scene-settings slot 3.0 renamed: 1.0's g_colorgrade_lut is 3.0's g_colorgrade_lut_sampler
 inline std::map<uint32_t, uint32_t> ssfRenamedSlots10()
 {
-    return {{gen30::ehash("g_colorgrade_lut"), gen30::ehash("g_colorgrade_lut_sampler")}};
+    return {{hash::ehash("g_colorgrade_lut"), hash::ehash("g_colorgrade_lut_sampler")}};
 }
 
 // ---- the world transcode ----
@@ -407,7 +395,7 @@ struct IO {
     const ssf::Format* ssf30 = nullptr;
     // the served vformat.vtxf's re-laid 1.0 formats (gen30::mergeVtxf): a translated primitive in one has its
     // trailing vertex colour split into a stream of its own, as that layout says
-    const std::map<uint32_t, gen30::ColourTail>* tails10 = nullptr;
+    const std::map<uint32_t, vtxf::ColourTail>* tails10 = nullptr;
     // cfg skintr10: a material drawn only with skinned formats may take its translated 1.0 shader too. Its vertices
     // still go to their 3.0 'skin' layout target (skinTarget30: 3.0's GPU skinning reads that and nothing else), and
     // the translated shader takes that target's skinned output (gen30: skin passes, identity bones)
@@ -681,7 +669,7 @@ inline std::set<uint32_t> slotNames10(const IO& io, const std::string& shader)
 
 inline bool readsRole(const std::set<uint32_t>& slots10, const std::string& role)
 {
-    return slots10.count(gen30::ehash("g_" + role + "_sampler")) != 0;
+    return slots10.count(hash::ehash("g_" + role + "_sampler")) != 0;
 }
 
 // A generic donor candidate and its slot roles in common with the 1.0 shader
@@ -1039,7 +1027,7 @@ inline Op copyOp(int dsi, int size, int ssi, int soff)
 }
 
 // the primitive's last stream ends in the re-laid format's colour tail
-inline bool tailFits(const gen30::ColourTail& ct, const std::vector<int32_t>& vda)
+inline bool tailFits(const vtxf::ColourTail& ct, const std::vector<int32_t>& vda)
 {
     return vda[0] == ct.stream + 1 && vda[4 + 3 * ct.stream] == ct.offset + ct.size;
 }
@@ -1047,7 +1035,7 @@ inline bool tailFits(const gen30::ColourTail& ct, const std::vector<int32_t>& vd
 // A translated material's primitive: every stream copied as it is; a re-laid format's colour tail to its own stream
 inline const char* samePlan(const IO& io, uint32_t src, const std::vector<int32_t>& vda, Plan& same)
 {
-    const gen30::ColourTail* ct = nullptr;
+    const vtxf::ColourTail* ct = nullptr;
     if (io.tails10)
         if (auto t = io.tails10->find(src); t != io.tails10->end()) ct = &t->second;
     if (ct && !tailFits(*ct, vda)) return "vertex colour tail: strides differ from the format";

@@ -592,6 +592,10 @@ Code: `shdfmt.py`, `vtxf.py`, `matp.py`, `slotcheck.py`
 - **An unknown CRC is not an error, it is a silent bad layout.** The primitive loader FUN_004553c0 stores `lookup(vformatCRC)` as a **byte**. An unknown CRC returns `0xbadddec1`, which truncates to slot `0xc1`. That slot is empty, so the input layout (FUN_0045c5c0 -> FUN_0044d430 -> `CreateInputLayout`) is built from nothing.
 - **1.0 formats**: 1.0 has 44 formats, and 12 have an exact 3.0 twin (identical `main` declaration). 1.0's `ea1acc4c` (sumo, monolith) = 3.0's `63ae710f`; it was tested in-game on 2026-10-02 and renders.
 - All 12 vformatCRCs used by shipped 3.0 `.oct` files hash from a 3.0 GUID (`vtxf --selftest`).
+- **Descriptor slots**: the parser (FUN_004642f0) numbers element names first come (FUN_0044d730, 32 names) and gives each name 8 descriptor slots (FUN_0044d790, table at `0x0216f260`; descriptor = size, type, semantic, offset, stream).
+  - A 9th distinct descriptor returns `name*8|8`, the next name's slot 0, so that element turns into another one.
+  - 3.0 uses 7 for color0. 1.0's formats add five more (color0 ending stream 1 at offsets 8..28). Served together, 3.0's `1a9a10d9` lost its COLOR0: dock crates drew black, the dumpster in flat per-face colours.
+  - So the served file (di1compat `vtxf::merge`) gives a 1.0 format whose last stream ends in vertex colour at a non-zero offset that colour as a stream of its own; translated primitives in it are split the same way.
 
 **Element types** (3.0 uses all nine; size = `vtxf.SIZE`):
 

@@ -11,7 +11,8 @@
 #include <unordered_map>
 #include <vector>
 #include "oct.hpp"
-#include "gen30.hpp"
+#include "base/hash.hpp"
+#include "formats/vtxf.hpp"
 #include "luachunk.hpp"
 #include "base/bytes.hpp"
 
@@ -182,7 +183,7 @@ inline SkinLayouts skinLayouts(const std::string& t)
     static const std::map<std::string, int> size = {{"FLOAT32_2", 8}, {"FLOAT32_3", 12}, {"FLOAT32_4", 16}, {"FLOAT16_2", 4},
         {"FLOAT16_4", 8}, {"U8_4_NORMALIZED", 4}, {"S16_4_NORMALIZED", 8}, {"U8_4", 4}, {"U16_2", 4}};
     SkinLayouts out;
-    for (auto& v : gen30::ventries(t)) {
+    for (auto& v : vtxf::entries(t)) {
         size_t m = t.find("main", v.start), s = m == std::string::npos ? m : t.find("streams", m);
         if (s == std::string::npos || s > v.end) continue;
         size_t p = t.find('{', s);
@@ -197,7 +198,7 @@ inline SkinLayouts skinLayouts(const std::string& t)
                 if (depth == 3) {
                     auto z = size.find(type);
                     if (z == size.end()) break;                         // an unknown type: no layout for this format
-                    if (sem == "BLENDINDICES" && type == "U8_4") out[gen30::ehash(v.guid, true)] = {stream, off};
+                    if (sem == "BLENDINDICES" && type == "U8_4") out[hash::ehashLower(v.guid)] = {stream, off};
                     off += z->second;
                 }
                 if (--depth == 0) break;

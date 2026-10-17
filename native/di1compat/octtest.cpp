@@ -289,11 +289,11 @@ static int renderTest(char** a)
         io.ssf10 = &ssf10;
         io.ssf30 = &ssf30;
     }
-    gen30::VFormats vf10 = gen30::vformats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
+    vtxf::VFormats vf10 = vtxf::formats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
     io.skinned = [&](uint32_t vf) { auto f = vf10.find(vf); return f != vf10.end() && f->second.count("BLENDINDICES0"); };
-    std::map<uint32_t, gen30::ColourTail> tails;   // as the plugin serves vformat.vtxf
+    std::map<uint32_t, vtxf::ColourTail> tails;   // as the plugin serves vformat.vtxf
     int added = 0;
-    gen30::mergeVtxf(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"),
+    vtxf::merge(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"),
                      slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"), added, tails);
     io.tails10 = &tails;
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
@@ -302,7 +302,7 @@ static int renderTest(char** a)
     // RENDER_SKINTR: cfg skintr10. RENDER_GENCHECK=<d3dcompiler cache dir>: a shader translates only if the plugin's
     // generator makes it and every program compiles (the plugin's io.translatable); without it every one is assumed to
     io.translateSkinned = getenv("RENDER_SKINTR") != nullptr;
-    gen30::VFormats vf30 = gen30::vformats(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"));
+    vtxf::VFormats vf30 = vtxf::formats(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"));
     std::map<std::string, bool> made;
     typedef HRESULT(WINAPI * CompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, void**, void**);
     static CompileFn cf = nullptr;
@@ -362,30 +362,30 @@ static int renderTest(char** a)
 }
 
 // octtest --vtxf <3.0 extract root> <1.0 extract root> [merged out]
-// The engine's vformat parser gives each element name 8 descriptor slots and 32 names (gen30::mergeVtxf): counts
+// The engine's vformat parser gives each element name 8 descriptor slots and 32 names (vtxf::merge): counts
 // them over the shipped 3.0 file and the served one, which must stay within both.
 static int vtxfTest(char** a, int argc)
 {
     namespace fs = std::filesystem;
     std::string t30 = slurp(fs::path(a[2]) / "assets/shaders/shaders/vformat.vtxf"), t10 = slurp(fs::path(a[3]) / "assets/shaders/shaders/vformat.vtxf");
-    std::map<uint32_t, gen30::ColourTail> tails;
+    std::map<uint32_t, vtxf::ColourTail> tails;
     int added = 0;
-    std::string m = gen30::mergeVtxf(t30, t10, added, tails);
+    std::string m = vtxf::merge(t30, t10, added, tails);
     if (argc > 4) std::ofstream(a[4], std::ios::binary).write(m.data(), m.size());
     int fails = 0;
     for (auto* t : {&t30, &m}) {
-        auto sizes = gen30::typeSizes(*t);
+        auto sizes = vtxf::typeSizes(*t);
         std::map<std::string, std::set<std::tuple<int, std::string, std::string, int, int>>> desc;
-        auto ents = gen30::ventries(*t);
+        auto ents = vtxf::entries(*t);
         for (auto& e : ents) {
             size_t mn = t->find("main", e.start), st = mn < e.end ? t->find("streams", mn) : std::string::npos;
             if (st == std::string::npos || st > e.end) continue;
-            auto streams = gen30::children(*t, t->find('{', st));
+            auto streams = vtxf::children(*t, t->find('{', st));
             for (size_t s = 0; s < streams.size(); ++s) {
                 int off = 0;
-                for (auto [x, y] : gen30::children(*t, streams[s].first)) {
-                    std::string ty = gen30::field(*t, x, y, "type");
-                    desc[gen30::field(*t, x, y, "name")].insert({sizes[ty], ty, gen30::field(*t, x, y, "semantic"), off, (int)s});
+                for (auto [x, y] : vtxf::children(*t, streams[s].first)) {
+                    std::string ty = vtxf::field(*t, x, y, "type");
+                    desc[vtxf::field(*t, x, y, "name")].insert({sizes[ty], ty, vtxf::field(*t, x, y, "semantic"), off, (int)s});
                     off += sizes[ty];
                 }
             }
@@ -3214,7 +3214,7 @@ int main(int argc, char** argv)
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         fs::path ext10 = fs::path(argv[3]) / "assets", dump = argv[4];
         gen30::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(ext10 / p); return !o.empty(); };
-        gen30::VFormats vf = gen30::vformats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
+        vtxf::VFormats vf = vtxf::formats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
         size_t ok = 0, bad = 0, progs = 0;
         for (auto& e : fs::directory_iterator(dump)) {
             if (e.path().extension() != ".shd") continue;
@@ -3246,7 +3246,7 @@ int main(int argc, char** argv)
         std::string cache = argv[4];
         fs::create_directories(cache);
         gen30::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(ext10 / p); return !o.empty(); };
-        gen30::VFormats vf = gen30::vformats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
+        vtxf::VFormats vf = vtxf::formats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
         typedef HRESULT(WINAPI * CompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, void**, void**);
         HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
         CompileFn cf = dc ? (CompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
@@ -3289,8 +3289,8 @@ int main(int argc, char** argv)
         }
         size_t probs = 0;
         // WARM_EXT30=<3.0 extract root>: as the plugin with cfg skintr10 on (skinned passes take their 3.0 skin target)
-        gen30::VFormats vf30;
-        if (const char* e30 = getenv("WARM_EXT30")) vf30 = gen30::vformats(slurp(fs::path(e30) / "assets/shaders/shaders/vformat.vtxf"));
+        vtxf::VFormats vf30;
+        if (const char* e30 = getenv("WARM_EXT30")) vf30 = vtxf::formats(slurp(fs::path(e30) / "assets/shaders/shaders/vformat.vtxf"));
         std::function<uint32_t(uint32_t)> st;
         if (!vf30.empty()) st = [&](uint32_t v) { return render::skinTarget30(T, v); };
         for (auto& sh : shaders) {
