@@ -618,7 +618,8 @@ inline void copyField(Graph& g, const NodeView& v, bool firstType, Field& fd)
         r = g.f.nameScalar(r.level, r.name, "NodeGroup");   // a plain name scalar whatever the 1.0 Type's form
         ++g.s.stubs;
     }
-    if (stubField && (nm == "NumInLinks" || nm == "NumOutLinks")) g.f.setInt(r, 0);
+    const bool linkCount = nm == "NumInLinks" || nm == "NumOutLinks";
+    if (stubField && linkCount) g.f.setInt(r, 0);
     else if (field && nm == "NumInLinks" && g.dIn.count(v.k)) g.f.setInt(r, g.f.ints(r)[0] - g.dIn[v.k]);
     else if (field && nm == "NumOutLinks" && g.dOut.count(v.k)) g.f.setInt(r, g.f.ints(r)[0] - g.dOut[v.k]);
     if (!(stubField && v.c && v.c->pins.count(nm))) g.out.push_back(r);
@@ -628,7 +629,9 @@ inline void copyField(Graph& g, const NodeView& v, bool firstType, Field& fd)
 inline void describeField(Graph& g, const NodeView& v, const Field& fd, NodeParams& p)
 {
     const oct::Rec& r = fd.r;
-    const bool pin = isPlainInt(r) && ((v.c && v.c->pins.count(fd.nm)) || v.valued.count(fd.nm));
+    const bool classPin = v.c && v.c->pins.count(fd.nm);
+    const bool pinName = classPin || v.valued.count(fd.nm);
+    const bool pin = isPlainInt(r) && pinName;
     if (pin || g.portRefs[v.k].count(fd.nm)) return;
     std::string pn = hasValueSuffix(fd.nm) ? withoutValueSuffix(fd.nm) : fd.nm;
     const bool fetchValue = v.n.type == "DataFetch" && pn == "Value";

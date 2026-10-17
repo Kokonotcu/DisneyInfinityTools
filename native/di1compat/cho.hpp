@@ -890,7 +890,8 @@ inline void demoteStatics(oct::File& f, ConstScan& s, const HeaderTree& t, const
         if (!d.stat) continue;
         const int h = headerOf(f, t, d.hd);
         const bool neverStatic = d.type == "Bool" || d.type == "Int" || d.type == "Visibility";
-        const bool shape = neverStatic || (d.ext && d.type != "ClipData");
+        const bool external = d.ext && d.type != "ClipData";
+        const bool shape = neverStatic || external;
         const bool bound = h > 0 && named && named->count(pathOf(t, h));
         const bool used = bound || s.convRefs.count((int)di) || offList[di];
         if (shape || used) demote(f, d);
