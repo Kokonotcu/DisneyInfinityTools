@@ -54,7 +54,7 @@
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
-#include "cho.hpp"
+#include "games/di1/cho.hpp"
 #include "ui.hpp"
 #include "audio.hpp"
 #include "vfx.hpp"
@@ -117,7 +117,7 @@ static mz_zip_archive* zipFor(const std::string& rel)
     return (g_zips[rel] = core::openZip(di1::archivePath(g_cfg.install10, rel))).get();
 }
 
-static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
+static di1::cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
 
 // -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
 static void* read10z(const std::string& p, size_t* size, std::string* where);

@@ -208,4 +208,56 @@ inline void eachAssociation(oct::File& f, const std::string& type, Fn fn)
     }
 }
 
+// ---- reading records that may lack a value ----
+
+// A record's first int, def if it has none (a node or an empty list)
+inline int firstInt(const oct::File& f, const oct::Rec& r, int def)
+{
+    auto v = f.ints(r);
+    return v.empty() ? def : v[0];
+}
+
+// Record r's first name, "" for none or r < 0
+inline std::string name1(const oct::File& f, long r)
+{
+    auto v = r < 0 ? std::vector<std::string>{} : f.nameValues(f.recs[r]);
+    return v.empty() ? std::string() : v[0];
+}
+
+// The first child of record i (one level down) with this name, -1 if none
+inline long child(const oct::File& f, size_t i, const char* nm)
+{
+    for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
+        if (f.recs[j].level == f.recs[i].level + 1 && f.name(f.recs[j]) == nm) return (long)j;
+    return -1;
+}
+
+// The pool's level-2 children named SubNetwork, in file order
+inline std::vector<size_t> subNetworks(const oct::File& f, long pool)
+{
+    std::vector<size_t> sns;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
+        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
+    return sns;
+}
+
+// A record reader of a scan table: record i of f into out
+template <class Out>
+struct FieldRule {
+    const char* name;
+    void (*read)(const oct::File& f, size_t i, Out& out);
+};
+
+// Runs the rule named like record i, if any (the names of a table are distinct)
+template <class Out, size_t N>
+inline void readField(const oct::File& f, size_t i, const FieldRule<Out> (&rules)[N], Out& out)
+{
+    const std::string& k = f.name(f.recs[i]);
+    for (const FieldRule<Out>& rule : rules) {
+        if (k != rule.name) continue;
+        rule.read(f, i, out);
+        return;
+    }
+}
+
 }  // namespace octx

@@ -13,7 +13,7 @@
 #include "../../base/text.hpp"
 #include "../../convert/dispatch.hpp"
 #include "../../chan.hpp"
-#include "../../cho.hpp"
+#include "cho.hpp"
 #include "../../convert/datamap.hpp"
 #include "../../gameplay.hpp"
 #include "../../formats/btd.hpp"
