@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -41,6 +42,11 @@ constexpr uint32_t kNoRef = 0xFFE17B81u;          // an empty ScriptRef's index,
 // checked in install() (H4)
 constexpr uint32_t kRecordByUid = 0x0070F700;     // FUN_0070f700: cdecl (uid) -> a GameDB record, null if none
 constexpr const char* kRecordByUidPrologue = "51568B74240C56B9";
+constexpr uint32_t kChangeCount = 0x00E07F90;     // FUN_00e07f90: thiscall (name, delta) on the inventory (ret 8)
+constexpr const char* kChangeCountPrologue = "8B4424046A016A0050E8";
+// FUN_0159bfe0's table: a StatEvent's amount by number, StatEvent_NONE .. StatEvent_5000 (25 names at 0x01ad6660)
+constexpr uint32_t kStatEventAmounts = 0x021069E0;
+constexpr int kStatEvents = 25;
 // an InventoryItem, as FUN_018db5b0 and FUN_014bf7f0 fill it from its record
 constexpr size_t kItemName = 0x10;                // 'name', a CString
 constexpr size_t kItemType = 0x2C;                // 'type', an InventoryType record
@@ -62,6 +68,7 @@ typedef void(__fastcall* ZoneCurrencyFn)(void* self, void* edx, const char* filt
 typedef int(__fastcall* PlaysetCurrencyFn)(void* self, void* edx, void* L);
 typedef uint8_t(__fastcall* HudCurrencyFn)(uint8_t* hud, void* edx, void* data);
 typedef uint32_t(__fastcall* ItemReadFn)(uint8_t* item, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4);
+typedef void(__fastcall* StatEventPayFn)(void* reward, void* edx, int statEvent);
 
 struct State {
     // originals: set once by hook() in install()
@@ -69,6 +76,7 @@ struct State {
     PlaysetCurrencyFn g_playsetCurrency = nullptr;
     HudCurrencyFn g_hudCurrency = nullptr;
     ItemReadFn g_itemReadLua = nullptr, g_itemReadChd = nullptr;
+    StatEventPayFn g_statEventPay = nullptr;
     std::mutex mx;                                   // guards currencies and told (its lines are logged under it)
     std::map<std::string, std::string> currencies;   // inventoryFilter -> currency
     core::LogOnce<std::string> told;                 // (asker, filter) pairs logged
@@ -190,6 +198,28 @@ inline uint32_t __fastcall hkItemReadChd(uint8_t* item, void*, uint32_t a1, uint
     return r;
 }
 
+// A 1.0 zone's StatEvent amount, paid into its currency as UI_ChangePelletCount pays (the GLOBAL stat).
+inline void payStatEvent(int statEvent)
+{
+    if (statEvent <= 0 || statEvent >= eng::kStatEvents) return;
+    const std::string cur = zoneCurrency("mission StatEvent");
+    if (cur.empty() || cur == "INV_SPARKS") return;
+    const int amount = ((const int*)core::rt(eng::kStatEventAmounts))[statEvent];
+    typedef void(__fastcall * ChangeFn)(void* inventory, void* edx, const char* name, int delta);
+    ((ChangeFn)core::rt(eng::kChangeCount))(*(void**)core::rt(eng::kInventory), nullptr, cur.c_str(), amount);
+}
+
+// FUN_0159bfe0, thiscall (statEvent; ret 4): pays PLAYSET/PLAYER stats, not GLOBAL ones. Game thread, per reward.
+inline void __fastcall hkStatEventPay(void* reward, void*, int statEvent)
+{
+    g_state.g_statEventPay(reward, nullptr, statEvent);
+    try {
+        payStatEvent(statEvent);
+    } catch (std::exception& e) {
+        core::logf("currency10: StatEvent %d not paid: %s", statEvent, e.what());
+    }
+}
+
 }  // namespace detail
 
 inline void setCurrencies(std::map<std::string, std::string> currencies)
@@ -206,6 +236,10 @@ inline bool install(const Config& c)
         core::logf("feature currency10 off: FUN_0070f700's prologue differs");
         return false;
     }
+    if (!core::prologueMatches(detail::eng::kChangeCount, detail::eng::kChangeCountPrologue)) {
+        core::logf("feature currency10 off: FUN_00e07f90's prologue differs");
+        return false;
+    }
     detail::State& s = detail::g_state;
     return core::installFeature("currency10", {
         {"zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&detail::hkZoneCurrency,
@@ -218,6 +252,8 @@ inline bool install(const Config& c)
          (void*)&detail::hkItemReadLua, (void**)&s.g_itemReadLua},
         {"InventoryItem CHD read (currency10)", 0x014BF7F0, "81ECA80000008B8424B8000000",
          (void*)&detail::hkItemReadChd, (void**)&s.g_itemReadChd},
+        {"StatEvent reward pay (currency10)", 0x0159BFE0, "6AFF68????????64A10000000050648925000000005156",
+         (void*)&detail::hkStatEventPay, (void**)&s.g_statEventPay},
     });
 }
 
