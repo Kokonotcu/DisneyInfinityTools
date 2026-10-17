@@ -1,5 +1,5 @@
-// 1.0 mission data in 3.0 terms, at load time (FORMATS.md 10.3): presentation events, objective and task lines,
-// mission behaviours, beacon maps, and the Meridian class aliases. Standard library only; any thread.
+// 1.0 mission data in 3.0 terms (FORMATS.md 10.3): events, objective and task lines, behaviours, beacon maps.
+// Std only; any thread.
 #pragma once
 #include <algorithm>
 #include <cctype>
@@ -338,8 +338,8 @@ inline int luaEvents30(std::string& t)
     return n;
 }
 
-// progress30 (progress10): ProgressString "<default>" for a Parms block with the 1.0 generated-line flag and none.
-// Returns 1 if changed (FORMATS.md 10.3).
+// progress30 (progress10): ProgressString "<default>" where 1.0 generated the objective line (FORMATS.md 10.3).
+// Returns 1 if changed.
 inline int progress30(std::string& t)
 {
     size_t p = t.find("\n\tParms = "), e = p == std::string::npos ? p : t.find("\n\t}", p);
@@ -367,8 +367,8 @@ inline int taskLines30(std::string& t)
     return (int)ins.size();
 }
 
-// behaviour30 (behav10): MissionBehavior 2 -> 3 on a story line, 4 on any other, but not on GoldStar or EvalTrigger
-// records (FORMATS.md 10.3). Returns the records changed.
+// behaviour30 (behav10): MissionBehavior 2 -> 3 (story line) or 4; not GoldStar or EvalTrigger records.
+// Returns the count.
 inline int behaviour30(std::string& t)
 {
     static constexpr char kKey[] = "\t\t\t\tMissionBehavior = 2,\n";
@@ -377,7 +377,7 @@ inline int behaviour30(std::string& t)
     const size_t digitAt = keyLen - 3;   // the '2' before ",\n"
     int n = 0;
     for (size_t p = t.find(kKey); p != std::string::npos; p = t.find(kKey, p + 1)) {
-        size_t next = t.find("\n\t\t{\n", p), l = t.find(kLine, p);   // this record's line = "...", before the next record
+        size_t next = t.find("\n\t\t{\n", p), l = t.find(kLine, p);   // its line = "...", before the next record
         const bool afterNext = next != std::string::npos && l > next;
         if (l == std::string::npos || afterNext) continue;
         size_t rs = t.rfind("\n\t\t{\n", p), end = next == std::string::npos ? t.size() : next;
