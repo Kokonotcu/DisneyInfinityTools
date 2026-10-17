@@ -42,6 +42,7 @@
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/currency.hpp"
+#include "games/di1/econ.hpp"
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
 #include "games/di1/octsteps.hpp"
@@ -630,35 +631,6 @@ static int* chdForLua(const char* p, int* r)
         logf("CHD compile of %s failed: %s; served as it is", p, e.what());
         return memFile(src.data(), src.size());
     }
-}
-
-// NPC-8: the .ap key SpawnEconomyOnDeath. 1.0's combat getter FUN_00aa1520 decides once per actor: default 1, then
-// the key from the actor's params (component DAT_016a6a80, +8; 271 uses in the 195 Metroville .ap files: 268 say 1,
-// 3 in in_city_story__missiongraph.ap say 0). 3.0's getter FUN_00ff69c0 (thiscall, decided-bit 0x20 of +0x90c) sets 1 unread; the 1.0
-// read goes in front of it: params component DAT_0220353c (FUN_0069ecd0, +8, as 3.0 reads ChestName in FUN_00b9ebb0),
-// has-key FUN_006f9640, bool FUN_006f9610, setter FUN_00fee6b0 (the one Combat_SetOnDeathSpawnEconomy calls).
-typedef uint32_t(__fastcall* CombatGetFn)(uint8_t* self, void* edx);
-static CombatGetFn g_econOnDeath;
-static uint32_t __fastcall hkEconOnDeath(uint8_t* self, void*)
-{
-    if (!(self[0x90c] & 0x20)) {
-        void* comp = ((void*(__cdecl*)(void*, uint32_t))rt(0x0069ECD0))(*(void**)self, *(uint16_t*)rt(0x0220353C));
-        void* params = comp ? (uint8_t*)comp + 8 : nullptr;
-        if (params && ((uint8_t(__fastcall*)(void*, void*, const char*, uint32_t))rt(0x006F9640))(params, nullptr, "SpawnEconomyOnDeath", 0)) {
-            uint8_t v = ((uint8_t(__fastcall*)(void*, void*, const char*, uint32_t, uint32_t))rt(0x006F9610))(params, nullptr, "SpawnEconomyOnDeath", 0, 0);
-            ((void(__fastcall*)(void*, void*, uint32_t))rt(0x00FEE6B0))(self, nullptr, v);
-            if (!v) logf("SpawnEconomyOnDeath = 0 read for actor %p", *(void**)self);
-        }
-    }
-    return g_econOnDeath(self, nullptr);
-}
-
-// econ10's hook (H1).
-static bool installEcon(const di1::Config& c)
-{
-    if (!c.econ10) return true;
-    return hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath,
-                (void**)&g_econOnDeath);
 }
 
 // sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
@@ -1365,7 +1337,7 @@ extern "C" void __stdcall Pentane_Main()
     if (!startHooks()) return;
     if (!engine::assets::install({(void*)&hkOpen, g_gameDir})) return;
     di1::gamedb::install(g_cfg);
-    installEcon(g_cfg);
+    di1::econ::install(g_cfg);
     di1::expendables::install(g_cfg);
     di1::currency::install(g_cfg);
     di1::popin::install(g_cfg);
