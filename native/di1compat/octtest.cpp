@@ -405,8 +405,8 @@ static int vtxfTest(char** a, int argc)
 
 static bool isCountRecord(const std::string& n)
 {
-    for (auto c : octx::COUNTS_A) if (n == c) return true;
-    for (auto c : octx::COUNTS_B) if (n == c) return true;
+    for (auto c : octx::kCountsA) if (n == c) return true;
+    for (auto c : octx::kCountsB) if (n == c) return true;
     return n == "ConstantLayoutCount" || n == "VariableAccumulatedSize32" || n == "VariableAccumulatedSize64" ||
            n == "ConstantAccumulatedSize32" || n == "ConstantAccumulatedSize64" || n == "DefaultDataSize" ||
            n == "BaseDataNodeLinksAdditionalSize" || n == "LayerBindAdditionalSize";
