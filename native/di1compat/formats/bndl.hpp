@@ -256,4 +256,36 @@ inline std::string build(const std::vector<std::string>& textures, const std::ve
     return out + body;
 }
 
+namespace detail {
+// A named texture-only bundle (all 424 shipped charactericons bundles, texbrule.py): its one TEXB entry's fields.
+constexpr size_t kNamedTexb = kHeader;                           // the TEXB chunk after the BNDL header
+constexpr size_t kNamedCount = kNamedTexb + kCountAt;            // 1: one entry
+constexpr size_t kNamedLength = kNamedTexb + kHeader;            // u32 name length, its NUL counted
+constexpr size_t kNamedName = kNamedLength + 4;                  // the name, padded to 4; then u64 hash, u32 0
+}  // namespace detail
+
+// A named texture-only bundle re-emitted under the TEXB name `name`, its hash kept; "" when b is not one.
+inline std::string texBundleAs(const std::string& b, const std::string& name)
+{
+    namespace d = detail;
+    if (b.size() < d::kNamedName) return "";
+    const bool tags = b.compare(0, 4, "BNDL") == 0 && b.compare(d::kNamedTexb, 4, "TEXB") == 0;
+    if (!tags || d::u32(b, d::kNamedCount) != 1) return "";
+    uint32_t ln = d::u32(b, d::kNamedLength);
+    size_t h = d::kNamedName + bytes::alignUp(ln, 4);
+    // a damaged ln can wrap h + 8: append then throws, as it always did (X-07 decides that case)
+    const bool wraps = h > SIZE_MAX - d::kTexbHash;
+    const bool past = !wraps && !bytes::fits(b.size(), h, d::kTexbHash);
+    if (!ln || past) return "";
+    auto le = [](uint32_t v) { return std::string((const char*)&v, 4); };
+    std::string e = le((uint32_t)name.size() + 1) + name;
+    e.append(bytes::alignUp(name.size() + 1, 4) - name.size(), '\0');
+    e.append(b, h, d::kTexbHash);
+    e.append(4, '\0');
+    size_t cs = bytes::alignUp(d::kHeader + e.size(), 16);
+    e.append(cs - d::kHeader - e.size(), '\0');
+    return "BNDL" + le(1) + le((uint32_t)(d::kHeader + cs)) + le(1) + "TEXB" + le(d::kTexbVersion) + le((uint32_t)cs) +
+           le(1) + e;
+}
+
 }  // namespace bndl

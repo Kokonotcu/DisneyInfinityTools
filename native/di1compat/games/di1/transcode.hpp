@@ -27,7 +27,7 @@
 #include "rendermtb.hpp"
 #include "../../sx.hpp"
 #include "../../sys.hpp"
-#include "../../ui.hpp"
+#include "../../formats/bndl.hpp"
 #include "vfx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
@@ -483,7 +483,7 @@ inline Verdict textureBundle(Request& r)
     stem.resize(stem.size() - strlen(".mtb"));
     const bool holo = r.np.rfind("ui/charactericons/", 0) == 0 && ends(r, "_holo.mtb");
     if (!holo) return kRaw;
-    r.out = ui::texBundleAs(std::string((const char*)r.data, r.n), stem);
+    r.out = bndl::texBundleAs(std::string((const char*)r.data, r.n), stem);
     if (r.out.empty()) return kRaw;
     r.note += "+texname(" + stem + ") ";
     return "mtb";

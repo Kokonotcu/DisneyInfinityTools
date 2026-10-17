@@ -15,7 +15,7 @@
 #include "../../engine/zones.hpp"
 #include "../../formats/chd.hpp"
 #include "challenges.hpp"
-#include "../../ui.hpp"
+#include "ui.hpp"
 #include "config.hpp"
 #include "mission.hpp"
 #include "openstage.hpp"

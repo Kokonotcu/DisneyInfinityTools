@@ -19,7 +19,7 @@
 #include "../../sys.hpp"
 #include "../../third_party/miniz/miniz.h"
 #include "../../trace/loadprof.hpp"
-#include "../../ui.hpp"
+#include "ui.hpp"
 #include "config.hpp"
 #include "openstage.hpp"
 #include "session.hpp"
