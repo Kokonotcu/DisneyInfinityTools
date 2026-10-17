@@ -14,7 +14,8 @@
 #include "../games/di1/zones.hpp"
 #include "../games/di1/mer.hpp"
 #include "../games/di1/mission.hpp"
-#include "../npc.hpp"
+#include "../games/di1/navmesh.hpp"
+#include "../games/di1/skin.hpp"
 #include "../third_party/miniz/miniz.h"
 #include "../ui.hpp"
 #include "files.hpp"
@@ -130,7 +131,7 @@ void activityAp(const fs::path& in, const fs::path& outDir)
     fs::path dir = in.parent_path();
     std::string graph = slurp(dir / (in.stem().string() + ".lua"));
     auto ok = gameplay::activityGivers(graph, [&dir](const std::string& n, std::string& o) {
-        o = slurp(dir / npc::lower(n + ".lua"));
+        o = slurp(dir / text::lower(n + ".lua"));
         return !o.empty();
     });
     int k = gameplay::apGivers30(t, &ok);
@@ -264,7 +265,7 @@ int convertChallenge(const Args& a)
     std::string beacons10;   // a ChallengeData.lua needs the 1.0 beacons file given before it
     for (int i = 3; i < a.argc; ++i) {
         fs::path in = a.argv[i];
-        std::string t = slurp(in), o, name = npc::lower(in.filename().string());
+        std::string t = slurp(in), o, name = text::lower(in.filename().string());
         if (name == "defaultactivitybeacons.lua") {
             beacons10 = t;
             continue;
@@ -356,7 +357,7 @@ int convertNav(const Args& a)
     for (int k = 3; k < a.argc; ++k) {
         std::string b = slurp(a.argv[k]), why;
         oct::File f = parse(b);
-        int n = npc::navmesh30(f, &why);
+        int n = di1::navmesh::navmesh30(f, &why);
         ++files;
         if (n < 0) {
             ++failed;
@@ -381,7 +382,7 @@ int convertNav(const Args& a)
 // REN-3: <out>/<stem>_0.vbuf, each .oct's vertex buffer with its InfluenceRemap palettes applied.
 int convertSkin(const Args& a)
 {
-    npc::SkinLayouts L = npc::skinLayouts(slurp(a.argv[2]));
+    di1::skin::SkinLayouts L = di1::skin::skinLayouts(slurp(a.argv[2]));
     int files = 0, prims = 0;
     for (int k = 4; k < a.argc; ++k) {
         fs::path p = a.argv[k];
@@ -389,7 +390,7 @@ int convertSkin(const Args& a)
         std::string b = slurp(p), vb = slurp(p.parent_path() / (stem + "_0.vbuf")), why;
         std::string ib = slurp(p.parent_path() / (stem + "_0.ibuf"));
         oct::File f = parse(b);
-        int n = npc::skinRemap(f, vb, ib, L, &why);
+        int n = di1::skin::skinRemap(f, vb, ib, L, &why);
         writeFile(fs::path(a.argv[3]) / (stem + "_0.vbuf"), vb);
         ++files;
         prims += n;

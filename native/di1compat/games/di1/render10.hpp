@@ -17,7 +17,6 @@
 #include "../../formats/oct.hpp"
 #include "../../formats/ssf.hpp"
 #include "../../formats/vtxf.hpp"
-#include "../../npcrt.hpp"
 #include "config.hpp"
 #include "gen30.hpp"
 #include "options.hpp"
@@ -25,6 +24,7 @@
 #include "renderio.hpp"
 #include "renderoct.hpp"
 #include "session.hpp"
+#include "skin.hpp"
 #include "tables.hpp"
 #include "transcode.hpp"
 #include "vfs.hpp"
@@ -59,8 +59,26 @@ struct State {
     bool sceneDone = false;                      // the formats were read (once, at the first render)
     bool sceneOk = false;                        // both parsed
     ssf::Format ssf10, ssf30;                    // both games' scenesettingsformat.ssf
+    std::once_flag skinOnce;                     // skin10: skinLayouts filled at the first skinned render
+    skin::SkinLayouts skinLayouts;
 };
 inline State g_state;
+
+// skin10: a 1.0 asset's InfluenceRemap palettes on its vertex buffer (419 models: skincheck2.py). -> the note.
+inline std::string skin10(oct::File& f, std::string& vbuf, const std::string& ibuf)
+{
+    State& s = g_state;
+    std::call_once(s.skinOnce, [&s] {
+        std::string t;
+        if (vfs::read10s("shaders/vformat.vtxf", t)) s.skinLayouts = skin::skinLayouts(t);
+        core::logf("skin10: %u skinned 1.0 vertex formats", (unsigned)s.skinLayouts.size());
+    });
+    if (vbuf.empty() || ibuf.empty() || s.skinLayouts.empty()) return "";
+    std::string why;
+    int n = skin::skinRemap(f, vbuf, ibuf, s.skinLayouts, &why);
+    if (!n && why.empty()) return "";
+    return "+skinremap(" + std::to_string(n) + (why.empty() ? "" : ": " + why) + ") ";
+}
 
 // Both games' scenesettingsformat.ssf (ssf::relayBlock), parsed at the first render; both or neither (scenesettings10).
 inline void sceneSettingsIO(render::IO& io)
@@ -131,7 +149,7 @@ inline bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     if (!vfs::read10s(dir + "/" + stem + ".mtb", mtb)) return false;   // nothing to render
     vfs::read10s(dir + "/" + stem + "_0.vbuf", vbuf);
     vfs::read10s(dir + "/" + stem + "_0.ibuf", ibuf);
-    if (detail::g_state.cfg.skin10) note += npcrt::skin10(f, vbuf, ibuf);
+    if (detail::g_state.cfg.skin10) note += detail::skin10(f, vbuf, ibuf);
     render::IO io = detail::worldRenderIO();
     render::Result r;
     if (!render::transcodeWorld(tables::render(), io, f, {stem, mtb, vbuf, ibuf}, r)) {

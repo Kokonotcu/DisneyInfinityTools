@@ -27,6 +27,7 @@
 #include "games/di1/econ.hpp"
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
+#include "games/di1/gamedb30.hpp"
 #include "games/di1/hideps.hpp"
 #include "games/di1/inputtrace.hpp"
 #include "games/di1/meridian.hpp"
@@ -41,6 +42,8 @@
 #include "games/di1/session.hpp"
 #include "games/di1/shaders10.hpp"
 #include "games/di1/shutdown.hpp"
+#include "games/di1/spawner.hpp"
+#include "games/di1/sxkeys.hpp"
 #include "games/di1/sxnatives.hpp"
 #include "games/di1/tables.hpp"
 #include "games/di1/tools.hpp"
@@ -57,7 +60,6 @@
 #include "trace/spawntrace.hpp"
 #include "trace/teardown.hpp"
 #include "trace/vfx.hpp"
-#include "npcrt.hpp"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -122,8 +124,10 @@ extern "C" void __stdcall Pentane_Main()
     trace::loadprof::install({cfg.fpsLog10, cfg.loadProf10, gameDir});
     di1::assetdefs::install(cfg);
     engine::crt::install({});
+    di1::sxkeys::install(cfg);
     di1::sxnatives::install(cfg);
-    npcrt::install(cfg);
+    di1::spawner::install(cfg);
+    di1::gamedb30::install(cfg);
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
     di1::particles::install(cfg);

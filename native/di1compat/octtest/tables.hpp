@@ -7,7 +7,7 @@
 #include "../base/hash.hpp"
 #include "../formats/chd.hpp"
 #include "../formats/dct.hpp"
-#include "../npc.hpp"
+#include "../base/text.hpp"
 
 namespace octtest {
 
@@ -26,7 +26,7 @@ inline bool dctLookup(const std::string& t, const std::string& key, std::string&
     if (t.size() < d::kHeader) return false;
     const uint32_t ns = bytes::le32(t, d::kSlotsAt);
     if (!ns || (uint64_t)ns * d::kSlotBytes > t.size() - d::kHeader) return false;
-    const std::string k = npc::lower(key);
+    const std::string k = text::lower(key);
     const uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::le32(t, d::kSeedAt));
     uint32_t i = h % ns;
     for (uint32_t n = 0; n < ns; ++n, i = (i + 1) % ns) {   // lower-cased key, linear from hash % slots

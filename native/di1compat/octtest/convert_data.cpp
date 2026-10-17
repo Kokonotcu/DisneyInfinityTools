@@ -14,12 +14,22 @@
 #include "../games/di1/cho.hpp"
 #include "../convert/datamap.hpp"
 #include "../formats/chd.hpp"
+#include "../base/text.hpp"
+#include "../formats/datamap.hpp"
+#include "../games/di1/chestinfo.hpp"
+#include "../games/di1/gamedb.hpp"
+#include "../games/di1/groups.hpp"
+#include "../games/di1/perceptions.hpp"
+#include "../games/di1/psdna.hpp"
+#include "../games/di1/supplement.hpp"
 #include "../formats/luachunk.hpp"
 #include "../gameplay.hpp"
+#include "../formats/slang.hpp"
+#include "../games/di1/aitables.hpp"
+#include "../games/di1/avperc.hpp"
+#include "../games/di1/sxkeys.hpp"
+#include "../games/di1/sxnatives.hpp"
 #include "../games/di1/transcode.hpp"
-#include "../npc.hpp"
-#include "../sx.hpp"
-#include "../sys.hpp"
 #include "files.hpp"
 #include "modes.hpp"
 #include "run.hpp"
@@ -55,13 +65,14 @@ void printSections(const chd::V* c, const char* const (&keys)[N])
 void writeSxTables(const fs::path& out)
 {
     std::ofstream nt(out / "natives.tsv"), kt(out / "keys.tsv");
-    for (auto& n : sx::g_natives) nt << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
-    for (auto& n : sx::g_ports) nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
-    for (auto& k : sx::KEYS30) kt << k.name << '\t' << k.id << '\n';
+    for (auto& n : di1::sxnatives::g_natives) nt << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
+    for (auto& n : di1::sxnatives::g_ports)
+        nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
+    for (auto& k : di1::sxkeys::KEYS30) kt << k.name << '\t' << k.id << '\n';
     std::ofstream bt(out / "beh10.tsv");
-    for (auto* n : sx::BEH10) bt << n << '\n';
+    for (auto* n : di1::sxnatives::BEH10) bt << n << '\n';
     std::ofstream et(out / "events.tsv");
-    for (int t = 1; t <= kTriggerEventTypes; ++t) et << t << '\t' << sx::eventTo30(t) << '\n';
+    for (int t = 1; t <= kTriggerEventTypes; ++t) et << t << '\t' << di1::sxnatives::eventTo30(t) << '\n';
 }
 
 // FlipMotionName on its edge cases; the wrong ones.
@@ -72,7 +83,7 @@ int checkFlips()
     int bad = 0;
     for (auto& f : flips) {
         char b[64];
-        sx::flipMotionName(f[0], b, sizeof(b));
+        di1::sxnatives::flipMotionName(f[0], b, sizeof(b));
         if (!strcmp(b, f[1])) continue;
         printf("FlipMotionName(%s) = %s, want %s\n", f[0], b, f[1]);
         ++bad;
@@ -84,7 +95,7 @@ struct SxRun {
     size_t ok = 0, bad = 0, imports = 0;
 };
 
-// Every .sx of dir through sx::transcode into <out>/<dir name>/ (characters/ and scripts/ share names).
+// Every .sx of dir through slang::upgrade into <out>/<dir name>/ (characters/ and scripts/ share names).
 void transcodeScripts(const fs::path& out, const char* dir, SxRun& r)
 {
     fs::path sub = out / fs::path(dir).filename();
@@ -93,7 +104,7 @@ void transcodeScripts(const fs::path& out, const char* dir, SxRun& r)
         if (e.path().extension() != ".sx") continue;
         std::string b = slurp(e.path()), o, why;
         std::string name = e.path().parent_path().filename().string() + "/" + e.path().filename().string();
-        int k = sx::transcode(b.data(), b.size(), name, o, &why);
+        int k = slang::upgrade(b.data(), b.size(), name, o, &why);
         if (k < 0) {
             ++r.bad;
             printf("REFUSED %s: %s\n", e.path().string().c_str(), why.c_str());
@@ -106,12 +117,12 @@ void transcodeScripts(const fs::path& out, const char* dir, SxRun& r)
 }
 
 // The comma-joined lower-case perception names of a list.
-std::string percNames(const npc::PercList& l)
+std::string percNames(const di1::avperc::PercList& l)
 {
     std::set<std::string> s;
     for (auto& e : l) {
-        if (!e.on.empty()) s.insert(npc::lower(e.on));
-        if (!e.off.empty()) s.insert(npc::lower(e.off));
+        if (!e.on.empty()) s.insert(text::lower(e.on));
+        if (!e.off.empty()) s.insert(text::lower(e.off));
     }
     std::string o;
     for (auto& n : s) o += (o.empty() ? "" : ",") + n;
@@ -123,17 +134,17 @@ template <class Adds>
 std::string percAdded(const Adds& adds)
 {
     std::map<std::string, std::string> a;
-    for (auto& [n, h] : adds) a[npc::lower(n)] = n + (h ? "|1" : "|0");
+    for (auto& [n, h] : adds) a[text::lower(n)] = n + (h ? "|1" : "|0");
     std::string s;
     for (auto& [k, v] : a) s += (s.empty() ? "" : ",") + v;
     return s;
 }
 
-bool dataMapOf(const char* path, npc::DataMap& m) { return npc::dataMap(slurp(path), m); }
+bool dataMapOf(const char* path, datamap::DataMap& m) { return datamap::parse(slurp(path), m); }
 
 }  // namespace
 
-// sys::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A package it throws on fails (OT-04).
+// di1::groups::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A throw fails it (OT-04).
 int convertGroups30(const Args& a)
 {
     int groups = 0, over = 0, files = 0, sparks = 0, failed = 0;
@@ -144,7 +155,7 @@ int convertGroups30(const Args& a)
         std::string out;
         int k = 0, s = 0;
         try {
-            k = sys::groups30(slurp(a.argv[i]), out, &over, isSpark, &s);
+            k = di1::groups::groups30(slurp(a.argv[i]), out, &over, isSpark, &s);
         } catch (std::exception& e) {
             ++failed;
             printf("%s: %s\n", a.argv[i], e.what());
@@ -167,13 +178,13 @@ int convertCurrency10(const Args& a)
     return 0;
 }
 
-// sx::keyId of every line (keycheck.py recomputes the ids on its own).
+// di1::sxkeys::keyId of every line (keycheck.py recomputes the ids on its own).
 int convertSxKeys(const Args& a)
 {
     std::ifstream in(a.argv[2]);
     std::ofstream o(a.argv[3]);
     for (std::string s; std::getline(in, s);)
-        if (!s.empty()) o << s << '\t' << sx::keyId(s.c_str()) << '\n';
+        if (!s.empty()) o << s << '\t' << di1::sxkeys::keyId(s.c_str()) << '\n';
     return 0;
 }
 
@@ -188,8 +199,8 @@ int convertAi(const Args& a)
         std::string ext = e.path().extension().string();
         if (ext != ".bmx" && ext != ".btx") continue;
         std::string b = slurp(e.path()), o, why;
-        int k = ext == ".bmx" ? sx::ai::bmx(b.data(), b.size(), exists, o, &why)
-                              : sx::ai::btx(b.data(), b.size(), exists, o, &why);
+        int k = ext == ".bmx" ? di1::aitables::bmx(b.data(), b.size(), exists, o, &why)
+                              : di1::aitables::btx(b.data(), b.size(), exists, o, &why);
         if (k < 0) {
             ++bad;
             printf("REFUSED %s: %s\n", e.path().string().c_str(), why.c_str());
@@ -212,7 +223,7 @@ int convertSx(const Args& a)
     writeSxTables(out);
     r.bad += checkFlips();
     printf("sx transcoded %zu (%zu imports), refused %zu; %zu natives, %zu ports, %zu keys\n", r.ok, r.imports, r.bad,
-           std::size(sx::g_natives), std::size(sx::g_ports), std::size(sx::KEYS30));
+           std::size(di1::sxnatives::g_natives), std::size(di1::sxnatives::g_ports), std::size(di1::sxkeys::KEYS30));
     return r.bad ? 1 : 0;
 }
 
@@ -220,7 +231,7 @@ int convertSx(const Args& a)
 int convertChest(const Args& a)
 {
     std::string out, why;
-    if (!sys::chestInfoLua(slurp(a.argv[2]), out, &why)) {
+    if (!di1::chestinfo::chestInfoLua(slurp(a.argv[2]), out, &why)) {
         printf("FAILED: %s\n", why.c_str());
         return 1;
     }
@@ -242,14 +253,14 @@ int convertPerc(const Args& a)
         if (!l.empty()) names.insert(l);
     for (std::string l; std::getline(gl, l);)
         if (l.find('\t') != std::string::npos) groups.emplace(l.substr(0, l.find('\t')), l.substr(l.find('\t') + 1));
-    sys::Perc30 p30{[&](const std::string& s) { return names.count(s) != 0; },
-                    [&](const std::string& s) {
-                        auto it = groups.find(s);
-                        return it == groups.end() ? std::string() : it->second;
-                    }};
+    di1::perceptions::Perc30 p30{[&](const std::string& s) { return names.count(s) != 0; },
+                                 [&](const std::string& s) {
+                                     auto it = groups.find(s);
+                                     return it == groups.end() ? std::string() : it->second;
+                                 }};
     std::string out, why;
     int added = 0;
-    if (!sys::perceptionInfoLua(slurp(a.argv[2]), p30, out, added, &why)) {
+    if (!di1::perceptions::perceptionInfoLua(slurp(a.argv[2]), p30, out, added, &why)) {
         printf("FAILED: %s\n", why.c_str());
         return 1;
     }
@@ -284,18 +295,19 @@ int convertDataMap(const Args& a)
 int convertDbTriggers(const Args& a)
 {
     const auto add = [](std::string& s) {
-        sys::dbTrigger10Add(s);
+        di1::gamedb::dbTrigger10Add(s);
         return datamap::normalise(s);
     };
     for (int i = 2; i < a.argc; ++i) {
         std::string in = slurp(a.argv[i]), out;
         luachunk::rewrite(in, out, add);
     }
-    for (auto& p : sys::dbTriggers10())
-        if (sys::dbTrigger10(p.c_str(), "locks__lua.lua") || sys::dbTrigger10(p.c_str(), "bitmasks.lua"))
+    for (auto& p : di1::gamedb::dbTriggers10())
+        if (di1::gamedb::dbTrigger10(p.c_str(), "locks__lua.lua") ||
+            di1::gamedb::dbTrigger10(p.c_str(), "bitmasks.lua"))
             printf("%s\n", p.c_str());
-    const bool match = sys::dbTrigger10("GameDB/Incredibles/locks__lua.lua", "locks__lua.lua") &&
-                       sys::dbTrigger10("GameDB/Incredibles/bitmasks.lua", "bitmasks.lua");
+    const bool match = di1::gamedb::dbTrigger10("GameDB/Incredibles/locks__lua.lua", "locks__lua.lua") &&
+                       di1::gamedb::dbTrigger10("GameDB/Incredibles/bitmasks.lua", "bitmasks.lua");
     printf("%s\n", match ? "the former Incredibles triggers match" : "the former Incredibles triggers DO NOT match");
     return 0;
 }
@@ -319,13 +331,13 @@ int convertChoAlias(const Args& a)
     return 0;
 }
 
-// npc::dataMap of each DataMap: one line per file and include.
+// datamap::parse of each DataMap: one line per file and include.
 int convertDmEval(const Args& a)
 {
     for (int k = 2; k < a.argc; ++k) {
-        npc::DataMap m;
+        datamap::DataMap m;
         std::string why;
-        if (!npc::dataMap(slurp(a.argv[k]), m, &why)) {
+        if (!datamap::parse(slurp(a.argv[k]), m, &why)) {
             printf("%s: FAILED %s\n", a.argv[k], why.c_str());
             return 1;
         }
@@ -340,29 +352,30 @@ int convertDmEval(const Args& a)
 // The playset's GameDB text; with a 1.0 CoreDataMap, its core expendables packages too.
 int convertPlayset(const Args& a)
 {
-    npc::DataMap m10, tb, other, core10;
+    datamap::DataMap m10, tb, other, core10;
     bool ok = dataMapOf(a.argv[2], m10) && dataMapOf(a.argv[3], tb) && dataMapOf(a.argv[4], other);
     if (ok && a.argc > 6) ok = dataMapOf(a.argv[6], core10);
     if (!ok) {
         printf("DataMap eval failed\n");
         return 1;
     }
-    std::string t = npc::playsetText(a.argv[5], npc::gamedb30(m10, tb).playset, tb, other, true,
-                                     npc::coreExpendables10(core10));
+    di1::supplement::PlaysetRecord rec{a.argv[5], di1::supplement::gamedb30(m10, tb).playset,
+                                       di1::supplement::coreExpendables10(core10), true};
+    std::string t = di1::supplement::playsetText(rec, tb, other);
     fwrite(t.data(), 1, t.size(), stdout);
     return 0;
 }
 
-// npc::percAdds: the perceptions each 3.0 avatar list gains from its 1.0 list in a zone.
+// di1::avperc::percAdds: the perceptions each 3.0 avatar list gains from its 1.0 list in a zone.
 int convertAvPerc(const Args& a)
 {
-    std::vector<npc::PercList> l10, l30;
+    std::vector<di1::avperc::PercList> l10, l30;
     std::string why;
-    if (!npc::percLists(slurp(a.argv[2]), l10, &why) || !npc::percLists(slurp(a.argv[3]), l30, &why)) {
+    if (!di1::avperc::percLists(slurp(a.argv[2]), l10, &why) || !di1::avperc::percLists(slurp(a.argv[3]), l30, &why)) {
         printf("btx eval failed: %s\n", why.c_str());
         return 1;
     }
-    auto adds = npc::percAdds(l10, l30, a.argv[4]);
+    auto adds = di1::avperc::percAdds(l10, l30, a.argv[4]);
     std::set<std::string> lines;
     for (size_t j = 0; j < l30.size(); ++j) {
         if (adds[j].first < 0) continue;
@@ -374,15 +387,15 @@ int convertAvPerc(const Args& a)
     return 0;
 }
 
-// npc::gamedb30: the 1.0 DataMap's playset and actor entries against 3.0's ToyBox.
+// di1::supplement::gamedb30: the 1.0 DataMap's playset and actor entries against 3.0's ToyBox.
 int convertGameDb(const Args& a)
 {
-    npc::DataMap m10, m30;
+    datamap::DataMap m10, m30;
     if (!dataMapOf(a.argv[2], m10) || !dataMapOf(a.argv[3], m30)) {
         printf("DataMap eval failed\n");
         return 1;
     }
-    npc::GameDb g = npc::gamedb30(m10, m30);
+    di1::supplement::GameDb g = di1::supplement::gamedb30(m10, m30);
     std::set<std::string> lines;
     for (auto& [t, p] : g.playset) lines.insert("P " + t + " " + p);
     for (auto& [actor, v] : g.actor)
@@ -402,7 +415,7 @@ int convertPsDna(const Args& a)
         fs::path base = fs::path(a.argv[3]) / (n.substr(0, n.size() - kPsDnaLen) + ".dnax");
         if (!fs::exists(base)) continue;
         std::string out, why;
-        bool r = npc::psDna30(slurp(e.path()), slurp(base), out, &why);
+        bool r = di1::psdna::psDna30(slurp(e.path()), slurp(base), out, &why);
         printf("%s: %s %s\n", n.c_str(), r ? "ok" : "kept 1.0", why.c_str());
         if (r) writeFile(fs::path(a.argv[4]) / n, out);
         (r ? ok : no)++;

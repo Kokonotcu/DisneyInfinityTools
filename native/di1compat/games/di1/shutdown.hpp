@@ -1,4 +1,4 @@
-// 1.0 expendables drawn while shut down, as in 1.0 (shutdown10); capsuletrace10's spawn probes. core, sys.
+// 1.0 expendables drawn while shut down, as in 1.0 (shutdown10); capsuletrace10's spawn probes. core, popin.
 // Spawn threads.
 #pragma once
 #include <windows.h>
@@ -12,8 +12,8 @@
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
-#include "../../sys.hpp"
 #include "config.hpp"
+#include "popin.hpp"
 
 namespace di1::shutdown {
 
@@ -77,11 +77,10 @@ inline State g_state;
 // Per spawn call on its thread: set around one engine call, cleared after it.
 inline thread_local int t_inCust, t_base, t_spark, t_keep;
 
-// A definition from a 1.0 package: popin10 stamped it (sys::applyPopin10; 1.0 entries never carry PopinDistance).
+// A definition from a 1.0 package: popin10 stamped it (1.0 entries never carry PopinDistance).
 inline bool def10(const uint8_t* def)
 {
-    const float stamp = sys::kPopin10 * sys::kPopin10;
-    return def && core::readable(def + eng::kDefPopin, 4) && *(const float*)(def + eng::kDefPopin) == stamp;
+    return def && core::readable(def + eng::kDefPopin, 4) && popin::isStamped(def);
 }
 
 inline void defText(const uint8_t* def, char (&data)[kNames], char (&model)[kNames])
