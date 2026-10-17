@@ -91,6 +91,7 @@ inline constexpr EntryField<Assoc> kAssocFields[] = {
     {"SubNetworkRef", nullptr, &Assoc::sn},
     {"CollisionInstanceRef", nullptr, &Assoc::inst},
     {"SceneTreeNodeRef", nullptr, &Assoc::stn},
+    {"AssetIndex", nullptr, nullptr, &Assoc::hasIndex},
 };
 
 // The associations in file order; none when they have CollisionAggregates already (3.0 form).
@@ -102,7 +103,6 @@ inline std::optional<std::vector<Assoc>> associations(const oct::File& f, long a
         a.at = i;
         a.end = f.blockEnd(i);
         readEntryFields(f, i, kAssocFields, a);
-        a.hasIndex = hasField(f, i, "AssetIndex");
         if (a.type == "CollisionAggregate") return std::nullopt;
         as.push_back(a);
     }
@@ -121,7 +121,7 @@ inline AssetIndex assetIndex(const oct::File& f, long asp)
         x.aggregateAt.push_back(-1);
         for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
             const std::string& n = f.name(f.recs[j]);
-            if (n == "SubNetworkRef") x.ofSubNetwork.emplace(f.int0(f.recs[j]), (int)k);
+            if (n == "SubNetworkRef") x.ofSubNetwork.try_emplace(f.int0(f.recs[j]), (int)k);
             else if (n == "AggregateCount") x.aggregateAt.back() = (long)j;
         }
     }
@@ -134,7 +134,7 @@ inline std::map<std::pair<int, std::string>, int> sceneRefs(const std::vector<As
     std::map<std::pair<int, std::string>, int> scene;
     for (const Assoc& a : as) {
         const bool placed = a.type == "Transform" || a.type == "Geometry";
-        if (placed && a.stn != -1) scene.emplace(std::make_pair(a.sn, a.node), a.stn);
+        if (placed && a.stn != -1) scene.try_emplace({a.sn, a.node}, a.stn);
     }
     return scene;
 }

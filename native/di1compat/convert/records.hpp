@@ -117,12 +117,13 @@ inline void editPoolChildren(oct::File& f, long pool, const std::vector<size_t>&
     f.recs.swap(out);
 }
 
-// A pool entry field for readEntryFields: a name (name0) into text, or an int (int0) into number.
+// A pool entry field for readEntryFields: a name (name0) into text, an int (int0) into number, or just seen.
 template <class Out>
 struct EntryField {
     const char* name;
     std::string Out::*text;
     int32_t Out::*number;
+    bool Out::*seen = nullptr;
 };
 
 // Reads every record of entry's block named in fields, in record order: a repeated field's last value wins.
@@ -134,17 +135,11 @@ inline void readEntryFields(const oct::File& f, size_t entry, const EntryField<O
         for (const EntryField<Out>& x : fields) {
             if (n != x.name) continue;
             if (x.text) out.*x.text = f.name0(f.recs[j]);
-            else out.*x.number = f.int0(f.recs[j]);
+            else if (x.number) out.*x.number = f.int0(f.recs[j]);
+            else out.*x.seen = true;
+            break;   // the names of a field table are distinct
         }
     }
-}
-
-// True when entry's block has a record called n.
-inline bool hasField(const oct::File& f, size_t entry, const char* n)
-{
-    for (size_t j = entry + 1, end = f.blockEnd(entry); j < end; ++j)
-        if (f.name(f.recs[j]) == n) return true;
-    return false;
 }
 
 // Calls fn(NodeName record, SubNetworkRef) for every association of this Type.
