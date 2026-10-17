@@ -43,6 +43,7 @@ inline bool memtestStage(openstage::Open& o, int*& out);
 namespace detail {
 
 constexpr size_t kGameDbDir = sizeof("gamedb/") - 1;
+constexpr int kStackWords = 24;   // the exe addresses a bitmasks open's line lists
 
 // 3.0's tips (o.r, consumed) plus the 1.0 records it lacks; registered zones' keys stay 3.0's (FUN_01391150).
 inline int* tips30(const openstage::Open& o)
@@ -185,7 +186,7 @@ inline bool bitmasksStack(openstage::Open& o, int*&)
     char line[600];
     // never cut: at most 327 characters before the stack's 216
     int len = snprintf(line, sizeof(line), "gamedb package open %s, stack:", o.p);
-    core::stackOf(o.sp, line, sizeof(line), len, 24);
+    core::stackOf(o.sp, line, sizeof(line), len, detail::kStackWords);
     core::logf("%s", line);
     return false;
 }

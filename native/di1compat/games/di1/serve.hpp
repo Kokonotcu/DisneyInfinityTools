@@ -45,10 +45,19 @@ constexpr size_t kPcConSuffix = sizeof("_pc_con.dct") - 1;
 constexpr size_t kHoloSuffix = sizeof("_holo.mtb") - 1;
 constexpr size_t kPresentationDir = sizeof("presentation/") - 1;
 
-// loadprof10's served-file stacks: the first 3 per kind, 15 in all
+// A DDS file: the magic, then DDS_HEADER (Microsoft's "DDS file layout")
+constexpr size_t kDdsBytes = 128;   // magic and header
+constexpr size_t kDdsHeight = 12;   // u32 dwHeight, then u32 dwWidth
+constexpr size_t kDdsWidth = 16;
+constexpr size_t kDdsMips = 28;     // u32 dwMipMapCount
+constexpr size_t kDdsFourCc = 84;   // the pixel format's FourCC
+constexpr uint32_t kBlockSide = 4;  // a block-compressed texture's blocks are 4x4 texels
+
+// loadprof10's served-file stacks: the first 3 per kind, 15 in all, 16 exe addresses each
 inline constexpr const char* kStackKinds[] = {".oct", ".bent", ".banm", ".mer", ".tbody"};
 constexpr LONG kStacksPerKind = 3;
 constexpr LONG kStacksAll = 15;
+constexpr int kStackWords = 16;
 
 struct State {
     std::atomic<LONG> stacks{0};                                   // served-file stacks logged; any open thread
@@ -135,12 +144,14 @@ inline int* sysServe(const char* p)
 // header only (conv.copy_texture).
 inline void padSmallDxt(std::string& d)
 {
-    if (d.size() < 128 || d.compare(0, 4, "DDS ") || d.compare(84, 3, "DXT")) return;
-    uint32_t h = oct::u((const uint8_t*)d.data() + 12, 4), w = oct::u((const uint8_t*)d.data() + 16, 4);
-    uint32_t mips = oct::u((const uint8_t*)d.data() + 28, 4);
-    if ((w < 4 || h < 4) && mips <= 1) {
-        uint32_t v[2] = {h < 4 ? 4u : h, w < 4 ? 4u : w};
-        memcpy(&d[12], v, 8);
+    if (d.size() < kDdsBytes || d.compare(0, 4, "DDS ") || d.compare(kDdsFourCc, 3, "DXT")) return;
+    const uint8_t* b = (const uint8_t*)d.data();
+    uint32_t h = oct::u(b + kDdsHeight, 4), w = oct::u(b + kDdsWidth, 4);
+    uint32_t mips = oct::u(b + kDdsMips, 4);
+    const bool underBlock = w < kBlockSide || h < kBlockSide;
+    if (underBlock && mips <= 1) {
+        uint32_t v[2] = {h < kBlockSide ? kBlockSide : h, w < kBlockSide ? kBlockSide : w};
+        memcpy(&d[kDdsHeight], v, sizeof(v));
     }
 }
 
@@ -273,7 +284,7 @@ inline void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_
         const LONG all = ++s.stacks;
         if (all > kStacksAll) continue;
         len += format::fitOrFailFast(pf + len, cap - len, " stack:");
-        core::stackOf(sp, pf, cap, len, 16);
+        core::stackOf(sp, pf, cap, len, kStackWords);
     }
 }
 

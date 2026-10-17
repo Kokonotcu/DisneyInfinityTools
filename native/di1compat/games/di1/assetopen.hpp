@@ -23,6 +23,8 @@ inline int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
 
 namespace detail {
 
+constexpr uint32_t kFlagsLogged = 0xff;   // the open line shows the flags' low byte
+
 struct State {
     Config cfg;   // set once in install(), before engine::assets installs hkOpen
 };
@@ -43,7 +45,7 @@ inline void logOpen(const openstage::Open& o)
                               GetCurrentThreadId(), trace::loadprof::frameNo(), o.t30, o.tRead,
                               trace::loadprof::nowMs() - o.tIn);
     if (o.cfg->trace || !o.r)
-        core::logf("open %s flags=%X -> %s%s%s", o.p, o.flags & 0xff, o.r ? "ok" : "MISSING",
+        core::logf("open %s flags=%X -> %s%s%s", o.p, o.flags & kFlagsLogged, o.r ? "ok" : "MISSING",
                    o.r ? "" : o.missWhy.c_str(), pf);
 }
 
