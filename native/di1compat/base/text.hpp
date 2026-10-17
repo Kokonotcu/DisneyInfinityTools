@@ -22,4 +22,11 @@ inline std::string norm(const char* path)
     return p;
 }
 
+// s with '\' as '/', lower-cased by the CRT: norm without the "assets/" cut (SX-16, SY-09).
+inline std::string slashLower(std::string s)
+{
+    for (char& c : s) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
+    return s;
+}
+
 }  // namespace text

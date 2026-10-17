@@ -20,11 +20,12 @@
 #include "../../formats/dct.hpp"
 #include "../../formats/luachunk.hpp"
 #include "../../formats/oct.hpp"
+#include "../../formats/slang.hpp"
+#include "aitables.hpp"
 #include "mer.hpp"
 #include "mission.hpp"
 #include "../../npc.hpp"
 #include "rendermtb.hpp"
-#include "../../sx.hpp"
 #include "../../sys.hpp"
 #include "../../ui.hpp"
 #include "vfx.hpp"
@@ -588,13 +589,13 @@ inline Verdict dataMap(Request& r)
     return k ? "datamap" : nullptr;
 }
 
-inline bool slangMatches(const Request& r) { return r.o.sx && ends(r, ".sx") && sx::is10(r.data, r.n); }
+inline bool slangMatches(const Request& r) { return r.o.sx && ends(r, ".sx") && slang::isV100c(r.data, r.n); }
 
-// A 1.0 Slang script (sx.hpp): 3.0's fix-up FUN_007366f0 takes only 0x100d containers
+// A 1.0 Slang script (formats/slang.hpp): 3.0's fix-up FUN_007366f0 takes only 0x100d containers
 inline Verdict slang(Request& r)
 {
     std::string why;
-    int k = sx::transcode(r.data, r.n, r.np, r.out, &why);
+    int k = slang::upgrade(r.data, r.n, r.np, r.out, &why);
     if (k < 0) return raw(r, "sx: " + why + " ");
     r.note += "+sx(" + std::to_string(k) + " imports) ";
     return "sx";
@@ -608,7 +609,7 @@ inline bool behaviourMatches(const Request& r)
     return table && startsLua(r);
 }
 
-// A 1.0 behavior map / behavior tree (sx.hpp): 3.0's loaders drop tables without Version 763
+// A 1.0 behavior map / behavior tree (aitables.hpp): 3.0's loaders drop tables without Version 763
 inline Verdict behaviour(Request& r)
 {
     std::string why;
@@ -618,7 +619,7 @@ inline Verdict behaviour(Request& r)
         std::string s;
         return io.read10(p, s);
     };
-    int k = bmx ? sx::ai::bmx(r.data, r.n, exists, r.out, &why) : sx::ai::btx(r.data, r.n, exists, r.out, &why);
+    int k = bmx ? aitables::bmx(r.data, r.n, exists, r.out, &why) : aitables::btx(r.data, r.n, exists, r.out, &why);
     if (k < 0) return raw(r, std::string(bmx ? "bmx: " : "btx: ") + why + " ");
     r.note += (bmx ? "+bmx(" : "+btx(") + std::to_string(k) + (bmx ? " behaviors) " : " tables) ");
     return bmx ? "bmx" : "btx";

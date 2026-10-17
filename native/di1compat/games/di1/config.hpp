@@ -43,12 +43,12 @@ struct Config {
     bool beacon10 = true;            // zonelist.lua: 1.0 BeaconMap rows in 3.0's row form (mission::beaconMap30)
     bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
     bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
-    bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (sx.hpp SX-1; 0: raw, rejected)
+    bool sx10 = true;                // 1.0 Slang scripts served in the 3.0 container (slang.hpp SX-1; 0: raw, rejected)
     bool sxNatives10 = true;         // sx10's imports bound to 1.0-semantics natives by a linker hook (SX-3/4)
     bool sxPorts10 = true;           // sxNatives10 with the ported natives (0: stack-balanced stubs only)
     bool sxBeh10 = true;             // sxPorts10 + 1.0 behavior-type numbers into 1.0 scripts' SetInitialParams
-    bool bmx10 = true;               // 1.0 behavior maps in 3.0's form (sx.hpp BMX-1; 0: raw, 3.0 drops them)
-    bool btx10 = true;               // 1.0 behavior trees in 3.0's form (sx.hpp BTX-1; 0: raw, 3.0 drops them)
+    bool bmx10 = true;               // 1.0 behavior maps in 3.0's form (aitables.hpp BMX-1; 0: raw, 3.0 drops them)
+    bool btx10 = true;               // 1.0 behavior trees in 3.0's form (aitables.hpp BTX-1; 0: raw, 3.0 drops them)
     bool root10 = true;              // sys: read10 also searches the 1.0 root archives (startup*.zip)
     bool locks10 = true;             // sys: 1.0 lock records the Locks DB lacks, after the playset locks (PS-5)
     bool popin10 = true;             // sys: 1.0 expendable packages' entries pop in as in 1.0 (PS-8)

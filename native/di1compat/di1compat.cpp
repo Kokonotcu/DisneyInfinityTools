@@ -34,6 +34,7 @@
 #include "games/di1/screens.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/shaders10.hpp"
+#include "games/di1/sxkeys.hpp"
 #include "games/di1/sxnatives.hpp"
 #include "games/di1/tables.hpp"
 #include "games/di1/transcodeio.hpp"
@@ -116,6 +117,7 @@ extern "C" void __stdcall Pentane_Main()
     trace::loadprof::install({cfg.fpsLog10, cfg.loadProf10, gameDir});
     di1::assetdefs::install(cfg);
     engine::crt::install({});
+    di1::sxkeys::install(cfg);
     di1::sxnatives::install(cfg);
     npcrt::install(cfg);
     di1::screens::install(cfg);

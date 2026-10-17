@@ -16,9 +16,12 @@
 #include "../formats/chd.hpp"
 #include "../formats/luachunk.hpp"
 #include "../gameplay.hpp"
+#include "../formats/slang.hpp"
+#include "../games/di1/aitables.hpp"
+#include "../games/di1/sxkeys.hpp"
+#include "../games/di1/sxnatives.hpp"
 #include "../games/di1/transcode.hpp"
 #include "../npc.hpp"
-#include "../sx.hpp"
 #include "../sys.hpp"
 #include "files.hpp"
 #include "modes.hpp"
@@ -55,13 +58,14 @@ void printSections(const chd::V* c, const char* const (&keys)[N])
 void writeSxTables(const fs::path& out)
 {
     std::ofstream nt(out / "natives.tsv"), kt(out / "keys.tsv");
-    for (auto& n : sx::g_natives) nt << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
-    for (auto& n : sx::g_ports) nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
-    for (auto& k : sx::KEYS30) kt << k.name << '\t' << k.id << '\n';
+    for (auto& n : di1::sxnatives::g_natives) nt << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
+    for (auto& n : di1::sxnatives::g_ports)
+        nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
+    for (auto& k : di1::sxkeys::KEYS30) kt << k.name << '\t' << k.id << '\n';
     std::ofstream bt(out / "beh10.tsv");
-    for (auto* n : sx::BEH10) bt << n << '\n';
+    for (auto* n : di1::sxnatives::BEH10) bt << n << '\n';
     std::ofstream et(out / "events.tsv");
-    for (int t = 1; t <= kTriggerEventTypes; ++t) et << t << '\t' << sx::eventTo30(t) << '\n';
+    for (int t = 1; t <= kTriggerEventTypes; ++t) et << t << '\t' << di1::sxnatives::eventTo30(t) << '\n';
 }
 
 // FlipMotionName on its edge cases; the wrong ones.
@@ -72,7 +76,7 @@ int checkFlips()
     int bad = 0;
     for (auto& f : flips) {
         char b[64];
-        sx::flipMotionName(f[0], b, sizeof(b));
+        di1::sxnatives::flipMotionName(f[0], b, sizeof(b));
         if (!strcmp(b, f[1])) continue;
         printf("FlipMotionName(%s) = %s, want %s\n", f[0], b, f[1]);
         ++bad;
@@ -84,7 +88,7 @@ struct SxRun {
     size_t ok = 0, bad = 0, imports = 0;
 };
 
-// Every .sx of dir through sx::transcode into <out>/<dir name>/ (characters/ and scripts/ share names).
+// Every .sx of dir through slang::upgrade into <out>/<dir name>/ (characters/ and scripts/ share names).
 void transcodeScripts(const fs::path& out, const char* dir, SxRun& r)
 {
     fs::path sub = out / fs::path(dir).filename();
@@ -93,7 +97,7 @@ void transcodeScripts(const fs::path& out, const char* dir, SxRun& r)
         if (e.path().extension() != ".sx") continue;
         std::string b = slurp(e.path()), o, why;
         std::string name = e.path().parent_path().filename().string() + "/" + e.path().filename().string();
-        int k = sx::transcode(b.data(), b.size(), name, o, &why);
+        int k = slang::upgrade(b.data(), b.size(), name, o, &why);
         if (k < 0) {
             ++r.bad;
             printf("REFUSED %s: %s\n", e.path().string().c_str(), why.c_str());
@@ -167,13 +171,13 @@ int convertCurrency10(const Args& a)
     return 0;
 }
 
-// sx::keyId of every line (keycheck.py recomputes the ids on its own).
+// di1::sxkeys::keyId of every line (keycheck.py recomputes the ids on its own).
 int convertSxKeys(const Args& a)
 {
     std::ifstream in(a.argv[2]);
     std::ofstream o(a.argv[3]);
     for (std::string s; std::getline(in, s);)
-        if (!s.empty()) o << s << '\t' << sx::keyId(s.c_str()) << '\n';
+        if (!s.empty()) o << s << '\t' << di1::sxkeys::keyId(s.c_str()) << '\n';
     return 0;
 }
 
@@ -188,8 +192,8 @@ int convertAi(const Args& a)
         std::string ext = e.path().extension().string();
         if (ext != ".bmx" && ext != ".btx") continue;
         std::string b = slurp(e.path()), o, why;
-        int k = ext == ".bmx" ? sx::ai::bmx(b.data(), b.size(), exists, o, &why)
-                              : sx::ai::btx(b.data(), b.size(), exists, o, &why);
+        int k = ext == ".bmx" ? di1::aitables::bmx(b.data(), b.size(), exists, o, &why)
+                              : di1::aitables::btx(b.data(), b.size(), exists, o, &why);
         if (k < 0) {
             ++bad;
             printf("REFUSED %s: %s\n", e.path().string().c_str(), why.c_str());
@@ -212,7 +216,7 @@ int convertSx(const Args& a)
     writeSxTables(out);
     r.bad += checkFlips();
     printf("sx transcoded %zu (%zu imports), refused %zu; %zu natives, %zu ports, %zu keys\n", r.ok, r.imports, r.bad,
-           std::size(sx::g_natives), std::size(sx::g_ports), std::size(sx::KEYS30));
+           std::size(di1::sxnatives::g_natives), std::size(di1::sxnatives::g_ports), std::size(di1::sxkeys::KEYS30));
     return r.bad ? 1 : 0;
 }
 
