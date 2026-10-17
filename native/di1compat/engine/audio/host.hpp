@@ -232,6 +232,13 @@ inline void placeInfoOnly(unsigned sysId, uint32_t obj)
     place(info, obj);
 }
 
+// AU-30: an event handle FMOD hands out again is no longer an older play's, so its late stop misses it.
+inline void forgetInstance(void* ev)
+{
+    for (auto& pl : g_state.plays)
+        if (pl.second.ev == ev) pl.second.ev = nullptr;
+}
+
 // Starts ev on obj with our callback and programmer sound snd; id is new; false: it did not start.
 inline bool start(void* ev, uint32_t obj, void* snd, uint32_t& id)
 {
@@ -455,6 +462,7 @@ inline uint32_t play(const Post& p)
     const fmod::Result r =
         system::api().EventSystem_GetEventBySystemID(system::eventSystem(), it->second.sysId, fmod::kEventDefault, &ev);
     if (r || !ev) return 0;
+    detail::forgetInstance(ev);
     uint32_t id = 0;
     if (const bool started = detail::start(ev, p.obj, nullptr, id); !started) return 0;
     s.plays[id] = Play{ev, it->second.proj, p.obj, p.eventId, p.flags, p.cb, p.cookie, it->second.ui, s.tickNo};
@@ -483,6 +491,7 @@ inline uint32_t playLine(const Post& p, void* fsb, int sub)
     void* es = system::eventSystem();
     const fmod::Result r = f.EventSystem_GetEventBySystemID(es, it->second.sysId, fmod::kEventDefault, &ev);
     if (r || !ev) return 0;
+    detail::forgetInstance(ev);
     uint32_t id = 0;
     if (const bool started = detail::start(ev, p.obj, snd, id); !started) return 0;
     s.plays[id] = Play{ev, it->second.proj, p.obj, p.eventId, p.flags, p.cb, p.cookie, it->second.ui, s.tickNo, fsb};
