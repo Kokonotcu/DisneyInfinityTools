@@ -42,6 +42,7 @@
 #include "trace/breaktrace.hpp"
 #include "trace/fade.hpp"
 #include "trace/locktrace.hpp"
+#include "trace/mission.hpp"
 #include "trace/opacity.hpp"
 #include "trace/teardown.hpp"
 #include "octx.hpp"
@@ -857,10 +858,6 @@ static uint32_t* __fastcall hkChoMake(void* self, void*, uint32_t* out, const ch
 typedef void(__cdecl* PlaceToyFn)(void* msg);
 static PlaceToyFn g_placeToy;
 static void __cdecl hkPlaceToy(void* msg) { logf("ToyCreation_PlaceToy callback (msg %p)", msg); g_placeToy(msg); }
-// MissionContext update (FUN_0166ffb0, per frame per context): logs an IN_ context's activation state when it changes.
-// Offsets from the context parser FUN_016748d0 and the update itself; +0x10 is the context's name string.
-typedef void(__fastcall* MissionTickFn)(uint8_t* self, void* edx, float dt);
-static MissionTickFn g_missionTick;
 // test (fpslog10): FUN_0047aab0 runs once per frame on the main thread (FUN_0047f0a0, the frame's render submit) and
 // spins while the render thread still holds the previous frame (+0x71f0 == 2). Call-to-call time = frame time; time
 // inside = the main thread waiting on rendering. Mostly waiting -> render thread / GPU / present bound; hardly
@@ -1388,34 +1385,27 @@ static bool playsetMission10(const char* name)
 }
 
 static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc loaded in-process, one frame captured once the world runs
-static void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
+// renderdoc10: one frame captured renderdoc10 seconds after the first 1.0 playset mission's tick (missiontrace).
+static void armRenderDocCapture()
 {
-    g_missionTick(self, nullptr, dt);
-    const char* name = *(const char**)(self + 0x10);
-    if (!name || !playsetMission10(name)) return;   // a 1.0 playset's mission (zones10's prefixes)
-    static bool armed;
-    if (g_rdoc && !armed) {
-        armed = true;
-        std::thread([] { Sleep(1000 * g_cfg.renderdoc10); g_rdoc->TriggerCapture(); logf("renderdoc: capture triggered"); }).detach();
-    }
-    static const uint32_t stateVa[] = {0x0228a2c0, 0x0228a2c4, 0x0228a2c8, 0x0228a2cc, 0x0228a2d0, 0x0228a2d4, 0x0228a2d8,
-                                       0x0228a2dc, 0x0228a2e0, 0x0228a2e4, 0x0228a2e8, 0x0228a2ec, 0x0228a2f0, 0x0228a2f4};
-    auto stateName = [](uint32_t v) {
-        for (int i = 0; i < 14; ++i) if (*(uint32_t*)rt(stateVa[i]) == v) return i;
-        return -1;
-    };
-    uint32_t state = *(uint32_t*)(self + 0x44), m = *(uint32_t*)(self + 0x198);
-    // state objects carry their name at +8: m_state +0x44, m_presentationState +0x54 (FUN_01662730, the context dump)
-    auto stName = [](uint32_t st, char* buf) { safeCopy(buf, 48, st ? *(const char**)(uintptr_t)(st + 8) : "<null>"); return buf; };
-    char sn[48], pn[48], sig[320];
-    sprintf_s(sig, "state=%d(%s) pres=%s mission=%08X mflags=%02X faft=%d trig=%d b159=%d b15f=%d inzone=%d ignzone=%d avready=%d reason=%d "
-                   "f3f=%08X beh=%d init=%d", stateName(state), stName(state, sn), stName(*(uint32_t*)(self + 0x54), pn), m,
-              m ? *(uint8_t*)(m + 0x3d9) : 0xff, self[0x112], self[0x113],
-              self[0x159], self[0x15f], self[0x114], self[0x135], self[0x137], *(int*)(self + 0x290), *(uint32_t*)(self + 0xfc),
-              *(int*)(self + 0xc8), self[0x224]);
-    static std::unordered_map<uint8_t*, std::string> last;
-    std::string& l = last[self];
-    if (l != sig) { l = sig; logf("mission %.60s: %s", name, sig); }
+    static bool armed;   // first mission tick only; missiontrace's tick runs on one thread (B-48: unverified)
+    if (armed) return;
+    armed = true;
+    std::thread([] {
+        Sleep(1000 * g_cfg.renderdoc10);
+        g_rdoc->TriggerCapture();
+        logf("renderdoc: capture triggered");
+    }).detach();
+}
+
+// missiontrace's config: a 1.0 playset's missions by zones10's prefixes; renderdoc10 arms on the first one's tick.
+static trace::mission::Config missionTraceOf(const di1::Config& c)
+{
+    trace::mission::Config m;
+    m.on = c.missionTrace;
+    m.ownMission = playsetMission10;
+    if (g_rdoc) m.ownMissionTick = armRenderDocCapture;
+    return m;
 }
 // Meridian class registry (FUN_0178e330, run once at boot by FUN_013aaba0): the 1.0 classes of mission.hpp kAliases
 // are registered after it with their 3.0 template. The transcoder treats them as registered only once that has run,
@@ -1452,165 +1442,6 @@ static bool installMerRegistry(const di1::Config& c)
     if (!classes || !g_merOk) return true;
     return hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry,
                 (void**)&g_merRegistry);
-}
-
-static volatile LONG g_lockLines, g_traceLines;
-static bool lockTraceRoom(volatile LONG& n = g_traceLines) { return InterlockedIncrement(&n) <= 4000; }
-
-// missiontrace: a 1.0 mission's actor focus points (MU tutorial 2026-10-15: no marker on the FearTech decorations).
-// The graph node MissionFocusPoint_Actor (Meridian::FocusPointActor, vtable 01DE726C) binds at init to the mission's
-// FocusPoint_Actor record by its MissionID 'name:id' (FUN_01747160: +0x40 the string, +0x28 the mission element,
-// +0x30 the id; slot 28 sets +0x64 = record). Its Update pin (FUN_01730e80, cdecl(pin context), [ctx+4] = node) only
-// marks the record (FUN_01571690: +0x140 |= 0x10) and does nothing while +0x64 is 0. The record (vtable 01DCA744)
-// update FUN_015df390 (thiscall, int, ret 4) then tags the node's ActorList (node FUN_01740880 -> +0x180 = 1 once the
-// pin had actors). Record fields: +0x142 MissionID, +0x144 ParentMissionID -> +0x148 parent task (+0xc flags: bit 0
-// active), +0x140 flags (1 active, 4 turned off, 0x10 update), +0x168 FUN_015930d0's last active check, +0x17c tag,
-// +0x190 node, +0xd4 mission context (+0x10 name), +0xe8/+0xec beacon cho/placement (FUN_015c30a0), +0x150
-// EnableCompass, +0x160 MissionTarget, +0x170 NoHudMarker. Log-only: one line per record whenever that state changes.
-typedef void(__fastcall* FpUpdateFn)(uint8_t* fp, void* edx, int a);
-static FpUpdateFn g_fpUpdate;
-static void __fastcall hkFpUpdate(uint8_t* fp, void*, int a)
-{
-    g_fpUpdate(fp, nullptr, a);
-    if (!fp || *(uint32_t*)fp != (uint32_t)rt(0x01DCA744)) return;   // the engine's own this: no probe needed
-    uint8_t* ctx = *(uint8_t**)(fp + 0xd4);
-    char name[64];
-    safeCopy(name, sizeof(name), ctx && sys::readable(ctx + 0x10, 4) ? *(const char**)(ctx + 0x10) : nullptr);
-    if (!ctx || !playsetMission10(name)) return;
-    uint8_t *parent = *(uint8_t**)(fp + 0x148), *node = *(uint8_t**)(fp + 0x190);
-    char tag[64], cho[64], pl[64], ntag[64] = "";
-    void *nRec = nullptr, *nAct = nullptr;
-    if (node && sys::readable(node + 0x5c, 12)) { cstr(node + 0x60, ntag, sizeof(ntag)); nAct = *(void**)(node + 0x5c); nRec = *(void**)(node + 0x64); }
-    uint8_t f = fp[0x140];
-    char sig[512];
-    sprintf_s(sig, "flags %02X (active %d, off %d, update %d) check %d, parent %d %p flags %d, node %p (record %p, tag '%s', "
-                   "ActorTag %p), tagged %d tag '%s', beacon '%s' '%s', compass %d target %d nohud %d",
-              f, f & 1, f >> 2 & 1, f >> 4 & 1, fp[0x168], *(int16_t*)(fp + 0x144), parent,
-              parent && sys::readable(parent + 0xc, 1) ? parent[0xc] : -1, node, nRec, ntag, nAct, fp[0x180],
-              cstr(fp + 0x17c, tag, sizeof(tag)), cstr(fp + 0xe8, cho, sizeof(cho)), cstr(fp + 0xec, pl, sizeof(pl)), fp[0x150],
-              fp[0x160], fp[0x170]);
-    static std::mutex m;
-    static std::unordered_map<uint8_t*, std::string> last;
-    {
-        std::lock_guard<std::mutex> lock(m);
-        if (last.size() > 400) return;
-        std::string& l = last[fp];
-        if (l == sig) return;
-        l = sig;
-    }
-    static volatile LONG lines;
-    if (lockTraceRoom(lines) && lines <= 300) logf("focus point %.60s:%d %s", name, *(int16_t*)(fp + 0x142), sig);
-}
-typedef void(__cdecl* FpPinFn)(uint8_t* pinCtx);
-static FpPinFn g_fpNodeUpdate;
-static void __cdecl hkFpNodeUpdate(uint8_t* pinCtx)
-{
-    uint8_t* node = pinCtx && sys::readable(pinCtx + 4, 4) ? *(uint8_t**)(pinCtx + 4) : nullptr;
-    if (node && sys::readable(node, 0x68) && *(uint32_t*)node == (uint32_t)rt(0x01DE726C)) {
-        char id[96];
-        cstr(node + 0x40, id, sizeof(id));
-        static volatile LONG lines;
-        if (playsetMission10(id) && lockTraceRoom(lines) && lines <= 200)
-            logf("focus point node %p '%s' Update: record %p, mission element %p, id %d", node, id, *(void**)(node + 0x64),
-                 *(void**)(node + 0x28), *(int*)(node + 0x30));
-    }
-    g_fpNodeUpdate(pinCtx);
-}
-// MU run 2026-10-15 10:54 (run-mu-1054.log): the tutorial's five records bind, tag and turn active exactly as
-// SuperCollect's, whose pennants got 20 Beacon_Mission_Arrow choreographies; the FearTech decorations got none. Two
-// steps remain between the tag and a beacon:
-//   node tag apply FUN_0173a3f0 (thiscall node): reads the ActorList pin into a list; each handle -> actor through
-//     FUN_0074b200 (handle table + actor class check), which is tagged (FUN_014ac0a0)
-//   record scan, FocusPoint_Actor slot 12 FUN_015d5f80 (thiscall record): the tag's type-1 entries (FUN_014ac5a0)
-//     -> FUN_0074b200 -> actor; an actor with +0x10e == 2, or in actor state 0xe53 (0x1079 when HideOnSpawn), is
-//     skipped, else a beacon item joins the record's list at +0x118 (head; next at [0])
-// Each is wrapped once here, and FUN_0074b200 counts its calls (and the passes' +0x10e) only inside them.
-struct FpScope { int mode, calls, actors; uint8_t b10e[4]; };
-static thread_local FpScope g_fpScope;
-typedef uint8_t*(__cdecl* ActorOfFn)(uint32_t handle);
-static ActorOfFn g_actorOf;
-static uint8_t* __cdecl hkActorOf(uint32_t handle)
-{
-    uint8_t* a = g_actorOf(handle);
-    FpScope& s = g_fpScope;
-    if (s.mode) {
-        ++s.calls;
-        if (a && s.actors < 4) s.b10e[s.actors] = a[0x10e];
-        if (a) ++s.actors;
-    }
-    return a;
-}
-static const char* fpScopeText(char* buf, size_t cap)
-{
-    const FpScope& s = g_fpScope;
-    sprintf_s(buf, cap, "%d handles -> %d actors (+0x10e %d %d %d %d)", s.calls, s.actors, s.actors > 0 ? s.b10e[0] : -1,
-              s.actors > 1 ? s.b10e[1] : -1, s.actors > 2 ? s.b10e[2] : -1, s.actors > 3 ? s.b10e[3] : -1);
-    return buf;
-}
-typedef void(__fastcall* FpThisFn)(uint8_t* self, void* edx);
-static FpThisFn g_fpApply, g_fpScan;
-static void __fastcall hkFpApply(uint8_t* node, void*)
-{
-    char id[96] = "";
-    bool mine = node && *(uint32_t*)node == (uint32_t)rt(0x01DE726C) && playsetMission10(cstr(node + 0x40, id, sizeof(id)));
-    if (!mine) return g_fpApply(node, nullptr);
-    g_fpScope = FpScope{1};
-    g_fpApply(node, nullptr);
-    char t[96], sig[160];
-    sprintf_s(sig, "tag apply: ActorList %s, ActorTag %p", fpScopeText(t, sizeof(t)), *(void**)(node + 0x5c));
-    g_fpScope.mode = 0;
-    static std::mutex m;
-    static std::unordered_map<uint8_t*, std::string> last;
-    {
-        std::lock_guard<std::mutex> lock(m);
-        if (last.size() > 400 || last[node] == sig) return;
-        last[node] = sig;
-    }
-    static volatile LONG lines;
-    if (lockTraceRoom(lines) && lines <= 200) logf("focus point node %p '%s' %s", node, id, sig);
-}
-static void __fastcall hkFpScan(uint8_t* fp, void*)
-{
-    uint8_t* ctx = fp && *(uint32_t*)fp == (uint32_t)rt(0x01DCA744) ? *(uint8_t**)(fp + 0xd4) : nullptr;
-    char name[64];
-    safeCopy(name, sizeof(name), ctx && sys::readable(ctx + 0x10, 4) ? *(const char**)(ctx + 0x10) : nullptr);
-    if (!ctx || !playsetMission10(name)) return g_fpScan(fp, nullptr);
-    g_fpScope = FpScope{2};
-    g_fpScan(fp, nullptr);
-    int items = 0;
-    for (uint8_t** e = *(uint8_t***)(fp + 0x118); e && items < 1000; e = (uint8_t**)e[0]) ++items;
-    char t[96], sig[200];
-    sprintf_s(sig, "scan: tagged %s, active %d, beacon items %d", fpScopeText(t, sizeof(t)), fp[0x140] & 1, items);
-    g_fpScope.mode = 0;
-    static std::mutex m;
-    static std::unordered_map<uint8_t*, std::string> last;
-    {
-        std::lock_guard<std::mutex> lock(m);
-        if (last.size() > 400 || last[fp] == sig) return;
-        last[fp] = sig;
-    }
-    static volatile LONG lines;
-    if (lockTraceRoom(lines) && lines <= 300) logf("focus point %.60s:%d %s", name, *(int16_t*)(fp + 0x142), sig);
-}
-
-// missiontrace's hooks (H1), all or none.
-static bool installMissionTrace(const di1::Config& c)
-{
-    if (!c.missionTrace) return true;
-    return installFeature("missiontrace", {
-        {"MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick,
-         (void**)&g_missionTick},
-        {"FocusPoint_Actor update (missiontrace)", 0x015DF390, "6AFF64A10000000068????????50", (void*)&hkFpUpdate,
-         (void**)&g_fpUpdate},
-        {"FocusPointActor Update pin (missiontrace)", 0x01730E80, "8B4424048B40048B486485C9", (void*)&hkFpNodeUpdate,
-         (void**)&g_fpNodeUpdate},
-        {"FocusPointActor tag apply (missiontrace)", 0x0173A3F0, "6AFF68????????64A100000000", (void*)&hkFpApply,
-         (void**)&g_fpApply},
-        {"FocusPoint_Actor tag scan (missiontrace)", 0x015D5F80, "6AFF68????????64A100000000", (void*)&hkFpScan,
-         (void**)&g_fpScan},
-        {"handle to actor (missiontrace)", 0x0074B200, "83EC088B44240C8D0C2451", (void*)&hkActorOf,
-         (void**)&g_actorOf},
-    });
 }
 
 // Meridian node creators (cdecl placement constructors registered per class, FUN_006bc220): count what a graph builds.
@@ -2864,7 +2695,7 @@ extern "C" void __stdcall Pentane_Main()
     installPlaysetSlot(g_cfg);
     installTrace(g_cfg);
     installShaders(g_cfg);
-    installMissionTrace(g_cfg);
+    trace::mission::install(missionTraceOf(g_cfg));
     installChoStart(g_cfg);
     trace::breaktrace::install({g_cfg.breakTrace});
     trace::teardown::install({g_cfg.teardownTrace});
