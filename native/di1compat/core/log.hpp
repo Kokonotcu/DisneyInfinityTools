@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <mutex>
 #include <set>
+#include "locks.hpp"
 
 namespace core {
 
@@ -16,18 +17,6 @@ struct LogState {
     FILE* file;              // set once by openLog, before any other thread runs; null: logging is off
 };
 inline LogState g_logState;   // zero-initialised: logf does nothing until openLog
-
-// Holds a CRITICAL_SECTION for one scope (CLAUDE.md L5).
-class CsLock {
-public:
-    explicit CsLock(CRITICAL_SECTION& cs) : cs_(cs) { EnterCriticalSection(&cs_); }
-    ~CsLock() { LeaveCriticalSection(&cs_); }
-    CsLock(const CsLock&) = delete;
-    CsLock& operator=(const CsLock&) = delete;
-
-private:
-    CRITICAL_SECTION& cs_;
-};
 }  // namespace detail
 
 // Opens the log for writing, readable while the game runs. Call once, before anything logs.
@@ -42,7 +31,7 @@ inline void logf(const char* fmt, ...)
 {
     detail::LogState& s = detail::g_logState;
     if (!s.file) return;
-    detail::CsLock lock(s.lock);
+    CsLock lock(s.lock);
     SYSTEMTIME t;
     GetLocalTime(&t);
     fprintf(s.file, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
