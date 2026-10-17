@@ -2,7 +2,7 @@
 // Boot thread installs.
 #pragma once
 #include <cstdint>
-#include "../../audio.hpp"
+#include "../../engine/audio/host.hpp"
 #include "../../engine/choreography.hpp"
 #include "../../trace/breaktrace.hpp"
 #include "config.hpp"
@@ -16,7 +16,9 @@ inline bool install(const Config& c)
     if (c.breakTrace) cho.starting = trace::breaktrace::choreographyStart;
     const bool cineSync = c.audio10 && c.cineSync10;
     if (cineSync)
-        cho.started = [](const uint8_t*, const char* name, uint32_t flags) { audio::choreographyStarted(name, flags); };
+        cho.started = [](const uint8_t*, const char* name, uint32_t flags) {
+            engine::audio::host::choreographyStarted(name, flags);
+        };
     return engine::choreography::install(cho);
 }
 

@@ -11,7 +11,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
-#include "../audio.hpp"
+#include "../games/di1/audio.hpp"
 #include "../base/bytes.hpp"
 #include "files.hpp"
 #include "run.hpp"
@@ -71,11 +71,11 @@ using Dropped = std::map<std::string, std::string>;
 // Initialize.fev:Permanent, then each FEV of argv[4..] by its 1.0 name (NOFILE when the install lacks it).
 void loadFevs(const Args& a)
 {
-    audio::g.loadTree("Initialize.fev", "Permanent");
+    ea::host::loadTree("Initialize.fev", "Permanent");
     for (int i = 4; i < a.argc; ++i) {
-        std::string n = audio::g.name10(a.argv[i]);
+        std::string n = ea::system::installedName(a.argv[i]);
         if (n.empty()) printf("NOFILE %s\n", a.argv[i]);
-        else audio::g.loadTree(n, nullptr);
+        else ea::host::loadTree(n, nullptr);
     }
 }
 
@@ -85,21 +85,21 @@ std::string cueVerdict(const std::string& name)
     size_t u = name.find('_');
     std::string x = u == std::string::npos ? "" : name.substr(0, u);
     unsigned id = 0;
-    if (!x.empty() && audio::music.ensure(x))
-        return audio::Music::cue(name.c_str(), &id) ? "OK " + audio::music.file
-                                                     : "MISS (not a cue of " + audio::music.file + ")";
-    if (!audio::music.file.empty() && audio::Music::cue(name.c_str(), &id)) {
+    if (!x.empty() && ea::music::ensure(x))
+        return ea::music::cue(name.c_str(), &id) ? "OK " + ea::music::file()
+                                                     : "MISS (not a cue of " + ea::music::file() + ")";
+    if (!ea::music::file().empty() && ea::music::cue(name.c_str(), &id)) {
         MusicIterator ci{};
-        audio::g.f.MusicSystem_GetCues(audio::g.ms, &ci, name.c_str());
-        return "OK " + audio::music.file + " as " + (ci.value ? ci.value->name : "?");
+        g_sys.f.MusicSystem_GetCues(g_sys.ms, &ci, name.c_str());
+        return "OK " + ea::music::file() + " as " + (ci.value ? ci.value->name : "?");
     }
     return "MISS (no Music_" + x + ".fev)";
 }
 
 std::string eventVerdict(const std::string& name, ProjectNames& projName, Dropped& dropped)
 {
-    auto it = audio::g.byId.find(audio::fnv1(name));
-    if (it != audio::g.byId.end())
+    auto it = g_host.byId.find(hash::fnv1Lower(name));
+    if (it != g_host.byId.end())
         return "OK " + projName[it->second.proj] + " flags " + std::to_string(it->second.flags);
     if (dropped.count(name)) return "MISS (left out by the 1.0 rule: " + dropped[name] + ")";
     return "MISS";
@@ -126,20 +126,21 @@ std::map<std::string, int> resolveNames(const char* path, ProjectNames& projName
 void printCues()
 {
     MusicIterator it{};
-    if (!audio::g.ms || audio::g.f.MusicSystem_GetCues(audio::g.ms, &it, nullptr)) return;
-    for (; it.value; audio::g.f.MusicSystem_GetNextCue(audio::g.ms, &it))
+    if (!g_sys.ms || g_sys.f.MusicSystem_GetCues(g_sys.ms, &it, nullptr)) return;
+    for (; it.value; g_sys.f.MusicSystem_GetNextCue(g_sys.ms, &it))
         printf("CUE\t%s\t%u\n", it.value->name, it.value->id);
 }
 
 // A one-shot ends by itself and calls back once; a loop runs until stopped.
 void lifecycle()
 {
-    uint32_t one = audio::g.play(audio::fnv1(kOneShot), kTestObject, kAkEndOfEvent, (void*)onFmodCallback, nullptr);
-    uint32_t loop = audio::g.play(audio::fnv1(kLoop), kTestObject, kAkEndOfEvent, (void*)onFmodCallback, nullptr);
+    void* const cb = (void*)onFmodCallback;
+    uint32_t one = ea::host::play({hash::fnv1Lower(kOneShot), kTestObject, kAkEndOfEvent, cb, nullptr});
+    uint32_t loop = ea::host::play({hash::fnv1Lower(kLoop), kTestObject, kAkEndOfEvent, cb, nullptr});
     tickFor(kOneShotMs);
     int afterOne = state.fmodEnds;
     uint32_t pidOne = state.fmodLastPid;
-    audio::g.act(loop, kAkStop);
+    ea::host::act(loop, kAkStop);
     tickFor(kAfterStopMs);
     printf("LIFE one-shot id %u: %d callback(s) in 6 s (pid %u); loop id %u: %s before its stop, %d after\n", one,
            afterOne, pidOne, loop, afterOne == 1 ? "running" : "ENDED", state.fmodEnds - afterOne);
@@ -149,18 +150,18 @@ void lifecycle()
 void musicPrompt()
 {
     int active = -1, activeAfter = -1;
-    if (audio::music.ensure(kPlayset10) && audio::music.begin(kCue)) {
+    if (ea::music::ensure(kPlayset10) && ea::music::begin(kCue)) {
         tickFor(kPromptMs);
-        audio::g.f.MusicPrompt_IsActive(audio::music.prompt, &active);
-        audio::music.endPrompt();
-        audio::g.f.MusicSystem_Reset(audio::g.ms);
+        g_sys.f.MusicPrompt_IsActive(ea::music::prompt(), &active);
+        ea::music::endPrompt();
+        g_sys.f.MusicSystem_Reset(g_sys.ms);
         tickFor(kResetMs);
         unsigned id;
         void* p = nullptr;
-        if (audio::Music::cue(kCue, &id)) audio::g.f.MusicSystem_PrepareCue(audio::g.ms, id, &p);
+        if (ea::music::cue(kCue, &id)) g_sys.f.MusicSystem_PrepareCue(g_sys.ms, id, &p);
         if (p) {
-            audio::g.f.MusicPrompt_IsActive(p, &activeAfter);
-            audio::g.f.MusicPrompt_Release(p);
+            g_sys.f.MusicPrompt_IsActive(p, &activeAfter);
+            g_sys.f.MusicPrompt_Release(p);
         }
     }
     printf("LIFE music Inc_mx_Metroville: active %d after 1 s, fresh prompt active %d after end+reset\n", active,
@@ -170,14 +171,14 @@ void musicPrompt()
 // cinesync10: an audio-synced choreography starts the 1.0 event of its leaf name, nothing else does.
 void cineSync()
 {
-    if (!audio::g.byId.count(audio::fnv1(kSyncedCin))) return;
-    audio::hostState = kHostUp;   // octtest runs the host on this thread
-    size_t n0 = audio::g.plays.size();
-    audio::choreographyStarted(kSyncedCinPath, kCinNoSync);
-    audio::choreographyStarted(kUnnamedCinPath, kCinOther);
-    size_t n1 = audio::g.plays.size();
-    audio::choreographyStarted(kSyncedCinPath, kCinOpeningA);
-    size_t n2 = audio::g.plays.size();
+    if (!g_host.byId.count(hash::fnv1Lower(kSyncedCin))) return;
+    g_sys.up = kHostUp;   // octtest runs the host on this thread
+    size_t n0 = g_host.plays.size();
+    ea::host::choreographyStarted(kSyncedCinPath, kCinNoSync);
+    ea::host::choreographyStarted(kUnnamedCinPath, kCinOther);
+    size_t n1 = g_host.plays.size();
+    ea::host::choreographyStarted(kSyncedCinPath, kCinOpeningA);
+    size_t n2 = g_host.plays.size();
     printf("CINESYNC unsynced / unnamed: %s; synced: %s\n", n1 == n0 ? "nothing started" : "STARTED",
            n2 == n1 + 1 ? "event started" : "NOTHING");
     tickFor(kCinMs);
@@ -192,11 +193,11 @@ Limit virtualLimit(unsigned sysId)
 {
     Limit l;
     void* info = nullptr;
-    audio::g.f.EventSystem_GetEventBySystemID(audio::g.es, sysId, kInfoOnly, &info);
+    g_sys.f.EventSystem_GetEventBySystemID(g_sys.es, sysId, kInfoOnly, &info);
     if (!info) return l;
-    audio::g.f.Event_GetPropertyByIndex(info, fmodprop::kMaxPlaybacks, &l.maxPlaybacks, kEventValue);
-    audio::g.f.Event_GetPropertyByIndex(info, fmodprop::kMinDistance, &l.dmin, kEventValue);
-    audio::g.f.Event_GetPropertyByIndex(info, fmodprop::kMaxDistance, &l.dmax, kEventValue);
+    g_sys.f.Event_GetPropertyByIndex(info, fmodprop::kMaxPlaybacks, &l.maxPlaybacks, kEventValue);
+    g_sys.f.Event_GetPropertyByIndex(info, fmodprop::kMinDistance, &l.dmin, kEventValue);
+    g_sys.f.Event_GetPropertyByIndex(info, fmodprop::kMaxDistance, &l.dmax, kEventValue);
     return l;
 }
 
@@ -204,11 +205,11 @@ Limit virtualLimit(unsigned sysId)
 void virtualControl(unsigned sysId)
 {
     void* raw = nullptr;
-    audio::FR rr;
+    ea::fmod::Result rr;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        rr = audio::g.f.EventSystem_GetEventBySystemID(audio::g.es, sysId, kEventDefault, &raw);
-        if (!rr && raw) audio::g.f.Event_Stop(raw, 1);
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        rr = g_sys.f.EventSystem_GetEventBySystemID(g_sys.es, sysId, kEventDefault, &raw);
+        if (!rr && raw) g_sys.f.Event_Stop(raw, 1);
     }
     printf("VIRT control: near request with the info-only instance left at the far position -> %s (FMOD %d)\n",
            !rr && raw ? "granted" : "refused", (int)rr);
@@ -221,32 +222,33 @@ void virtualPosts(uint32_t eventId, unsigned sysId, const Limit& lim)
     std::vector<uint32_t> ids;
     int got = 0;
     for (int i = 0; i < lim.maxPlaybacks && i < kVirtFill; ++i) {
-        uint32_t id = audio::g.play(eventId, kVirtFirst + i, kAkEndOfEvent, (void*)onFmodCallback, nullptr);
+        uint32_t id = ea::host::play({eventId, kVirtFirst + i, kAkEndOfEvent, (void*)onFmodCallback, nullptr});
         got += id != 0;
         ids.push_back(id);
         tickFor(kVirtPostMs);
     }
     tickFor(kVirtSettleMs);
-    uint32_t farId = audio::g.play(eventId, kVirtFirst + kVirtFill, kAkEndOfEvent, (void*)onFmodCallback, nullptr);
+    uint32_t farId = ea::host::play({eventId, kVirtFirst + kVirtFill, kAkEndOfEvent, (void*)onFmodCallback, nullptr});
     tickFor(kVirtSettleMs);
     virtualControl(sysId);
     tickFor(kVirtSettleMs);
-    uint32_t nearId = audio::g.play(eventId, kVirtFirst + kVirtFill + 1, kAkEndOfEvent, (void*)onFmodCallback, nullptr);
+    const uint32_t nearObj = kVirtFirst + kVirtFill + 1;
+    uint32_t nearId = ea::host::play({eventId, nearObj, kAkEndOfEvent, (void*)onFmodCallback, nullptr});
     tickFor(kVirtEndMs);
     printf("VIRT fire_loop max playbacks %d: %d of %d started at the fill distance; far post %s; near post %s, %d "
            "stolen end(s)\n", lim.maxPlaybacks, got, (int)ids.size(), farId ? "STARTED (wrong)" : "failed",
            nearId ? "started" : "FAILED (wrong)", state.fmodEnds);
-    for (uint32_t id : ids) audio::g.act(id, kAkStop);
-    if (nearId) audio::g.act(nearId, kAkStop);
-    if (farId) audio::g.act(farId, kAkStop);
+    for (uint32_t id : ids) ea::host::act(id, kAkStop);
+    if (nearId) ea::host::act(nearId, kAkStop);
+    if (farId) ea::host::act(farId, kAkStop);
     tickFor(kVirtEndMs);
 }
 
 // A 'virtual' event at its playback limit, through the hooks as the engine sets them.
 void virtualEvent()
 {
-    auto fire = audio::g.byId.find(audio::fnv1(kLoop));
-    if (fire == audio::g.byId.end() || !(fire->second.flags & kVirtualFlag)) return;
+    auto fire = g_host.byId.find(hash::fnv1Lower(kLoop));
+    if (fire == g_host.byId.end() || !(fire->second.flags & kVirtualFlag)) return;
     const Limit lim = virtualLimit(fire->second.sysId);
     float dFill = lim.dmin + kFillAt * (lim.dmax - lim.dmin), dFar = lim.dmin + kFarAt * (lim.dmax - lim.dmin);
     float dNear = lim.dmin * kNearAt;
@@ -255,7 +257,7 @@ void virtualEvent()
     listenerAtOrigin();
     for (int i = 0; i < kVirtSources; ++i) {
         const float p[6] = {0, 0, -(i < kVirtFill ? dFill : i == kVirtFill ? dFar : dNear), 0, 0, 1};   // Wwise z = -z
-        audio::hkSetPos(kVirtFirst + i, p);
+        ea::wwise::hkSetPos(kVirtFirst + i, p);
     }
     virtualPosts(fire->first, fire->second.sysId, lim);
 }
@@ -290,24 +292,25 @@ int transcodeDialog(const fs::path& path, const std::string& outDir, const char*
 {
     std::string file = path.filename().string();
     std::vector<uint8_t> in, out;
-    audio::slurp(path.string(), in);
+    core::readFile(path.string(), in);
     const uint32_t ver = in.size() >= sizeof(uint32_t) ? bytes::u32At(in.data()) : 0;
     if (ver != kDlgVersion10) {
         printf("DLG %s skipped (v%u)\n", file.c_str(), ver);
         return 0;
     }
-    audio::DlgStats st;
+    di1::dlg::DlgStats st;
     std::string err;
-    bool ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err, nullptr, nullptr, &audio::vo.lineEvents);
+    const di1::dlg::ScriptRequest req{in, g_vo.scripts.evNames, nullptr, nullptr, &g_vo.scripts.lineEvents};
+    bool ok = di1::dlg::dlgTranscode(req, out, &st, &err);
     int bad = !ok;
     printf("DLG %s %s classes %d lines %d dup %d ranges %d named %d events %d unresolved %d %s\n", file.c_str(),
            ok ? "ok" : "FAIL", st.classes, st.lines, st.dupLines, st.ranges, st.named, st.events, st.unresolved,
            err.c_str());
     if (ok) writeFile(outDir + "\\" + path.stem().string() + ".dlg30", out);
     std::vector<uint8_t> b30;
-    const std::string stem = audio::lower(path.stem().string());
-    if (!dir30 || !audio::slurp(std::string(dir30) + kDialog30Prefix + stem + ".dlg", b30)) return bad;
-    ok = audio::dlgTranscode(in, audio::vo.evNames, out, &st, &err, &b30);
+    const std::string stem = text::lower(path.stem().string());
+    if (!dir30 || !core::readFile(std::string(dir30) + kDialog30Prefix + stem + ".dlg", b30)) return bad;
+    ok = di1::dlg::dlgTranscode({in, g_vo.scripts.evNames, &b30}, out, &st, &err);
     bad += !ok;
     printf("DLG %s +3.0 %s classes %d named %d events %d kept30 %d lines30 %d %s\n", file.c_str(), ok ? "ok" : "FAIL",
            st.classes, st.named, st.events, st.kept30, st.lines30, err.c_str());
@@ -321,13 +324,13 @@ int checkLineEvents()
     int bad = 0;
     for (const LineEvent& x : kLineEvents) {
         const uint32_t pfx = (uint32_t)(uint8_t)x.prefix[0] | (uint32_t)(uint8_t)x.prefix[1] << 8;
-        auto le = audio::vo.lineEvents.find(audio::dlgLineKey(pfx, (uint16_t)x.number));
-        bool ok = le != audio::vo.lineEvents.end() && le->second == x.event;
+        auto le = g_vo.scripts.lineEvents.find(ea::dlgscript::dlgLineKey(pfx, (uint16_t)x.number));
+        bool ok = le != g_vo.scripts.lineEvents.end() && le->second == x.event;
         bad += !ok;
         printf("LINEEVENT %s%03d -> %s (%s)\n", x.prefix, x.number,
-               le != audio::vo.lineEvents.end() ? le->second.c_str() : "-", ok ? "ok" : "BAD");
+               le != g_vo.scripts.lineEvents.end() ? le->second.c_str() : "-", ok ? "ok" : "BAD");
     }
-    printf("LINEEVENTS %zu lines\n", audio::vo.lineEvents.size());
+    printf("LINEEVENTS %zu lines\n", g_vo.scripts.lineEvents.size());
     return bad;
 }
 
@@ -339,7 +342,7 @@ const uint32_t* mediaOf(const uint8_t* d, uint32_t m)
 }
 
 // Every variant of line l (its entry at le) down to its media record; the failures.
-int checkBankLine(const std::string& file, const uint8_t* d, uint32_t l, const uint8_t* le, audio::DlgBank* b)
+int checkBankLine(const std::string& file, const uint8_t* d, uint32_t l, const uint8_t* le, ea::dialogue::DlgBank* b)
 {
     int bad = 0;
     for (int v = 0; v < (le[1] > 1 ? le[1] : 1); ++v) {   // FUN_0182bf80's random pick, enumerated
@@ -347,7 +350,7 @@ int checkBankLine(const std::string& file, const uint8_t* d, uint32_t l, const u
         bool inMem = bytes::u32At(d + kDataSizeAt) > me[1] && me[2] == kInMemory;
         const uint32_t* rec = (const uint32_t*)(d + me[1]);
         bool ok = inMem && me[0];
-        if (ok) ok = (audio::DlgBank*)(uintptr_t)rec[0] == b && rec[1] < b->idx().subs();
+        if (ok) ok = (ea::dialogue::DlgBank*)(uintptr_t)rec[0] == b && rec[1] < b->idx().subs();
         bad += !ok;
         printf("NAME %s %c%c%03u %d %s %u %s\n", file.c_str(), d[kPrefixAt], d[kPrefixAt + 1], l, v,
                me[0] ? (const char*)d + me[0] : "-", rec[1], ok ? "ok" : "BAD");
@@ -359,16 +362,16 @@ int checkBankLine(const std::string& file, const uint8_t* d, uint32_t l, const u
 int checkBanks()
 {
     int bad = 0;
-    for (auto& e : fs::directory_iterator(audio::vo.dir10)) {
+    for (auto& e : fs::directory_iterator(g_vo.reg.dir)) {
         if (e.path().extension() != ".fsb") continue;
         std::string file = e.path().filename().string();
-        audio::DlgBank* b = audio::vo.open(file);
+        ea::dialogue::DlgBank* b = ea::dialogue::open(file);
         if (!b) {
             printf("BANK %s FAIL\n", file.c_str());
             ++bad;
             continue;
         }
-        std::vector<uint8_t> h = audio::dbnkFromName10(b->idx().prefix(), {b});
+        std::vector<uint8_t> h = dbnk::fromNames(b->idx().prefix(), {{b->idx(), (uint32_t)(uintptr_t)b}});
         const uint8_t* d = h.data();
         int lines = 0;
         const uint16_t lo = bytes::u16At(d + kFirstLineAt), hi = bytes::u16At(d + kLastLineAt);
@@ -380,24 +383,24 @@ int checkBanks()
         }
         printf("BANK %s ok prefix %c%c lines %d subsounds %u header %u B\n", file.c_str(), d[kPrefixAt],
                d[kPrefixAt + 1], lines, b->idx().subs(), (unsigned)h.size());
-        audio::vo.unload(file);
+        ea::dialogue::unload(file);
     }
     return bad;
 }
 
 // Edna's ED019: its bank and subsound, found the way the post hook finds them.
 struct VoLine {
-    audio::DlgBank* bank = nullptr;
+    ea::dialogue::DlgBank* bank = nullptr;
     int sub = -1;
     bool found = false;
 };
 VoLine ednaLine()
 {
-    const uint8_t* d = audio::vo.speakers[audio::vo.banks[kEdnaBankKey]->idx().prefix()].hdrs.back()->data();
+    const uint8_t* d = g_vo.reg.speakers[ea::dialogue::bank(kEdnaBankKey)->idx().prefix()].hdrs.back()->data();
     const uint8_t* le = d + kLinesAt + (kEdnaLine - (int)bytes::u16At(d + kFirstLineAt)) * (int)kLineBytes;
     const uint32_t* me = mediaOf(d, bytes::u16At(le + 2));
     VoLine v;
-    v.found = audio::vo.media(d + me[1], &v.bank, &v.sub);
+    v.found = ea::dialogue::media(d + me[1], &v.bank, &v.sub);
     return v;
 }
 
@@ -408,11 +411,11 @@ std::vector<std::pair<DWORD, int>> positionSamples(uint32_t id, DWORD t0)
     DWORD lastSample = 0;
     for (int t = 0; t < kPlayMs && !state.voEnds; t += kTickMs) {
         Sleep(kTickMs);
-        audio::tickAndDeliver();
+        ea::wwise::tick();
         int pos = -1;
         DWORD now = GetTickCount() - t0;
         const bool due = !state.voEnds && now >= lastSample + kSampleMs;
-        if (due && audio::hkSrcPos(id, &pos, 1) == 1) {
+        if (due && ea::wwise::hkSrcPos(id, &pos, 1) == 1) {
             posAt.emplace_back(now, pos);
             lastSample = now;
         }
@@ -438,17 +441,16 @@ int checkPositions(const std::vector<std::pair<DWORD, int>>& posAt)
 int checkOverlap(const VoLine& v)
 {
     int endsBefore = state.voEnds;
-    uint32_t a = audio::g.playLine(audio::fnv1(kEdnaEvent), kTestObject, kAkEndOfEvent, (void*)onVoCallback, nullptr,
-                                   v.bank->snd, v.sub);
+    const ea::host::Post post{hash::fnv1Lower(kEdnaEvent), kTestObject, kAkEndOfEvent, (void*)onVoCallback, nullptr};
+    uint32_t a = ea::host::playLine(post, v.bank->snd, v.sub);
     tickFor(kOverlapMs);
-    uint32_t c = audio::g.playLine(audio::fnv1(kEdnaEvent), kTestObject, kAkEndOfEvent, (void*)onVoCallback, nullptr,
-                                   v.bank->snd, v.sub + 1);
-    audio::g.act(a, kAkStop);
+    uint32_t c = ea::host::playLine(post, v.bank->snd, v.sub + 1);
+    ea::host::act(a, kAkStop);
     tickFor(kOverlapMs);
     bool cAlive;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        cAlive = audio::g.plays.count(c) && audio::g.plays[c].ev;
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        cAlive = g_host.plays.count(c) && g_host.plays[c].ev;
     }
     printf("PLAY overlap: old id %u ended %d time(s), new"   // split: rulecheck's N19 matches the word 'new'
            " id %u %s\n", a, state.voEnds - endsBefore, c, cAlive ? "still playing" : "ENDED");
@@ -460,14 +462,13 @@ int checkEdnaLine(const VoLine& v)
 {
     DWORD t0 = GetTickCount();
     const uint32_t flags = kAkEndOfEvent | kAkMarker | kAkDuration;
-    uint32_t id = v.found ? audio::g.playLine(audio::fnv1(kEdnaEvent), kTestObject, flags, (void*)onVoCallback,
-                                              nullptr, v.bank->snd, v.sub)
-                          : 0;
+    const ea::host::Post post{hash::fnv1Lower(kEdnaEvent), kTestObject, flags, (void*)onVoCallback, nullptr};
+    uint32_t id = v.found ? ea::host::playLine(post, v.bank->snd, v.sub) : 0;
     int bad = checkPositions(positionSamples(id, t0));
     unsigned ms = 0;
     void* s = nullptr;
     const bool sound = v.bank && v.bank->snd;
-    if (sound && !audio::g.f.Sound_GetSubSound(v.bank->snd, v.sub, &s) && s) audio::g.f.Sound_GetLength(s, &ms, 1);
+    if (sound && !g_sys.f.Sound_GetSubSound(v.bank->snd, v.sub, &s) && s) g_sys.f.Sound_GetLength(s, &ms, 1);
     printf("PLAY ED019 media %s sub %d (%s) id %u: duration cb %.0f ms (subsound %u ms), end cb %d after %lu ms\n",
            v.found ? "ours" : "NOT FOUND", v.sub, v.found ? v.bank->idx().subName(v.sub) : "-", id, state.voDuration,
            ms, state.voEnds, (unsigned long)(state.voEndAt - t0));
@@ -480,7 +481,7 @@ int checkEdnaLine(const VoLine& v)
 int checkAnno(const VoLine& v)
 {
     std::string zr, mem, ap = std::string(kEdnaAnnoDir) + (v.found ? v.bank->idx().subName(v.sub) : "") + ".anno";
-    bool anno = audio::annoSource(ap.c_str(), zr, mem);
+    bool anno = di1::audio::annoSource(ap.c_str(), zr, mem);
     printf("ANNO %s -> %s : %s\n", ap.c_str(), anno ? zr.c_str() : "-", anno ? mem.c_str() : "-");
     return !anno || zr != kEdnaZip;
 }
@@ -497,14 +498,15 @@ bool __cdecl standInHook(const char*, const std::vector<core::HookSpec>& feature
 }
 uintptr_t standInAddress(uint32_t) { return (uintptr_t)state.hostMemory; }
 
-// audio::install's config at its defaults, with the stand-ins for hooks and engine addresses.
-audio::Cfg standInCfg(const char* install10)
+// di1::audio::install's config at its defaults, with the stand-ins for hooks and engine addresses.
+di1::audio::Cfg standInCfg(const char* install10)
 {
-    audio::Cfg cfg;
+    di1::audio::Cfg cfg;
     cfg.install10 = install10;
     cfg.game30 = ".";
     cfg.installFeature = standInHook;
     cfg.rt = standInAddress;
+    cfg.log = stdoutLog;
     return cfg;
 }
 
@@ -512,16 +514,17 @@ audio::Cfg standInCfg(const char* install10)
 
 int testFmod(const Args& a)
 {
-    audio::logfn = stdoutLog;
+    ea::setLog(stdoutLog);
     Dropped dropped;
-    audio::g.dropped = &dropped;
+    ea::wwise::Config ac = offlineAudio(a.argv[2]);
+    ac.hostCfg.dropped = &dropped;
     if (env("FMOD_CAPS")) return probeFmodCaps(a.argv[2]);
-    if (const char* sm = env("FMOD_SPEAKERS")) audio::g.testSpeakerMode = atoi(sm);
-    if (!audio::g.init(a.argv[2], true)) return 1;
+    if (const char* sm = env("FMOD_SPEAKERS")) ac.systemCfg.testSpeakerMode = atoi(sm);
+    if (!offlineHost(ac)) return 1;
     loadFevs(a);
     ProjectNames projName;
-    for (auto& p : audio::g.projects) projName[p.second.p] = p.first;
-    for (auto& e : audio::g.byId)
+    for (auto& p : g_host.projects) projName[p.second.p] = p.first;
+    for (auto& e : g_host.byId)
         printf("EV\t%s\t%s\t%u\n", projName[e.second.proj].c_str(), e.second.name.c_str(), e.second.flags);
     const auto tally = resolveNames(a.argv[3], projName, dropped);
     printCues();
@@ -537,19 +540,18 @@ int testFmod(const Args& a)
 
 int testVo(const Args& a)
 {
-    audio::logfn = stdoutLog;
+    ea::setLog(stdoutLog);
     std::string inst = a.argv[2], outDir = a.argv[3];
-    if (!audio::g.init(inst, true)) return 1;
-    audio::vo.root10 = inst + kDialog10;
-    audio::vo.pickLanguage();   // no engine: ENU
-    audio::vo.buildEvNames(audio::g.sound10);
+    if (!offlineHost(offlineAudio(inst))) return 1;
+    ea::dialogue::pickLanguage();   // no engine: ENU
+    ea::dialogue::buildEvNames();
     int bad = 0;
     for (auto& e : fs::directory_iterator(inst + kDialog10))
         if (e.path().extension() == ".dlg") bad += transcodeDialog(e.path(), outDir, a.argv[4]);
     bad += checkLineEvents();
     bad += checkBanks();
-    audio::g.load(kEdnaFev);
-    if (!audio::vo.load(kEdnaBank)) {   // vo.mgr null: no registry step
+    ea::host::load(kEdnaFev);
+    if (!ea::dialogue::load(kEdnaBank)) {   // vo.mgr null: no registry step
         printf("PLAY no Edna_str.fsb\n");
         return 1;
     }
@@ -560,10 +562,10 @@ int testVo(const Args& a)
     return bad != 0;
 }
 
-// audio::install under the loader lock, as in Pentane_Main: it returns at once; the host starts after the release.
+// di1::audio::install under the loader lock, as in Pentane_Main: it returns at once; the host starts after the release.
 int testHost(const Args& a)
 {
-    audio::logfn = stdoutLog;
+    ea::setLog(stdoutLog);
     typedef LONG(NTAPI * LockFn)(ULONG, ULONG*, ULONG_PTR*);
     typedef LONG(NTAPI * UnlockFn)(ULONG, ULONG_PTR);
     HMODULE nt = GetModuleHandleA("ntdll.dll");
@@ -573,26 +575,26 @@ int testHost(const Args& a)
         printf("HOST no LdrLockLoaderLock\n");
         return 1;
     }
-    audio::hostStart.nosound = true;
     ULONG lockState = 0;
     ULONG_PTR cookie = 0;
     if (lock(0, &lockState, &cookie) < 0) {
         printf("HOST lock failed\n");
         return 1;
     }
-    const audio::Cfg cfg = standInCfg(a.argv[2]);
+    ea::wwise::Config ac = di1::audio::config(standInCfg(a.argv[2]));
+    ac.systemCfg.nosound = true;
     DWORD t0 = GetTickCount();
-    bool ok = audio::install(cfg);
+    bool ok = ea::wwise::install(ac);
     DWORD tInstall = GetTickCount() - t0;
-    DWORD w = WaitForSingleObject(audio::hostStart.done, kHostWaitMs);
+    DWORD w = WaitForSingleObject(g_sys.done, kHostWaitMs);
     unlock(0, cookie);
-    bool up = audio::ready();
+    bool up = ea::system::ready();
     DWORD tUp = GetTickCount() - t0;
     bool init = false, mixer = false;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        init = audio::g.projects.count("initialize.fev") != 0;
-        mixer = audio::g.mixer.count("sfx") && fabs(audio::g.mixer["sfx"] - kMixerSfx10) < kMixerTolerance;
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        init = g_host.projects.count("initialize.fev") != 0;
+        mixer = g_host.mixer.count("sfx") && fabs(g_host.mixer["sfx"] - kMixerSfx10) < kMixerTolerance;
     }
     printf("HOST install under the loader lock: %s in %lu ms, %d hooks; host init while locked: %s; ready %d after %lu "
            "ms; Initialize.fev %s; mixer sfx %s\n", ok ? "returned" : "FAILED", (unsigned long)tInstall,
