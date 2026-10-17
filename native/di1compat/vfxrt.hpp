@@ -80,7 +80,7 @@ static void trace(const char* what, uint32_t key, const char* name, const float*
 inline uint32_t nameHash(char* n)
 {
     for (char* p = n; *p; ++p) *p = (char)tolower((unsigned char)*p);
-    return vfx::h131(n, strlen(n));
+    return hash::h131Signed(n, strlen(n));
 }
 
 // FUN_0065e3a0(hash, placement, info, 0): every effect (FUN_0065e5a0 / FUN_0065e6d0, the name hashed by FUN_0040bb80)
@@ -121,6 +121,30 @@ static void* __cdecl hkAttached(const char* name, uint8_t* xf, uint8_t* xf2, voi
     }
     trace("attached", nameHash(n), n, xf ? (const float*)(xf + 0x34) : nullptr, retVa(_ReturnAddress()), note);
     return g_attached(name, xf, xf2, a4, a5, a6);
+}
+
+// The vfx runtime's hooks (H1); the universal10 alias is in the overlay before the package hook can ask for it.
+inline bool install(const di1::Config& c)
+{
+    bool ok = true;
+    if (c.vfx10 && c.vfxUniversal10) {
+        std::unique_lock<std::mutex> lock(g_sessLock);   // AssetOpen is live already
+        for (const char* e : {".particledata", ".mtb"})   // the alias hkPkg loads -> 1.0 particles/universal.zip
+            g_over10.emplace(std::string("particles/universal10") + e,
+                             std::string("particles/universal/universal") + e);
+        lock.unlock();
+        ok &= hook("particle package load (vfx)", 0x00672620, "6AFF68????????64A100000000", (void*)&hkPkg,
+                   (void**)&g_pkg);
+    }
+    if (c.vfxTrace)
+        ok &= installFeature("vfx_trace", {
+            {"effect create (vfx trace)", 0x0065E3A0, "8B54240C8B4A18", (void*)&hkEffect, (void**)&g_effect},
+            {"emitter create (vfx trace)", 0x0066A1C0, "6AFF68????????64A100000000", (void*)&hkEmitter,
+             (void**)&g_emitter},
+            {"slaved emitter create (vfx trace)", 0x0066E7F0, "6AFF68????????64A100000000", (void*)&hkAttached,
+             (void**)&g_attached},
+        });
+    return ok;
 }
 
 }  // namespace vfxrt

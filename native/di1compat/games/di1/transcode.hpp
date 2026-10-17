@@ -12,7 +12,7 @@
 #include <vector>
 #include "../../base/text.hpp"
 #include "../../convert/dispatch.hpp"
-#include "../../chan.hpp"
+#include "chan.hpp"
 #include "cho.hpp"
 #include "../../convert/datamap.hpp"
 #include "../../gameplay.hpp"
@@ -23,11 +23,11 @@
 #include "mer.hpp"
 #include "mission.hpp"
 #include "../../npc.hpp"
-#include "../../render.hpp"
+#include "rendermtb.hpp"
 #include "../../sx.hpp"
 #include "../../sys.hpp"
 #include "../../ui.hpp"
-#include "../../vfx.hpp"
+#include "vfx.hpp"
 #include "bent.hpp"
 #include "btd.hpp"
 #include "octsteps.hpp"
@@ -61,7 +61,7 @@ struct TranscodeIO {
     Read read30;     // a 3.0 asset through the engine's own open (psdna30)
     OctSteps oct;    // the .oct steps
     const mer::Table* mer = nullptr;          // the Meridian table; null: .mer and .mtc are served raw
-    const render::Table* render = nullptr;    // the render table; null: "render table missing"
+    const rentable::Table* render = nullptr;  // the render table; null: "render table missing"
     std::function<const std::unordered_set<uint32_t>&(const std::string& lang)> lang30;   // text10: 3.0's key hashes
     std::function<void(const std::string& path, const std::string& bytes)> keep;   // the engine reopens bundles
     std::function<void(const std::string& path, const std::string& problem)> renderProblem;   // logged per problem
@@ -103,7 +103,7 @@ struct ParticleBundle {
 };
 
 // vfxchan10: a particle package's material shaders, from its .mtb (mp) through the .mtb rule's bundle transcode.
-inline ParticleBundle particleBundle(const render::Table& T, const render::IO& io, const std::string& mp,
+inline ParticleBundle particleBundle(const rentable::Table& T, const render::IO& io, const std::string& mp,
                                      const std::string& mtb10, std::string& note)
 {
     ParticleBundle b;
@@ -538,7 +538,7 @@ inline Verdict particles(Request& r)
     if (!shaders.empty())
         cm = [&shaders, &io](uint16_t mat, int n10, std::vector<int>& chans) {
             if (mat >= shaders.size()) return false;
-            return chan::layout(io.read10, io.read30x, shaders[mat].first, shaders[mat].second, n10, chans);
+            return chan::layout({io.read10, io.read30x}, shaders[mat], n10, chans);
         };
     if (!vfx::transcode(std::string((const char*)r.data, r.n), r.out, &st, &cm)) return kRaw;
     r.note += "+particles(" + std::to_string(st.emitters) + " emitters, " + std::to_string(st.effects) + " effects, " +

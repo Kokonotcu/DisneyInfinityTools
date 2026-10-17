@@ -23,10 +23,16 @@ constexpr uint8_t kModRmReg = 0x38;        // the ModRM byte's reg field
 constexpr uint8_t kRegCall = 0x10;         // reg field 2: FF's call
 constexpr size_t kStackWalkWords = 2048;   // stackOf reads at most 8 KiB of stack
 constexpr uint32_t kUtf16Pair = 0xff00ff00u;   // these bits are zero in two UTF-16 characters of a path buffer
+}  // namespace detail
+
+// Whether op starts an E8 rel32 call.
+inline bool callRel32(const uint8_t* op) { return op[0] == detail::kCallRel32; }
 
 // Whether op starts an FF /2 call.
-inline bool callRm(const uint8_t* op) { return op[0] == kCallRm && (op[1] & kModRmReg) == kRegCall; }
-}  // namespace detail
+inline bool callRm(const uint8_t* op)
+{
+    return op[0] == detail::kCallRm && (op[1] & detail::kModRmReg) == detail::kRegCall;
+}
 
 // Whether a runtime address lies in the span read as the exe image.
 inline bool inExeImage(uintptr_t v) { return v >= g_base && v < g_base + eng::kExeImageSpan; }
@@ -38,9 +44,9 @@ inline bool afterCall(uintptr_t ret)
     if (!inside) return false;
     const uint8_t* p = (const uint8_t*)ret;
     if (!vqReadable(p - kLongestCall, kLongestCall)) return false;
-    if (p[-5] == detail::kCallRel32) return inExeImage(ret + *(const int32_t*)(p - 4));
+    if (callRel32(p - 5)) return inExeImage(ret + *(const int32_t*)(p - 4));
     // call [mem32] / [reg+disp32], call [reg+disp8], call reg / [reg]
-    return detail::callRm(p - 6) || detail::callRm(p - 3) || detail::callRm(p - 2);
+    return callRm(p - 6) || callRm(p - 3) || callRm(p - 2);
 }
 
 // Appends the exe return addresses found on a stack (static VAs, call-site validated) to line.
