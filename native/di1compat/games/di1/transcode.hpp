@@ -1,6 +1,4 @@
-// The 1.0 transcode dispatch: which served 1.0 files are rewritten into the form 3.0 reads, by which codec, in which
-// order (CLAUDE.md M8). The plugin's readers, tables and session come in through TranscodeIO (M2). No engine, log or
-// config. Runs on the threads that open files.
+// The 1.0 transcode dispatch: which served files a codec rewrites, in which order (M8). No engine, log or config.
 #pragma once
 #include <cctype>
 #include <cstdint>
@@ -36,7 +34,7 @@
 
 namespace di1 {
 
-// The cfg keys the dispatch reads (S4). The keys of the steps in TranscodeIO are in their function objects.
+// The cfg keys the dispatch reads (S4); the keys of TranscodeIO's steps decide whether their function objects are set.
 struct TranscodeOptions {
     bool challenge = false;   // challenge10
     bool behaviour = false;   // behav10
@@ -70,15 +68,80 @@ struct TranscodeIO {
     std::function<void(const std::string& entry)> dataMapEntry;   // each DataMap entry before it is normalised
 };
 
+// currency10: the engine path of a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path); "" for none.
+inline std::string dnaPath(const std::string& dnaFile)
+{
+    std::string p = dnaFile;
+    for (char& c : p) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
+    if (p.empty() || p == "none") return "";
+    if (p.find('/') == std::string::npos) p = "expendables_data/dna/" + p;
+    if (!text::endsWith(p.c_str(), ".dnax")) p += ".dnax";
+    return p;
+}
+
+// currency10: does a 1.0 DNA chunk set DNA.AgentGadgets.FastCoin.IsSpark? One that does not evaluate does not.
+inline bool paysSparks(const std::string& dnaChunk)
+{
+    try {
+        auto G = luachunk::eval(dnaChunk);
+        const luachunk::Value* d = G.count("DNA") ? &G["DNA"] : nullptr;
+        const luachunk::Value* ag = d ? d->get("AgentGadgets") : nullptr;
+        const luachunk::Value* fc = ag ? ag->get("FastCoin") : nullptr;
+        const luachunk::Value* is = fc ? fc->get("IsSpark") : nullptr;
+        return is && is->t == luachunk::Value::BOOL && is->b;
+    } catch (std::exception&) {
+        return false;
+    }
+}
+
+struct ParticleBundle {
+    bool ok = false;
+    Shaders shaders;    // per material: (1.0 shader, served shader)
+    std::string mtb;    // the served bundle, for the engine's .mtb request right after
+};
+
+// vfxchan10: a particle package's material shaders, from its .mtb (mp) through the .mtb rule's bundle transcode.
+inline ParticleBundle particleBundle(const render::Table& T, const render::IO& io, const std::string& mp,
+                                     const std::string& mtb10, std::string& note)
+{
+    ParticleBundle b;
+    if (mtb10.size() < 4 || memcmp(mtb10.data(), "BNDL", 4)) return b;
+    render::Result r;
+    if (!render::transcodeBundle(T, io, mtb10, "3:" + mp.substr(0, mp.find('/') + 1), r)) {
+        note += "channels: " + mp + " did not transcode ";
+        return b;
+    }
+    note += "(" + mp + ": real " + std::to_string(r.tiers["real"]) + " same-sh " + std::to_string(r.tiers["same-sh"]) +
+            " generic " + std::to_string(r.tiers["generic"]) + ", served from the session) ";
+    b.ok = true;
+    b.shaders = std::move(r.shaders);
+    b.mtb = std::move(r.mtb);
+    return b;
+}
+
+// A served 1.0 file: its engine path as opened and its bytes.
+struct File {
+    const char* path;
+    const void* data;
+    size_t n;
+};
+
+// Where the dispatch writes: served bytes, log note, a .mer's .mtc (asked next: 48 of 48 in a load).
+struct Output {
+    std::string& out;
+    std::string& note;
+    std::string* mtc;
+};
+
 // One served 1.0 file on its way through the rules.
 struct Request {
     const char* path;      // the engine path as opened
     std::string np;        // norm(path)
     const void* data;      // the 1.0 bytes
     size_t n;
-    std::string& out;      // the bytes served instead, when a rule answers with a codec
-    std::string& note;     // the open's log note
-    std::string* mtc;      // .mer: also the .mtc built from the same graph, when not null
+    std::string& out;
+    std::string& note;
+    std::string* mtc;
     std::string actLua;    // a mission table activityTasks30 changed: the mission rule goes on from it
     const TranscodeOptions& o;
     const TranscodeIO& io;
@@ -87,12 +150,25 @@ struct Request {
 using Verdict = dispatch::Answer<const char*>;
 inline constexpr Verdict kRaw{nullptr};   // serve the 1.0 bytes unchanged; no later rule runs
 
+// Notes why a file is served raw, and serves it raw.
+inline Verdict raw(Request& r, const std::string& why)
+{
+    r.note += why;
+    return kRaw;
+}
+
 namespace detail {
 
 inline bool startsLua(const Request& r) { return r.n >= 4 && !memcmp(r.data, "\x1bLua", 4); }
 inline bool startsTuple(const Request& r) { return r.n >= 4 && oct::u((const uint8_t*)r.data, 4) == oct::MAGIC; }
 inline bool luaSource(const Request& r) { return r.n && ((const char*)r.data)[0] != 0x1b; }
 inline bool ends(const Request& r, const char* suffix) { return text::endsWith(r.path, suffix); }
+
+// np without a suffix the path is known to end with
+inline std::string dropSuffix(const Request& r, const char* suffix)
+{
+    return r.np.substr(0, r.np.size() - strlen(suffix));
+}
 
 // A mission table (Mission_Data/<playset>/<line>/<name>.lua), not its line's __missiongraph.lua
 inline bool missionLua(const Request& r)
@@ -120,7 +196,7 @@ inline int apGivers(const Request& r, std::string& t)
 {
     std::string graph, dir = r.np.substr(0, r.np.rfind('/') + 1);
     std::set<std::string> ok;
-    if (r.io.read10(r.np.substr(0, r.np.size() - 3) + ".lua", graph))
+    if (r.io.read10(dropSuffix(r, ".ap") + ".lua", graph))
         ok = gameplay::activityGivers(graph, [&](const std::string& name, std::string& o) {
             std::string m = dir + name + ".lua";
             for (char& c : m) c = (char)tolower((unsigned char)c);
@@ -129,42 +205,63 @@ inline int apGivers(const Request& r, std::string& t)
     return gameplay::apGivers30(t, &ok);
 }
 
+// giver DNA: the converted chunk replaces t; a chunk that does not convert gives 0
+inline int gadgets(std::string& t)
+{
+    std::string o;
+    int k = 0;
+    try {
+        k = gameplay::dnaGadgets30(t, o);
+    } catch (std::exception&) {
+        k = 0;
+    }
+    if (k) t.swap(o);
+    return k;
+}
+
 inline bool challengeMatches(const Request& r) { return r.o.challenge && r.n && challengeKind(r) != Challenge::None; }
 
-// gp: 1.0 activities into 3.0's Challenge system: type data, mission tasks, giver sections, giver DNA. A changed
-// mission table goes on to the mission rule (disjoint keys); nothing changed passes the file on.
+// gp: 1.0 activities into 3.0's Challenge system. A changed mission table goes on to the mission rule.
 inline Verdict challenge(Request& r)
 {
     std::string t((const char*)r.data, r.n);
     int k = 0;
     const char* codec = nullptr;
     switch (challengeKind(r)) {
-    case Challenge::Types: k = gameplay::challengeTypes30(t); codec = "challengetypes"; break;
-    case Challenge::Tasks: k = gameplay::activityTasks30(t); codec = "activitytasks"; break;
-    case Challenge::Givers: k = apGivers(r, t); codec = "apgivers"; break;
-    case Challenge::Gadgets: {
-        std::string o;
-        try { k = gameplay::dnaGadgets30(t, o); } catch (std::exception&) { k = 0; }
-        if (k) t.swap(o);
+    case Challenge::Types:
+        k = gameplay::challengeTypes30(t);
+        codec = "challengetypes";
+        break;
+    case Challenge::Tasks:
+        k = gameplay::activityTasks30(t);
+        codec = "activitytasks";
+        break;
+    case Challenge::Givers:
+        k = apGivers(r, t);
+        codec = "apgivers";
+        break;
+    case Challenge::Gadgets:
+        k = gadgets(t);
         codec = "dnagadgets";
         break;
-    }
     case Challenge::None: break;
     }
     if (!k) return dispatch::kNext;
     r.note += std::string("+") + codec + "(" + std::to_string(k) + ") ";
-    if (missionLua(r)) { r.actLua.swap(t); return dispatch::kNext; }
+    if (missionLua(r)) {
+        r.actLua.swap(t);
+        return dispatch::kNext;
+    }
     r.out.swap(t);
     return codec;
 }
 
-// A 1.0 mission line's Unlocks database: 1.0 started a line's opening mission by itself, even with its giver far
-// away (IN_City_DockFire: IN_Edna spawns ~550 m from the start). 3.0 waits for a named giver unless the record has
-// ForceActivateFirstTime = true (as 3.0's own openers MBA_Side_Tutorial_Quest_01, PSX_L1_Main04). Adds it to story
-// records with empty Unlocks. Exact whitespace, as 1.0 writes it (A-25). Returns the records changed.
+// A mission line's story records with empty Unlocks get ForceActivateFirstTime = true. Returns the records changed.
 inline int missionGraph30(std::string& t)
 {
+    // exact whitespace, as 1.0 writes it (A-25)
     static const std::string emptyUnlocks = "\t\t\tUnlocks = \n\t\t\t{\n\t\t\t},\n\t\t\tline = \"";
+    // as 3.0's own openers MBA_Side_Tutorial_Quest_01 and PSX_L1_Main04 have it
     static const std::string add = "\t\t\t\tForceActivateFirstTime = true,\n";
     int n = 0;
     for (size_t pos = t.find(emptyUnlocks); pos != std::string::npos; pos = t.find(emptyUnlocks, pos + 1)) {
@@ -173,6 +270,7 @@ inline int missionGraph30(std::string& t)
         std::string line = t.substr(q, e - q);
         for (char& c : line) c = (char)tolower((unsigned char)c);
         size_t start = t.rfind("\n\t\t{\n", pos);
+        // 1.0 opened story lines itself (IN_City_DockFire's giver spawns ~550 m away); 3.0 waits for a named giver
         if (start == std::string::npos || line.find("story") == std::string::npos) continue;
         std::string rec = t.substr(start, pos - start);
         size_t ar = rec.find("\t\t\t\tAvatarReady = ");
@@ -203,24 +301,26 @@ inline Verdict missionGraph(Request& r)
 inline bool missionMatches(const Request& r)
 {
     const bool wanted = r.o.events || r.o.progress || !r.actLua.empty();
+    const bool lua = ends(r, ".lua") && luaSource(r);
     const bool mission = r.np.rfind("mission_data/", 0) == 0 && !strstr(r.path, "__");
-    return wanted && ends(r, ".lua") && luaSource(r) && mission;
+    return wanted && lua && mission;
 }
 
-// A mission (Mission_Data/<playset>/<line>/<name>.lua): presentation events in the 3.0 enum, the 1.0
-// mission-generated objective line as 3.0's ProgressString "<default>", its eval lines as task lines (mission.hpp).
+// A mission table: presentation events in the 3.0 enum, objective and eval lines as ProgressString (mission.hpp).
 inline Verdict missionTable(Request& r)
 {
+    static constexpr char kMissionHead[] = "Mission =";
     std::string t = r.actLua.empty() ? std::string((const char*)r.data, r.n) : r.actLua;
-    bool m = t.compare(0, 9, "Mission =") == 0;
+    bool m = t.compare(0, sizeof(kMissionHead) - 1, kMissionHead) == 0;
     int k = r.o.events && m ? mission::luaEvents30(t) : 0, pr = r.o.progress && m ? mission::progress30(t) : 0;
     if (k) r.note += "+events(" + std::to_string(k) + " presentation events to the 3.0 enum) ";
     if (pr) r.note += "+progress(objective line <MissionName>_Desc) ";
     int tl = r.o.progress && m ? mission::taskLines30(t) : 0;
     if (tl) r.note += "+tasklines(" + std::to_string(tl) + " 1.0 eval lines as ProgressString) ";
-    if (!k && !pr && !tl && r.actLua.empty()) return kRaw;
+    const bool changed = k || pr || tl;
+    if (!changed && r.actLua.empty()) return kRaw;
     r.out.swap(t);
-    return k || pr || tl ? "mission" : "activitytasks";
+    return changed ? "mission" : "activitytasks";
 }
 
 inline bool tasksMatches(const Request& r) { return !r.actLua.empty(); }
@@ -248,16 +348,19 @@ inline Verdict octFile(Request& r)
     }
 }
 
-inline bool merMatches(const Request& r) { return (ends(r, ".mer") || ends(r, ".mtc")) && r.io.mer; }
+inline bool merMatches(const Request& r)
+{
+    const bool graph = ends(r, ".mer") || ends(r, ".mtc");
+    return graph && r.io.mer;
+}
 
-// A Meridian graph (.mer, mer.hpp) and its type manifest (.mtc, rebuilt from the transcoded graph: stand-ins change
-// the class counts). A .mer also gives the .mtc of the same graph, when asked.
+// A Meridian graph (.mer) and its type manifest (.mtc, rebuilt from the transcoded graph: stand-ins change counts).
 inline Verdict merGraph(Request& r)
 {
     bool isMtc = ends(r, ".mtc");
     std::string graph, why;
     if (isMtc) {
-        if (!r.io.read10(r.np.substr(0, r.np.size() - 4) + ".mer", graph)) return kRaw;
+        if (!r.io.read10(dropSuffix(r, ".mtc") + ".mer", graph)) return kRaw;
     } else graph.assign((const char*)r.data, r.n);
     if (graph.size() < 4 || oct::u((const uint8_t*)graph.data(), 4) != oct::MAGIC) return kRaw;
     oct::File f = oct::File::parse(graph.data(), graph.size());
@@ -266,11 +369,13 @@ inline Verdict merGraph(Request& r)
         r.note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) +
                   " participant links, " + std::to_string(actDrop) + " dropped) ";
     mer::Stats st;
-    if (!mer::transcode(*r.io.mer, f, &st, &why)) { r.note += "mer: " + why + " "; return kRaw; }
+    if (!mer::transcode(*r.io.mer, f, &st, &why)) return raw(r, "mer: " + why + " ");
+    // never cut: 136 characters and 11 numbers of at most 11
     char buf[300];
-    sprintf_s(buf, "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, "
-              "%d events, %d fetches, %d net-sync links, %d toggle types) ", st.namespaces, st.nodes, st.params,
-              st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches, st.netSync, st.typed);
+    snprintf(buf, sizeof(buf), "+mer(%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, "
+             "%d dropped, %d events, %d fetches, %d net-sync links, %d toggle types) ", st.namespaces, st.nodes,
+             st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches, st.netSync,
+             st.typed);
     r.note += buf;
     r.out = isMtc ? mer::mtc(f) : f.write();
     if (!isMtc && r.mtc) *r.mtc = mer::mtc(f);
@@ -279,25 +384,22 @@ inline Verdict merGraph(Request& r)
 
 inline bool dctMatches(const Request& r) { return ends(r, ".dct") && r.n >= 4 && !memcmp(r.data, "DICT", 4); }
 
-// A localisation table: keys re-hashed under 3.0's one seed (dct.hpp), names from the stringids table beside it;
-// text10 adds the 1.0 lang/main keys no 3.0 table has.
+// A localisation table: keys re-hashed under 3.0's seed, named by stringids beside it; text10 adds lang/main keys.
 inline Verdict dctTable(Request& r)
 {
+    static constexpr char kPcCon[] = "_pc_con.dct";
     const std::string& p = r.np;
     std::string ids;
     size_t us = p.rfind('_'), sl = p.rfind('/');
     if (us == std::string::npos || sl == std::string::npos || us < sl) return kRaw;
-    const bool pcCon = ends(r, "_pc_con.dct");
+    const bool pcCon = ends(r, kPcCon);
     std::string plat = pcCon ? "_win32.dct" : p.substr(us);   // its stand-in (hkOpen)
-    if (!r.io.read10(p.substr(0, sl + 1) + "stringids" + plat, ids)) {
-        r.note += "dct: no stringids beside it ";
-        return kRaw;
-    }
+    if (!r.io.read10(p.substr(0, sl + 1) + "stringids" + plat, ids)) return raw(r, "dct: no stringids beside it ");
     std::string t((const char*)r.data, r.n);
     int dropped = 0, kept = dct::reseed(t, ids, dct::SEED30, &dropped);
     if (kept < 0) return kRaw;
     r.note += "+dct(" + std::to_string(kept) + " keys re-hashed, " + std::to_string(dropped) + " unnamed dropped) ";
-    std::string m10, mids, lang = p.substr(sl + 1, (pcCon ? p.size() - 11 : us) - sl - 1);
+    std::string m10, mids, lang = p.substr(sl + 1, (pcCon ? p.size() - (sizeof(kPcCon) - 1) : us) - sl - 1);
     const bool main10 = r.o.text && r.io.read10("lang/main/" + lang + "_win32.dct", m10);
     if (main10 && r.io.read10("lang/main/stringids_win32.dct", mids)) {
         int k = dct::supplement(t, m10, mids, r.io.lang30(lang));
@@ -309,18 +411,18 @@ inline Verdict dctTable(Request& r)
 
 inline bool btdMatches(const Request& r) { return ends(r, ".btd") || ends(r, ".btm"); }
 
-// Collision (.btd blocks in the 3.0 layout, btd.hpp) and its block table (.btm, rebuilt from the converted sibling
-// .btd); raw 1.0 collision gave a world without ground (in-game 2026-10-13: the avatar fell, respawned).
+// Collision blocks in the 3.0 layout and the .btm rebuilt from them: raw 1.0 collision gave a world without ground.
 inline Verdict collision(Request& r)
 {
     bool isBtm = ends(r, ".btm");
     std::string src, conv;
     if (isBtm) {
-        if (!r.io.read10(r.np.substr(0, r.np.size() - 4) + ".btd", src)) return kRaw;
+        if (!r.io.read10(dropSuffix(r, ".btm") + ".btd", src)) return kRaw;
     } else src.assign((const char*)r.data, r.n);
-    if (!btd::convert(src, conv)) { r.note += "btd: not the 1.0 block layout "; return kRaw; }
+    if (!btd::convert(src, conv)) return raw(r, "btd: not the 1.0 block layout ");
+    // never cut: 14 characters and a number of at most 10
     char buf[64];
-    sprintf_s(buf, "+btd(%u blocks) ", (unsigned)btd::blocks(conv, 3).size());
+    snprintf(buf, sizeof(buf), "+btd(%u blocks) ", (unsigned)btd::blocks(conv, 3).size());
     r.note += buf;
     r.out = isBtm ? btd::btm(conv) : conv;
     return isBtm ? "btm" : "btd";
@@ -333,7 +435,7 @@ inline Verdict entity(Request& r)
 {
     oct::File f = oct::File::parse(r.data, r.n);
     std::string why;
-    if (!bent::transcode(f, r.np, &why)) { r.note += "bent: " + why + " "; return kRaw; }
+    if (!bent::transcode(f, r.np, &why)) return raw(r, "bent: " + why + " ");
     r.out = f.write();
     return "bent";
 }
@@ -344,33 +446,38 @@ inline bool banmMatches(const Request& r) { return r.o.banm && ends(r, ".banm") 
 inline Verdict blend(Request& r)
 {
     oct::File f = oct::File::parse(r.data, r.n);
-    if (!cho::banm30(f, r.np)) { r.note += "banm: not 1.0f "; return kRaw; }
+    if (!cho::banm30(f, r.np)) return raw(r, "banm: not 1.0f ");
     r.out = f.write();
     return "banm";
 }
 
 inline bool mtbMatches(const Request& r) { return ends(r, ".mtb") && r.n >= 4 && !memcmp(r.data, "BNDL", 4); }
 
+// BNDL layout (render.hpp's bundle reader): chunk count at +12, chunks from +16, a chunk's size at its +8
+inline constexpr size_t kBndlCount = 12;
+inline constexpr size_t kBndlChunks = 16;
+inline constexpr size_t kChunkHeader = 16;
+inline constexpr size_t kChunkSize = 8;
+
 // Does a bundle hold a MATP chunk? A chunk past the end ends the walk; o never wraps (A-26).
 inline bool hasMaterials(const void* data, size_t n)
 {
     bool hasMatp = false;
-    const size_t nc = n >= 16 ? oct::u((const uint8_t*)data + 12, 4) : 0;
-    for (size_t o = 16, c = 0; c < nc && bytes::fits(n, o, 16); ++c) {
+    const size_t nc = n >= kBndlChunks ? oct::u((const uint8_t*)data + kBndlCount, 4) : 0;
+    for (size_t o = kBndlChunks, c = 0; c < nc && bytes::fits(n, o, kChunkHeader); ++c) {
         if (!memcmp((const char*)data + o, "MATP", 4)) hasMatp = true;
-        uint32_t cs = oct::u((const uint8_t*)data + o + 8, 4);
+        uint32_t cs = oct::u((const uint8_t*)data + o + kChunkSize, 4);
         if (!cs || cs > n - o) break;
         o += cs;
     }
     return hasMatp;
 }
 
-// A texture-only bundle (UI images: ui/charactericons, flash/<screen>/*_iN.mtb) holds a named TEXB laid out as in
-// 3.0 and is served as it is, except the _holo portrait stand-in (hkOpen), which carries the asked name.
+// A texture-only bundle (UI images) is laid out as in 3.0: served raw; the _holo stand-in gets the asked name.
 inline Verdict textureBundle(Request& r)
 {
     std::string stem = r.np.substr(r.np.rfind('/') + 1);
-    stem.resize(stem.size() - 4);
+    stem.resize(stem.size() - strlen(".mtb"));
     const bool holo = r.np.rfind("ui/charactericons/", 0) == 0 && ends(r, "_holo.mtb");
     if (!holo) return kRaw;
     r.out = ui::texBundleAs(std::string((const char*)r.data, r.n), stem);
@@ -379,16 +486,15 @@ inline Verdict textureBundle(Request& r)
     return "mtb";
 }
 
-// A material bundle outside any asset session (particles/<x>.mtb): its materials onto 3.0 shaders, generic donors
-// from the same 3.0 asset family (in-game 2026-10-12: raw particles/IN_City.mtb -> int3 in Shader_LookupCrc).
-// The material path read texture-only bundles as unnamed TEXB and wrote garbage (2026-10-13: Edna's dialog icon).
+// A material bundle outside any asset (particles/<x>.mtb) onto 3.0 shaders: raw, it hit int3 in Shader_LookupCrc.
 inline Verdict materialBundle(Request& r)
 {
     if (!hasMaterials(r.data, r.n)) return textureBundle(r);
-    if (!r.io.render) { r.note += "render table missing "; return kRaw; }
+    if (!r.io.render) return raw(r, "render table missing ");
     const std::string& p = r.np;
     render::IO io = bundleIO(r.io.read10, r.io.read30x);
     render::Result res;
+    // generic donors from the same 3.0 asset family
     const std::string donors = "3:" + p.substr(0, p.find('/') + 1);
     if (!render::transcodeBundle(*r.io.render, io, std::string((const char*)r.data, r.n), donors, res)) {
         for (auto& pr : res.problems)
@@ -397,9 +503,10 @@ inline Verdict materialBundle(Request& r)
         return kRaw;
     }
     if (r.io.keep) r.io.keep(p, res.mtb);   // the engine reopens bundles; transcode once
+    // never cut: 51 characters and 4 numbers of at most 11
     char buf[160];
-    sprintf_s(buf, "+materials(real %d same-sh %d generic %d, %u 1.0 textures) ", res.tiers["real"],
-              res.tiers["same-sh"], res.tiers["generic"], (unsigned)res.textures10.size());
+    snprintf(buf, sizeof(buf), "+materials(real %d same-sh %d generic %d, %u 1.0 textures) ", res.tiers["real"],
+             res.tiers["same-sh"], res.tiers["generic"], (unsigned)res.textures10.size());
     r.note += buf;
     r.out = res.mtb;
     return "mtb";
@@ -407,23 +514,19 @@ inline Verdict materialBundle(Request& r)
 
 inline bool psDnaMatches(const Request& r) { return r.o.psdna && ends(r, "_ps.dnax"); }
 
-// A 1.0 playset avatar DNA that 3.0 ships only as its base DNA: the base, naming the 1.0 _PS model (npc::psDna30)
+// A 1.0 playset avatar DNA 3.0 ships only as its base: the base, naming the 1.0 _PS model (npc::psDna30)
 inline Verdict playsetDna(Request& r)
 {
     std::string base, why;
-    if (!r.io.read30(r.np.substr(0, r.np.size() - 8) + ".dnax", base)) return kRaw;
-    if (!npc::psDna30(std::string((const char*)r.data, r.n), base, r.out, &why)) {
-        r.note += "psdna30: " + why + " ";
-        return kRaw;
-    }
+    if (!r.io.read30(dropSuffix(r, "_ps.dnax") + ".dnax", base)) return kRaw;
+    if (!npc::psDna30(std::string((const char*)r.data, r.n), base, r.out, &why)) return raw(r, "psdna30: " + why + " ");
     r.note += "+psdna30(3.0 base, " + why + ") ";
     return "psdna30";
 }
 
 inline bool particlesMatches(const Request& r) { return r.o.vfx && ends(r, ".particledata"); }
 
-// A particle package (trailer v12 -> v47; 3.0's loader rejects 1.0's, so nothing of it registered); vfxchan10
-// re-lays emitter channels for the shader each material is served on.
+// A particle package, trailer v12 -> v47 (3.0 rejects 1.0's); vfxchan10 re-lays channels for each material's shader.
 inline Verdict particles(Request& r)
 {
     vfx::Stats st;
@@ -490,7 +593,7 @@ inline Verdict slang(Request& r)
 {
     std::string why;
     int k = sx::transcode(r.data, r.n, r.np, r.out, &why);
-    if (k < 0) { r.note += "sx: " + why + " "; return kRaw; }
+    if (k < 0) return raw(r, "sx: " + why + " ");
     r.note += "+sx(" + std::to_string(k) + " imports) ";
     return "sx";
 }
@@ -499,7 +602,8 @@ inline bool isBmx(const Request& r) { return r.o.bmx && ends(r, ".bmx"); }
 inline bool behaviourMatches(const Request& r)
 {
     const bool isBtx = r.o.btx && ends(r, ".btx");
-    return (isBmx(r) || isBtx) && startsLua(r);
+    const bool table = isBmx(r) || isBtx;
+    return table && startsLua(r);
 }
 
 // A 1.0 behavior map / behavior tree (sx.hpp): 3.0's loaders drop tables without Version 763
@@ -508,18 +612,19 @@ inline Verdict behaviour(Request& r)
     std::string why;
     const bool bmx = isBmx(r);
     const TranscodeIO& io = r.io;
-    auto exists = [&io](const std::string& p) { std::string s; return io.read10(p, s); };
+    auto exists = [&io](const std::string& p) {
+        std::string s;
+        return io.read10(p, s);
+    };
     int k = bmx ? sx::ai::bmx(r.data, r.n, exists, r.out, &why) : sx::ai::btx(r.data, r.n, exists, r.out, &why);
-    if (k < 0) { r.note += std::string(bmx ? "bmx: " : "btx: ") + why + " "; return kRaw; }
+    if (k < 0) return raw(r, std::string(bmx ? "bmx: " : "btx: ") + why + " ");
     r.note += (bmx ? "+bmx(" : "+btx(") + std::to_string(k) + (bmx ? " behaviors) " : " tables) ");
     return bmx ? "bmx" : "btx";
 }
 
 using Rule = dispatch::Rule<Request, const char*>;
 
-// First match wins, in this order (C3, B3): a rule answers with a codec, with kRaw, or passes (kNext). Order matters:
-// challenge passes a changed mission table on to the mission rule (and a converted .dnax never reaches psdna);
-// groups passes a package without 1.0 groups on. The rest end the dispatch.
+// First match wins, in this order (C3, B3). Only challenge (a changed mission table) and groups pass a file on.
 inline constexpr Rule kRules[] = {
     {challengeMatches, challenge},
     {missionGraphMatches, missionGraph},
@@ -543,12 +648,10 @@ inline constexpr Rule kRules[] = {
 
 }  // namespace detail
 
-// A served 1.0 file in the form 3.0 reads: the codec name when out holds the bytes to serve instead, nullptr to serve
-// the 1.0 bytes unchanged. mtc: for a .mer, also the .mtc of the same graph (the engine asks for it next).
-inline const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note,
-                             std::string* mtc, const TranscodeOptions& o, const TranscodeIO& io)
+// A served 1.0 file in 3.0's form: the codec when out holds the bytes to serve; nullptr: the 1.0 bytes.
+inline const char* transcode(const File& f, const Output& w, const TranscodeOptions& o, const TranscodeIO& io)
 {
-    Request r{path, text::norm(path), data, n, out, note, mtc, std::string(), o, io};
+    Request r{f.path, text::norm(f.path), f.data, f.n, w.out, w.note, w.mtc, std::string(), o, io};
     return dispatch::firstMatch(detail::kRules, r, (const char*)nullptr);
 }
 

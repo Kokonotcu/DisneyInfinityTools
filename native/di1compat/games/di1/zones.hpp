@@ -1,6 +1,4 @@
-// zones10: the 1.0 playsets a 3.0 zone list registers (gameplay::playsets10), their currencies and their zones' name
-// prefixes, from 1.0's own gamedb/core/zonelist.lua. Text in, values out; the install probe is a function object (M2).
-// Windows (worldInstalled) and the codec headers. Any thread.
+// zones10: 1.0's playsets in a 3.0 zone list, their currencies and zone prefixes. Windows, codec headers. Any thread.
 #pragma once
 #include <windows.h>
 #include <algorithm>

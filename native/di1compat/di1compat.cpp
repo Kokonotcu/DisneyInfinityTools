@@ -35,6 +35,7 @@
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/octsteps.hpp"
+#include "games/di1/options.hpp"
 #include "games/di1/renderio.hpp"
 #include "games/di1/transcode.hpp"
 #include "games/di1/zones.hpp"
@@ -297,10 +298,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     read10s(dir + "/" + stem + "_0.vbuf", vbuf);
     read10s(dir + "/" + stem + "_0.ibuf", ibuf);
     if (g_cfg.skin10) note += npcrt::skin10(f, vbuf, ibuf);
-    di1::WorldRender w;
-    w.translate = g_cfg.shaders10 && g_cfg.translate10;
-    w.skinLayout = g_cfg.skinLayout10;
-    w.skinTr = g_cfg.skinTr10;
+    di1::WorldRender w = di1::worldRenderOf(g_cfg);
     w.vf10 = &g_vf10;
     w.vf30 = &g_vf30;
     w.tails10 = &g_tails10;
@@ -356,53 +354,34 @@ static std::vector<std::string> surfaceTable30()
     return t;
 }
 
-// The plugin's .oct steps (games/di1/octsteps.hpp): its cfg switches, its render, the 3.0 install, the engine's table
+// The plugin's .oct steps: its cfg, its render, the 3.0 install and the engine's surface table
 static di1::OctSteps octSteps10()
 {
-    di1::OctSteps o;
+    di1::OctSteps o = di1::octStepsOf(g_cfg);
     o.render = transcodeAssetRender;
-    o.navmesh = g_cfg.navmesh10;
-    o.cameras = g_cfg.camWorld10;
-    o.realmFile = g_cfg.realmFile10;
-    o.clips = g_cfg.clip10;
     if (g_cfg.clip10Motions) o.installed30 = has30;
-    o.clipIds = g_cfg.clip10Ids;
-    o.layout = g_cfg.choLayout10;
-    o.time = g_cfg.choTime10;
-    o.anim = g_cfg.choAnim10;
-    o.scene = g_cfg.choScene10;
-    o.curves = g_cfg.curves10;
     if (g_cfg.surfaces10) o.surfaceTable = surfaceTable30;
-    o.constSections = g_cfg.choConst10;
     return o;
 }
 
-// The shaders a particle package's materials are served on: its .mtb (beside it, or the overlay member the alias
-// names) through the stand-alone bundle transcode (the .mtb case of transcode(), same donors), kept in the session
-// so the engine's .mtb request right after (log: particledata then mtb, same frame) is served the same bytes.
-// Per 1.0 material: (1.0 shader, served shader); empty if the bundle is missing or does not transcode.
-static std::vector<std::pair<std::string, std::string>> particleShaders(const std::string& pd, std::string& note)
+// vfxchan10: a particle package's shaders; its served .mtb is kept for the engine's request right after (same frame).
+static di1::Shaders particleShaders(const std::string& pd, std::string& note)
 {
     if (!g_renderOk) return {};
-    std::string mp = pd.substr(0, pd.size() - 13) + ".mtb", over;
+    std::string mp = pd.substr(0, pd.size() - strlen(".particledata")) + ".mtb", over;
+    // the .mtb beside it, or the overlay member the alias names
     {
         std::lock_guard<std::mutex> lock(g_sessLock);
         auto o = g_over10.find(mp);
         if (o != g_over10.end()) over = o->second;
     }
     std::string mtb;
-    if (!read10s(over.empty() ? mp : over, mtb) || mtb.size() < 4 || memcmp(mtb.data(), "BNDL", 4)) return {};
-    render::IO io = di1::bundleIO(read10s, read30x);
-    render::Result r;
-    if (!render::transcodeBundle(g_render, io, mtb, "3:" + mp.substr(0, mp.find('/') + 1), r)) {
-        note += "channels: " + mp + " did not transcode ";
-        return {};
-    }
-    note += "(" + mp + ": real " + std::to_string(r.tiers["real"]) + " same-sh " + std::to_string(r.tiers["same-sh"]) + " generic " +
-            std::to_string(r.tiers["generic"]) + ", served from the session) ";
+    if (!read10s(over.empty() ? mp : over, mtb)) return {};
+    di1::ParticleBundle b = di1::particleBundle(g_render, di1::bundleIO(read10s, read30x), mp, mtb, note);
+    if (!b.ok) return {};
     std::lock_guard<std::mutex> lock(g_sessLock);
-    g_served.emplace(mp, r.mtb);
-    return r.shaders;
+    g_served.emplace(mp, std::move(b.mtb));
+    return b.shaders;
 }
 
 // currency10: does a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path) carry FastCoin.IsSpark? Memoised.
@@ -410,49 +389,20 @@ static bool isSpark10(const std::string& dnaFile)
 {
     static std::mutex m;
     static std::map<std::string, bool> memo;
-    std::string p = dnaFile;
-    for (char& c : p) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
-    if (p.empty() || p == "none") return false;
-    if (p.find('/') == std::string::npos) p = "expendables_data/dna/" + p;
-    if (!endsWith(p.c_str(), ".dnax")) p += ".dnax";
+    std::string p = di1::dnaPath(dnaFile);
+    if (p.empty()) return false;
     {
         std::lock_guard<std::mutex> l(m);
         if (auto it = memo.find(p); it != memo.end()) return it->second;
     }
     bool spark = false;
     std::string b;
-    if (read10s(p, b)) {
-        try {
-            auto G = luachunk::eval(b);
-            const luachunk::Value* d = G.count("DNA") ? &G["DNA"] : nullptr;
-            const luachunk::Value* ag = d ? d->get("AgentGadgets") : nullptr;
-            const luachunk::Value* fc = ag ? ag->get("FastCoin") : nullptr;
-            const luachunk::Value* is = fc ? fc->get("IsSpark") : nullptr;
-            spark = is && is->t == luachunk::Value::BOOL && is->b;
-        } catch (std::exception&) {}
-    }
+    if (read10s(p, b)) spark = di1::paysSparks(b);
     std::lock_guard<std::mutex> l(m);
     return memo[p] = spark;
 }
 
-// The cfg keys the transcode dispatch reads (games/di1/transcode.hpp)
-static di1::TranscodeOptions transcodeOptions10()
-{
-    di1::TranscodeOptions o;
-    o.challenge = g_cfg.challenge10;
-    o.behaviour = g_cfg.behav10;
-    o.events = g_cfg.events10;
-    o.progress = g_cfg.progress10;
-    o.text = g_cfg.text10;
-    o.banm = g_cfg.banm10;
-    o.psdna = g_cfg.psdna30;
-    o.vfx = g_cfg.vfx10;
-    o.rewards = g_cfg.rewards10;
-    o.sx = g_cfg.sx10;
-    o.bmx = g_cfg.bmx10;
-    o.btx = g_cfg.btx10;
-    return o;
-}
+static di1::TranscodeOptions transcodeOptions10() { return di1::transcodeOptionsOf(g_cfg); }
 
 static void keepBundle(const std::string& path, const std::string& bytes)
 {
@@ -486,14 +436,6 @@ static di1::TranscodeIO transcodeIO10()
     if (g_cfg.currency10) io.isSpark = isSpark10;
     io.dataMapEntry = dataMapEntry10;
     return io;
-}
-
-// -> codec name if out holds transcoded bytes, nullptr to serve the 1.0 bytes unchanged (games/di1/transcode.hpp).
-// mtc: for a .mer, also the .mtc built from the same transcoded graph (the engine asks for the .mtc right after,
-// 48/48 pairs in a load: serving it from the session saves reading and transcoding the .mer a second time)
-static const char* transcode(const char* path, const void* data, size_t n, std::string& out, std::string& note, std::string* mtc = nullptr)
-{
-    return di1::transcode(path, data, n, out, note, mtc, transcodeOptions10(), transcodeIO10());
 }
 
 static bool memtestMatch(const char* p)
@@ -2936,7 +2878,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
                     out.assign((const char*)data, n);
                     padSmallDxt(out);
                     codec = out.size() == n && memcmp(out.data(), data, n) ? "tbody" : nullptr;
-                } else codec = transcode(p, data, n, out, note, &mtc);
+                } else codec = di1::transcode({p, data, n}, {out, note, &mtc}, transcodeOptions10(), transcodeIO10());
                 // the .mtc request transcodes read10s(<same path>.mer): these bytes when nothing redirected the read
                 if (codec && !strcmp(codec, "mer") && !mtc.empty() && over.empty() && chal.empty()) {
                     std::lock_guard<std::mutex> lock(g_sessLock);
@@ -3008,6 +2950,20 @@ static std::unordered_map<std::string, uint8_t*> g_sh10;                       /
 static std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> g_prog10;  // code -> engine id, table index
 
 static thread_local std::string g_compiling10;   // the shader shader10 is generating (debug views name it)
+// The shader cache's file at path, read into code: true when it holds DXBC (a whole header, "DXBC" first).
+static bool cachedDxbc(const std::string& path, std::string& code)
+{
+    constexpr size_t kDxbcHeader = 32;   // magic, checksum, version, size and chunk count
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") || !f) return false;
+    char buf[65536];
+    size_t got;
+    code.clear();
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) code.append(buf, got);
+    fclose(f);
+    return code.size() > kDxbcHeader && !code.compare(0, 4, "DXBC");
+}
+
 static bool compile10(const std::string& hlsl0, const char* target, std::string& code, std::string& msg)
 {
     std::string idcolor;
@@ -3051,15 +3007,8 @@ static bool compile10(const std::string& hlsl0, const char* target, std::string&
         : !idcolor.empty() ? idcolor
         : g_cfg.bufview10 && target[0] == 'p' && hlsl0.find("tLight") != std::string::npos ? bufview[(g_cfg.bufview10 - 1) % 5] : hlsl0;
     std::string path = g_shaderCache + "\\" + hash::shaderCacheName(target, hlsl);
+    if (cachedDxbc(path, code)) return true;
     FILE* f = nullptr;
-    if (!fopen_s(&f, path.c_str(), "rb") && f) {
-        char buf[65536];
-        size_t got;
-        code.clear();
-        while ((got = fread(buf, 1, sizeof(buf), f)) > 0) code.append(buf, got);
-        fclose(f);
-        if (code.size() > 32 && !code.compare(0, 4, "DXBC")) return true;
-    }
     if (!g_d3dCompile) { msg = "no d3dcompiler_47"; return false; }
     Blob *c = nullptr, *e = nullptr;
     HRESULT hr = g_d3dCompile(hlsl.data(), hlsl.size(), "di1compat", nullptr, nullptr, "main", target, 0, 0, &c, &e);

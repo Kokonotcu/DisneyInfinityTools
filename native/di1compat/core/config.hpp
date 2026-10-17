@@ -27,10 +27,16 @@ void setConfigField(Cfg& cfg, const ConfigKey& k, const char* value)
 {
     char* field = reinterpret_cast<char*>(&cfg) + k.offset;
     switch (k.kind) {
-    case ConfigKind::Flag: *reinterpret_cast<bool*>(field) = atoi(value) != 0; break;
-    case ConfigKind::Int: *reinterpret_cast<int*>(field) = atoi(value); break;
-    // never cut: readConfig's value has at most 259 characters, a Text field at least 260 bytes
-    case ConfigKind::Text: snprintf(field, k.size, "%s", value); break;
+    case ConfigKind::Flag:
+        *reinterpret_cast<bool*>(field) = atoi(value) != 0;
+        break;
+    case ConfigKind::Int:
+        *reinterpret_cast<int*>(field) = atoi(value);
+        break;
+    case ConfigKind::Text:
+        // never cut: readConfig's value has at most 259 characters, a Text field at least 260 bytes
+        snprintf(field, k.size, "%s", value);
+        break;
     }
 }
 }  // namespace detail

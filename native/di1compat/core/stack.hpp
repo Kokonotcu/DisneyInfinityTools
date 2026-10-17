@@ -52,10 +52,18 @@ inline void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max
     int words = (int)(std::min)(detail::kStackWalkWords, region);
     for (int i = 0, found = 0; i < words && found < max; ++i) {
         uint32_t v;
-        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        __try {
+            v = sp[i];
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
         bool ok = false;
         if ((v & detail::kUtf16Pair) == 0) continue;   // path text, not a return address
-        __try { ok = afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+        __try {
+            ok = afterCall(v);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ok = false;
+        }
         if (!ok) continue;
         // sprintf_s kept (N21): an overflow fail-fasts, where snprintf would cut and push len past cap (A-37)
         len += sprintf_s(line + len, cap - len, " %08X", (unsigned)toStaticVa(v));

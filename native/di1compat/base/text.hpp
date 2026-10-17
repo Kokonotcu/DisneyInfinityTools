@@ -13,8 +13,7 @@ inline bool endsWith(const char* s, const char* suffix)
     return a >= b && _stricmp(s + a - b, suffix) == 0;
 }
 
-// An engine path as a lookup key: '\' -> '/', lower case, one leading "assets/" removed. Not idempotent:
-// "assets/assets/x" keeps one "assets/" (docs/audit A-22).
+// An engine path as a lookup key: '\' -> '/', lower case, one leading "assets/" removed (not idempotent, A-22).
 inline std::string norm(const char* path)
 {
     std::string p = path;

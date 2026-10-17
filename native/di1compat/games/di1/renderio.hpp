@@ -1,5 +1,4 @@
-// The render IO a 1.0 asset's materials are transcoded with (render.hpp), built one way for the plugin and octtest
-// (docs/audit OT-11, A-23). Files come through the readers given (M2). No engine, log or config. Any thread.
+// The render IO 1.0 materials transcode with, one builder for plugin and octtest (OT-11). Readers given (M2).
 #pragma once
 #include <cstdint>
 #include <functional>

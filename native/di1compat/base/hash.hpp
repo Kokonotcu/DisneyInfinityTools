@@ -6,12 +6,13 @@
 
 namespace hash {
 
-// FNV-1a 64 from a shortened start value (1469598103934665603; the standard one is 14695981039346656037). It names
-// the shader cache's files, so the start value stays (docs/audit CO-19).
+// FNV-1a 64 from a shortened start value: it names the shader cache's files, so it stays (CO-19).
 inline uint64_t fnv64(const std::string& s)
 {
-    uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : s) h = (h ^ c) * 1099511628211ull;
+    constexpr uint64_t kStart = 1469598103934665603ull;   // the standard basis is 14695981039346656037
+    constexpr uint64_t kPrime = 1099511628211ull;         // the FNV 64-bit prime
+    uint64_t h = kStart;
+    for (unsigned char c : s) h = (h ^ c) * kPrime;
     return h;
 }
 

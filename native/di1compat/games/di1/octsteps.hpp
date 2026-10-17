@@ -1,5 +1,4 @@
-// The 1.0 .oct transcode: which steps run on a 1.0 .oct, in which order (CLAUDE.md M7, M8). The plugin and octtest
-// both call it. Engine-bound steps come in as function objects (M2). No engine, log or config. Any thread.
+// The 1.0 .oct steps and their order (M7, M8); engine-bound steps are function objects (M2). Any thread.
 #pragma once
 #include <cctype>
 #include <functional>
@@ -35,30 +34,40 @@ struct OctSteps {
 
 namespace detail {
 
+// A step's note "<head><n><tail>", appended when the step changed something (n != 0). Returns n != 0.
+inline bool noted(std::string& note, int n, const char* head, const char* tail)
+{
+    if (!n) return false;
+    note += head + std::to_string(n) + tail;
+    return true;
+}
+
+// Clip tables re-packed (cho.hpp); a motion clip only when its template's folder is not in the 3.0 install.
+inline bool clipSteps(oct::File& f, const OctSteps& o, std::string& note)
+{
+    std::function<bool(const std::string&)> motion;
+    if (o.installed30)
+        motion = [&o](const std::string& t) {
+            size_t s = t.find_last_of("/\\");
+            return s != std::string::npos && !o.installed30(t.substr(0, s));
+        };
+    int failed = 0, ren = 0;
+    bool changed = false;
+    if (int n = cho::clips30(f, motion, &failed, o.clipIds, &ren)) {
+        std::string ids = ren ? ", " + std::to_string(ren) + " with 3.0 port ids" : std::string();
+        note += "+clips(" + std::to_string(n) + ids + ") ";
+        changed = true;
+    }
+    if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
+    return changed;
+}
+
 // Choreographies, exploders and clips in 3.0 form (cho.hpp): clip tables, ContextNodes, play ranges, anim inputs.
 inline bool choSteps(oct::File& f, const OctSteps& o, std::string& note)
 {
     bool changed = false;
-    if (o.clips) {
-        std::function<bool(const std::string&)> motion;
-        if (o.installed30)
-            motion = [&o](const std::string& t) {
-                size_t s = t.find_last_of("/\\");
-                return s != std::string::npos && !o.installed30(t.substr(0, s));
-            };
-        int failed = 0, ren = 0;
-        if (int n = cho::clips30(f, motion, &failed, o.clipIds, &ren)) {
-            std::string ids = ren ? ", " + std::to_string(ren) + " with 3.0 port ids" : std::string();
-            note += "+clips(" + std::to_string(n) + ids + ") ";
-            changed = true;
-        }
-        if (failed) note += "clips not in the 1.0 layout(" + std::to_string(failed) + ") ";
-    }
-    if (o.clipIds)
-        if (int n = cho::links30(f)) {
-            note += "+ports(" + std::to_string(n) + " model links in 3.0 port order) ";
-            changed = true;
-        }
+    if (o.clips) changed |= clipSteps(f, o, note);
+    if (o.clipIds) changed |= noted(note, cho::links30(f), "+ports(", " model links in 3.0 port order) ");
     if (o.layout) {
         int inst = 0;
         if (int n = cho::layout30(f, &inst)) {
@@ -66,8 +75,7 @@ inline bool choSteps(oct::File& f, const OctSteps& o, std::string& note)
             changed = true;
         }
     }
-    if (o.time)
-        if (int n = cho::time30(f)) { note += "+time(" + std::to_string(n) + " subnetworks) "; changed = true; }
+    if (o.time) changed |= noted(note, cho::time30(f), "+time(", " subnetworks) ");
     if (o.anim) {
         int sns = 0;
         if (int n = cho::anim30(f, &sns)) {
@@ -75,56 +83,65 @@ inline bool choSteps(oct::File& f, const OctSteps& o, std::string& note)
             changed = true;
         }
     }
-    if (o.scene)
-        if (int n = cho::scene30(f)) { note += "+scene(" + std::to_string(n) + " placements) "; changed = true; }
+    if (o.scene) changed |= noted(note, cho::scene30(f), "+scene(", " placements) ");
     return changed;
+}
+
+// NavMeshPool into 3.0's layout: 3.0's parser FUN_01909fb0 trusts it (raw in_city.oct faulted at 0x190A4A7).
+inline bool navSteps(oct::File& f, const OctSteps& o, std::string& note)
+{
+    std::string navWhy = "navmesh10 off";
+    int navs = o.navmesh ? npc::navmesh30(f, &navWhy) : -1;
+    if (navs > 0) {
+        note += "+navmesh(" + std::to_string(navs) + ") ";
+        return true;
+    }
+    if (navs < 0 && f.dropPool("NavMeshPool")) {
+        note += "-NavMeshPool (" + navWhy + ") ";
+        return true;
+    }
+    return false;
 }
 
 }  // namespace detail
 
-// Every step before the constant sections, in this order: render, navmesh, asset pool, skin, locators, cameras,
-// collision, realm, choreography, curves, surfaces. path: the normalised engine path. True if f changed.
-// Evidence: a raw 1.0 .mtb names 1.0 shaders (int3 in Shader_LookupCrc); 3.0's NavMesh parser FUN_01909fb0 trusts
-// the layout (raw in_city.oct faulted at 0x190A4A7); without counts the basis arenas are sized 0 (FUN_004d0160).
+// The steps before the constant sections, in this order. path: the normalised engine path. True if f changed.
 inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, std::string& note)
 {
+    // a raw 1.0 .mtb names 1.0 shaders: int3 in Shader_LookupCrc
     bool changed = o.render && o.render(path, f, note);
-    std::string navWhy = "navmesh10 off";
-    int navs = o.navmesh ? npc::navmesh30(f, &navWhy) : -1;
-    if (navs > 0) { note += "+navmesh(" + std::to_string(navs) + ") "; changed = true; }
-    else if (navs < 0 && f.dropPool("NavMeshPool")) { note += "-NavMeshPool (" + navWhy + ") "; changed = true; }
-    if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
-    if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = o.cameras ? octx::camera30(f) : 0) { note += "+cameras(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::realm30w(f, o.realmFile && path.rfind("realms/", 0) == 0)) {
-        note += "+lighting(" + std::to_string(n) + " nodes) ";
+    changed |= detail::navSteps(f, o, note);
+    if (octx::addAssetPool(f)) {
+        note += "+AssetPool ";
         changed = true;
     }
-    if (detail::choSteps(f, o, note)) changed = true;
+    changed |= detail::noted(note, octx::skin30(f), "+skin(", ") ");
+    changed |= detail::noted(note, octx::locator30(f), "+locators(", ") ");
+    changed |= detail::noted(note, o.cameras ? octx::camera30(f) : 0, "+cameras(", ") ");
+    changed |= detail::noted(note, octx::collision30(f), "+collision(", ") ");
+    const bool realmFile = o.realmFile && path.rfind("realms/", 0) == 0;
+    changed |= detail::noted(note, octx::realm30w(f, realmFile), "+lighting(", " nodes) ");
+    changed |= detail::choSteps(f, o, note);
     int nfl = 0, ncv = o.curves ? gameplay::curves30(f, &nfl) : 0;
     if (ncv || nfl) {
         note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) ";
         changed = true;
     }
-    if (int n = o.surfaceTable ? gameplay::surfaces30(f, o.surfaceTable()) : 0) {
-        note += "+surfaces(" + std::to_string(n) + ") ";
-        changed = true;
-    }
+    changed |= detail::noted(note, o.surfaceTable ? gameplay::surfaces30(f, o.surfaceTable()) : 0, "+surfaces(", ") ");
     return changed;
 }
 
-// The last two steps: constant sections, then the counts. const30 renumbers headers, so it is the last SubNetwork
-// edit before the counts (cho.hpp); mission graphs keep octx's variable form. True if f changed.
+// Constant sections, then the counts: const30 renumbers headers, so it is the last SubNetwork edit (cho.hpp).
 inline bool octFinish(const std::string& path, oct::File& f, const OctSteps& o, std::string& note)
 {
     bool changed = false;
-    // norm again: path is normalised already, and norm strips one more "assets/" (docs/audit A-22)
+    // norm again: path is normalised already, and norm strips one more "assets/" (A-22)
     std::string np = text::norm(path.c_str());
-    if (o.constSections && (np.rfind("choreographies/", 0) == 0 || np.rfind("exploders/", 0) == 0))
-        if (int n = cho::const30(f)) { note += "+constant(" + std::to_string(n) + " subnetworks) "; changed = true; }
-    if (int n = octx::addAllCounts(f)) { note += "+counts(" + std::to_string(n) + " subnetworks) "; changed = true; }
+    const bool choOrExploder = np.rfind("choreographies/", 0) == 0 || np.rfind("exploders/", 0) == 0;
+    if (o.constSections && choOrExploder)
+        changed |= detail::noted(note, cho::const30(f), "+constant(", " subnetworks) ");
+    // without counts the engine sizes the basis arenas 0 (FUN_004d0160)
+    changed |= detail::noted(note, octx::addAllCounts(f), "+counts(", " subnetworks) ");
     return changed;
 }
 
@@ -132,7 +149,7 @@ inline bool octFinish(const std::string& path, oct::File& f, const OctSteps& o, 
 inline bool transcodeOct(const std::string& path, oct::File& f, const OctSteps& o, std::string& note)
 {
     bool changed = octSteps(path, f, o, note);
-    if (octFinish(path, f, o, note)) changed = true;
+    changed |= octFinish(path, f, o, note);
     return changed;
 }
 

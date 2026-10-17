@@ -1,5 +1,4 @@
-// First-match dispatch over a table of rules: the first rule whose test passes answers, unless it passes the request
-// on to the rules below it. Standard library only. Any thread.
+// First-match dispatch over a rule table; a rule may pass a request on. Standard library only. Any thread.
 #pragma once
 #include <cstddef>
 #include <optional>
