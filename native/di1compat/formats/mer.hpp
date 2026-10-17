@@ -262,7 +262,7 @@ inline bool encode(const oct::File& f, const oct::Rec& r, int type, std::string&
         val.append((const char*)&x, 4);
     };
     const size_t want = type == T_VEC3 ? 3 : 1;
-    const bool number = type == T_BOOL || type == T_INT || type == T_FLOAT || type == T_VEC3;
+    const bool number = type >= T_BOOL && type <= T_VEC3 && type != T_STRING;   // T_* are 0..4
     if (number && nums.size() != want) return false;
     switch (type) {
     case T_BOOL: put4(nums[0] != 0); return true;
