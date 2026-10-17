@@ -15,9 +15,11 @@
 #include "engine/crt.hpp"
 #include "engine/langkeys.hpp"
 #include "engine/playsetslot.hpp"
+#include "games/di1/accept.hpp"
 #include "games/di1/assetdefs.hpp"
 #include "games/di1/assetopen.hpp"
 #include "games/di1/audio10.hpp"
+#include "games/di1/buildings.hpp"
 #include "games/di1/choalias.hpp"
 #include "games/di1/chostart.hpp"
 #include "games/di1/config.hpp"
@@ -27,21 +29,28 @@
 #include "games/di1/gamedb.hpp"
 #include "games/di1/gamedb30.hpp"
 #include "games/di1/hideps.hpp"
+#include "games/di1/inputtrace.hpp"
 #include "games/di1/meridian.hpp"
 #include "games/di1/missiontrace.hpp"
+#include "games/di1/particles.hpp"
+#include "games/di1/movies.hpp"
 #include "games/di1/playsets.hpp"
 #include "games/di1/popin.hpp"
 #include "games/di1/render10.hpp"
 #include "games/di1/screens.hpp"
+#include "games/di1/selectmenu.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/shaders10.hpp"
+#include "games/di1/shutdown.hpp"
 #include "games/di1/spawner.hpp"
 #include "games/di1/sxkeys.hpp"
 #include "games/di1/sxnatives.hpp"
 #include "games/di1/tables.hpp"
+#include "games/di1/tools.hpp"
 #include "games/di1/transcodeio.hpp"
 #include "games/di1/vfs.hpp"
 #include "trace/breaktrace.hpp"
+#include "trace/buildings.hpp"
 #include "trace/fade.hpp"
 #include "trace/loadprof.hpp"
 #include "trace/locktrace.hpp"
@@ -50,10 +59,7 @@
 #include "trace/spawn.hpp"
 #include "trace/spawntrace.hpp"
 #include "trace/teardown.hpp"
-#include "vfxrt.hpp"
-#include "gprt.hpp"
-#include "bldrt.hpp"
-#include "caprt.hpp"
+#include "trace/vfx.hpp"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -124,10 +130,16 @@ extern "C" void __stdcall Pentane_Main()
     di1::gamedb30::install(cfg);
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
-    vfxrt::install(cfg);
-    gprt::install(cfg);
-    bldrt::install(cfg);
-    caprt::install(cfg);
+    di1::particles::install(cfg);
+    trace::vfx::install({cfg.vfxTrace});
+    di1::inputtrace::install(cfg);
+    di1::accept::install(cfg);
+    di1::tools::install(cfg);
+    di1::selectmenu::install(cfg);
+    di1::movies::install(cfg);
+    di1::buildings::install(cfg);
+    trace::buildings::install({cfg.spawnTrace10});
+    di1::shutdown::install(cfg);
     trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});
 }
 

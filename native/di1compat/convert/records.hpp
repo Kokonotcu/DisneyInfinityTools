@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -215,6 +216,14 @@ inline int firstInt(const oct::File& f, const oct::Rec& r, int def)
 {
     auto v = f.ints(r);
     return v.empty() ? def : v[0];
+}
+
+// v's first value; none is damaged input: throws "<who>: <record name> record without a value" (E1).
+template <class T>
+inline T firstOrThrow(std::vector<T> v, const oct::File& f, const oct::Rec& r, const char* who)
+{
+    if (v.empty()) throw std::runtime_error(std::string(who) + ": " + f.name(r) + " record without a value");
+    return std::move(v[0]);
 }
 
 // Record r's first name, "" for none or r < 0

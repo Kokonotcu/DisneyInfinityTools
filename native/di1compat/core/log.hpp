@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -77,6 +78,23 @@ private:
     std::mutex mx;         // guards seen
     std::set<Key> seen;
     const size_t cap;      // set once
+};
+
+// Calls counted per key (L6): first(key, n) holds for a key's first n calls, while under cap keys are known.
+template <class Key>
+class LogCount {
+public:
+    explicit LogCount(size_t maxKeys = SIZE_MAX) : cap(maxKeys) {}
+    bool first(const Key& key, int n)
+    {
+        std::lock_guard<std::mutex> lock(mx);
+        return seen.size() < cap && ++seen[key] <= n;
+    }
+
+private:
+    std::mutex mx;            // guards seen; a leaf lock
+    std::map<Key, int> seen;
+    const size_t cap;         // set once
 };
 
 }  // namespace core

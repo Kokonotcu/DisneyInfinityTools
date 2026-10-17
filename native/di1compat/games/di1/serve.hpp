@@ -15,10 +15,9 @@
 #include "../../core/zip.hpp"
 #include "../../formats/gamedblua.hpp"
 #include "../../formats/oct.hpp"
-#include "../../gameplay.hpp"
+#include "challenges.hpp"
 #include "../../third_party/miniz/miniz.h"
 #include "../../trace/loadprof.hpp"
-#include "../../ui.hpp"
 #include "audio.hpp"
 #include "chestinfo.hpp"
 #include "config.hpp"
@@ -28,6 +27,7 @@
 #include "session.hpp"
 #include "transcode.hpp"
 #include "transcodeio.hpp"
+#include "ui.hpp"
 #include "vfs.hpp"
 
 namespace di1::serve {
@@ -223,7 +223,7 @@ inline Read10 read10For(openstage::Open& o, const std::string& np, const std::st
     o.missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(vfs::archiveCount()) + " archives open)"
                              : " (overlay " + over + " unreadable)";
     const bool scoped = imageOfMovie30(o, np);
-    rd.chal = o.cfg->challenge10 ? gameplay::challengeTypePath(np) : "";
+    rd.chal = o.cfg->challenge10 ? challenges::challengeTypePath(np) : "";
     const char* from = !rd.chal.empty() ? rd.chal.c_str() : over.empty() ? o.p : over.c_str();
     rd.data = scoped ? nullptr : vfs::read10(from, &rd.n, &rd.where);
     if (!rd.data) rd.data = read10StandIn(o, np, &rd.n, &rd.where);
@@ -267,7 +267,7 @@ inline Transcoded transcodeServed(const openstage::Open& o, const std::string& n
     return t;
 }
 
-// ui: a flash movie served from 1.0 (its images may be too) and a presentation screen served from 1.0 (gprt).
+// ui: a flash movie served from 1.0 (its images may be too) and a presentation screen served from 1.0 (movies).
 inline void noteServedUi(const std::string& np, const char* p)
 {
     std::string mv = ui::flashMovie(np);

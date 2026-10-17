@@ -3,7 +3,7 @@
 #include <string>
 #include "../../core/log.hpp"
 #include "../../engine/ui.hpp"
-#include "../../ui.hpp"
+#include "ui.hpp"
 #include "config.hpp"
 
 namespace di1::screens {
@@ -23,7 +23,7 @@ inline engine::ui::Fmv fmv(const char* name)
 {
     const State& s = g_state;
     if (s.install10.empty()) return {};
-    std::string clip = ::ui::fmvClip(name);
+    std::string clip = ui::fmvClip(name);
     if (clip.empty()) return {};
     return {clip, s.install10 + "\\assets\\fmv\\PC1\\" + clip + ".bik"};
 }
@@ -39,11 +39,11 @@ inline bool install(const Config& c)
     engine::ui::Config u;
     if (c.loadScreen10) {
         u.screenKey = "LoadingScreen";   // 1.0's key: 11 1.0 zone records carry it, no 3.0 one
-        u.loadingScreen = ::ui::loadingScreen10;
+        u.loadingScreen = ui::loadingScreen10;
     }
     if (c.fmv10) u.fmv = detail::fmv;
     u.selectMenu = c.tutorial10;
-    if (c.context10) u.contexts = ::ui::contextList10;
+    if (c.context10) u.contexts = ui::contextList10;
     return engine::ui::install(u);
 }
 

@@ -14,7 +14,7 @@ namespace di1::currency {
 
 // Installs the three currency hooks when c has currency10, all or none (H1, H2); false when they were refused.
 inline bool install(const Config& c);
-// inventoryFilter -> the 1.0 playset's currency (gameplay::currencies10), as the zone list read finds them.
+// inventoryFilter -> the 1.0 playset's currency (currencies10, zones.hpp), as the zone list read finds them.
 inline void setCurrencies(std::map<std::string, std::string> currencies);
 
 namespace detail {
