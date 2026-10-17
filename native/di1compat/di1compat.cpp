@@ -50,7 +50,7 @@
 #include "cho.hpp"
 #include "ui.hpp"
 #include "audio.hpp"
-#include "vfx.hpp"
+#include "games/di1/vfx.hpp"
 #include "chan.hpp"
 #include "gameplay.hpp"
 #include "third_party/miniz/miniz.h"

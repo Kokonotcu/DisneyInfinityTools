@@ -24,7 +24,7 @@
 #include "ui.hpp"
 #include "audio.hpp"
 #include <cstdarg>
-#include "vfx.hpp"
+#include "games/di1/vfx.hpp"
 #include "chan.hpp"
 #include "gameplay.hpp"
 
@@ -115,7 +115,7 @@ static int vfxChanTest(char** a)
         }
         for (auto& [name, m] : {std::make_pair(std::string("roles"), ours), std::make_pair(std::string("1.0 as is"), verb)}) {
             std::vector<std::string> got;
-            for (int s : m) got.push_back(s >= 0 && s < (int)x.keys.size() ? x.keys[s] : std::string(vfx::constKey(), 8));
+            for (int s : m) got.push_back(s >= 0 && s < (int)x.keys.size() ? x.keys[s] : std::string(particledata::kConstantKey, particledata::kKeyBytes));
             ++c[name + ": emitters"];
             c[name + ": count = Disney's"] += got.size() == kb.size();
             c[name + ": whole emitter = Disney's"] += got == kb;
