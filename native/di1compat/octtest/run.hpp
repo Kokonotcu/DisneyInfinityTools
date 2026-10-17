@@ -19,6 +19,8 @@ struct Args {
 // A mode: its exit code.
 using Mode = int (*)(const Args& a);
 
+inline constexpr int kUsageError = 2;   // the exit code of a command line octtest cannot run
+
 // Check name -> how often it held, printed in name order.
 using Tally = std::map<std::string, size_t>;
 

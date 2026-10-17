@@ -43,6 +43,17 @@ void forEachTupleFile(const Args& a, int first, Fn fn)
         }
 }
 
+// True when every root from argv[first] is a directory; else says which is not (OT-02).
+bool rootsAreDirs(const Args& a, int first)
+{
+    for (int i = first; i < a.argc; ++i) {
+        if (fs::is_directory(a.argv[i])) continue;
+        fprintf(stderr, "octtest: %s is not a directory\n", a.argv[i]);
+        return false;
+    }
+    return true;
+}
+
 // True when the file parses and writes back byte-identical, with no tail.
 bool roundTrips(const fs::path& p, const std::string& b)
 {
@@ -334,20 +345,24 @@ bool withinLimits(const std::string& t, const char* label)
 
 }  // namespace
 
+// The round trip; roots that are not directories are a usage error, finding no tuple file fails (OT-02).
 int testRoundTrip(const Args& a)
 {
+    if (!rootsAreDirs(a, 1)) return kUsageError;
     size_t files = 0, bad = 0;
     forEachTupleFile(a, 1, [&](const fs::path& p, const std::string&, const std::string& b) {
         ++files;
         bad += !roundTrips(p, b);
     });
     printf("round-trip %zu/%zu exact\n", files - bad, files);
-    return bad ? 1 : 0;
+    if (!files) fprintf(stderr, "octtest: no tuple file under the roots\n");
+    return bad || !files ? 1 : 0;
 }
 
 // OCT-1: in every shipped processor-free SubNetwork, counts stripped and regenerated must come back byte-identical.
 int testCounts(const Args& a)
 {
+    if (!rootsAreDirs(a, 2)) return kUsageError;
     CountsRun run;
     run.octx = a.octx;
     forEachTupleFile(a, 2, [&run](const fs::path& p, const std::string& ext, const std::string& b) {
@@ -362,7 +377,9 @@ int testCounts(const Args& a)
     for (auto& [k, n] : run.skipWhy) printf("  skipped: %-40s %zu\n", k.c_str(), n);
     for (auto& [k, t] : run.fieldTally)
         printf("  per-field (processor / constant graphs) %-32s %zu ok %zu miss\n", k.c_str(), t.first, t.second);
-    return run.bad ? 1 : 0;
+    const bool none = run.ok + run.bad + run.skip == 0;
+    if (none) fprintf(stderr, "octtest: no SubNetwork under the roots\n");
+    return run.bad || none ? 1 : 0;
 }
 
 // The served vformat.vtxf (vtxf::merge of 3.0's and 1.0's) stays within the engine's limits, as 3.0's does.
