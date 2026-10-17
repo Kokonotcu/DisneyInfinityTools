@@ -51,7 +51,7 @@
 #include "ui.hpp"
 #include "audio.hpp"
 #include "games/di1/vfx.hpp"
-#include "chan.hpp"
+#include "games/di1/chan.hpp"
 #include "gameplay.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
@@ -734,7 +734,7 @@ static const char* transcode(const char* path, const void* data, size_t n, std::
         auto shaders = g_cfg.vfxChan10 ? particleShaders(norm(path), note) : std::vector<std::pair<std::string, std::string>>();
         if (!shaders.empty())
             cm = [&shaders](uint16_t mat, int n10, std::vector<int>& chans) {
-                return mat < shaders.size() && chan::layout(read10s, read30x, shaders[mat].first, shaders[mat].second, n10, chans);
+                return mat < shaders.size() && chan::layout({read10s, read30x}, shaders[mat], n10, chans);
             };
         if (!vfx::transcode(std::string((const char*)data, n), out, &st, &cm)) return nullptr;
         note += "+particles(" + std::to_string(st.emitters) + " emitters, " + std::to_string(st.effects) + " effects, " +

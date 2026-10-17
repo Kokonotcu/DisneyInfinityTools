@@ -25,7 +25,7 @@
 #include "audio.hpp"
 #include <cstdarg>
 #include "games/di1/vfx.hpp"
-#include "chan.hpp"
+#include "games/di1/chan.hpp"
 #include "gameplay.hpp"
 
 static std::string slurp(const std::filesystem::path& p)
@@ -108,8 +108,8 @@ static int vfxChanTest(char** a)
         const auto& kb = y->second.keys;
         std::vector<int> ours, verb;
         for (int i = 0; i < (int)x.keys.size(); ++i) verb.push_back(i);
-        if (!chan::layout(r10, r30, x.shader, y->second.shader, (int)x.keys.size(), ours)) {
-            std::vector<char> ra = chan::shaderRoles(r10, x.shader, false), rb = chan::shaderRoles(r30, y->second.shader, true);
+        if (!chan::layout({r10, r30}, {x.shader, y->second.shader}, (int)x.keys.size(), ours)) {
+            std::vector<char> ra = chan::shaderRoles(r10, x.shader, chan::kGame10), rb = chan::shaderRoles(r30, y->second.shader, chan::kGame30);
             if (ra.empty() || rb.empty()) { ++c["  no channel roles (layout kept)"]; continue; }
             ours = verb;   // same layout
         }
@@ -3166,7 +3166,7 @@ int main(int argc, char** argv)
             if (!render::transcodeBundle(T, io, slurp(mtbFile), "3:" + p.substr(0, p.find('/') + 1), r)) { printf("bundle FAILED\n"); return 1; }
             shaders = r.shaders;
             cm = [&](uint16_t mat, int n10, std::vector<int>& chans) {
-                return mat < shaders.size() && chan::layout(r10, r30, shaders[mat].first, shaders[mat].second, n10, chans);
+                return mat < shaders.size() && chan::layout({r10, r30}, shaders[mat], n10, chans);
             };
         }
         bool ok = vfx::isPd10(in) ? vfx::transcode(in, out, &st, &cm) : vfx::p3d30(in, out);
