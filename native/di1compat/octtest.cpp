@@ -17,7 +17,7 @@
 #include "convert/datamap.hpp"
 #include "formats/dct.hpp"
 #include "base/hash.hpp"
-#include "luachunk.hpp"
+#include "formats/luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
