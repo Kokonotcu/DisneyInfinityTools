@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include "../base/text.hpp"
+#include "../core/enginestring.hpp"
 #include "../core/hooks.hpp"
 #include "../core/log.hpp"
 #include "../core/memcheck.hpp"
@@ -56,9 +57,6 @@ constexpr size_t kPerceptionCount = 0x104;
 namespace detail {
 
 namespace eng {
-// H4 open: called without a prologue check (X-12)
-constexpr uint32_t kCStringCtor = 0x00418310;     // FUN_00418310: thiscall (const char*) on a CString
-constexpr uint32_t kCStringRelease = 0x00418230;  // FUN_00418230: thiscall on a CString
 constexpr size_t kLoaderMode = 0x2d;              // a loader's byte +0x2d: 1 CHD, 0 Lua (FUN_01612fa0)
 constexpr int kVfLoad = 1;                        // DBFileLoader_Callback vtable[1]: load, as FUN_018da710 calls it
 constexpr size_t kSingletonLoader = 4;
@@ -159,14 +157,9 @@ inline uint32_t loadLocks(const LoadCall& call)
 // The path goes in as a CString: the loader add-refs the header at path-0xc (FUN_00caa0d0), a char* would be written.
 inline uint8_t cbLoad(void* loader, const char* path, uint32_t a2, uint32_t a3)
 {
-    typedef void*(__fastcall * CtorFn)(void* str, void* edx, const char* s);
     typedef uint8_t(__fastcall * LoadFn)(void* self, void* edx, char* path, uint32_t a2, uint32_t a3);
-    typedef void(__fastcall * ReleaseFn)(void* str, void* edx);
-    char* cs = nullptr;
-    ((CtorFn)core::rt(detail::eng::kCStringCtor))(&cs, nullptr, path);
-    uint8_t ok = ((LoadFn)(*(void***)loader)[detail::eng::kVfLoad])(loader, nullptr, cs, a2, a3);
-    ((ReleaseFn)core::rt(detail::eng::kCStringRelease))(&cs, nullptr);
-    return ok;
+    core::EngineString cs(path);
+    return ((LoadFn)(*(void***)loader)[detail::eng::kVfLoad])(loader, nullptr, cs.p, a2, a3);
 }
 
 inline void* singletonLoader(uint32_t global)

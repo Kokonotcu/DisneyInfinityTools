@@ -25,6 +25,7 @@
 #include "games/di1/econ.hpp"
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
+#include "games/di1/gamedb30.hpp"
 #include "games/di1/hideps.hpp"
 #include "games/di1/meridian.hpp"
 #include "games/di1/missiontrace.hpp"
@@ -34,6 +35,7 @@
 #include "games/di1/screens.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/shaders10.hpp"
+#include "games/di1/spawner.hpp"
 #include "games/di1/sxkeys.hpp"
 #include "games/di1/sxnatives.hpp"
 #include "games/di1/tables.hpp"
@@ -48,7 +50,6 @@
 #include "trace/spawn.hpp"
 #include "trace/spawntrace.hpp"
 #include "trace/teardown.hpp"
-#include "npcrt.hpp"
 #include "vfxrt.hpp"
 #include "gprt.hpp"
 #include "bldrt.hpp"
@@ -119,7 +120,8 @@ extern "C" void __stdcall Pentane_Main()
     engine::crt::install({});
     di1::sxkeys::install(cfg);
     di1::sxnatives::install(cfg);
-    npcrt::install(cfg);
+    di1::spawner::install(cfg);
+    di1::gamedb30::install(cfg);
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
     vfxrt::install(cfg);
