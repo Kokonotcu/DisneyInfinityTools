@@ -66,6 +66,7 @@ struct State {
     LuaAddScreenFn g_luaAddScreen = nullptr;
     ScreenLifeFn g_screenEnter = nullptr, g_screenExit = nullptr;
     Lease leases[eng::kPauseSlots] = {};   // per player; main thread only, cleared at the screen's onExit (H11)
+    bool trace = false;                    // uitrace10: set once in install()
 };
 inline State g_state;
 
@@ -82,12 +83,33 @@ inline bool pauseSlot(int player) { return player >= 0 && player < eng::kPauseSl
 inline bool paused(int player) { return ((const uint8_t*)core::rt(eng::kPaused))[player] != 0; }
 
 // The 1.0 pause of player now belongs to a screen that releases it (catalog.lua onExit, missionlog.lua onExit).
-inline void handOn(int player, const uint8_t* from)
+inline void handOn(int player, const uint8_t* from, const char* to)
 {
     State& s = g_state;
     if (!pauseSlot(player) || !s.leases[player].screen) return;
     if (from && s.leases[player].screen != from) return;
     s.leases[player].handed = true;
+    if (s.trace) core::logf("uitrace10: player %d's 1.0 pause handed on to %s", player, to);
+}
+
+// uitrace10: a screen's onEnter or onExit, its player's pause flag after it (-1 none) and what its 1.0 pause did.
+inline void traceScreen(const uint8_t* screen, const char* what, const char* note)
+{
+    char name[64] = "", script[64] = "";
+    engine::screens::copyField(screen, engine::screens::eng::kName, name, sizeof(name));
+    const bool ten = script10(screen, script, sizeof(script));
+    const int player = *(const int*)(screen + engine::screens::eng::kPlayer);
+    const int flag = pauseSlot(player) ? paused(player) : -1;
+    core::logf("uitrace10: screen %s %s (player %d, 1.0 script %d), player paused %d%s", name, what, player, ten, flag,
+               note);
+}
+
+// The uitrace10 note of a screen's exit: what became of the 1.0 pause it took, if it took one.
+inline const char* exitNote(bool held, bool handed, bool released)
+{
+    if (!held) return "";
+    if (handed) return ", its 1.0 pause was handed on";
+    return released ? ", pause10 released its 1.0 pause" : ", it had released its 1.0 pause";
 }
 
 // FUN_00b42540, thiscall, main thread, per ribbon query: 3.0's "MissionLog"; 1.0's was SelectMenu (FUN_00c32cf0).
@@ -130,8 +152,11 @@ inline void* __fastcall hkScreenReq(void* ui, void* edx, const char* name, int a
         core::logf("screen request ProgressLog -> MissionLog for player %d, pauseGame "
                    "(the log releases SelectMenu's pause)",
                    player);
-        handOn(player, nullptr);
+        handOn(player, nullptr, "MissionLog");
     }
+    if (g_state.trace)
+        core::logf("uitrace10: event screen request %s for player %d: %s", name ? name : "?", player,
+                   ev ? "made" : "refused");
     return ev;
 }
 
@@ -147,12 +172,23 @@ inline int __fastcall hkLuaAddScreen(uint8_t* screen, void* edx, void* L)
             int player = *(int*)(screen + engine::screens::eng::kPlayer);   // the caller's, from its request
             int h = engine::screens::addByName(name, player);
             core::logf("AddScreen(\"%s\") from 1.0 screen %s, player %d -> screen request %d", name, caller, player, h);
-            if (h != -1) handOn(player, screen);   // a refused add leaves the pause with the caller
+            if (h != -1) handOn(player, screen, name);   // a refused add leaves the pause with the caller
             ((LuaPushIntFn)core::rt(eng::kLuaPushInt))(L, h);
             return 1;
         }
     }
     return g_state.g_luaAddScreen(screen, edx, L);
+}
+
+// The release a 3.0 screen's onExit makes (missionlog.lua), for a 1.0 screen that left its pause behind.
+inline void releasePause(const uint8_t* screen, int player)
+{
+    ((UnpauseFn)core::rt(eng::kUnpause))(player);
+    char name[64] = "";
+    engine::screens::copyField(screen, engine::screens::eng::kName, name, sizeof(name));
+    core::logf("pause10: %s (1.0 screen) left without releasing or handing on its pause: player %d unpaused "
+               "(3.0's onExit release)",
+               name, player);
 }
 
 // FUN_01551d70, thiscall, main thread, once per screen as FUN_0156b200 creates it: the screen's Lua onEnter.
@@ -165,7 +201,9 @@ inline void __fastcall hkScreenEnter(uint8_t* screen, void* edx)
     char script[64] = "";
     const bool pausedHere = pauseSlot(player) && !before && paused(player);
     // selectmenu.lua's onEnter pauses; only its ExitScreen releases or hands on, 3.0's screens release in onExit
-    if (pausedHere && script10(screen, script, sizeof(script))) s.leases[player] = {screen, false};
+    const bool took = pausedHere && script10(screen, script, sizeof(script));
+    if (took) s.leases[player] = {screen, false};
+    if (s.trace && screen) traceScreen(screen, "enter", took ? ", it took the pause" : "");
 }
 
 // FUN_01551eb0, thiscall, main thread, once per screen in its teardown FUN_01565750: the screen's Lua onExit.
@@ -174,16 +212,12 @@ inline void __fastcall hkScreenExit(uint8_t* screen, void* edx)
     State& s = g_state;
     const int player = screen ? *(const int*)(screen + engine::screens::eng::kPlayer) : -1;
     s.g_screenExit(screen, edx);
-    if (!pauseSlot(player) || s.leases[player].screen != screen) return;
-    const bool handed = s.leases[player].handed;
-    s.leases[player] = {};
-    if (handed || !paused(player)) return;
-    ((UnpauseFn)core::rt(eng::kUnpause))(player);
-    char name[64] = "";
-    engine::screens::copyField(screen, engine::screens::eng::kName, name, sizeof(name));
-    core::logf("pause10: %s (1.0 screen) left without releasing or handing on its pause: player %d unpaused "
-               "(3.0's onExit release)",
-               name, player);
+    const bool held = pauseSlot(player) && s.leases[player].screen == screen;
+    const bool handed = held && s.leases[player].handed;
+    if (held) s.leases[player] = {};
+    const bool release = held && !handed && paused(player);
+    if (release) releasePause(screen, player);
+    if (s.trace && screen) traceScreen(screen, "exit", exitNote(held, handed, release));
 }
 
 // pause10's hooks; they need selectmenu10's handoff hooks (H2).
@@ -208,6 +242,7 @@ inline bool install(const Config& c)
 {
     if (!c.selectMenu10) return true;
     detail::State& s = detail::g_state;
+    s.trace = c.uiTrace10;
     const bool menu = core::installFeature("selectmenu10", {
         {"ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&detail::hkRibbonName,
          (void**)&s.g_ribbonName},

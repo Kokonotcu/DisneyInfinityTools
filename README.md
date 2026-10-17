@@ -136,6 +136,7 @@ Diagnostics, all off by default and log-only:
 | Key | Logs |
 |---|---|
 | `locktrace10` | Control locks, controller contexts, choreography play and events, messages, mission monitors, load screens, compass, beacons, mission progress |
+| `uitrace10` | Every pause applied or lifted per player, each screen's onEnter and onExit (the screen lines need `pause10`), event screen requests, a 1.0 pause handed on or released, focus changes of 3.0 screens |
 | `fpslog10` | Frame time once a second, and how much of it the main thread waits on rendering |
 | `loadprof10` | Per-file load timings and a sampling profile of the busiest threads (`di1compat_prof.tsv`) |
 | `audiotrace10` | Each sound posted and the backend that played it, its position, its mix and its lifetime |

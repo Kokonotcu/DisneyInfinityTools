@@ -55,6 +55,7 @@
 #include "trace/loadprof.hpp"
 #include "trace/locktrace.hpp"
 #include "trace/opacity.hpp"
+#include "trace/pause.hpp"
 #include "trace/renderdoc.hpp"
 #include "trace/spawn.hpp"
 #include "trace/spawntrace.hpp"
@@ -119,6 +120,7 @@ static void installModules(const di1::Config& cfg, const std::string& gameDir)
     trace::buildings::install({cfg.spawnTrace10});
     di1::shutdown::install(cfg);
     trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});
+    trace::pause::install({cfg.uiTrace10});
 }
 
 // Pentane's entry, under the loader lock (B-N1): the log and the cfg, then each module's install() in order.
