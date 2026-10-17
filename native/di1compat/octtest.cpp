@@ -15,7 +15,7 @@
 #include "formats/btd.hpp"
 #include "games/di1/btd.hpp"
 #include "formats/chd.hpp"
-#include "mer.hpp"
+#include "games/di1/mer.hpp"
 #include "games/di1/renderoct.hpp"
 #include "formats/arc30.hpp"
 #include "core/readonly_file.hpp"
@@ -26,7 +26,9 @@
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
-#include "cho.hpp"
+#include "games/di1/cho.hpp"
+#include "games/di1/choconst.hpp"
+#include "games/di1/cholayout.hpp"
 #include "ui.hpp"
 #include "audio.hpp"
 #include <cstdarg>
@@ -628,7 +630,7 @@ static int choLayoutTest(char** a)
         oct::File f = oct::File::parse(b.data(), b.size());
         std::string b3 = slurp(B[n]);
         oct::File g = oct::File::parse(b3.data(), b3.size());
-        cho::layout30(f);
+        di1::cho::layout30(f);
         for (const char* k : {"PlacementNode", "InstanceNode", "Attachment"}) {
             bool ok = layoutDump(f, k) == layoutDump(g, k);
             ++c[std::string(k) + (ok ? " same" : " differ")];
@@ -658,7 +660,7 @@ static int choTimeTest(int argc, char** a)
             else ++i;
         }
         if (f.recs.size() != n0) ++with;
-        cho::time30(f);
+        di1::cho::time30(f);
         if (f.write() == b) ++same;
         else if (++differ <= 5) printf("differ %s\n", p.string().c_str());
     };
@@ -690,7 +692,7 @@ static int choTime10Test(char** a)
         if (!B.count(n)) continue;
         std::string b = slurp(p), b3 = slurp(B[n]);
         oct::File f = oct::File::parse(b.data(), b.size()), g = oct::File::parse(b3.data(), b3.size());
-        cho::time30(f);
+        di1::cho::time30(f);
         auto x = ranges(f), y = ranges(g);
         if (x.empty() && y.empty()) { ++none; continue; }
         bool nearly = x.size() == y.size();
@@ -767,7 +769,7 @@ static std::string str1(const oct::File& f, size_t i, const char* n)
 static std::string path(const oct::File& f, const Sn& s, size_t node)
 {
     long h = kid(f, node, "Header");
-    int k = h < 0 ? -1 : cho::first(f, f.recs[h], -1);
+    int k = h < 0 ? -1 : octx::firstInt(f, f.recs[h], -1);
     return k >= 0 && (size_t)k < s.paths.size() ? s.paths[k] : "?";
 }
 // the node's records below it except Header: 'level|name|type|value'
@@ -821,8 +823,8 @@ static int choAnimTest(char** a)
             if (b.size() < 4 || b3.size() < 4 || oct::u((const uint8_t*)b.data(), 4) != oct::MAGIC ||
                 oct::u((const uint8_t*)b3.data(), 4) != oct::MAGIC) continue;
             oct::File f = oct::File::parse(b.data(), b.size()), g = oct::File::parse(b3.data(), b3.size());
-            cho::time30(f);
-            cho::anim30(f);
+            di1::cho::time30(f);
+            di1::cho::anim30(f);
             auto S = subnets(f), T = subnets(g);
             for (size_t k = 0; k < S.size(); ++k) {
                 for (size_t pn : S[k].pns) {
@@ -869,9 +871,9 @@ static int choAnimTest(char** a)
         std::string b = slurp(p);
         if (b.size() < 4 || oct::u((const uint8_t*)b.data(), 4) != oct::MAGIC) continue;
         oct::File f = oct::File::parse(b.data(), b.size());
-        cho::time30(f);
+        di1::cho::time30(f);
         auto before = subnets(f);
-        int sns = 0, nodes = cho::anim30(f, &sns);
+        int sns = 0, nodes = di1::cho::anim30(f, &sns);
         c["1.0 corpus: nodes converted"] += nodes;
         c["1.0 corpus: subnetworks converted"] += sns;
         std::string w = f.write();
@@ -955,14 +957,14 @@ static int choAnimTest(char** a)
             for (size_t q = anims.size(); q-- > 0;) {
                 size_t dn = anims[q];
                 std::vector<oct::Rec> t = {g.recs[kid(g, dn, "Header")], g.nameScalar(5, g.recs[kid(g, dn, "Type")].name, "Float"),
-                                           cho::floatRec(g, "Data", 0.f, 5)};
+                                           octx::floatRec(g, 5, "Data", 0.f)};
                 g.recs.erase(g.recs.begin() + dn + 1, g.recs.begin() + g.blockEnd(dn));
                 g.recs.insert(g.recs.begin() + dn + 1, t.begin(), t.end());
                 ++nodes;
             }
         }
         if (skip) { ++c["3.0 corpus: file skipped (string 'AnimState' shared or 'Global.Time' present)"]; continue; }
-        int got = cho::anim30(g);
+        int got = di1::cho::anim30(g);
         bool same = got == nodes && canon(g) == want;
         c["3.0 corpus: AnimState nodes regenerated"] += nodes;
         ++c[same ? "3.0 corpus: files identical after the round trip" : "3.0 corpus: files DIFFER after the round trip"];
@@ -989,7 +991,7 @@ static std::vector<Pl> placements(const oct::File& f)
     for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i) {
         if (f.recs[i].level != 2 || anim::str1(f, i, "Type") != "PlacementNode") continue;
         long s = anim::kid(f, i, "SceneTreeNodeRef");
-        v.push_back({anim::str1(f, i, "NodeName"), s < 0 ? -2 : cho::first(f, f.recs[s], -2)});
+        v.push_back({anim::str1(f, i, "NodeName"), s < 0 ? -2 : octx::firstInt(f, f.recs[s], -2)});
     }
     return v;
 }
@@ -1017,7 +1019,7 @@ static std::vector<std::filesystem::path> files(const std::filesystem::path& ass
 static bool tuple(const std::string& b) { return b.size() >= 4 && oct::u((const uint8_t*)b.data(), 4) == oct::MAGIC; }
 }  // namespace scene
 
-// --cho-const <1.0 assets> <3.0 assets>: cho::const30 + octx::addCounts' constant mode. Every 1.0 choreography and
+// --cho-const <1.0 assets> <3.0 assets>: di1::cho::const30 + octx::addCounts' constant mode. Every 1.0 choreography and
 // exploder through the plugin's .oct steps (octx, cho, const30, counts); on each processor SubNetwork with Static
 // nodes: converted or why not; the 3.0 rule on the result (Static headers 1..CHC, nothing else there; constant headers
 // = the prefixes of the Static paths; ConstantLayoutCount = the layout ints of 1..CHC; the plain path gone from the
@@ -1030,12 +1032,12 @@ static int choConstTest(char** a)
     std::map<std::string, size_t> c;
     auto statics = [](const oct::File& f, const Sn& s) {
         std::vector<size_t> v;
-        for (size_t d : s.dns) { long st = kid(f, d, "Static"); if (st >= 0 && cho::first(f, f.recs[st], 0)) v.push_back(d); }
+        for (size_t d : s.dns) { long st = kid(f, d, "Static"); if (st >= 0 && octx::firstInt(f, f.recs[st], 0)) v.push_back(d); }
         return v;
     };
     auto count3 = [](const oct::File& f, size_t snRec, const char* k) {
         long r = kid(f, snRec, k);
-        return r < 0 ? -1 : cho::first(f, f.recs[r], -1);
+        return r < 0 ? -1 : octx::firstInt(f, f.recs[r], -1);
     };
     // Static shapes as 3.0 ships them, measured here from the 3.0 corpus (not from cho.hpp's table): processor inputs
     // fed by a Static node ('Type.Attr'), Static node shapes ('Type External?'), BasisConversion refs to Static nodes
@@ -1056,7 +1058,7 @@ static int choConstTest(char** a)
             for (size_t q : s.pns) varPaths.push_back(path(f, s, q));
             for (size_t d : st) {
                 long ex = kid(f, d, "External");
-                std::string sh = str1(f, d, "Type") + (ex >= 0 && cho::first(f, f.recs[ex], 0) ? " External" : "");
+                std::string sh = str1(f, d, "Type") + (ex >= 0 && octx::firstInt(f, f.recs[ex], 0) ? " External" : "");
                 if (shapes) shapes->insert(sh);
                 if (bad && !shapes30.count(sh)) ++(*bad)["Static node shape never shipped: " + sh];
                 std::string pre = path(f, s, d) + "/";
@@ -1085,7 +1087,7 @@ static int choConstTest(char** a)
                     }
             for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
                 if (f.recs[j].level == 5 && f.name(f.recs[j]) == "DataNodeRef") {
-                    int d = cho::first(f, f.recs[j], -1);
+                    int d = octx::firstInt(f, f.recs[j], -1);
                     if (d >= 0 && (size_t)d < s.dns.size() && st.count(s.dns[d])) {
                         if (convs) ++*convs;
                         if (bad) ++(*bad)["BasisConversion DataNodeRef to a Static node"];
@@ -1134,7 +1136,7 @@ static int choConstTest(char** a)
                 long ap0 = f.pool("AssociationPool");
                 for (size_t i = ap0 < 0 ? 0 : ap0 + 1, e = ap0 < 0 ? 0 : f.blockEnd(ap0); i < e; i = f.blockEnd(i)) {
                     long sr = kid(f, i, "SubNetworkRef");
-                    int k = sr < 0 ? -1 : cho::first(f, f.recs[sr], -1);
+                    int k = sr < 0 ? -1 : octx::firstInt(f, f.recs[sr], -1);
                     if (k < 0 || k >= (int)before.size()) continue;
                     std::string nn = str1(f, i, "NodeName");
                     std::replace(nn.begin(), nn.end(), '|', '/');
@@ -1171,7 +1173,7 @@ static int choConstTest(char** a)
                 ++c["1.0: Static processor subnetworks converted"];
                 auto st = statics(g, s);
                 size_t nst = st.size();
-                auto hnum = [&](size_t rec) { long h = kid(g, rec, "Header"); return h < 0 ? -1 : cho::first(g, g.recs[h], -1); };
+                auto hnum = [&](size_t rec) { long h = kid(g, rec, "Header"); return h < 0 ? -1 : octx::firstInt(g, g.recs[h], -1); };
                 bool ra = true;
                 for (size_t d = 0; d < s.dns.size(); ++d) {   // Static before, variable now: which kind
                     bool now = std::find(st.begin(), st.end(), s.dns[d]) != st.end();
@@ -1229,7 +1231,7 @@ static int choConstTest(char** a)
             for (size_t i = ap < 0 ? 0 : ap + 1, e = ap < 0 ? 0 : g.blockEnd(ap); i < e; i = g.blockEnd(i)) {
                 if (str1(g, i, "Type") != "Transform") continue;
                 long sr = kid(g, i, "SubNetworkRef");
-                int k = sr < 0 ? -1 : cho::first(g, g.recs[sr], -1);
+                int k = sr < 0 ? -1 : octx::firstInt(g, g.recs[sr], -1);
                 if (k < 0 || k >= (int)S.size()) continue;
                 std::string node = str1(g, i, "NodeName"), alt = str1(g, i, "AltNodeName"), wantH = "Constant" + node;
                 std::replace(wantH.begin(), wantH.end(), '|', '/');
@@ -1281,8 +1283,8 @@ static int variantsTest(char** a)
                 const oct::Rec& r = f.recs[j];
                 if (r.level == 3) {
                     pool = f.name(r);
-                    if (pool == "VariantGroupCount") vgc = cho::first(f, r, -1);
-                    else if (pool == "VariantMemberCount") vmc = cho::first(f, r, -1);
+                    if (pool == "VariantGroupCount") vgc = octx::firstInt(f, r, -1);
+                    else if (pool == "VariantMemberCount") vmc = octx::firstInt(f, r, -1);
                 } else if (r.level == 4 && pool == "VariantGroupPool") vgs.push_back(f.ints(r));
             }
             if (vgc >= 0) {
@@ -1383,7 +1385,7 @@ static int choSceneTest(char** a)
                 if (s >= 0) { f.recs.erase(f.recs.begin() + s); ++stripped; }
             }
         if (!stripped) continue;
-        int got = cho::scene30(f);
+        int got = di1::cho::scene30(f);
         bool same = got == (int)stripped && f.write() == b;
         c["3.0: placements regenerated"] += stripped;
         ++c[same ? "3.0: files byte-identical" : "3.0: files DIFFER"];
@@ -1397,7 +1399,7 @@ static int choSceneTest(char** a)
             std::string b = slurp(p), b3 = slurp(B[n]);
             if (!tuple(b) || !tuple(b3)) continue;
             oct::File f = oct::File::parse(b.data(), b.size()), g = oct::File::parse(b3.data(), b3.size());
-            cho::scene30(f);
+            di1::cho::scene30(f);
             auto s10 = sceneNames(f), s30 = sceneNames(g);
             std::map<std::string, int> by30;
             for (auto& q : placements(g)) by30.emplace(q.name, q.scene);
@@ -1417,7 +1419,7 @@ static int choSceneTest(char** a)
         std::string b = slurp(p);
         if (!tuple(b)) continue;
         oct::File f = oct::File::parse(b.data(), b.size());
-        int n = cho::scene30(f);
+        int n = di1::cho::scene30(f);
         if (!n) continue;
         std::string w = f.write();
         oct::File g = oct::File::parse(w.data(), w.size());
@@ -1443,27 +1445,27 @@ static int choClipsTest(char** a)
     size_t exact = 0, sameLen = 0, other = 0, failed = 0, files = 0, areaSame = 0, shapeSame = 0, anyExactN = 0, anyShapeN = 0;
     // header + descriptor area: up to the first section / constant offset (the data sections follow)
     auto area = [](const std::string& d) {
-        uint32_t nDesc = cho::rd(d, 8, 2), nSec = cho::rd(d, 10, 2), e = cho::rd(d, 12, 4);
-        for (uint32_t i = 0; i < nSec; ++i) e = (std::min)(e, cho::rd(d, 0x10 + 4 * (nDesc + i), 4));
+        uint32_t nDesc = clips::rd(d, 8, 2), nSec = clips::rd(d, 10, 2), e = clips::rd(d, 12, 4);
+        for (uint32_t i = 0; i < nSec; ++i) e = (std::min)(e, clips::rd(d, 0x10 + 4 * (nDesc + i), 4));
         return d.substr(0, (std::min<size_t>)(e, d.size()));
     };
     // the shape of a 3.0-layout block: counts, section ids, output heads and comp codes (operands left out)
     auto shape = [](const std::string& d) {
         std::string s;
-        uint32_t nDesc = cho::rd(d, 8, 2), nSec = cho::rd(d, 10, 2);
+        uint32_t nDesc = clips::rd(d, 8, 2), nSec = clips::rd(d, 10, 2);
         s += std::to_string(nDesc) + "/" + std::to_string(nSec) + ":";
         for (uint32_t i = 0; i < nDesc; ++i) {
-            uint32_t o = cho::rd(d, 0x10 + 4 * i, 4), n = cho::rd(d, o + 2, 2);
-            for (uint32_t k = 0; k < n; ++k) s += std::to_string(cho::rd(d, o + 4 + 2 * k, 2)) + ",";
-            uint32_t x = cho::rd(d, o + 4 + 2 * n, 2);
+            uint32_t o = clips::rd(d, 0x10 + 4 * i, 4), n = clips::rd(d, o + 2, 2);
+            for (uint32_t k = 0; k < n; ++k) s += std::to_string(clips::rd(d, o + 4 + 2 * k, 2)) + ",";
+            uint32_t x = clips::rd(d, o + 4 + 2 * n, 2);
             for (size_t t : {(size_t)o + 6 + 2 * n, (size_t)o + x}) {
-                uint32_t nOut = cho::rd(d, t, 2), comps = 0;
+                uint32_t nOut = clips::rd(d, t, 2), comps = 0;
                 if (nOut == 0xffffffffu) return s + "?";
                 s += "[";
-                for (uint32_t h = 0; h < nOut; ++h) { uint32_t hd = cho::rd(d, t + 2 + 2 * h, 2); comps += hd >> 13; s += std::to_string(hd) + " "; }
+                for (uint32_t h = 0; h < nOut; ++h) { uint32_t hd = clips::rd(d, t + 2 + 2 * h, 2); comps += hd >> 13; s += std::to_string(hd) + " "; }
                 size_t c = t + 2 + 2 * nOut;
                 for (uint32_t k = 0; k < comps; ++k) {
-                    uint32_t code = cho::rd(d, c, 2);
+                    uint32_t code = clips::rd(d, c, 2);
                     s += std::to_string(code) + ".";
                     c += (code & 0xf000) == 0x1000 || (code & 0xf000) == 0x2000 ? 8 : 4;
                 }
@@ -1488,7 +1490,7 @@ static int choClipsTest(char** a)
         ++files;
         for (size_t i = 0; i < A.size() && i < B.size(); ++i) {
             std::string out;
-            if (!cho::clipBlock30(A[i], out)) { ++failed; continue; }
+            if (!di1::cho::clipBlock30(A[i], out)) { ++failed; continue; }
             if (out == B[i]) ++exact;
             else if (out.size() == B[i].size()) ++sameLen;
             else ++other;
@@ -1517,12 +1519,12 @@ static int clipIdsTest(char** a)
 {
     auto ids30 = [](const std::string& d) {   // output ids per table of a 3.0-layout block
         std::vector<std::vector<uint32_t>> t;
-        uint32_t nDesc = cho::rd(d, 8, 2);
+        uint32_t nDesc = clips::rd(d, 8, 2);
         for (uint32_t i = 0; i < nDesc; ++i) {
-            uint32_t o = cho::rd(d, 0x10 + 4 * i, 4), n = cho::rd(d, o + 2, 2), x = cho::rd(d, o + 4 + 2 * n, 2);
+            uint32_t o = clips::rd(d, 0x10 + 4 * i, 4), n = clips::rd(d, o + 2, 2), x = clips::rd(d, o + 4 + 2 * n, 2);
             for (size_t s : {(size_t)o + 6 + 2 * n, (size_t)o + x}) {
                 std::vector<uint32_t> v;
-                for (uint32_t h = 0, k = cho::rd(d, s, 2); k != 0xffffffffu && h < k; ++h) v.push_back(cho::rd(d, s + 2 + 2 * h, 2) & 0x1fff);
+                for (uint32_t h = 0, k = clips::rd(d, s, 2); k != 0xffffffffu && h < k; ++h) v.push_back(clips::rd(d, s + 2 + 2 * h, 2) & 0x1fff);
                 t.push_back(v);
             }
         }
@@ -1544,10 +1546,10 @@ static int clipIdsTest(char** a)
             if (B.name(r) == "ClipDataBlock") blocksB.push_back(r.pay.substr(oct::spec(r.type).cw));
             if (B.name(r) == "ConnectionTemplate" && tmplB.empty()) tmplB = B.nameValues(r)[0];
         }
-        const cho::PortMap* pm = nullptr;
+        const di1::cho::PortMap* pm = nullptr;
         size_t k = 0;
         for (size_t i = 0; i < A.recs.size(); ++i) {
-            if (A.recs[i].level == 2 && A.name(A.recs[i]) == "SubNetwork") { pm = cho::clipPorts(A, i); continue; }
+            if (A.recs[i].level == 2 && A.name(A.recs[i]) == "SubNetwork") { pm = di1::cho::clipPorts(A, i); continue; }
             if (A.name(A.recs[i]) != "ClipDataBlock") continue;
             size_t at = k++;
             if (!pm) continue;
@@ -1557,7 +1559,7 @@ static int clipIdsTest(char** a)
             if (_stricmp(tmplB.c_str(), pm->tmpl)) { C("  twin binds another template"); continue; }
             if (at >= blocksB.size()) { C("  twin has no block there"); continue; }
             std::string d = A.recs[i].pay.substr(oct::spec(A.recs[i].type).cw), ours, kept;
-            if (!cho::clipBlock30(d, ours, pm) || !cho::clipBlock30(d, kept)) { C("  NOT CONVERTED"); continue; }
+            if (!di1::cho::clipBlock30(d, ours, pm) || !di1::cho::clipBlock30(d, kept)) { C("  NOT CONVERTED"); continue; }
             const std::string& y = blocksB[at];
             C(ours == y ? "  bytes: identical to the twin" : ours.size() == y.size() ? "  bytes: same length" : "  bytes: other length");
             if (kept == y) C("  (ids kept: identical to the twin)");
@@ -1595,19 +1597,19 @@ static int clipIdsTest(char** a)
 // tables ending at the next descriptor or the data). Prints what changed.
 static bool parses30(const std::string& d)
 {
-    uint32_t nDesc = cho::rd(d, 8, 2), nSec = cho::rd(d, 10, 2);
+    uint32_t nDesc = clips::rd(d, 8, 2), nSec = clips::rd(d, 10, 2);
     for (uint32_t i = 0; i < nDesc; ++i) {
-        uint32_t o = cho::rd(d, 0x10 + 4 * i, 4), n = cho::rd(d, o + 2, 2);
+        uint32_t o = clips::rd(d, 0x10 + 4 * i, 4), n = clips::rd(d, o + 2, 2);
         if (n == 0xffffffffu) return false;
-        uint32_t x = cho::rd(d, o + 4 + 2 * n, 2);
+        uint32_t x = clips::rd(d, o + 4 + 2 * n, 2);
         size_t t = o + 6 + 2 * (size_t)n;
         for (int k = 0; k < 2; ++k) {
-            uint32_t nOut = cho::rd(d, t, 2), comps = 0;
+            uint32_t nOut = clips::rd(d, t, 2), comps = 0;
             if (nOut == 0xffffffffu) return false;
-            for (uint32_t h = 0; h < nOut; ++h) comps += cho::rd(d, t + 2 + 2 * h, 2) >> 13;
+            for (uint32_t h = 0; h < nOut; ++h) comps += clips::rd(d, t + 2 + 2 * h, 2) >> 13;
             size_t c = t + 2 + 2 * (size_t)nOut;
             for (uint32_t q = 0; q < comps; ++q) {
-                uint32_t code = cho::rd(d, c, 2);
+                uint32_t code = clips::rd(d, c, 2);
                 if (code == 0xffffffffu) return false;
                 c += (code & 0xf000) == 0x1000 || (code & 0xf000) == 0x2000 ? 8 : 4;
             }
@@ -1645,9 +1647,12 @@ static int choFileTest(int argc, char** a)
         int failed = 0, inst = 0, ren = 0;
         // clip10ids: the file without it must come out the same unless a clip or a link was renumbered
         oct::File g0 = oct::File::parse(b.data(), b.size());
-        cho::clips30(g0, [](const std::string&) { return true; });
-        int nc = cho::clips30(f, [](const std::string&) { return true; }, &failed, true, &ren);
-        int nk = cho::links30(f);
+        di1::cho::clips30(g0, {[](const std::string&) { return true; }});
+        const di1::cho::ClipCounts cc = di1::cho::clips30(f, {[](const std::string&) { return true; }, true});
+        int nc = cc.repacked;
+        failed = cc.failed;
+        ren = cc.renumbered;
+        int nk = di1::cho::links30(f);
         if (f.write() != g0.write()) ++(ren || nk ? changedIds : changedElse);
         tr += ren;
         tk += nk;
@@ -1663,14 +1668,14 @@ static int choFileTest(int argc, char** a)
                 if (r.level == 3 && g1.name(r) == "Type") clipSn = g1.nameValues(r) == std::vector<std::string>{"Clip"};
                 if (g1.name(r) == "ClipDataBlock" && !clipSn) ++scene;
             }
-            int n1 = cho::clips30(g1, [](const std::string&) { return false; });
+            int n1 = di1::cho::clips30(g1, {[](const std::string&) { return false; }}).repacked;
             tsc += scene;
             if (n1 < scene) { ++sceneMiss; printf("BAD %s: %d of %d scene blocks re-packed when 3.0 owns the templates\n", path.c_str(), n1, scene); }
         }
-        int nl = cho::layout30(f, &inst);
-        int nt = cho::time30(f);
-        int na = cho::anim30(f);
-        int ns = cho::scene30(f);
+        int nl = di1::cho::layout30(f, &inst);
+        int nt = di1::cho::time30(f);
+        int na = di1::cho::anim30(f);
+        int ns = di1::cho::scene30(f);
         std::string w = f.write();
         if (!corpus && getenv("CHO_OUT"))   // the result, for inspection: <CHO_OUT>/<file name>
             std::ofstream(std::filesystem::path(getenv("CHO_OUT")) / std::filesystem::path(path).filename(), std::ios::binary) << w;
@@ -1695,7 +1700,7 @@ static int choFileTest(int argc, char** a)
     return bad || changedElse || sceneMiss ? 1 : 0;
 }
 
-// --banm <pairs.txt>: lines '<1.0 .banm>|<3.0 .banm (text)>|<engine path>'; cho::banm30 on the 1.0 binary tuple must
+// --banm <pairs.txt>: lines '<1.0 .banm>|<3.0 .banm (text)>|<engine path>'; di1::cho::banm30 on the 1.0 binary tuple must
 // give the 3.0 twin's records ("depth|name|values", numbers %.6g), the text read by a minimal tuple-text reader
 static std::vector<std::string> canonBin(const oct::File& f)
 {
@@ -1762,7 +1767,7 @@ static int banmTest(char** a)
         if (b2 == std::string::npos) continue;
         std::string b = slurp(line.substr(0, b1));
         oct::File f = oct::File::parse(b.data(), b.size());
-        if (!cho::banm30(f, line.substr(b2 + 1))) { ++rejected; continue; }
+        if (!di1::cho::banm30(f, line.substr(b2 + 1))) { ++rejected; continue; }
         std::string w = f.write();
         oct::File g = oct::File::parse(w.data(), w.size());
         auto A = canonBin(g), B = canonText(slurp(line.substr(b1 + 1, b2 - b1 - 1)));
@@ -1795,7 +1800,7 @@ static int choClipDump(char** a)
     for (auto& r : f.recs) {
         if (f.name(r) != "ClipDataBlock") continue;
         std::string out;
-        if (!cho::clipBlock30(r.pay.substr(oct::spec(r.type).cw), out)) out = "FAIL";
+        if (!di1::cho::clipBlock30(r.pay.substr(oct::spec(r.type).cw), out)) out = "FAIL";
         all += out;
     }
     std::ofstream(a[3], std::ios::binary).write(all.data(), all.size());
@@ -2733,7 +2738,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) g_octx.variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
     if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
         std::string in = slurp(argv[2]), out;
-        cho::Aliases al;
+        di1::cho::Aliases al;
         luachunk::rewrite(in, out, [&](std::string& s) { al.add(s); return datamap::normalise(s); });
         int hit = 0;
         for (int i = 3; i < argc; ++i) {
@@ -2782,20 +2787,21 @@ int main(int argc, char** argv)
     }
     if (argc > 4 && std::string(argv[1]) == "--mer") {   // --mer <di1compat_mer.txt> <1.0 .mer> <out.mer> [out.mtc] [flags]
         mer::Table T;
+        di1::mer::Rules R;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         for (std::string a; argc > 5 && (a = argv[argc - 1]).rfind("--", 0) == 0; --argc) {   // trailing flags, any order
-            if (a == "--noportrefs") T.portRefs = false;     // cfg portrefs10=0
-            else if (a == "--noports") T.ports10 = false;    // cfg ports10=0
-            else if (a == "--nopins") T.pins10 = false;      // cfg pins10=0
-            else if (a == "--noevents") T.events10 = false;  // cfg events10=0
-            else if (a == "--nogate") T.gate10 = false;      // cfg gate10=0
-            else if (a == "--notoggletype") T.toggleType10 = false;   // cfg toggletype10=0
-            else if (a == "--aliases") mer::addAliases(T);   // as after hkMerRegistry
+            if (a == "--noportrefs") R.portRefs = false;     // cfg portrefs10=0
+            else if (a == "--noports") R.ports10 = false;    // cfg ports10=0
+            else if (a == "--nopins") R.pins10 = false;      // cfg pins10=0
+            else if (a == "--noevents") R.events10 = false;  // cfg events10=0
+            else if (a == "--nogate") R.gate10 = false;      // cfg gate10=0
+            else if (a == "--notoggletype") R.toggleType10 = false;   // cfg toggletype10=0
+            else if (a == "--aliases") di1::mer::addAliases(T);   // as after hkMerRegistry
         }
         std::string b = slurp(argv[3]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
-        mer::Stats st;
-        if (!mer::transcode(T, f, &st, &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
+        di1::mer::Stats st;
+        if (!di1::mer::transcode(T, R, f, &st, &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         if (argc > 5) { std::string m = mer::mtc(f); std::ofstream(argv[5], std::ios::binary).write(m.data(), m.size()); }
@@ -2815,8 +2821,8 @@ int main(int argc, char** argv)
         int both = 0, bad = 0;                                    // activityTasks30 into mis's luaEvents30; the order must not
         for (int a = 2; a < argc; ++a) {                          // matter (disjoint keys): both orders give the same bytes
             std::string t = slurp(argv[a]), x = t, y = t;
-            int a1 = gameplay::activityTasks30(x), e1 = x.compare(0, 9, "Mission =") ? 0 : mission::luaEvents30(x);
-            int e2 = y.compare(0, 9, "Mission =") ? 0 : mission::luaEvents30(y), a2 = gameplay::activityTasks30(y);
+            int a1 = gameplay::activityTasks30(x), e1 = x.compare(0, 9, "Mission =") ? 0 : di1::mission::luaEvents30(x);
+            int e2 = y.compare(0, 9, "Mission =") ? 0 : di1::mission::luaEvents30(y), a2 = gameplay::activityTasks30(y);
             if (x != y || a1 != a2 || e1 != e2) { ++bad; printf("ORDER MATTERS %s\n", argv[a]); }
             if (a1 && e1) { ++both; printf("both %s: %d activity tables, %d events\n", argv[a], a1, e1); }
         }
@@ -2832,7 +2838,7 @@ int main(int argc, char** argv)
     }
     if (argc > 3 && std::string(argv[1]) == "--beaconmap") {   // --beaconmap <zonelist.lua> <out.lua>: beacon10
         std::string t = slurp(argv[2]);
-        int aliases = 0, n = mission::beaconMap30(t, &aliases);
+        int aliases = 0, n = di1::mission::beaconMap30(t, &aliases);
         std::ofstream(argv[3], std::ios::binary).write(t.data(), t.size());
         printf("%d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added\n", n, aliases);
         return 0;
@@ -3040,9 +3046,9 @@ int main(int argc, char** argv)
                 if (!k) { printf("mer %-52s unchanged\n", name.c_str()); continue; }
                 std::string pre = f.write();
                 std::ofstream(fs::path(argv[3]) / (in.stem().string() + ".pre.mer"), std::ios::binary).write(pre.data(), pre.size());
-                mer::Stats st;
+                di1::mer::Stats st;
                 std::string why;
-                bool ok = mer::transcode(T, f, &st, &why);
+                bool ok = di1::mer::transcode(T, di1::mer::Rules(), f, &st, &why);
                 std::string o = f.write();
                 std::ofstream(outp, std::ios::binary).write(o.data(), o.size());
                 printf("mer %-52s %d nodes, %d rerouted, %d dropped; mer %s: %d nodes %d stubs %d links %d dropped\n", name.c_str(), k, re, dr,
@@ -3377,7 +3383,7 @@ int main(int argc, char** argv)
             printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
         } else {
             if (opt != "only") {
-                int k = gameplay::zonelist30(t), ka = 0, kb = mission::beaconMap30(t, &ka);
+                int k = gameplay::zonelist30(t), ka = 0, kb = di1::mission::beaconMap30(t, &ka);
                 printf("zonelist30 %d records, beaconMap30 %d rows (+%d)\n", k, kb, ka);
             }
             out = t;

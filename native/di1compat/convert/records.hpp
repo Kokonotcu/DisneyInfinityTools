@@ -1,7 +1,9 @@
 // Record builders and pool edits for tuple files in 3.0's form (formats/oct.hpp). Data in, data out; any thread.
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -75,6 +77,13 @@ inline oct::Rec floatList(oct::File& f, uint16_t level, const std::string& n, co
     r.pay.append((const char*)v.data(), v.size() * 4);
     return r;
 }
+// A float scalar (FORMATS.md 3).
+inline oct::Rec floatRec(oct::File& f, uint16_t level, const std::string& n, float v)
+{
+    oct::Rec r{level, oct::makeType(oct::SCALAR, 0, oct::FLOAT), f.addName(n), std::string(4, '\0')};
+    memcpy(&r.pay[0], &v, 4);
+    return r;
+}
 // A keyed node: name n, key the decimal text of key (pool entries: DataNode = ['3']).
 inline oct::Rec keyedNode(oct::File& f, uint16_t level, const std::string& n, int key)
 {
@@ -123,6 +132,37 @@ inline void editPoolChildren(oct::File& f, long pool, const std::vector<size_t>&
     f.recs.swap(out);
 }
 
+// Records [at, at + erase) replaced by recs; at indexes the records as they were before the batch.
+struct RangeEdit {
+    size_t at;
+    size_t erase;
+    std::vector<oct::Rec> recs;
+};
+
+// A batch of non-overlapping edits applied in one pass, so no edit moves another's indices (C8). Empties edits.
+inline void applyEdits(oct::File& f, std::vector<RangeEdit>& edits)
+{
+    if (edits.empty()) return;
+    // stable: two inserts at one position keep their batch order
+    std::stable_sort(edits.begin(), edits.end(), [](const RangeEdit& a, const RangeEdit& b) { return a.at < b.at; });
+    size_t grown = 0;
+    for (const RangeEdit& e : edits) grown += e.recs.size();
+    // the records before the first edit stay where they are; only the rest is rebuilt
+    const size_t first = edits.front().at;
+    std::vector<oct::Rec> rest;
+    rest.reserve(f.recs.size() - first + grown);
+    size_t from = first;
+    for (RangeEdit& e : edits) {
+        detail::moveAppend(rest, f.recs, from, e.at);
+        detail::moveAppend(rest, e.recs, 0, e.recs.size());
+        from = e.at + e.erase;
+    }
+    detail::moveAppend(rest, f.recs, from, f.recs.size());
+    f.recs.erase(f.recs.begin() + first, f.recs.end());
+    detail::moveAppend(f.recs, rest, 0, rest.size());
+    edits.clear();
+}
+
 // A pool entry field for readEntryFields: a name (name0) into text, an int (int0) into number, or just seen.
 template <class Out>
 struct EntryField {
@@ -165,6 +205,58 @@ inline void eachAssociation(oct::File& f, const std::string& type, Fn fn)
             else if (n == "SubNetworkRef") sn = f.int0(f.recs[j]);
         }
         if (t == type && nn >= 0 && sn >= 0) fn(f.recs[nn], sn);
+    }
+}
+
+// ---- reading records that may lack a value ----
+
+// A record's first int, def if it has none (a node or an empty list)
+inline int firstInt(const oct::File& f, const oct::Rec& r, int def)
+{
+    auto v = f.ints(r);
+    return v.empty() ? def : v[0];
+}
+
+// Record r's first name, "" for none or r < 0
+inline std::string name1(const oct::File& f, long r)
+{
+    auto v = r < 0 ? std::vector<std::string>{} : f.nameValues(f.recs[r]);
+    return v.empty() ? std::string() : v[0];
+}
+
+// The first child of record i (one level down) with this name, -1 if none
+inline long child(const oct::File& f, size_t i, const char* nm)
+{
+    for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j)
+        if (f.recs[j].level == f.recs[i].level + 1 && f.name(f.recs[j]) == nm) return (long)j;
+    return -1;
+}
+
+// The pool's level-2 children named SubNetwork, in file order
+inline std::vector<size_t> subNetworks(const oct::File& f, long pool)
+{
+    std::vector<size_t> sns;
+    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
+        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
+    return sns;
+}
+
+// A record reader of a scan table: record i of f into out
+template <class Out>
+struct FieldRule {
+    const char* name;
+    void (*read)(const oct::File& f, size_t i, Out& out);
+};
+
+// Runs the rule named like record i, if any (the names of a table are distinct)
+template <class Out, size_t N>
+inline void readField(const oct::File& f, size_t i, const FieldRule<Out> (&rules)[N], Out& out)
+{
+    const std::string& k = f.name(f.recs[i]);
+    for (const FieldRule<Out>& rule : rules) {
+        if (k != rule.name) continue;
+        rule.read(f, i, out);
+        return;
     }
 }
 

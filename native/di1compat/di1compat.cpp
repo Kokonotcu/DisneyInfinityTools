@@ -71,8 +71,9 @@
 #include "trace/spawn.hpp"
 #include "trace/spawntrace.hpp"
 #include "trace/teardown.hpp"
-#include "mer.hpp"
-#include "mernode.hpp"
+#include "formats/mer.hpp"
+#include "games/di1/mer.hpp"
+#include "engine/mernode.hpp"
 #include "games/di1/renderoct.hpp"
 #include "formats/arc30.hpp"
 #include "convert/datamap.hpp"
@@ -81,7 +82,7 @@
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
-#include "cho.hpp"
+#include "games/di1/cho.hpp"
 #include "ui.hpp"
 #include "audio.hpp"
 #include "games/di1/vfx.hpp"
@@ -145,7 +146,7 @@ static mz_zip_archive* zipFor(const std::string& rel)
     return (g_zips[rel] = core::openZip(di1::archivePath(g_cfg.install10, rel))).get();
 }
 
-static cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
+static di1::cho::Aliases g_choAlias;   // Cho DataMap paths outside choreographies/<n>/<n> (cho.hpp, choalias10)
 
 // -> heap buffer (mz_free it) with the member's bytes, or nullptr. where = "zip:member" for the proof line.
 static void* read10z(const std::string& p, size_t* size, std::string* where);
@@ -666,7 +667,7 @@ static bool zoneListStage(Open& o, int*& out)
             const bool got10 = read10s("activitydata/defaultactivitybeacons.lua", t10);
             if (got10) k = gameplay::beacons30(t, t10);
         }
-        if (beacon) kb = mission::beaconMap30(t, &ka);
+        if (beacon) kb = di1::mission::beaconMap30(t, &ka);
     }
     if (g_cfg.challenge10)
         logf("%s: %d %s", o.p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
@@ -1097,12 +1098,6 @@ static void loadTables(const di1::Config& c, const char* dir)
          (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
          (unsigned)g_render.plans.size());
     g_merOk = g_mer.load(slurpFile(dir, "di1compat_mer.txt"));
-    g_mer.events10 = c.events10;
-    g_mer.portRefs = c.portRefs10;
-    g_mer.ports10 = c.ports10;
-    g_mer.pins10 = c.pins10;
-    g_mer.gate10 = c.gate10;
-    g_mer.toggleType10 = c.toggleType10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
 }
