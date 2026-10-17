@@ -198,8 +198,7 @@ static int* g_open(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, i
 
 static std::string g_gameDir;   // the 3.0 install; set once in Pentane_Main, before any hook
 
-// The key hashes of every 3.0 table of language `lang` (english_ntsc ...: _win32 and _pc_con of each package under
-// <game>\assets\lang), read from the archives once (text10: 3.0's keys are never shadowed).
+// Every 3.0 table's key hashes for language lang (both .dct kinds of each assets\lang package), read once (text10).
 static const std::unordered_set<uint32_t>& lang30(const std::string& lang)
 {
     static std::mutex mx;
@@ -220,16 +219,11 @@ static const std::unordered_set<uint32_t>& lang30(const std::string& lang)
     return s;
 }
 
-// World session: the .oct request transcodes the whole world (its .mtb/.vbuf/.ibuf decisions are coupled), and the
-// engine's next requests for those files are answered from here.
-// 1.0 archive overlay: a 1.0 asset archive also carries files under their full asset paths -- textures/<hash>.tbody,
-// and the motions its entity uses (characters/inc_bob/inc_bob_ps.zip holds characters/biped/motions/*.oct and .banm,
-// which no characters/biped archive has: in-game 2026-10-12 the transcoded inc_bob_ps.bent named them and they were
-// missing). The 1.0 engine sees them once the archive is loaded, so every 1.0 archive a file is served from gets its
-// full-path members indexed (engine path -> "<archive without .zip>/<member>", which read10 resolves); first wins.
+// World session: one .oct request transcodes the whole world; the engine's next requests for its files come from here.
 static std::mutex g_sessLock;
-static std::map<std::string, std::string> g_served;
-static std::map<std::string, std::string> g_over10;
+static std::map<std::string, std::string> g_served;   // guarded by g_sessLock
+// 1.0 archives' full-path members (path -> "<archive>/<member>"), seen once 1.0 loads the archive; first wins.
+static std::map<std::string, std::string> g_over10;   // guarded by g_sessLock
 static std::set<std::string> g_indexed10;
 static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1.0 (ui: their images may be too)
 static std::set<std::string> g_screens10;   // presentation/<screen>.lua served from 1.0: lower-case screen names (gprt)
@@ -239,7 +233,7 @@ static gen30::VFormats g_vf30;              // 3.0's (skintr10: the formats skin
 static std::map<uint32_t, gen30::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
 static bool g_renderOk;
 
-// Both games' scenesettingsformat.ssf (render.hpp ssfBlock30), parsed on first use; both or neither (cfg scenesettings10)
+// Both games' scenesettingsformat.ssf (render.hpp ssfBlock30), parsed once; both or neither (scenesettings10).
 static void sceneSettingsIO(render::IO& io)
 {
     static std::mutex mx;
@@ -270,12 +264,14 @@ static void indexZip10(const std::string& zipRel)
         std::string n = name;
         for (char& c : n) c = (c == '\\') ? '/' : (char)tolower((unsigned char)c);
         if (n.find('/') != std::string::npos && n.back() != '/') g_over10.emplace(n, base + name);
-        if (g_cfg.vfx10) if (std::string a = vfx::p3dAlias(n); !a.empty()) g_over10.emplace(a, base + name);   // 3.0 opens meshes by hash
+        if (!g_cfg.vfx10) continue;
+        // 3.0 opens meshes by hash
+        if (std::string a = vfx::p3dAlias(n); !a.empty()) g_over10.emplace(a, base + name);
     }
 }
 
-// D3D11 rejects block-compressed textures below 4x4; a 1x1/2x2 single-mip DXT file already holds one whole
-// 4x4 block, so only the header size changes (conv.copy_texture).
+// D3D11 rejects block-compressed textures under 4x4; a 1x1/2x2 one-mip DXT file holds a whole block:
+// header only (conv.copy_texture).
 static void padSmallDxt(std::string& d)
 {
     if (d.size() < 128 || d.compare(0, 4, "DDS ") || d.compare(84, 3, "DXT")) return;
@@ -289,8 +285,8 @@ static void padSmallDxt(std::string& d)
 
 #include "npcrt.hpp"
 
-// The render half of a 1.0 asset with a material bundle -- a world, a mission graph, ... (render.hpp): materials
-// onto 3.0 shaders and, where the asset has buffers, its vertices into formats those shaders take.
+// The render half of a 1.0 asset with a material bundle (render.hpp): materials onto 3.0 shaders, vertices into
+// their formats.
 static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string& note)
 {
     if (!g_renderOk) { note += "render table missing "; return false; }
@@ -323,11 +319,13 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
         if (!r.ibuf.empty()) g_served[dir + "/" + stem + "_0.ibuf"] = r.ibuf;
         if (!r.ibuf2.empty()) g_served[dir + "/" + stem + "_2.ibuf"] = r.ibuf2;
     }
+    // at most 179 characters (60 fixed, five numbers, both tails): never cut
     char buf[200];
-    sprintf_s(buf, "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s%s) ", r.tiers["translated"], r.tiers["real"],
-              r.tiers["same-sh"], r.tiers["generic"], (unsigned)r.textures10.size(),
-              r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "",
-              r.sceneSettings ? (", " + std::to_string(r.sceneSettings) + " scene settings").c_str() : "");
+    snprintf(buf, sizeof(buf), "+render(translated %d real %d same-sh %d generic %d, %u 1.0 textures%s%s) ",
+             r.tiers["translated"], r.tiers["real"], r.tiers["same-sh"], r.tiers["generic"],
+             (unsigned)r.textures10.size(),
+             r.skinned ? (", " + std::to_string(r.skinned) + " skinned in skin layout").c_str() : "",
+             r.sceneSettings ? (", " + std::to_string(r.sceneSettings) + " scene settings").c_str() : "");
     note += buf;
     return true;
 }
@@ -337,11 +335,12 @@ static bool has30(std::string dir)
 {
     std::string a = g_gameDir + "\\assets\\" + dir;
     for (char& c : a) if (c == '/') c = '\\';
-    return GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA((a + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+    return GetFileAttributesA((a + ".zip").c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-// gp: the engine's global surface table, in index order (FUN_00754eb0 fills *(0x2204830): +0xc {char*, bool}[],
-// +0x10 count; loaded from startup2 at boot, before any world). Empty until then.
+// gp: the engine's surface table, index order (FUN_00754eb0 fills *(0x2204830): +0xc {char*, bool}[], +0x10 count);
+// empty until startup2 loads.
 static std::vector<std::string> surfaceTable30()
 {
     std::vector<std::string> t;
@@ -442,10 +441,11 @@ static di1::TranscodeIO transcodeIO10()
     return io;
 }
 
+// memtest: whether p contains one of the cfg's comma-separated substrings.
 static bool memtestMatch(const char* p)
 {
-    char list[600];
-    strcpy_s(list, g_cfg.memtest);
+    char list[sizeof(g_cfg.memtest)];
+    snprintf(list, sizeof(list), "%s", g_cfg.memtest);   // never cut: the same size
     char* ctx = nullptr;
     for (char* t = strtok_s(list, ",", &ctx); t; t = strtok_s(nullptr, ",", &ctx))
         if (*t && strstr(p, t)) return true;
@@ -462,7 +462,7 @@ static bool installChoStart(const di1::Config& c)
         cho.started = [](const uint8_t*, const char* name, uint32_t flags) { audio::choreographyStarted(name, flags); };
     return engine::choreography::install(cho);
 }
-static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc loaded in-process, one frame captured once the world runs
+static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc in-process, one frame captured once the world runs
 // renderdoc10: one frame captured renderdoc10 seconds after the first 1.0 playset mission's tick (missiontrace).
 static void armRenderDocCapture()
 {
@@ -522,7 +522,7 @@ static bool installMerRegistry(const di1::Config& c)
                 (void**)&g_merRegistry);
 }
 
-// The open half: a .lua stream (3.0's own or served from 1.0) -> CHD bytes. nullptr leaves the open as it was.
+// Open half: a .lua stream (3.0's, or 1.0's served) as CHD bytes; nullptr leaves the open as it was.
 static int* chdForLua(const char* p, int* r)
 {
     std::string src;
@@ -530,7 +530,8 @@ static int* chdForLua(const char* p, int* r)
     else if (!read10s(norm(p), src)) return nullptr;
     try {
         std::string c = chd::compile(chd::lua(src));
-        logf("compiled %s %u B -> CHD %u B (%s)", p, (unsigned)src.size(), (unsigned)c.size(), r ? "3.0 file" : "1.0 file");
+        logf("compiled %s %u B -> CHD %u B (%s)", p, (unsigned)src.size(), (unsigned)c.size(),
+             r ? "3.0 file" : "1.0 file");
         return memFile(c.data(), c.size());
     } catch (std::exception& e) {
         logf("CHD compile of %s failed: %s; served as it is", p, e.what());
@@ -552,8 +553,8 @@ static int* sysServe(const char* p)
     if (!np.compare(0, cpre, sys::kChest10Prefix) && endsWith(p, ".lua")) {   // GLB-1 ChestInfo.bin -> Lua
         std::string bin = np.substr(cpre, np.size() - cpre - 4) + ".bin", why;
         bool ok = read10s(bin, src) && sys::chestInfoLua(src, out, &why);
-        logf("served %s from 1.0 %s (%u B) -> chestInfo Lua %u B%s%s", p, bin.c_str(), (unsigned)src.size(), (unsigned)out.size(),
-             ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
+        logf("served %s from 1.0 %s (%u B) -> chestInfo Lua %u B%s%s", p, bin.c_str(), (unsigned)src.size(),
+             (unsigned)out.size(), ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
         return ok ? memFile(out.data(), out.size()) : nullptr;
     }
     size_t ppre = strlen(sys::kPerc10Prefix);
@@ -562,7 +563,8 @@ static int* sysServe(const char* p)
         int added = 0;
         bool ok = read10s(bin, src) && sys::perceptionInfoLua(src, sys::perc30(), out, added, &why);
         logf("served %s from 1.0 %s (%u B) -> perceptions Lua %u B, %d perceptions 3.0 lacks%s%s", p, bin.c_str(),
-             (unsigned)src.size(), (unsigned)out.size(), added, ok ? "" : " FAILED: ", ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
+             (unsigned)src.size(), (unsigned)out.size(), added, ok ? "" : " FAILED: ",
+             ok ? "" : (src.empty() ? "no 1.0 file" : why.c_str()));
         return ok ? memFile(out.data(), out.size()) : nullptr;
     }
     size_t pre = strlen(sys::kLocks10Prefix);
@@ -1060,14 +1062,15 @@ static bool installShaders(const di1::Config& c, const engine::shaders::Compiler
     return engine::shaderlinks::install(links);
 }
 
-// vformat.vtxf: 3.0's formats plus every 1.0 format 3.0 lacks, so 1.0 vertex buffers draw as they are (their
-// trailing vertex colour in a stream of its own: gen30::mergeVtxf). Read once at boot, before any asset transcode.
+// vformat.vtxf: 3.0's formats plus each 1.0 format it lacks (vertex colour in its own stream). Read at boot,
+// before transcodes.
 static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 {
     int n = 0;
     std::string m = gen30::mergeVtxf(t30, t10, n, g_tails10);
     g_vf30 = gen30::vformats(t30);
-    logf("shaders10: vformat.vtxf + %d 1.0 formats, %u with their vertex colour in its own stream", n, (unsigned)g_tails10.size());
+    logf("shaders10: vformat.vtxf + %d 1.0 formats, %u with their vertex colour in its own stream", n,
+         (unsigned)g_tails10.size());
     return m;
 }
 
@@ -1218,8 +1221,8 @@ extern "C" void __stdcall Pentane_Main()
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
-    if (slash) strcpy_s(slash + 1, path + MAX_PATH - (slash + 1), "di1compat.log");
-    {   // the last 5 runs' logs stay as di1compat.1.log (newest) .. di1compat.5.log: a launch must not erase the evidence
+    if (slash) format::fitOrFailFast(slash + 1, path + MAX_PATH - (slash + 1), "%s", "di1compat.log");
+    {   // the last 5 runs' logs stay as di1compat.1.log (newest) .. di1compat.5.log: a launch keeps the evidence
         std::string base(path, strlen(path) - 4);
         for (int i = 4; i >= 0; --i)
             MoveFileExA(i ? (base + "." + std::to_string(i) + ".log").c_str() : path,
