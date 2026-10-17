@@ -326,10 +326,11 @@ struct NodeScan {
     std::vector<size_t> prims;
 };
 
-inline NodeScan scanNode(const oct::File& f, size_t n)
+// Node n's records up to end, its blockEnd
+inline NodeScan scanNode(const oct::File& f, size_t n, size_t end)
 {
     NodeScan s;
-    for (size_t j = n + 1, end = f.blockEnd(n); j < end; ++j) {
+    for (size_t j = n + 1; j < end; ++j) {
         const std::string& nm = f.name(f.recs[j]);
         const bool field = f.recs[j].level == kNodeLevel + 1;
         if (field && nm == "Type") {
@@ -467,9 +468,9 @@ inline bool layoutNode(WorldRun& w, oct::File& f, Geometry& g, const std::vector
     return true;
 }
 
-inline bool convertNode(WorldRun& w, oct::File& f, Geometry& g, size_t n)
+inline bool convertNode(WorldRun& w, oct::File& f, Geometry& g, size_t n, size_t end)
 {
-    const NodeScan node = scanNode(f, n);
+    const NodeScan node = scanNode(f, n, end);
     if (!node.geometry || node.prims.empty()) return true;
     std::vector<PrimRecs> ps(node.prims.size());
     for (size_t i = 0; i < node.prims.size(); ++i)
@@ -492,9 +493,10 @@ inline bool convertNodes(WorldRun& w, oct::File& f, Geometry& g)
     const long stp = f.pool("SceneTreeNodePool");
     if (stp < 0) return true;
     // reads only, the edits wait in g.edits: the pool's end holds
-    for (size_t n = stp + 1, end = f.blockEnd(stp); n < end; n = f.blockEnd(n)) {
+    for (size_t n = stp + 1, end = f.blockEnd(stp), next = 0; n < end; n = next) {
+        next = f.blockEnd(n);
         const bool node = f.recs[n].level == kNodeLevel && f.name(f.recs[n]) == "Node";
-        if (node && !convertNode(w, f, g, n)) return false;
+        if (node && !convertNode(w, f, g, n, next)) return false;
     }
     return true;
 }
