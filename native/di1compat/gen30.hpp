@@ -18,7 +18,7 @@
 #include <vector>
 #include "base/bytes.hpp"
 #include "formats/shd.hpp"
-#include "sm3.hpp"
+#include "formats/sm3.hpp"
 
 namespace gen30 {
 
@@ -83,34 +83,6 @@ inline bool parse10(const std::string& b, Shd10& s)
     for (int i = 0; i < ntech; ++i) s.techs.push_back({tn[i], tr[i] & 0xff, tr[i] >> 8});
     for (int i = 0; i < npar; ++i) s.params.push_back({pn[i], i < nA, (int)(pw[i] >> 16), (int)(pw[i] & 0xffff)});
     return o <= b.size();
-}
-
-// A D3D9 program's constant table: (name, set 'b'/'i'/'f'/'s', register, count).
-struct Const { std::string name; char set; int reg, count; };
-
-// CTAB entry k starts inside b (its fields are read checked); the file's count may be any u32
-inline bool entryStarts(const std::string& b, size_t base, uint32_t info, uint32_t k)
-{
-    return (uint64_t)base + info + 20ull * k < b.size();
-}
-inline std::vector<Const> ctab(const std::string& b)
-{
-    std::vector<Const> out;
-    size_t i = b.find("CTAB");
-    if (i == std::string::npos) return out;
-    size_t base = i + 4;
-    uint32_t n = bytes::u32OrZero(b, base + 12), info = bytes::u32OrZero(b, base + 16);
-    for (uint32_t k = 0; k < n && entryStarts(b, base, info, k); ++k) {
-        size_t e = base + info + 20 * k;
-        uint32_t nm = bytes::u32OrZero(b, e);
-        uint16_t rs = bytes::u16OrZero(b, e + 4);
-        uint16_t reg = bytes::u16OrZero(b, e + 6);
-        uint16_t cnt = bytes::u16OrZero(b, e + 8);
-        size_t z = b.find('\0', base + nm);
-        if (z == std::string::npos || rs > 3) continue;
-        out.push_back({b.substr(base + nm, z - base - nm), "bifs"[rs], reg, cnt});
-    }
-    return out;
 }
 
 // 1.0 vertex formats: GUID hash -> semantic (with index, 'NORMAL' -> 'NORMAL0') -> element type, from vformat.vtxf.
@@ -344,7 +316,8 @@ static const char* GBUFFER_EPILOGUE =
 // cbuffer registers b0..b4 Binding30 declares, one name each (perFrame .. perInstance); the table's V lines name one
 constexpr int kConstantBuffers = 5;
 
-struct Binding30 : sm3::Binding {
+// sm3::toHlsl's binding for a 1.0 program in 3.0
+struct Binding30 {
     const Tables& T;
     const Layout& L;
     std::map<std::string, std::string> fmt;
@@ -358,22 +331,29 @@ struct Binding30 : sm3::Binding {
     // own skinning becomes identity: bone indices 0, weights (1, 0, 0, 0), every bone the identity matrix.
     bool skin = false;
     std::set<std::string> needed;   // the vertex inputs the VS still reads
-    bool inputConst(const std::string& sem, std::string& expr) override
+    bool gbuffer = false;
+    bool depthOnly = false;   // a depth-only pass: keep the discards, drop the outputs
+    std::string epilogue;
+    bool inputConst(const std::string& sem, std::string& expr)
     {
         if (skin && sem.compare(0, 12, "BLENDINDICES") == 0) { expr = "float4(0, 0, 0, 0)"; return true; }
         if (skin && sem.compare(0, 11, "BLENDWEIGHT") == 0) { expr = "float4(1, 0, 0, 0)"; return true; }
         needed.insert(sem);
         return false;
     }
-    Binding30(const Tables& t, const Layout& l, const std::vector<Const>& ct, std::map<std::string, std::string> f, bool gb)
+    Binding30(const Tables& t, const Layout& l, const std::vector<sm3::Const>& ct, std::map<std::string, std::string> f)
         : T(t), L(l), fmt(std::move(f))
     {
         for (auto& c : ct) {
             if (c.set == 'f') for (int k = 0; k < c.count; ++k) creg[c.reg + k] = {c.name, c.reg};
             if (c.set == 's') sname[c.reg] = c.name;
         }
-        gbuffer = gb;
-        if (gb) epilogue = GBUFFER_EPILOGUE;
+    }
+    // A G-buffer pass's PS: 3.0's three targets, the 1.0 normal and gloss re-encoded
+    void gbufferOutput()
+    {
+        gbuffer = true;
+        epilogue = GBUFFER_EPILOGUE;
     }
     // -> buffer register (0..4) and first register, or buffer -1 with an expression, or false
     bool locate(const std::string& name, int& cb, int& base, std::string& expr)
@@ -393,7 +373,7 @@ struct Binding30 : sm3::Binding {
         }
         return false;
     }
-    std::string constant(int num, const std::string& rel) override
+    std::string constant(int num, const std::string& rel)
     {
         auto hit = creg.find(num);
         if (skin && hit != creg.end() && hit->second.first == "g_skinning_boneTransforms") {   // row_major float4x4 per bone
@@ -417,8 +397,8 @@ struct Binding30 : sm3::Binding {
         used[cb] = (std::max)(used[cb], base + num - reg0 + 1);
         return "CB" + std::to_string(cb) + "[" + std::to_string(base + num - reg0) + "]";
     }
-    std::string boolean(int) override { return "false"; }
-    std::string cbuffers() override
+    std::string boolean(int) { return "false"; }
+    std::string cbuffers()
     {
         static const char* names[kConstantBuffers] = {"perFrame", "perView", "perDraw", "perMaterial", "perInstance"};
         std::string s;
@@ -434,7 +414,7 @@ struct Binding30 : sm3::Binding {
         "#ifndef NG10\n#define NG10\nTexture2D tNG : register(t1); SamplerState sNG : register(s1);\n"
         "float4 ng10(float4 t) { float2 e = t.xy * 2.0 - 1.0; float3 n = float3(e, 1.0 - abs(e.x) - abs(e.y));\n"
         "    if (n.z < 0) n.xy = (1.0 - abs(n.yx)) * (n.xy >= 0 ? 1.0 : -1.0); return float4(normalize(n), t.z); }\n#endif";
-    void sampler(int num, int kind, std::string& tex, std::string& smp, std::string& decl) override
+    void sampler(int num, int kind, std::string& tex, std::string& smp, std::string& decl)
     {
         if (num == 1) { tex = "tNG"; smp = "sNG"; decl = NG10; return; }
         if (envOff(num)) { tex = smp = decl = ""; return; }
@@ -444,11 +424,11 @@ struct Binding30 : sm3::Binding {
             return;
         }
         int r = num == 0 ? 0 : num == 1 ? 1 : 5 + num - 3;
-        const char* Tn = kind == 3 ? "TextureCube" : kind == 4 ? "Texture3D" : "Texture2D";
+        const char* Tn = sm3::textureType(kind);
         tex = "t" + std::to_string(r); smp = "s" + std::to_string(r);
         decl = std::string(Tn) + " " + tex + " : register(t" + std::to_string(r) + "); SamplerState " + smp + " : register(s" + std::to_string(r) + ");";
     }
-    std::string sample(int num, int kind, const std::string& method, const std::string& uv, const std::string& extra) override
+    std::string sample(int num, int kind, const std::string& method, const std::string& uv, const std::string& extra)
     {
         std::string x = extra.empty() ? "" : ", " + extra;
         if (envOff(num)) return "float4(0, 0, 0, 0)";
@@ -461,9 +441,11 @@ struct Binding30 : sm3::Binding {
                    ").rgb, float3(0.2125, 0.7154, 0.0721)) * 8.0 / (exp2(10.0 * ng10(tNG." + method + "(sNG, " + uv + x +
                    ")).w + 1.0) + 2.0))";
         }
-        return sm3::Binding::sample(num, kind, method, uv, extra);
+        std::string t, s, d;
+        sampler(num, kind, t, s, d);
+        return sm3::sampleCall(t, s, method, uv, extra);
     }
-    std::string inputType(const std::string& sem) override
+    std::string inputType(const std::string& sem)
     {
         static const std::map<std::string, std::string> I = {{"U8_4", "uint"}, {"U16_2", "uint"}, {"U16_4", "uint"}, {"U8_1", "uint"},
                                                            {"U16_1", "uint"}, {"S16_2", "int"}, {"S16_4", "int"}, {"S8_4", "int"}};
@@ -572,7 +554,8 @@ inline bool translateProgram(const PassJob& job, Stage stage, const std::string&
     try {
         sm3::Program prog = sm3::parse(b);
         const std::map<std::string, std::string> none;
-        Binding30 B(job.sj.T, job.sj.L, ctab(b), ps ? none : job.format.elements, depth == shd::kDepthGBuffer && ps);
+        Binding30 B(job.sj.T, job.sj.L, sm3::ctab(b), ps ? none : job.format.elements);
+        if (ps && depth == shd::kDepthGBuffer) B.gbufferOutput();
         // depth-only: no colour output in 1549 of 3.0's 1550; 1.0's linear-depth colour painted near-black
         B.depthOnly = ps && depth == shd::kDepthOnly;
         B.skin = job.format.skinned && !ps;

@@ -1,15 +1,17 @@
-// D3D9 shader model 3 bytecode (the 1.0 .vp / .fp programs) -> HLSL for the D3D11 compiler. C++ port of DI3Tools/sm3.py
-// (its docstring has the token format and the translation rules); octtest --sm3 checks the text against it.
+// D3D9 shader model 3 programs read (tokens, constant table) and translated to HLSL for D3D11 (sm3.py).
+// Base only; any thread.
 #pragma once
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "../base/bytes.hpp"
 
 namespace sm3 {
 
@@ -40,7 +42,7 @@ inline const char* usage(int u)
 
 constexpr uint32_t kShaderModel3 = 0x0300;   // version token, low word
 constexpr uint32_t kPixelShader = 0xffff;    // version token, high word (vertex: 0xfffe)
-constexpr int kSampler2D = 2;                                         // dcl sampler type (D3DSTT_2D)
+constexpr int kSampler2D = 2, kSamplerCube = 3, kSamplerVolume = 4;   // dcl sampler types (D3DSAMPLER_TEXTURE_TYPE)
 constexpr int kModNegate = 1, kModAbs = 11, kModAbsNegate = 12;       // source modifiers (D3DSHADER_PARAM_SRCMOD_TYPE)
 constexpr int kModSaturate = 1;                                       // destination modifier (D3DSPDM_SATURATE)
 constexpr int kTexLdBias = 2;                                         // texld control (D3DSI_TEXLD_BIAS)
@@ -113,7 +115,7 @@ inline int dclSampler(uint32_t d) { return (d >> 27) & 0xf; }
 inline uint32_t token(const std::string& b, size_t i)
 {
     uint32_t v;
-    memcpy(&v, b.data() + 4 * i, 4);
+    memcpy(&v, b.data() + sizeof v * i, sizeof v);
     return v;
 }
 
@@ -139,8 +141,7 @@ inline bool noDestination(Opcode op)
     }
 }
 
-// Source operands of the instruction at token i (len tokens follow it), from its token k on. A relative-address
-// token follows its operand and must lie inside the instruction (RE-21).
+// Source operands at token i from operand token k; a relative-address token must lie inside the instruction (RE-21)
 inline void readSources(const std::string& b, size_t i, size_t len, size_t k, Op& o)
 {
     while (k < len) {
@@ -237,10 +238,46 @@ inline Program parse(const std::string& b)
     return p;
 }
 
-// Python repr() of a double (shortest round trip; exponent form below 1e-4 or from 1e16), for literal text identical
-// to sm3.py's.
+// A D3D9 program's constant table: (name, set 'b'/'i'/'f'/'s', register, count).
+struct Const { std::string name; char set; int reg, count; };
+
+namespace detail {
+
+constexpr size_t kCtabEntry = 20;   // D3DXSHADER_CONSTANTINFO
+
+// CTAB entry k starts inside b (its fields are read checked); the file's count may be any u32
+inline bool entryStarts(const std::string& b, size_t base, uint32_t info, uint32_t k)
+{
+    return (uint64_t)base + info + (uint64_t)kCtabEntry * k < b.size();
+}
+
+}  // namespace detail
+
+// The CTAB block (D3DXSHADER_CONSTANTTABLE: count +12, entries +16); entry: name +0, set +4, register +6, count +8
+inline std::vector<Const> ctab(const std::string& b)
+{
+    std::vector<Const> out;
+    size_t i = b.find("CTAB");
+    if (i == std::string::npos) return out;
+    size_t base = i + 4;
+    uint32_t n = bytes::u32OrZero(b, base + 12), info = bytes::u32OrZero(b, base + 16);
+    for (uint32_t k = 0; k < n && detail::entryStarts(b, base, info, k); ++k) {
+        size_t e = base + info + detail::kCtabEntry * k;
+        uint32_t nm = bytes::u32OrZero(b, e);
+        uint16_t rs = bytes::u16OrZero(b, e + 4);
+        uint16_t reg = bytes::u16OrZero(b, e + 6);
+        uint16_t cnt = bytes::u16OrZero(b, e + 8);
+        size_t z = b.find('\0', base + nm);
+        if (z == std::string::npos || rs > 3) continue;
+        out.push_back({b.substr(base + nm, z - base - nm), "bifs"[rs], reg, cnt});
+    }
+    return out;
+}
+
+// Python's repr() of a double: shortest round trip, exponent form below 1e-4 or from 1e16 (sm3.py's text)
 inline std::string pyrepr(double x)
 {
+    constexpr int kMinPlain = -4, kMaxPlain = 16;
     if (x == 0) return std::signbit(x) ? "-0.0" : "0.0";
     char buf[64];
     auto r = std::to_chars(buf, buf + sizeof(buf), x, std::chars_format::scientific);
@@ -254,11 +291,11 @@ inline std::string pyrepr(double x)
     for (char c : mant) if (c != '.') digits.push_back(c);
     while (digits.size() > 1 && digits.back() == '0') digits.pop_back();
     std::string out;
-    if (ex < -4 || ex >= 16) {
+    if (ex < kMinPlain || ex >= kMaxPlain) {
         out = digits.substr(0, 1);
         if (digits.size() > 1) out += "." + digits.substr(1);
         char eb[16];
-        sprintf_s(eb, "e%c%02d", ex < 0 ? '-' : '+', ex < 0 ? -ex : ex);
+        snprintf(eb, sizeof eb, "e%c%02d", ex < 0 ? '-' : '+', ex < 0 ? -ex : ex);
         out += eb;
     } else if (ex < 0) {
         out = "0." + std::string(-ex - 1, '0') + digits;
@@ -270,39 +307,24 @@ inline std::string pyrepr(double x)
     return neg ? "-" + out : out;
 }
 
-// Where a program's resources live (sm3.Binding).
-struct Binding {
-    virtual ~Binding() = default;
-    virtual std::string cbuffers() { return "cbuffer CB0 : register(b0) { float4 C[256]; uint4 B[16]; };"; }
-    virtual std::string constant(int num, const std::string& rel) { return "C[" + (rel.empty() ? "" : rel + " + ") + std::to_string(num) + "]"; }
-    virtual std::string boolean(int num) { return "(B[" + std::to_string(num) + "].x != 0)"; }
-    // -> texture name, sampler name, declarations
-    virtual void sampler(int num, int kind, std::string& tex, std::string& smp, std::string& decl)
-    {
-        const char* T = kind == 3 ? "TextureCube" : kind == 4 ? "Texture3D" : "Texture2D";
-        tex = "t" + std::to_string(num); smp = "s" + std::to_string(num);
-        decl = std::string(T) + " " + tex + " : register(t" + std::to_string(num) + "); SamplerState " + smp + " : register(s" + std::to_string(num) + ");";
-    }
-    virtual std::string sample(int num, int kind, const std::string& method, const std::string& uv, const std::string& extra)
-    {
-        std::string t, s, d;
-        sampler(num, kind, t, s, d);
-        return t + "." + method + "(" + s + ", " + uv + (extra.empty() ? "" : ", " + extra) + ")";
-    }
-    virtual std::string inputType(const std::string&) { return "float"; }
-    // a VS input given by an expression instead of the vertex (true: not declared in VSIn)
-    virtual bool inputConst(const std::string&, std::string&) { return false; }
-    bool gbuffer = false;
-    bool depthOnly = false;   // a depth-only pass (3.0 writes no colour there): keep the discards, drop the outputs
-    std::string epilogue;
-};
+// The HLSL texture type of a dcl sampler type
+inline const char* textureType(int kind)
+{
+    return kind == kSamplerCube ? "TextureCube" : kind == kSamplerVolume ? "Texture3D" : "Texture2D";
+}
 
-inline const char* VARYINGS[] = {"TEXCOORD0", "TEXCOORD1", "TEXCOORD2", "TEXCOORD3", "TEXCOORD4", "TEXCOORD5", "TEXCOORD6",
-                                 "TEXCOORD7", "TEXCOORD8", "TEXCOORD9", "COLOR0", "COLOR1"};
-// 3.0 renders reversed-Z (its sky VSs write z = 0, the far plane); 1.0's far-plane idiom is z = w (a .xyww matrix row,
-// bit-equal components), which under 3.0's test is the near plane: the 1.0 sky dome covered the world (2026-10-13).
-// Geometry through the shared worldToProjected matrix is reversed already. (sm3.py REVERSED_Z)
-inline const char* REVERSED_Z = "    if (vout.pos.z == vout.pos.w) vout.pos.z = 0;";
+// A sample call on texture tex through sampler smp; extra: the level or bias argument
+inline std::string sampleCall(const std::string& tex, const std::string& smp, const std::string& method,
+                              const std::string& uv, const std::string& extra)
+{
+    return tex + "." + method + "(" + smp + ", " + uv + (extra.empty() ? "" : ", " + extra) + ")";
+}
+
+// The VS outputs and PS inputs
+constexpr const char* kVaryings[] = {"TEXCOORD0", "TEXCOORD1", "TEXCOORD2", "TEXCOORD3", "TEXCOORD4", "TEXCOORD5",
+                                     "TEXCOORD6", "TEXCOORD7", "TEXCOORD8", "TEXCOORD9", "COLOR0", "COLOR1"};
+// 3.0 renders reversed-Z; 1.0's far-plane idiom z = w is its near plane: the 1.0 sky dome covered the world
+constexpr const char* kReversedZ = "    if (vout.pos.z == vout.pos.w) vout.pos.z = 0;";
 
 namespace detail {
 
@@ -371,6 +393,7 @@ inline std::string swizzle(int swz, int n)
 }
 
 // The program body as HLSL lines; temps and B's used buffers grow as it goes, so shells come after it
+template <class Binding>
 struct Emitter {
     const Decls& d;
     Binding& B;
@@ -400,7 +423,8 @@ struct Emitter {
     void instruction(const Op& o);
 };
 
-inline std::string Emitter::reg(const Operand& r)
+template <class Binding>
+inline std::string Emitter<Binding>::reg(const Operand& r)
 {
     const int n = r.num;
     switch (r.type) {
@@ -423,7 +447,8 @@ inline std::string Emitter::reg(const Operand& r)
 }
 
 // A def'd constant as its literal (sm3.py's float repr), else where the binding puts it
-inline std::string Emitter::constant(const Operand& r)
+template <class Binding>
+inline std::string Emitter<Binding>::constant(const Operand& r)
 {
     std::string rel;
     const char* relReg = r.relType == Reg::AddrTex ? "a" : "aL";
@@ -437,7 +462,8 @@ inline std::string Emitter::constant(const Operand& r)
 }
 
 // Source r swizzled to n components
-inline std::string Emitter::src(const Operand& r, int n)
+template <class Binding>
+inline std::string Emitter<Binding>::src(const Operand& r, int n)
 {
     std::string e = reg(r);
     if (r.type == Reg::ConstBool) return e;
@@ -446,14 +472,16 @@ inline std::string Emitter::src(const Operand& r, int n)
     return modified((sw == "xyzw") ? e : e + "." + sw, r.mod);
 }
 
-inline std::string Emitter::scalar(const Operand& r)
+template <class Binding>
+inline std::string Emitter<Binding>::scalar(const Operand& r)
 {
     std::string e = reg(r);
     if (r.type == Reg::AddrTex) e = "((float4)" + e + ")";
     return modified(e + "." + kSwizzle[r.swz & 3], r.mod);
 }
 
-inline void Emitter::assign(const Op& o, const std::string& val)
+template <class Binding>
+inline void Emitter<Binding>::assign(const Op& o, const std::string& val)
 {
     const Operand& dst = o.dst;
     if (dst.shift || (dst.mod & ~kModSaturate)) throw std::runtime_error("dst shift/modifier");
@@ -466,20 +494,23 @@ inline void Emitter::assign(const Op& o, const std::string& val)
         emit(reg(dst) + "." + mask + " = " + v + ";");
 }
 
-inline void Emitter::normalize(const Op& o)
+template <class Binding>
+inline void Emitter<Binding>::normalize(const Op& o)
 {
     std::string v = src(o.src[0]);
     store(o, v + " * rsqrt(dot((" + v + ").xyz, (" + v + ").xyz))");
 }
 
-inline void Emitter::sinCos(const Op& o)
+template <class Binding>
+inline void Emitter<Binding>::sinCos(const Op& o)
 {
     std::string a = scalar(o.src[0]);
     store(o, "float4(cos(" + a + "), sin(" + a + "), 0, 0)");
 }
 
 // texld (plain or biased) and texldl: the binding names the call; an undeclared sampler is 2D
-inline void Emitter::sample(const Op& o)
+template <class Binding>
+inline void Emitter<Binding>::sample(const Op& o)
 {
     const std::vector<Operand>& S = o.src;
     const Operand& sm = S[1];
@@ -495,33 +526,38 @@ inline void Emitter::sample(const Op& o)
 }
 
 // ifc: control 1..6 is the comparison (D3DSHADER_COMPARISON)
-inline void Emitter::ifCompare(const Op& o)
+template <class Binding>
+inline void Emitter<Binding>::ifCompare(const Op& o)
 {
     static constexpr const char* kCompare[] = {"", ">", "==", ">=", "<", "!=", "<="};
     if (o.ctl < 1 || o.ctl > 6) throw std::runtime_error("ifc");
     openBlock("if (" + scalar(o.src[0]) + " " + kCompare[o.ctl] + " " + scalar(o.src[1]) + ") {");
 }
 
-inline void Emitter::openBlock(const std::string& l)
+template <class Binding>
+inline void Emitter<Binding>::openBlock(const std::string& l)
 {
     emit(l);
     ++depth;
 }
 
-inline void Emitter::elseBlock()
+template <class Binding>
+inline void Emitter<Binding>::elseBlock()
 {
     --depth;
     emit("} else {");
     ++depth;
 }
 
-inline void Emitter::closeBlock()
+template <class Binding>
+inline void Emitter<Binding>::closeBlock()
 {
     --depth;
     emit("}");
 }
 
-inline void Emitter::instruction(const Op& o)
+template <class Binding>
+inline void Emitter<Binding>::instruction(const Op& o)
 {
     const std::vector<Operand>& S = o.src;
     switch (o.op) {
@@ -560,11 +596,12 @@ inline void Emitter::instruction(const Op& o)
 inline std::string varyings()
 {
     std::string io = "float4 pos : SV_Position;";
-    for (const char* v : VARYINGS) io += std::string(" float4 ") + v + " : " + v + ";";
+    for (const char* v : kVaryings) io += std::string(" float4 ") + v + " : " + v + ";";
     return io;
 }
 
 // VSIn, VSOut and main's opening: the outputs precise, the inputs the binding gives as expressions
+template <class Binding>
 inline void vsHead(std::map<int, std::string> inputs, Binding& B, std::vector<std::string>& out)
 {
     std::string in;
@@ -603,6 +640,7 @@ inline bool writesDepth(const Program& P)
 }
 
 // The PS outputs: the colour targets written and depth, the G-buffer's three, or none for a quiet depth-only pass
+template <class Binding>
 inline std::string psOutputs(const Program& P, const Binding& B, bool& quiet)
 {
     std::string outs;
@@ -618,6 +656,7 @@ inline std::string psOutputs(const Program& P, const Binding& B, bool& quiet)
 }
 
 // PSIn, PSOut and main's opening; true: a quiet depth-only PS (void main)
+template <class Binding>
 inline bool psHead(const Program& P, const Decls& d, Binding& B, std::vector<std::string>& out)
 {
     bool quiet = false;
@@ -648,7 +687,7 @@ inline void vsTail(const Decls& d, std::vector<std::string>& out)
     out.push_back("    VSOut vout = (VSOut)0;");
     for (auto& [k, v] : d.outputs)
         out.push_back("    vout." + (v == "POSITION0" ? std::string("pos") : v) + " = o" + std::to_string(k) + ";");
-    out.push_back(REVERSED_Z);
+    out.push_back(kReversedZ);
     out.push_back("    return vout;");
 }
 
@@ -664,11 +703,12 @@ inline std::string joinLines(const std::vector<std::string>& out)
 
 }  // namespace detail
 
-// The text is the shader cache key: keep it byte for byte (RE-02)
+// Binding says where resources live (sm3.py Binding). The text is the shader cache key: keep it exact (RE-02)
+template <class Binding>
 inline std::string toHlsl(const Program& P, Binding& B)
 {
     detail::Decls d = detail::scanDecls(P);
-    detail::Emitter e{d, B, !P.ps};
+    detail::Emitter<Binding> e{d, B, !P.ps};
     for (auto& o : P.ops) {
         if (detail::isDeclaration(o.op)) continue;
         detail::checkOp(o);
