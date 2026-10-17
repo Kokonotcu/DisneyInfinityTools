@@ -37,9 +37,11 @@
 #include "engine/assets.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
+#include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
 #include "games/di1/octsteps.hpp"
 #include "games/di1/options.hpp"
+#include "games/di1/popin.hpp"
 #include "games/di1/renderio.hpp"
 #include "games/di1/transcode.hpp"
 #include "games/di1/zones.hpp"
@@ -773,51 +775,6 @@ static int* chdForLua(const char* p, int* r)
     }
 }
 
-// PS-8 (sys.hpp): the expendables package loader FUN_0160aa30(path, ?) (ret 8) and the definition ctor FUN_016022c0
-// (thiscall, ret 4) -- entries of a package 3.0 lacks get the 1.0 pop-in
-typedef void(__fastcall* ExpPkgFn)(void* ecx, void* edx, const char* path, uint32_t a2);
-static ExpPkgFn g_expPkg;
-// deliv10: 1.0 RewardType "Delivery" (1.0 registry FUN_00cc2580 -> FUN_00b757c0, DeliveryExpendableReward) is the one
-// 1.0 type 3.0's registry (FUN_01232de0: FUN_0160a9c0(name, factory), thiscall on the expendables manager DAT_0228aa40)
-// lacks, so the 15 DELIVERY entries of inc_expendables.lua (INC_Spawn_GlidePack, _HoverBoard, _ZPE, cars ...) get no
-// object (entry reader FUN_01603930 drops a type without factory). On PC its grant 0xbae4d0 runs the Multi grant's
-// EXPENDABLE / UNLOCK / SPAWNACTOR / STAT handlers (FUN_00f99940, FUN_00f75bf0, FUN_00f75c30, FUN_00facb90, as Multi
-// FUN_00facc50) plus DeliveryNode bookkeeping (FUN_00b59940/80, FUN_00b599e0; the network branch is dead, FUN_00493940
-// returns 0). 3.0 kept Multi (factory FUN_016049f0, grant FUN_0160fbd0, same command table), so Delivery is registered
-// with it; the bookkeeping comes with a DeliveryNode port (impl-sys 6.3). Registered before the first package load.
-static void registerDelivery10()
-{
-    static std::mutex m;   // packages may load on several threads; one registry insert
-    static bool done = false;
-    std::lock_guard<std::mutex> l(m);
-    if (done) return;
-    void* mgr = *(void**)rt(0x0228AA40);
-    if (!mgr || !sys::readable(mgr, 0x70)) return;
-    ((void(__fastcall*)(void*, void*, const char*, void*))rt(0x0160A9C0))(mgr, nullptr, "Delivery", (void*)rt(0x016049F0));
-    done = true;
-    logf("deliv10: RewardType Delivery registered with 3.0's MultiExpendableReward factory (FUN_016049f0)");
-}
-static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
-{
-    if (g_cfg.deliv10) registerDelivery10();
-    if (!g_cfg.popin10) return g_expPkg(ecx, nullptr, path, a2);
-    char p[300];
-    safeCopy(p, sizeof(p), path);
-    int* s = g_open(p, 0, 0, 0, nullptr);   // the engine's own open, unhooked: does 3.0 ship this package?
-    if (s) ((void(__fastcall*)(void*, void*, uint32_t))(*(void***)s)[11])(s, nullptr, 1);
-    sys::g_pkg10 = s ? -1 : 0;
-    g_expPkg(ecx, nullptr, path, a2);
-    if (sys::g_pkg10 >= 0) logf("expendables %s (a 1.0 package): %d entries without PopinDistance pop in as in 1.0", p, sys::g_pkg10);
-    sys::g_pkg10 = -1;
-}
-
-// The expendables package hook (H1): popin10 or deliv10.
-static bool installExpPkg(const di1::Config& c)
-{
-    if (!c.popin10 && !c.deliv10) return true;
-    return hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg,
-                (void**)&g_expPkg);
-}
 // NPC-8: the .ap key SpawnEconomyOnDeath. 1.0's combat getter FUN_00aa1520 decides once per actor: default 1, then
 // the key from the actor's params (component DAT_016a6a80, +8; 271 uses in the 195 Metroville .ap files: 268 say 1,
 // 3 in in_city_story__missiongraph.ap say 0). 3.0's getter FUN_00ff69c0 (thiscall, decided-bit 0x20 of +0x90c) sets 1 unread; the 1.0
@@ -845,25 +802,6 @@ static bool installEcon(const di1::Config& c)
     if (!c.econ10) return true;
     return hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath,
                 (void**)&g_econOnDeath);
-}
-
-// the ctor returns this, and the entry reader uses it (FUN_01603930 at 0x01603a20: mov esi, eax for an entry without
-// RewardType), so the detour must hand it back
-typedef void*(__fastcall* ExpDefFn)(void* self, void* edx, void* entry);
-static ExpDefFn g_expDef;
-static void* __fastcall hkExpDef(void* self, void*, void* entry)
-{
-    void* r = g_expDef(self, nullptr, entry);
-    if (sys::g_pkg10 >= 0 && sys::applyPopin10(self)) ++sys::g_pkg10;
-    return r;
-}
-
-// popin10's definition ctor hook (H1).
-static bool installExpDef(const di1::Config& c)
-{
-    if (!c.popin10) return true;
-    return hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef,
-                (void**)&g_expDef);
 }
 
 // sys.hpp supplements: a 1.0 GameDB table reduced to the records the target DB lacks (served under a di1sys/ path)
@@ -2026,9 +1964,9 @@ extern "C" void __stdcall Pentane_Main()
     if (!engine::assets::install({(void*)&hkOpen, g_gameDir})) return;
     di1::gamedb::install(g_cfg);
     installEcon(g_cfg);
-    installExpPkg(g_cfg);
+    di1::expendables::install(g_cfg);
     installCurrency(g_cfg);
-    installExpDef(g_cfg);
+    di1::popin::install(g_cfg);
     installPlaysetSlot(g_cfg);
     trace::spawn::install({g_cfg.trace, g_cfg.hidePs});
     installShaders(g_cfg);
