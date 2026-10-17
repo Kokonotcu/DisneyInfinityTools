@@ -1,18 +1,21 @@
-// currency10: a 1.0 playset's zone pays and shows its own currency, not INV_SPARKS. core, engine/zones. Main thread.
+// currency10: a 1.0 playset's zone pays, shows and charges its own currency. core, engine/zones. Main, loader threads.
 #pragma once
 #include <windows.h>
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
 #include "../../engine/zones.hpp"
 #include "config.hpp"
 
 namespace di1::currency {
 
-// Installs the three currency hooks when c has currency10, all or none (H1, H2); false when they were refused.
+// Installs the currency hooks when c has currency10, all or none (H1, H2, H4); false when they were refused.
 inline bool install(const Config& c);
 // inventoryFilter -> the 1.0 playset's currency (currencies10, zones.hpp), as the zone list read finds them.
 inline void setCurrencies(std::map<std::string, std::string> currencies);
@@ -35,7 +38,19 @@ constexpr uint32_t kSetInt = 0x0154C100;          // FUN_0154c100: thiscall (key
 constexpr size_t kHudScript = 0x5C;               // the HUD's script
 constexpr size_t kHudForce = 0x87;                // the HUD forces its info update
 constexpr uint32_t kNoRef = 0xFFE17B81u;          // an empty ScriptRef's index, as the engine starts one
+// checked in install() (H4)
+constexpr uint32_t kRecordByUid = 0x0070F700;     // FUN_0070f700: cdecl (uid) -> a GameDB record, null if none
+constexpr const char* kRecordByUidPrologue = "51568B74240C56B9";
+// an InventoryItem, as FUN_018db5b0 and FUN_014bf7f0 fill it from its record
+constexpr size_t kItemName = 0x10;                // 'name', a CString
+constexpr size_t kItemType = 0x2C;                // 'type', an InventoryType record
+constexpr uint32_t kCurrencyType = 0x4BE;         // InventoryType CURRENCY's UID (bitmasks.lua 1214), FUN_014b4b40's
 }  // namespace eng
+
+// 1.0's core inventory types these CURRENCY; 3.0's retypes them CAT_NORIBBON. INV_SPARKS: 3.0 routes it by name.
+inline constexpr const char* kCurrencyItems10[] = {
+    "INV_CARS_CASH",           "INV_NSA_BUCKS",           "INV_SPACE_CRYSTAL",    "INV_MONSTERS_CURRENCY",
+    "INV_AVATARHOUSE_CURRENCY", "INV_LONERANGER_CURRENCY", "INV_PIRATES_CURRENCY", "INV_TEMP_CURRENCY"};
 
 // A Lua reference: state and index.
 struct ScriptRef {
@@ -46,12 +61,14 @@ struct ScriptRef {
 typedef void(__fastcall* ZoneCurrencyFn)(void* self, void* edx, const char* filter, void* out);
 typedef int(__fastcall* PlaysetCurrencyFn)(void* self, void* edx, void* L);
 typedef uint8_t(__fastcall* HudCurrencyFn)(uint8_t* hud, void* edx, void* data);
+typedef uint32_t(__fastcall* ItemReadFn)(uint8_t* item, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4);
 
 struct State {
     // originals: set once by hook() in install()
     ZoneCurrencyFn g_zoneCurrency = nullptr;
     PlaysetCurrencyFn g_playsetCurrency = nullptr;
     HudCurrencyFn g_hudCurrency = nullptr;
+    ItemReadFn g_itemReadLua = nullptr, g_itemReadChd = nullptr;
     std::mutex mx;                                   // guards currencies and told (its lines are logged under it)
     std::map<std::string, std::string> currencies;   // inventoryFilter -> currency
     core::LogOnce<std::string> told;                 // (asker, filter) pairs logged
@@ -141,6 +158,38 @@ inline uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
     return changed;
 }
 
+// A 1.0 currency item takes 3.0's CURRENCY type: FUN_014b4b40, 014b4c00 and 014bb210 then use its GLOBAL stat.
+inline void typeAsCurrency(uint8_t* item)
+{
+    char name[64];
+    core::cstr(item + eng::kItemName, name, sizeof(name));
+    const auto named = [&name](const char* c) { return !_stricmp(c, name); };
+    if (std::none_of(std::begin(kCurrencyItems10), std::end(kCurrencyItems10), named)) return;
+    void* currency = ((void*(__cdecl*)(uint32_t))core::rt(eng::kRecordByUid))(eng::kCurrencyType);
+    if (!currency) {
+        core::logf("currency10: inventory item %s kept its type: no InventoryType record %X", name, eng::kCurrencyType);
+        return;
+    }
+    *(void**)(item + eng::kItemType) = currency;
+    core::logf("currency10: inventory item %s typed CURRENCY, as 1.0 types it", name);
+}
+
+// FUN_014bfaa0, thiscall (4; ret 0x10): InventoryItem's Lua record read (vtable 0x01dbbc6c +0x1c). Loader, per record.
+inline uint32_t __fastcall hkItemReadLua(uint8_t* item, void*, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4)
+{
+    const uint32_t r = g_state.g_itemReadLua(item, nullptr, a1, a2, a3, a4);
+    typeAsCurrency(item);
+    return r;
+}
+
+// FUN_014bf7f0, thiscall (4; ret 0x10): InventoryItem's CHD record read (vtable +0x20). Loader threads, per record.
+inline uint32_t __fastcall hkItemReadChd(uint8_t* item, void*, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4)
+{
+    const uint32_t r = g_state.g_itemReadChd(item, nullptr, a1, a2, a3, a4);
+    typeAsCurrency(item);
+    return r;
+}
+
 }  // namespace detail
 
 inline void setCurrencies(std::map<std::string, std::string> currencies)
@@ -153,6 +202,10 @@ inline void setCurrencies(std::map<std::string, std::string> currencies)
 inline bool install(const Config& c)
 {
     if (!c.currency10) return true;
+    if (!core::prologueMatches(detail::eng::kRecordByUid, detail::eng::kRecordByUidPrologue)) {
+        core::logf("feature currency10 off: FUN_0070f700's prologue differs");
+        return false;
+    }
     detail::State& s = detail::g_state;
     return core::installFeature("currency10", {
         {"zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&detail::hkZoneCurrency,
@@ -161,6 +214,10 @@ inline bool install(const Config& c)
          (void*)&detail::hkPlaysetCurrency, (void**)&s.g_playsetCurrency},
         {"HUD currency (currency10)", 0x00FBB420, "6AFF68????????64A100000000", (void*)&detail::hkHudCurrency,
          (void**)&s.g_hudCurrency},
+        {"InventoryItem Lua read (currency10)", 0x014BFAA0, "6AFF68????????64A100000000506489250000000083EC7C",
+         (void*)&detail::hkItemReadLua, (void**)&s.g_itemReadLua},
+        {"InventoryItem CHD read (currency10)", 0x014BF7F0, "81ECA80000008B8424B8000000",
+         (void*)&detail::hkItemReadChd, (void**)&s.g_itemReadChd},
     });
 }
 
