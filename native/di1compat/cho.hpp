@@ -428,67 +428,97 @@ inline oct::Rec floatRec(oct::File& f, const char* name, float v, uint16_t level
     return r;
 }
 
+namespace detail {
+
+// What time30 reads of one SubNetwork, and the play range of its clips and events
+struct TimeScan {
+    bool has = false;      // it has MinTime / MaxTime already
+    bool isClip = false;   // Type 'Clip': a motion clip
+    long vgEnd = -1;       // end of its VariantGroupPool
+    long lbAt = -1;        // its LayerBindPool
+    std::string nb;        // its NetworkBuffer
+    std::vector<uint32_t> evOffs;   // NetworkBufferOffset of each EventList DataNode
+    float mn = FLT_MAX, mx = FLT_MIN;
+    bool any = false;
+};
+inline void hasTimes(const oct::File&, size_t, TimeScan& s) { s.has = true; }
+inline constexpr FieldRule<TimeScan> kTimeLevel3[] = {
+    {"MinTime", hasTimes},
+    {"MaxTime", hasTimes},
+    {"Type",
+     [](const oct::File& f, size_t i, TimeScan& s) {
+         s.isClip = f.nameValues(f.recs[i]) == std::vector<std::string>{"Clip"};
+     }},
+    {"VariantGroupPool", [](const oct::File& f, size_t i, TimeScan& s) { s.vgEnd = (long)f.blockEnd(i); }},
+    {"LayerBindPool", [](const oct::File&, size_t i, TimeScan& s) { s.lbAt = (long)i; }},
+    {"NetworkBuffer",
+     [](const oct::File& f, size_t i, TimeScan& s) { s.nb = f.recs[i].pay.substr(oct::spec(f.recs[i].type).cw); }},
+};
+
+// DataNode i's NetworkBufferOffset if it is an EventList, else -1
+inline long eventListOffset(const oct::File& f, size_t i)
+{
+    bool ev = false;
+    long off = -1;
+    for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
+        const std::string& k = f.name(f.recs[j]);
+        if (k == "Type") ev = f.nameValues(f.recs[j]) == std::vector<std::string>{"EventList"};
+        else if (k == "NetworkBufferOffset") off = first(f, f.recs[j], -1);
+    }
+    return ev ? off : -1;
+}
+
+inline TimeScan scanTime(const oct::File& f, size_t sn)
+{
+    TimeScan s;
+    for (size_t i = sn + 1, end = f.blockEnd(sn); i < end; ++i) {
+        const oct::Rec& r = f.recs[i];
+        const std::string& nm = f.name(r);
+        if (r.level == 3) readField(f, i, kTimeLevel3, s);
+        else if (nm == "ClipDataBlock") {   // any block of the SubNetwork, BYTE or not
+            const auto ts = clipTimes(r.pay.substr(oct::spec(r.type).cw));
+            if (!ts) continue;
+            s.mn = (std::min)(s.mn, ts->first);
+            s.mx = (std::max)(s.mx, ts->second);
+            s.any = true;
+        } else if (r.level == 4 && nm == "DataNode") {
+            const long off = eventListOffset(f, i);
+            if (off >= 0) s.evOffs.push_back((uint32_t)off);
+        }
+    }
+    return s;
+}
+
+// MinTime / MaxTime into one SubNetwork with clips or events; false if it gets none
+inline bool timeSubNetwork(oct::File& f, size_t sn)
+{
+    const size_t end = f.blockEnd(sn);
+    TimeScan s = scanTime(f, sn);
+    if (s.has || s.isClip) return false;   // motion clips: octx::clip30 (addAllCounts)
+    auto widen = [&s](float t) {
+        s.mn = (std::min)(s.mn, t);
+        s.mx = (std::max)(s.mx, t);
+        s.any = true;
+    };
+    for (uint32_t off : s.evOffs) eachEventTime(s.nb, off, widen);
+    if (!s.any) return false;
+    size_t at = (size_t)(s.vgEnd >= 0 ? s.vgEnd : s.lbAt >= 0 ? s.lbAt : (long)end);   // where 3.0 writes them
+    std::vector<oct::Rec> t = {floatRec(f, "MinTime", s.mn), floatRec(f, "MaxTime", s.mx)};
+    f.recs.insert(f.recs.begin() + at, t.begin(), t.end());
+    return true;
+}
+
+}  // namespace detail
+
+// time30 (chotime10): MinTime / MaxTime on every SubNetwork with clips or events (FORMATS.md 4.10)
 inline int time30(oct::File& f)
 {
     long pool = f.pool("SubNetworkPool");
     if (pool < 0) return 0;
-    std::vector<size_t> sns;
-    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; ++i)
-        if (f.recs[i].level == 2 && f.name(f.recs[i]) == "SubNetwork") sns.push_back(i);
+    const std::vector<size_t> sns = detail::subNetworks(f, pool);
     int n = 0;
-    for (auto it = sns.rbegin(); it != sns.rend(); ++it) {   // last first: insertions keep earlier indices
-        size_t sn = *it, end = f.blockEnd(sn);
-        bool has = false, any = false, isClip = false;
-        long vgEnd = -1, lbAt = -1;
-        std::string nb;
-        std::vector<uint32_t> evOffs;
-        float mn = FLT_MAX, mx = FLT_MIN;
-        for (size_t i = sn + 1; i < end; ++i) {
-            const oct::Rec& r = f.recs[i];
-            const std::string& nm = f.name(r);
-            if (r.level == 3) {
-                if (nm == "MinTime" || nm == "MaxTime") has = true;
-                else if (nm == "Type") isClip = f.nameValues(r) == std::vector<std::string>{"Clip"};
-                else if (nm == "VariantGroupPool") vgEnd = (long)f.blockEnd(i);
-                else if (nm == "LayerBindPool") lbAt = (long)i;
-                else if (nm == "NetworkBuffer") nb = r.pay.substr(oct::spec(r.type).cw);
-            } else if (nm == "ClipDataBlock") {
-                std::string b = r.pay.substr(oct::spec(r.type).cw);
-                if (b.size() < 8) continue;
-                float a, z;
-                memcpy(&a, &b[0], 4);
-                memcpy(&z, &b[4], 4);
-                mn = (std::min)(mn, a);
-                mx = (std::max)(mx, z);
-                any = true;
-            } else if (r.level == 4 && nm == "DataNode") {
-                bool ev = false;
-                long off = -1;
-                for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
-                    const std::string& k = f.name(f.recs[j]);
-                    if (k == "Type") ev = f.nameValues(f.recs[j]) == std::vector<std::string>{"EventList"};
-                    else if (k == "NetworkBufferOffset") off = first(f, f.recs[j], -1);
-                }
-                if (ev && off >= 0) evOffs.push_back((uint32_t)off);
-            }
-        }
-        if (has || isClip) continue;   // motion clips: octx::clip30 (addAllCounts)
-        for (uint32_t off : evOffs) {
-            uint32_t cnt = rd(nb, off, 4);
-            for (uint32_t k = 0; cnt != 0xffffffffu && k < cnt && off + 8 + 8 * (size_t)k <= nb.size(); ++k) {
-                float t;
-                memcpy(&t, &nb[off + 4 + 8 * k], 4);
-                mn = (std::min)(mn, t);
-                mx = (std::max)(mx, t);
-                any = true;
-            }
-        }
-        if (!any) continue;
-        size_t at = (size_t)(vgEnd >= 0 ? vgEnd : lbAt >= 0 ? lbAt : (long)end);
-        std::vector<oct::Rec> t = {floatRec(f, "MinTime", mn), floatRec(f, "MaxTime", mx)};
-        f.recs.insert(f.recs.begin() + at, t.begin(), t.end());
-        ++n;
-    }
+    for (auto it = sns.rbegin(); it != sns.rend(); ++it)   // last first: insertions keep earlier indices
+        n += detail::timeSubNetwork(f, *it);
     return n;
 }
 

@@ -342,6 +342,13 @@ Code: `expl30.py`
 ### 4.10 1.0 choreographies in 3.0 form
 Code: `native/di1compat` `cho.hpp` (plan CHO-1, NPC-6), each step behind its own cfg key; the step order is `games/di1/octsteps.hpp`'s.
 
+#### Play ranges (`time30`, cfg `chotime10`)
+`MinTime` / `MaxTime` of every SubNetwork with clips or events.
+- 3.0 takes a SubNetwork's time range only from these records (FUN_00500ac0 -> FUN_004b0f70; absent = FLT_MAX..-FLT_MAX = invalid). It reaches the asset (FUN_0076d4e0 / FUN_00788280 -> FUN_0076c090) and the playback clock's play range (FUN_00774360 -> FUN_00525830, which leaves the range unset while it is invalid). 1.0 has no such records and computes the range at runtime (FUN_004ebc90).
+- **Rule**, exact on every SubNetwork of every shipped 3.0 choreography (8,612/8,612) and exploder (2,947/2,947; `timefit2.py`): present iff the SubNetwork has a ClipDataBlock or a static EventList event; MinTime = min(block f32[0], event times), MaxTime = max(FLT_MIN, block f32[1], event times).
+- EventList data sits in the SubNetwork's `NetworkBuffer` at the node's `NetworkBufferOffset`: `u32 n, n x (f32 time, f32 value)`, the same bytes in both games (bld_damage_explosion twin).
+- Placed after `VariantGroupPool` (else before `LayerBindPool`, else at the SubNetwork's end), as 3.0 writes them. Motion clips (Type `Clip`) get theirs from `octx::clip30` in `addAllCounts`.
+
 #### Animation time inputs (`anim30`, cfg `choanim10`)
 The time input of ClipProcessor / EventList: 1.0 drives them from a Float DataNode under the root header `Global.Time`, 3.0 from an AnimState DataNode under the root header `AnimState`.
 - 3.0 binds the input slot by type: EventListProcessor FUN_0054b180 binds slot 2 `Input` via FUN_00530ad0 with an AnimState type check (DAT_0213e6b0/ac). A Float leaves the slot empty and the evaluate FUN_0052d390 passes NULL to FUN_0048d2b0 (in-game 2026-10-13: AV at 0048D2B3 once `time30` let ts_watersplashdown evaluate).
