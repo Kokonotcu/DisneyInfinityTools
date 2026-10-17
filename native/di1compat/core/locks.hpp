@@ -47,6 +47,8 @@ inline constexpr const char* kHeldAcrossEngineCalls[] = {
     "g_dbLock (prepare's engine opens)",
     "engine::shaders mx (program registration)",
     "engine::shaders recCs (input layouts)",
+    "di1::particles uniLock (the universal10 package load: lookup + insert one at a time)",
+    "di1::shutdown keepMx (actorOf while pruning dead handles)",
 };
 
 // Never hold a plugin lock across engine::assets::open, read30, readStream or an engine loader.
