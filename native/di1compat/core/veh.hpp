@@ -1,9 +1,8 @@
-// The plugin's vectored exception handlers: avHandler logs the first access violation with its stack; the DR0
-// watchpoint (trace) logs who writes one address. Both run inside the handler chain, so they and all they call never
-// fault and never allocate (CLAUDE.md H9). core/log.hpp, core/stack.hpp, core/memcheck.hpp.
+// The vectored exception handlers: first access violation, trace DR0 watchpoint. Never fault or allocate (H9).
 #pragma once
 #include <windows.h>
 #include <tlhelp32.h>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include "hooks.hpp"
@@ -14,26 +13,36 @@
 namespace core {
 
 namespace detail {
-inline volatile LONG g_avLogged;         // avHandler's one-shot, set by InterlockedExchange
-inline volatile uintptr_t g_watchAddr;   // the watched address: set once by watch()
-inline volatile LONG g_watchHits;        // watchpoint hits so far (Interlocked)
+struct VehState {
+    std::atomic<LONG> avLogged{0};         // avHandler's one-shot; any thread
+    std::atomic<uintptr_t> watchAddr{0};   // the watched address: set once by watch()
+    std::atomic<LONG> watchHits{0};        // watchpoint hits so far; any thread
+};
+inline VehState g_veh;
 // DR7 fields of debug breakpoint 0 (Intel SDM vol. 3, 17.2.4)
 constexpr unsigned long kDr7Slot0 = 0xF0003ul;      // L0, G0, R/W0 and LEN0
 constexpr unsigned long kDr7L0 = 1ul;               // local enable
 constexpr unsigned long kDr7Rw0Write = 1ul << 16;   // break on data writes
 constexpr unsigned long kDr7Len0Dword = 3ul << 18;  // 4 bytes
+constexpr unsigned long kDr6B0 = 1ul;               // DR6: breakpoint 0 fired
+constexpr LONG kWatchHitsLogged = 10;               // watch hits that get a line
+constexpr int kWatchStackWords = 400;               // stack words a watch hit scans
+constexpr int kWatchStackFound = 14;                // exe addresses a watch hit lists
+constexpr DWORD kArmWaitMs = 5000;                  // watch() waits this long for the arming thread
 }  // namespace detail
 
-// First access violation in the exe: the faulting address and a call stack (stack words that point into the exe right
-// after a call instruction: E8 rel32 whose target is plausible, or an FF /2 indirect call), static addresses. Logged
-// once, then the exception continues to the game's / CrabeLoader's handlers.
+// First access violation: its address and exe call stack, as static addresses. Logged once; the search continues.
 inline LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
 {
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || InterlockedExchange(&detail::g_avLogged, 1)) return EXCEPTION_CONTINUE_SEARCH;
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || detail::g_veh.avLogged.exchange(1))
+        return EXCEPTION_CONTINUE_SEARCH;
     uintptr_t eip = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
+    const ULONG_PTR* info = e->ExceptionRecord->ExceptionInformation;
+    // never cut: at most 54 characters, plus 24 stack words of 9 (stackOf)
     char line[900];
-    int len = sprintf_s(line, "ACCESS VIOLATION at %08X (%s %08X), stack:", (unsigned)(inExeImage(eip) ? toStaticVa(eip) : eip),
-                        e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (unsigned)e->ExceptionRecord->ExceptionInformation[1]);
+    const unsigned at = (unsigned)(inExeImage(eip) ? toStaticVa(eip) : eip);
+    int len = snprintf(line, sizeof(line), "ACCESS VIOLATION at %08X (%s %08X), stack:", at, info[0] ? "write" : "read",
+                       (unsigned)info[1]);
     stackOf((const uint32_t*)e->ContextRecord->Esp, line, sizeof(line), len);
     logf("%s", line);
     return EXCEPTION_CONTINUE_SEARCH;
@@ -42,18 +51,23 @@ inline LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
 // Trace only: DR0 write watchpoint on one address in every thread; logs the writer's EIP and stack (first 10 hits).
 inline LONG CALLBACK watchHandler(EXCEPTION_POINTERS* e)
 {
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6 & detail::kDr6B0))
+        return EXCEPTION_CONTINUE_SEARCH;
     e->ContextRecord->Dr6 = 0;
-    if (InterlockedIncrement(&detail::g_watchHits) <= 10) {
+    if (++detail::g_veh.watchHits <= detail::kWatchHitsLogged) {
+        // never cut: at most 56 characters, plus 14 stack words of 9
         char line[700];
         uintptr_t eip = e->ContextRecord->Eip;
-        int len = sprintf_s(line, "watch hit: value now %d, eip %08X, stack:", *(int*)detail::g_watchAddr,
-                            (unsigned)(inExeImage(eip) ? toStaticVa(eip) : eip));
+        const int value = *(int*)detail::g_veh.watchAddr.load();
+        int len = snprintf(line, sizeof(line), "watch hit: value now %d, eip %08X, stack:", value,
+                           (unsigned)(inExeImage(eip) ? toStaticVa(eip) : eip));
         const uint32_t* sp = (const uint32_t*)e->ContextRecord->Esp;
-        int words = readableWords(sp, 400);
-        for (int i = 0, found = 0; i < words && found < 14; ++i) {
+        int words = readableWords(sp, detail::kWatchStackWords);
+        for (int i = 0, found = 0; i < words && found < detail::kWatchStackFound; ++i) {
             uint32_t v = sp[i];
-            if (inExeImage(v)) { len += sprintf_s(line + len, sizeof(line) - len, " %08X", (unsigned)toStaticVa(v)); ++found; }
+            if (!inExeImage(v)) continue;
+            len += snprintf(line + len, sizeof(line) - len, " %08X", (unsigned)toStaticVa(v));
+            ++found;
         }
         logf("%s", line);
     }
@@ -74,7 +88,7 @@ inline DWORD WINAPI armWatch(void*)
         CONTEXT c{};
         c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
         if (GetThreadContext(t, &c)) {
-            c.Dr0 = detail::g_watchAddr;
+            c.Dr0 = detail::g_veh.watchAddr.load();
             c.Dr7 = (c.Dr7 & ~detail::kDr7Slot0) | detail::kDr7L0 | detail::kDr7Rw0Write | detail::kDr7Len0Dword;
             if (SetThreadContext(t, &c)) ++n;
         }
@@ -82,18 +96,20 @@ inline DWORD WINAPI armWatch(void*)
         CloseHandle(t);
     }
     CloseHandle(snap);
-    logf("watch armed on %08X in %d threads", (unsigned)detail::g_watchAddr, n);
+    logf("watch armed on %08X in %d threads", (unsigned)detail::g_veh.watchAddr.load(), n);
     return 0;
 }
 
 // Arms the watchpoint on addr once (later calls return at once); waits up to 5 s for the arming thread.
 inline void watch(uintptr_t addr)
 {
-    if (detail::g_watchAddr) return;
-    detail::g_watchAddr = addr;
+    if (detail::g_veh.watchAddr.load()) return;
+    detail::g_veh.watchAddr.store(addr);
     AddVectoredExceptionHandler(1, watchHandler);
     HANDLE h = CreateThread(nullptr, 0, armWatch, nullptr, 0, nullptr);   // a thread cannot set its own context
-    if (h) { WaitForSingleObject(h, 5000); CloseHandle(h); }
+    if (!h) return;
+    WaitForSingleObject(h, detail::kArmWaitMs);
+    CloseHandle(h);
 }
 
 }  // namespace core
