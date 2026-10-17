@@ -70,27 +70,11 @@ inline std::string shaderCacheName(const char* target, const std::string& hlsl)
 constexpr uint32_t kH131 = 131;
 constexpr uint32_t kEhashFold = 0x25;   // FUN_0044a9f0 adds each 4 chars and multiplies by it
 
-// x131 over n chars or to a NUL, chars sign-extended (3.0 FUN_0040bb50, 1.0 FUN_0040bac0)
+// x131 over n chars or to a NUL, chars sign-extended (3.0 FUN_0040bb50, 1.0 FUN_0040bac0); lower-cased: FUN_0040bb80
 inline uint32_t h131Signed(const char* s, size_t n)
 {
     uint32_t h = 0;
     for (size_t i = 0; i < n && s[i]; ++i) h = h * kH131 + (uint32_t)(int32_t)(signed char)s[i];
-    return h;
-}
-
-// x131 to a NUL, chars zero-extended: differs from the engine for bytes >= 0x80 (AU-42)
-inline uint32_t h131Unsigned(const char* s)
-{
-    uint32_t h = 0;
-    for (; *s; ++s) h = h * kH131 + (uint8_t)*s;
-    return h;
-}
-
-// h131Unsigned of the name lower-cased by the CRT
-inline uint32_t h131UnsignedLower(const char* s)
-{
-    uint32_t h = 0;
-    for (; *s; ++s) h = h * kH131 + (uint32_t)tolower((uint8_t)*s);
     return h;
 }
 

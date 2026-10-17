@@ -293,7 +293,7 @@ inline void hashStrings(const std::vector<uint8_t>& d, dlgscript::EventNames& ou
             if (!bytes::fits(len, 4 + (size_t)cnt * 4, rel)) continue;   // no 32-bit wrap of the string offset
             const uint32_t o = 4 + cnt * 4 + rel;
             if (o >= len || !memchr(s + o, 0, len - o)) continue;
-            out.emplace(hash::h131Unsigned((const char*)s + o), (const char*)s + o);
+            out.emplace(hash::h131Signed((const char*)s + o, SIZE_MAX), (const char*)s + o);
         }
         return;
     }
@@ -458,13 +458,13 @@ inline void* __fastcall hkDlgReq(void* pool, void*, const char** nameRec, uint32
     State& s = g_state;
     const char* name = nameRec ? *nameRec : nullptr;
     uint8_t* dm = s.dialogMgr;
-    const uint32_t cs = name ? hash::h131Unsigned(name) : 0;
+    const uint32_t cs = name ? hash::h131Signed(name, SIZE_MAX) : 0;
     if (name) {   // a sequence entry of that name is armed: its first line's post starts the rest
         std::lock_guard<std::recursive_mutex> l(s.mx);
         auto q = s.scripts.seqs.find(cs);
         if (q != s.scripts.seqs.end()) s.armed = {q->second, GetTickCount(), true};
     }
-    const uint32_t lo = name && dm ? hash::h131UnsignedLower(name) : 0;
+    const uint32_t lo = name && dm ? hash::h131Signed(text::lower(name).c_str(), SIZE_MAX) : 0;
     if (name && dm && cs != lo) aliasScripts(dm, name, cs, lo);
     return s.oDlgReq(pool, nullptr, nameRec, a2);
 }
