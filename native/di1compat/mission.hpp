@@ -13,10 +13,13 @@
 // Intro/Generic/Interact: a mission's Activate list (DockFire's spawns, triggers, set-piece caches) never fired.
 #pragma once
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mission {
@@ -84,75 +87,133 @@ inline int progress30(std::string& t)
     return 1;
 }
 
-// The task lines of a 1.0 mission without the generated mission line (Parms.UseMissionGeneratedProgressStringNew =
-// false: 3 Toy Story missions). 1.0 builds them from the eval tree: an Eval_LogicProgressOverride shows
-// Localize(ProgressStr) and nothing below it; an eval with UseGeneratedProgressStringNew shows (FUN_00ffdaf0)
-// Localize("<MissionName>_Task<EvalPriority>"), or "<MissionName>_<ProgressGeneratedSuffix>" when it has one
-// (+0xe = Data.EvalPriority, FUN_010092c0); HideProgress hides an eval. 3.0's eval loader (FUN_01722b70) reads only
-// ProgressString / ProgressStringCustom: "<custom>" -> the custom string, "" / absent / "<none>" -> hidden, anything
-// else -> key = mission name + value. So such an override gets ProgressString "<custom>" with ProgressStringCustom =
-// its ProgressStr, and a generated eval outside any override gets ProgressString "_Task<EvalPriority>" or
-// "_<suffix>"; evals below an override stay as they are (hidden in 3.0, suppressed in 1.0). tslines.py checks the 13
-// resulting keys: 12 are in the ts table (ts_maintown_story_powertower_Task4 is in none; both games show the key).
+namespace detail {
+
+inline bool isLineBreak(char c) { return c == '\n' || c == '\r'; }
+
+// The line at a without its line break; next = where the following line starts
+inline std::string lineAt(const std::string& t, size_t a, size_t& next)
+{
+    size_t e = t.find('\n', a);
+    next = e == std::string::npos ? t.size() : e + 1;
+    std::string l = t.substr(a, next - a);
+    while (!l.empty() && isLineBreak(l.back())) l.pop_back();
+    return l;
+}
+
+// A '<tabs>k = v,' line: v without its comma and quotes; false for another key
+inline bool luaField(const std::string& l, const char* k, std::string& v)
+{
+    size_t i = l.find_first_not_of('\t');
+    if (i == std::string::npos || l.compare(i, strlen(k), k) || l.compare(i + strlen(k), 3, " = ")) return false;
+    v = l.substr(i + strlen(k) + 3);
+    if (!v.empty() && v.back() == ',') v.pop_back();
+    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+    return true;
+}
+
+// An eval's 'Data = { ... },' block: where it sits and the fields taskLines30 reads
+struct EvalBlock {
+    size_t node, open, close;   // its node's '{', its 'Data = ' line, its closing '},' line
+    int ind;                    // the tabs before 'Data = '
+    std::string type, str, sfx, prio;
+    bool gen = false, hide = false, has = false;
+};
+
+using EvalField = void (*)(EvalBlock& b, const std::string& v);
+inline void hasProgressString(EvalBlock& b, const std::string&) { b.has = true; }
+inline constexpr std::pair<const char*, EvalField> kEvalFields[] = {
+    {"Type", [](EvalBlock& b, const std::string& v) { b.type = v; }},
+    {"ProgressStr", [](EvalBlock& b, const std::string& v) { b.str = v; }},
+    {"ProgressGeneratedSuffix", [](EvalBlock& b, const std::string& v) { b.sfx = v; }},
+    {"EvalPriority", [](EvalBlock& b, const std::string& v) { b.prio = v; }},
+    {"UseGeneratedProgressStringNew", [](EvalBlock& b, const std::string& v) { b.gen = v == "true"; }},
+    {"HideProgress", [](EvalBlock& b, const std::string& v) { b.hide = v == "true"; }},
+    {"ProgressString", hasProgressString},
+    {"ProgressStringCustom", hasProgressString},
+};
+
+// One line of a Data block into b (the keys are exact, so at most one row matches)
+inline void evalField(EvalBlock& b, const std::string& line)
+{
+    std::string v;
+    for (auto& [key, read] : kEvalFields) {
+        if (!luaField(line, key, v)) continue;
+        read(b, v);
+        return;
+    }
+}
+
+// Data block at line a (ind tabs). next: in, the line after a; out, where scanning resumes, npos to stop
+inline std::optional<EvalBlock> evalBlock(const std::string& t, size_t a, size_t ind, size_t& next)
+{
+    EvalBlock b{};
+    b.ind = (int)ind;
+    size_t n2;
+    if (lineAt(t, next, n2) != std::string(ind, '\t') + "{") return std::nullopt;
+    const std::string closeLine = std::string(ind, '\t') + "},";
+    size_t c = n2, cn = n2;
+    for (; c < t.size(); c = cn) {
+        std::string fl = lineAt(t, c, cn);
+        if (fl == closeLine) break;
+        evalField(b, fl);
+    }
+    if (c >= t.size()) {
+        next = std::string::npos;   // unclosed: the scan ends
+        return std::nullopt;
+    }
+    b.open = a;
+    b.close = c;
+    const std::string nodeOpen = "\n" + std::string(ind - 1, '\t') + "{\n";   // its node's '{': the nearest at ind - 1
+    size_t no = t.rfind(nodeOpen, a);
+    b.node = no == std::string::npos ? 0 : no;
+    next = cn;
+    return b;
+}
+
+// Every eval's Data block from the Tasks table on (to the end of the file, GR-28)
+inline std::vector<EvalBlock> evalBlocks(const std::string& t)
+{
+    std::vector<EvalBlock> bs;
+    for (size_t a = t.find("\tTasks = "), next; a != std::string::npos && a < t.size(); a = next) {
+        std::string l = lineAt(t, a, next);
+        size_t ind = l.find_first_not_of('\t');
+        if (ind == std::string::npos || ind < 1 || l.compare(ind, std::string::npos, "Data = ")) continue;
+        std::optional<EvalBlock> b = evalBlock(t, a, ind, next);
+        if (b) bs.push_back(*b);
+        else if (next == std::string::npos) break;
+    }
+    return bs;
+}
+
+// The ProgressString lines block b gets in 3.0 ("" for none); evals below an override get none
+inline std::string progressLines(const EvalBlock& b, const std::vector<EvalBlock>& bs)
+{
+    if (b.hide || b.has) return "";
+    const std::string tab(b.ind + 1, '\t');
+    if (b.type == "Eval_LogicProgressOverride" && !b.str.empty())
+        return tab + "ProgressString = \"<custom>\",\n" + tab + "ProgressStringCustom = \"" + b.str + "\",\n";
+    if (!b.gen) return "";
+    for (const EvalBlock& o : bs) {
+        const bool isOverride = o.type == "Eval_LogicProgressOverride" && o.ind < b.ind;
+        if (isOverride && o.node < b.open && b.open < o.open) return "";
+    }
+    const std::string task = "Task" + (b.prio.empty() ? std::string("0") : b.prio);
+    return tab + "ProgressString = \"_" + (b.sfx.empty() ? task : b.sfx) + "\",\n";
+}
+
+}  // namespace detail
+
+// taskLines30 (progress10): 3.0 ProgressString lines for a mission without the generated line (FORMATS.md 10.3).
 // Returns the evals changed.
 inline int taskLines30(std::string& t)
 {
     size_t pp = t.find("\n\tParms = "), pe = pp == std::string::npos ? pp : t.find("\n\t}", pp);
     if (pe == std::string::npos || t.find("\n\t\tUseMissionGeneratedProgressStringNew = false,", pp) > pe) return 0;
-    struct Blk { size_t node, open, close; int ind; std::string type, str, sfx, prio; bool gen = false, hide = false, has = false; };
-    std::vector<Blk> bs;
-    auto lineAt = [&](size_t a, size_t& next) { size_t e = t.find('\n', a); next = e == std::string::npos ? t.size() : e + 1;
-                                                std::string l = t.substr(a, next - a); while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back(); return l; };
-    auto field = [](const std::string& l, const char* k, std::string& v) {
-        size_t i = l.find_first_not_of('\t');
-        if (i == std::string::npos || l.compare(i, strlen(k), k) || l.compare(i + strlen(k), 3, " = ")) return false;
-        v = l.substr(i + strlen(k) + 3);
-        if (!v.empty() && v.back() == ',') v.pop_back();
-        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
-        return true;
-    };
-    for (size_t a = t.find("\tTasks = "), next; a != std::string::npos && a < t.size(); a = next) {
-        std::string l = lineAt(a, next);
-        size_t ind = l.find_first_not_of('\t');
-        if (ind == std::string::npos || l.compare(ind, std::string::npos, "Data = ") || ind < 1) continue;
-        Blk b;
-        b.ind = (int)ind;
-        size_t n2;
-        if (lineAt(next, n2) != std::string(ind, '\t') + "{") continue;
-        std::string closeLine = std::string(ind, '\t') + "},", v;
-        size_t c = n2, cn;
-        for (; c < t.size(); c = cn) {
-            std::string fl = lineAt(c, cn);
-            if (fl == closeLine) break;
-            if (field(fl, "Type", v)) b.type = v;
-            else if (field(fl, "ProgressStr", v)) b.str = v;
-            else if (field(fl, "ProgressGeneratedSuffix", v)) b.sfx = v;
-            else if (field(fl, "EvalPriority", v)) b.prio = v;
-            else if (field(fl, "UseGeneratedProgressStringNew", v)) b.gen = v == "true";
-            else if (field(fl, "HideProgress", v)) b.hide = v == "true";
-            else if (field(fl, "ProgressString", v) || field(fl, "ProgressStringCustom", v)) b.has = true;
-        }
-        if (c >= t.size()) break;
-        b.open = a, b.close = c;
-        std::string nodeOpen = "\n" + std::string(ind - 1, '\t') + "{\n";   // this node's '{': the nearest one at ind - 1
-        size_t no = t.rfind(nodeOpen, a);
-        b.node = no == std::string::npos ? 0 : no;
-        bs.push_back(b);
-        next = cn;
-    }
+    const std::vector<detail::EvalBlock> bs = detail::evalBlocks(t);
     std::vector<std::pair<size_t, std::string>> ins;
-    for (const Blk& b : bs) {
-        if (b.hide || b.has) continue;
-        std::string tab(b.ind + 1, '\t'), add;
-        if (b.type == "Eval_LogicProgressOverride" && !b.str.empty())
-            add = tab + "ProgressString = \"<custom>\",\n" + tab + "ProgressStringCustom = \"" + b.str + "\",\n";
-        else if (b.gen) {
-            bool under = false;
-            for (const Blk& o : bs)
-                under |= o.type == "Eval_LogicProgressOverride" && o.ind < b.ind && o.node < b.open && b.open < o.open;
-            if (under) continue;
-            add = tab + "ProgressString = \"_" + (b.sfx.empty() ? "Task" + (b.prio.empty() ? std::string("0") : b.prio) : b.sfx) + "\",\n";
-        }
+    for (const detail::EvalBlock& b : bs) {
+        std::string add = detail::progressLines(b, bs);
         if (!add.empty()) ins.emplace_back(b.close, add);
     }
     std::sort(ins.begin(), ins.end(), [](auto& x, auto& y) { return x.first > y.first; });
