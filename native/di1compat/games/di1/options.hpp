@@ -7,6 +7,9 @@
 
 namespace di1 {
 
+// Instanced 1.0 SubNetworks must fit their arenas: slack on every count (octx::Options, CO-01).
+inline constexpr int kArenaSlack = 4096;
+
 // The .oct steps c switches on; render, installed30 and surfaceTable are the caller's.
 inline OctSteps octStepsOf(const Config& c)
 {
@@ -22,6 +25,7 @@ inline OctSteps octStepsOf(const Config& c)
     o.scene = c.choScene10;
     o.curves = c.curves10;
     o.constSections = c.choConst10;
+    o.transforms = {kArenaSlack, c.variant10};
     return o;
 }
 

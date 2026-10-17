@@ -7,8 +7,11 @@
 #include "../../base/text.hpp"
 #include "../../cho.hpp"
 #include "../../gameplay.hpp"
+#include "../../convert/assets.hpp"
+#include "../../convert/counts.hpp"
 #include "../../npc.hpp"
-#include "../../octx.hpp"
+#include "associations.hpp"
+#include "realms.hpp"
 
 namespace di1 {
 
@@ -30,6 +33,7 @@ struct OctSteps {
     bool curves = false;        // curves10
     std::function<std::vector<std::string>()> surfaceTable;   // surfaces10: the engine's surface table, by index
     bool constSections = false; // choconst10, for paths under choreographies/ or exploders/
+    octx::Options transforms;   // arena slack and variant groups (CO-01): the plugin's are octStepsOf's
 };
 
 namespace detail {
@@ -115,12 +119,13 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
         note += "+AssetPool ";
         changed = true;
     }
-    changed |= detail::noted(note, octx::skin30(f), "+skin(", ") ");
-    changed |= detail::noted(note, octx::locator30(f), "+locators(", ") ");
-    changed |= detail::noted(note, o.cameras ? octx::camera30(f) : 0, "+cameras(", ") ");
-    changed |= detail::noted(note, octx::collision30(f), "+collision(", ") ");
+    changed |= detail::noted(note, skin30(f, o.transforms), "+skin(", ") ");
+    changed |= detail::noted(note, locator30(f, o.transforms), "+locators(", ") ");
+    changed |= detail::noted(note, o.cameras ? camera30(f, o.transforms) : 0, "+cameras(", ") ");
+    changed |= detail::noted(note, collision30(f, o.transforms), "+collision(", ") ");
     const bool realmFile = o.realmFile && path.rfind("realms/", 0) == 0;
-    changed |= detail::noted(note, octx::realm30w(f, realmFile), "+lighting(", " nodes) ");
+    const RealmRule rule = realmFile ? RealmRule::RealmFile : RealmRule::WorldOnly;
+    changed |= detail::noted(note, realm30w(f, rule), "+lighting(", " nodes) ");
     changed |= detail::choSteps(f, o, note);
     int nfl = 0, ncv = o.curves ? gameplay::curves30(f, &nfl) : 0;
     if (ncv || nfl) {
@@ -141,7 +146,7 @@ inline bool octFinish(const std::string& path, oct::File& f, const OctSteps& o, 
     if (o.constSections && choOrExploder)
         changed |= detail::noted(note, cho::const30(f), "+constant(", " subnetworks) ");
     // without counts the engine sizes the basis arenas 0 (FUN_004d0160)
-    changed |= detail::noted(note, octx::addAllCounts(f), "+counts(", " subnetworks) ");
+    changed |= detail::noted(note, octx::addAllCounts(f, o.transforms), "+counts(", " subnetworks) ");
     return changed;
 }
 

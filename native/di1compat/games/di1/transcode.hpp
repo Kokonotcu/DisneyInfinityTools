@@ -12,23 +12,24 @@
 #include <vector>
 #include "../../base/text.hpp"
 #include "../../convert/dispatch.hpp"
-#include "../../bent.hpp"
-#include "../../btd.hpp"
 #include "../../chan.hpp"
 #include "../../cho.hpp"
-#include "../../datamap.hpp"
-#include "../../dct.hpp"
+#include "../../convert/datamap.hpp"
 #include "../../gameplay.hpp"
-#include "../../luachunk.hpp"
+#include "../../formats/btd.hpp"
+#include "../../formats/dct.hpp"
+#include "../../formats/luachunk.hpp"
+#include "../../formats/oct.hpp"
 #include "../../mer.hpp"
 #include "../../mission.hpp"
 #include "../../npc.hpp"
-#include "../../oct.hpp"
 #include "../../render.hpp"
 #include "../../sx.hpp"
 #include "../../sys.hpp"
 #include "../../ui.hpp"
 #include "../../vfx.hpp"
+#include "bent.hpp"
+#include "btd.hpp"
 #include "octsteps.hpp"
 #include "renderio.hpp"
 
@@ -419,12 +420,12 @@ inline Verdict collision(Request& r)
     if (isBtm) {
         if (!r.io.read10(dropSuffix(r, ".btm") + ".btd", src)) return kRaw;
     } else src.assign((const char*)r.data, r.n);
-    if (!btd::convert(src, conv)) return raw(r, "btd: not the 1.0 block layout ");
+    if (!di1::btd::convert(src, conv)) return raw(r, "btd: not the 1.0 block layout ");
     // never cut: 14 characters and a number of at most 10
     char buf[64];
-    snprintf(buf, sizeof(buf), "+btd(%u blocks) ", (unsigned)btd::blocks(conv, 3).size());
+    snprintf(buf, sizeof(buf), "+btd(%u blocks) ", (unsigned)::btd::blocks(conv, ::btd::kLayout30).size());
     r.note += buf;
-    r.out = isBtm ? btd::btm(conv) : conv;
+    r.out = isBtm ? ::btd::btm(conv) : conv;
     return isBtm ? "btm" : "btd";
 }
 
@@ -435,7 +436,7 @@ inline Verdict entity(Request& r)
 {
     oct::File f = oct::File::parse(r.data, r.n);
     std::string why;
-    if (!bent::transcode(f, r.np, &why)) return raw(r, "bent: " + why + " ");
+    if (!di1::bent::transcode(f, r.np, &why)) return raw(r, "bent: " + why + " ");
     r.out = f.write();
     return "bent";
 }

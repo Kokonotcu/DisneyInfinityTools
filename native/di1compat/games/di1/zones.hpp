@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 #include "../../gameplay.hpp"
-#include "../../luachunk.hpp"
+#include "../../formats/luachunk.hpp"
 
 namespace di1 {
 

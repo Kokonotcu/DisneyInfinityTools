@@ -29,6 +29,7 @@
 #include "core/hooks.hpp"
 #include "core/log.hpp"
 #include "core/memcheck.hpp"
+#include "core/readonly_file.hpp"
 #include "core/stack.hpp"
 #include "core/veh.hpp"
 #include "core/zip.hpp"
@@ -39,17 +40,15 @@
 #include "games/di1/renderio.hpp"
 #include "games/di1/transcode.hpp"
 #include "games/di1/zones.hpp"
-#include "octx.hpp"
-#include "bent.hpp"
-#include "btd.hpp"
-#include "chd.hpp"
+#include "formats/oct.hpp"
+#include "formats/chd.hpp"
 #include "mer.hpp"
 #include "mernode.hpp"
 #include "render.hpp"
-#include "arc30.hpp"
-#include "datamap.hpp"
-#include "dct.hpp"
-#include "luachunk.hpp"
+#include "formats/arc30.hpp"
+#include "convert/datamap.hpp"
+#include "formats/dct.hpp"
+#include "formats/luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
@@ -190,7 +189,10 @@ static bool read30x(const std::string& extract, std::string& out)
     if (cut == std::string::npos) return false;
     std::string arc = g_gameDir + "/assets/" + rel.substr(0, cut) + ".zip";
     for (char& c : arc) if (c == '/') c = '\\';
-    return arc30::readMember(arc, rel.substr(cut + 1), out);
+    core::ReadOnlyFile file(arc);
+    if (!file.open()) return false;
+    const arc30::Source src{file.size(), [&file](uint64_t at, void* dst, size_t n) { return file.readAt(at, dst, n); }};
+    return arc30::readMember(src, rel.substr(cut + 1), out);
 }
 
 // The key hashes of every 3.0 table of language `lang` (english_ntsc ...: _win32 and _pc_con of each package under
@@ -3323,8 +3325,6 @@ extern "C" void __stdcall Pentane_Main()
     logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
          (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
          (unsigned)g_render.plans.size());
-    octx::g_slack = 4096;   // instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
-    octx::g_variantGroups = g_cfg.variant10;
     g_merOk = g_mer.load(slurpFile("di1compat_mer.txt"));
     g_mer.events10 = g_cfg.events10;
     g_mer.portRefs = g_cfg.portRefs10;

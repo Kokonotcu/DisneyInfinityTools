@@ -7,16 +7,22 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
-#include "octx.hpp"
-#include "bent.hpp"
-#include "btd.hpp"
-#include "chd.hpp"
+#include "convert/assets.hpp"
+#include "convert/counts.hpp"
+#include "games/di1/associations.hpp"
+#include "games/di1/realms.hpp"
+#include "games/di1/bent.hpp"
+#include "formats/btd.hpp"
+#include "games/di1/btd.hpp"
+#include "formats/chd.hpp"
 #include "mer.hpp"
 #include "render.hpp"
-#include "arc30.hpp"
-#include "datamap.hpp"
-#include "dct.hpp"
-#include "luachunk.hpp"
+#include "formats/arc30.hpp"
+#include "core/readonly_file.hpp"
+#include "convert/datamap.hpp"
+#include "formats/dct.hpp"
+#include "base/hash.hpp"
+#include "formats/luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
 #include "npc.hpp"
@@ -32,6 +38,18 @@
 #include "games/di1/archives.hpp"
 #include "games/di1/options.hpp"
 #include "games/di1/zones.hpp"
+
+// The plugin's octx settings for this run: OCTX_SLACK, --variants (main); the defaults are the shipped-exact ones
+static octx::Options g_octx;
+
+// arc30::readMember of a member of the archive file at path
+static bool readArc30(const std::string& path, const std::string& member, std::string& out)
+{
+    core::ReadOnlyFile file(path);
+    if (!file.open()) return false;
+    const arc30::Source src{file.size(), [&file](uint64_t at, void* dst, size_t n) { return file.readAt(at, dst, n); }};
+    return arc30::readMember(src, member, out);
+}
 
 static std::string slurp(const std::filesystem::path& p)
 {
@@ -50,7 +68,12 @@ static std::string enginePath(const std::filesystem::path& p)
 
 // The plugin's .oct steps at its cfg defaults (games/di1/options.hpp). Render, the 3.0 install and the engine's
 // surface table need the game, so octtest runs without them.
-static di1::OctSteps pluginOctSteps() { return di1::octStepsOf(di1::Config{}); }
+static di1::OctSteps pluginOctSteps()
+{
+    di1::OctSteps o = di1::octStepsOf(di1::Config{});
+    o.transforms = g_octx;   // OCTX_SLACK and --variants, not the plugin's 4096
+    return o;
+}
 
 // One file through the plugin's transcode dispatch at its cfg defaults, with no readers: the rules that read files
 // beside it serve it raw. Returns the codec, or "-" when the 1.0 bytes would be served.
@@ -261,9 +284,9 @@ static int uiTest(char** a, int argc)
     check(add > 0 && !shadow && (int)d1.keys.size() == kept + add, "text10: " + std::to_string(add) + " 1.0 lang/main keys added, none a 3.0 key");
     auto probe = [&](std::string key) {   // the engine's probe (octtest --dct)
         for (char& c : key) c = (char)tolower((unsigned char)c);
-        uint32_t h = dct::lookup2((const uint8_t*)key.data(), key.size(), dct::u32(in, 8)), ns = dct::u32(in, 0x10);
-        for (uint32_t i = h % ns; dct::u32(in, 0x24 + 12 * i); i = (i + 1) % ns)
-            if (dct::u32(in, 0x20 + 12 * i) == h) return std::string(in.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(in, 0x24 + 12 * i));
+        uint32_t h = hash::lookup2((const uint8_t*)key.data(), key.size(), bytes::le32(in, 8)), ns = bytes::le32(in, 0x10);
+        for (uint32_t i = h % ns; bytes::le32(in, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (bytes::le32(in, 0x20 + 12 * i) == h) return std::string(in.c_str() + 0x25 + 12 * i + (int32_t)bytes::le32(in, 0x24 + 12 * i));
         return std::string();
     };
     int tips = 0;
@@ -307,7 +330,7 @@ static int renderTest(char** a)
         auto t = std::chrono::steady_clock::now();
         std::string rel = p.substr(2);
         size_t cut = rel.rfind('/');
-        bool ok = cut != std::string::npos && arc30::readMember(std::string(game) + "/assets/" + rel.substr(0, cut) + ".zip", rel.substr(cut + 1), o);
+        bool ok = cut != std::string::npos && readArc30(std::string(game) + "/assets/" + rel.substr(0, cut) + ".zip", rel.substr(cut + 1), o);
         readMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
         ++reads;
         return ok;
@@ -435,8 +458,8 @@ static int vtxfTest(char** a, int argc)
 
 static bool isCountRecord(const std::string& n)
 {
-    for (auto c : octx::COUNTS_A) if (n == c) return true;
-    for (auto c : octx::COUNTS_B) if (n == c) return true;
+    for (auto c : octx::kCountsA) if (n == c) return true;
+    for (auto c : octx::kCountsB) if (n == c) return true;
     return n == "ConstantLayoutCount" || n == "VariableAccumulatedSize32" || n == "VariableAccumulatedSize64" ||
            n == "ConstantAccumulatedSize32" || n == "ConstantAccumulatedSize64" || n == "DefaultDataSize" ||
            n == "BaseDataNodeLinksAdditionalSize" || n == "LayerBindAdditionalSize";
@@ -480,7 +503,7 @@ static void countsCheck(const std::string& b, const std::string& path, size_t* o
             if (g.recs[j].level == 3 && isCountRecord(g.name(g.recs[j])))
                 g.recs.erase(g.recs.begin() + j, g.recs.begin() + g.blockEnd(j));
         std::string why;
-        if (!octx::addCounts(g, i, &why)) { ++*skip; ++g_skipWhy[why]; continue; }
+        if (!octx::addCounts(g, i, g_octx, &why)) { ++*skip; ++g_skipWhy[why]; continue; }
         if (fits) {
             if (g.write() == b) ++*ok;
             else {
@@ -1235,7 +1258,7 @@ static int choConstTest(char** a)
     return bad ? 1 : 0;
 }
 
-// --variants <1.0 assets> <3.0 assets>: octx::g_variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
+// --variants <1.0 assets> <3.0 assets>: octx::Options::variantGroups. The 1.0 corpus (choreographies, exploders, worlds) through
 // the plugin's octx steps (addAssetPool, skin30, locator30, collision30, addAllCounts): every *VariantProcessor must sit
 // in a VariantGroup == [Input, Output], VariantGroupCount / VariantMemberCount must match the pool, the file must
 // re-parse identically. Twins: each group made for a 1.0 file must name, by DataNode header path, the members of a
@@ -2553,7 +2576,7 @@ int main(int argc, char** argv)
     // OCTX_SLACK=<n>: octx's arena slack; the plugin ships 4096 (Pentane_Main). Unset keeps the header's 0 (OT-08)
     char slack[16];
     DWORD slackLen = GetEnvironmentVariableA("OCTX_SLACK", slack, sizeof(slack));
-    if (slackLen && slackLen < sizeof(slack)) octx::g_slack = atoi(slack);
+    if (slackLen && slackLen < sizeof(slack)) g_octx.slack = atoi(slack);
     if (argc > 1 && std::string(argv[1]) == "--readable") return readableTest();
     namespace fs = std::filesystem;
     const char* exts[] = {".oct", ".mer", ".merdebug", ".bent", ".banm", ".bct"};
@@ -2702,7 +2725,7 @@ int main(int argc, char** argv)
     if (argc > 3 && std::string(argv[1]) == "--cho-anim") return choAnimTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-scene") return choSceneTest(argv);
     if (argc > 3 && std::string(argv[1]) == "--cho-const") return choConstTest(argv);
-    if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) octx::g_variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
+    if (argc > 3 && std::string(argv[1]) == "--variants") { if (argc > 4) g_octx.variantGroups = atoi(argv[4]) != 0; return variantsTest(argv); }
     if (argc > 3 && std::string(argv[1]) == "--cho-alias") {   // --cho-alias <1.0 datamap.lua> <engine path>...: Aliases as the plugin feeds it
         std::string in = slurp(argv[2]), out;
         cho::Aliases al;
@@ -2818,26 +2841,26 @@ int main(int argc, char** argv)
         // the engine's probe: lowercase key, hash with the table's seed, slot = hash % slots, linear
         std::string k = argv[4];
         for (char& c : k) c = (char)tolower((unsigned char)c);
-        uint32_t h = dct::lookup2((const uint8_t*)k.data(), k.size(), dct::u32(raw, 8)), ns = dct::u32(raw, 0x10);
-        for (uint32_t i = h % ns; dct::u32(raw, 0x24 + 12 * i); i = (i + 1) % ns)
-            if (dct::u32(raw, 0x20 + 12 * i) == h) { printf("%s = \"%s\"\n", argv[4], raw.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(raw, 0x24 + 12 * i)); return 0; }
+        uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::le32(raw, 8)), ns = bytes::le32(raw, 0x10);
+        for (uint32_t i = h % ns; bytes::le32(raw, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (bytes::le32(raw, 0x20 + 12 * i) == h) { printf("%s = \"%s\"\n", argv[4], raw.c_str() + 0x25 + 12 * i + (int32_t)bytes::le32(raw, 0x24 + 12 * i)); return 0; }
         printf("%s not found\n", argv[4]);
         return 1;
     }
     if (argc > 3 && std::string(argv[1]) == "--btd") {   // --btd <1.0 .btd> <out .btd>: + <out>.btm beside it
         std::string b = slurp(argv[2]), o;
-        if (!btd::convert(b, o)) { printf("not the 1.0 block layout\n"); return 1; }
+        if (!di1::btd::convert(b, o)) { printf("not the 1.0 block layout\n"); return 1; }
         std::ofstream(argv[3], std::ios::binary).write(o.data(), o.size());
         std::string m = btd::btm(o), mp = std::string(argv[3]);
         mp = mp.substr(0, mp.size() - 4) + ".btm";
         std::ofstream(mp, std::ios::binary).write(m.data(), m.size());
-        printf("%u blocks, %u B\n", (unsigned)btd::blocks(o, 3).size(), (unsigned)o.size());
+        printf("%u blocks, %u B\n", (unsigned)btd::blocks(o, btd::kLayout30).size(), (unsigned)o.size());
         return 0;
     }
     if (argc > 4 && std::string(argv[1]) == "--bent") {   // --bent <1.0 .bent> <engine path> <out>: 4.1 -> 4.1f
         std::string b = slurp(argv[2]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
-        if (!bent::transcode(f, argv[3], &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
+        if (!di1::bent::transcode(f, argv[3], &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         printf("wrote %zu B, %zu records\n", o.size(), f.recs.size());
@@ -3313,7 +3336,7 @@ int main(int argc, char** argv)
     }
     if (argc > 3 && std::string(argv[1]) == "--member") {   // --member <archive> <name>: one read, its size
         std::string got;
-        bool r = arc30::readMember(argv[2], argv[3], got);
+        bool r = readArc30(argv[2], argv[3], got);
         printf("%s %zu B\n", r ? "ok" : "FAILED", got.size());
         return r ? 0 : 1;
     }
@@ -3344,7 +3367,7 @@ int main(int argc, char** argv)
         std::string out;
         if (menu) {
             std::string in;
-            if (argc > 6 ? !arc30::readMember(argv[5], argv[6], in) : (in = slurp(argv[5])).empty()) return 1;
+            if (argc > 6 ? !readArc30(argv[5], argv[6], in) : (in = slurp(argv[5])).empty()) return 1;
             out = ui::playsetMenu10(in, list);
             printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
         } else {
@@ -3371,7 +3394,7 @@ int main(int argc, char** argv)
             size_t cut = rel.rfind('/');
             fprintf(stderr, "%s\n", x.c_str());
             std::string arc = std::string(argv[3]) + "/assets/" + rel.substr(0, cut) + ".zip";
-            bool r = arc30::readMember(arc, rel.substr(cut + 1), got);
+            bool r = readArc30(arc, rel.substr(cut + 1), got);
             fprintf(stderr, "  read %d %zu\n", (int)r, got.size());
             std::string ext = slurp(std::filesystem::path(argv[4]) / "assets" / rel);
             fprintf(stderr, "  extract %zu\n", ext.size());
