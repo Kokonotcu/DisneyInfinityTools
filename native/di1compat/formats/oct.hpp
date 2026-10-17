@@ -103,23 +103,27 @@ struct File {
 
     std::string write() const
     {
-        std::string nt, data;
+        size_t namesSize = 0, dataSize = tail.size();
+        for (const std::string& s : names) namesSize += s.size() + 1;
+        for (const Rec& r : recs) dataSize += kRecordHead + r.pay.size();
+        std::string out = hdr;
+        bytes::setLe32(out, kNamesSizeAt, (uint32_t)namesSize);
+        bytes::setLe32(out, kDataSizeAt, (uint32_t)dataSize);
+        // the engine allocates from the record count (FORMATS.md 3)
+        bytes::setLe32(out, kRecordCountAt, recordCount == 0 ? 0u : (uint32_t)recs.size());
+        out.reserve(out.size() + namesSize + dataSize);
         for (const std::string& s : names) {
-            nt += s;
-            nt.push_back('\0');
+            out += s;
+            out.push_back('\0');
         }
         for (const Rec& r : recs) {
-            bytes::appendLe(data, (uint32_t)(r.level << kLevelShift | r.type), 2);
-            bytes::appendLe(data, r.name, 2);
-            data += r.pay;
+            const uint16_t flag = (uint16_t)(r.level << kLevelShift | r.type);
+            const char head[kRecordHead] = {(char)flag, (char)(flag >> 8), (char)r.name, (char)(r.name >> 8)};
+            out.append(head, kRecordHead);
+            out += r.pay;
         }
-        data += tail;
-        std::string h = hdr;
-        bytes::setLe32(h, kNamesSizeAt, (uint32_t)nt.size());
-        bytes::setLe32(h, kDataSizeAt, (uint32_t)data.size());
-        // the engine allocates from the record count (FORMATS.md 3)
-        bytes::setLe32(h, kRecordCountAt, recordCount == 0 ? 0u : (uint32_t)recs.size());
-        return h + nt + data;
+        out += tail;
+        return out;
     }
 
     // The name at index i, or "?" past the table.
