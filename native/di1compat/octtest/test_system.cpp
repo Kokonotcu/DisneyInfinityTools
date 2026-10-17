@@ -11,7 +11,7 @@
 #include "../core/memcheck.hpp"
 #include "../formats/dct.hpp"
 #include "../base/text.hpp"
-#include "../ui.hpp"
+#include "../games/di1/ui.hpp"
 #include "files.hpp"
 #include "modes.hpp"
 #include "run.hpp"
@@ -152,14 +152,15 @@ void checkLoadingScreens(UiRun& r, const fs::path& e10, const fs::path& e30)
     std::string seq;
     bool movies = true;
     for (int i = 0; i < kLoads; ++i) {
-        std::string s = ui::loadingScreen10("LoadingScreen_Inc", counter), f = text::lower(s);
+        std::string s = di1::ui::loadingScreen10("LoadingScreen_Inc", counter), f = text::lower(s);
         seq += s.substr(sizeof kScreenPrefix - 1) + " ";
         movies &= fs::exists(e10 / "flash/loadingscreen/loadingscreen" / (f + ".gfx")) &&
                   !fs::exists(e30 / "flash/loadingscreen/loadingscreen" / (f + ".gfx"));
     }
     r.check(seq == kSequence, "loading-screen sequence " + seq);
     r.check(movies, "every pick is a 1.0 movie (flash/loadingscreen/loadingscreen_NN.gfx) 3.0 does not ship");
-    r.check(ui::loadingScreen10("LoadingScreen_Intro", counter) == "LoadingScreen_Intro", "an Intro screen is kept");
+    r.check(di1::ui::loadingScreen10("LoadingScreen_Intro", counter) == "LoadingScreen_Intro",
+            "an Intro screen is kept");
 }
 
 // The flash images of one extract: how many, how many lack their movie, 1.0 ones named after a 3.0 movie.
@@ -183,7 +184,7 @@ bool movieFound(const FlashScan& s, const fs::path& dir, const fs::path& sub, co
 void flashImage(FlashScan& s, const fs::path& dir, const fs::path& sub, const fs::path& file)
 {
     const std::string n = text::lower(file.filename().string());
-    std::string mv = ui::flashImageMovie("flash/" + dir.filename().string() + "/" + n);
+    std::string mv = di1::ui::flashImageMovie("flash/" + dir.filename().string() + "/" + n);
     if (mv.empty()) return;
     ++s.imgs;
     std::string stem = mv.substr(mv.rfind('/') + 1);
@@ -218,13 +219,14 @@ void checkFlashImages(UiRun& r, const fs::path& e10, const fs::path& e30)
                                    std::to_string(s.orphan) + " without their movie");
         if (s.is10) printf("     1.0 images named after a movie 3.0 ships (uiscope10 keeps 3.0's miss): %zu\n", s.coll);
     }
-    const bool images = ui::flashImageMovie("flash/progresslog/progresslog_i1e.mtb") ==
+    const bool images = di1::ui::flashImageMovie("flash/progresslog/progresslog_i1e.mtb") ==
                             "flash/progresslog/progresslog" &&
-                        ui::flashImageMovie("flash/loadingscreen/loadingscreen_01_i10.mtb") ==
+                        di1::ui::flashImageMovie("flash/loadingscreen/loadingscreen_01_i10.mtb") ==
                             "flash/loadingscreen/loadingscreen_01";
-    const bool others = ui::flashImageMovie("flash/hud/hud_info.mtb").empty() &&
-                        ui::flashImageMovie("ui/icons/x_i1.mtb").empty() &&
-                        ui::flashMovie("flash/progresslog/progresslog.gfxmanifest") == "flash/progresslog/progresslog";
+    const bool others = di1::ui::flashImageMovie("flash/hud/hud_info.mtb").empty() &&
+                        di1::ui::flashImageMovie("ui/icons/x_i1.mtb").empty() &&
+                        di1::ui::flashMovie("flash/progresslog/progresslog.gfxmanifest") ==
+                            "flash/progresslog/progresslog";
     r.check(images && others, "flash path forms");
 }
 
@@ -239,12 +241,12 @@ void checkTips(UiRun& r, const Args& a, const fs::path& e10, const fs::path& e30
         return z.find(lk) != std::string::npos;
     };
     std::string merged = t30;
-    int k = ui::mergeTips(merged, t10, isZone);
+    int k = di1::ui::mergeTips(merged, t10, isZone);
     writeFile(out / "tips.lua", merged);
     r.check(k > 0 && merged.compare(0, sizeof kTipCounts - 1, kTipCounts) == 0,
             "tips: " + std::to_string(k) + " 1.0 records added -> " + (out / "tips.lua").string());
     std::string again = merged;
-    r.check(ui::mergeTips(again, t10, isZone) == 0 && again == merged, "tips merge is idempotent");
+    r.check(di1::ui::mergeTips(again, t10, isZone) == 0 && again == merged, "tips merge is idempotent");
 }
 
 // The key hashes of every 3.0 english table.
@@ -300,11 +302,11 @@ void checkText(UiRun& r, const fs::path& e10, const fs::path& e30, const fs::pat
 // 6. Controller-context lists: the 1.0 IN exclusion lists (nodeflds.py) and every shipped 3.0 one (ctx30.py).
 void checkContextLists(UiRun& r)
 {
-    r.check(ui::contextList10("TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM") ==
+    r.check(di1::ui::contextList10("TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM") ==
                     "TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM,-TUT_DISABLE_WEAPONWHEEL" &&
-                ui::contextList10("TUT_DISABLE_*, !TUT_DISABLE_SELECT_ITEM ") ==
+                di1::ui::contextList10("TUT_DISABLE_*, !TUT_DISABLE_SELECT_ITEM ") ==
                     "TUT_DISABLE_*, !TUT_DISABLE_SELECT_ITEM ,-TUT_DISABLE_WEAPONWHEEL" &&
-                ui::contextList10("TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM,-TUT_DISABLE_WEAPONWHEEL").empty(),
+                di1::ui::contextList10("TUT_DISABLE_*,-TUT_DISABLE_SELECT_ITEM,-TUT_DISABLE_WEAPONWHEEL").empty(),
             "1.0 list keeping SELECT_ITEM also keeps 3.0's TUT_DISABLE_WEAPONWHEEL");
     bool same = true;
     for (const char* l : {"TUT_DISABLE_*,-TUT_DISABLE_TOY_STORE", "TUT_DISABLE_*", "TUT_DISABLE",
@@ -313,7 +315,7 @@ void checkContextLists(UiRun& r)
                           "UI_TUT_DISABLE_TOOL_SELECT_*,-UI_TUT_DISABLE_TOOL_SELECT_TOGGLE_LISTS",
                           "TUT_DISABLE_*,-TUT_DISABLE_CAM", "UI_TUT_DISABLE_GEN_*,-UI_TUT_DISABLE_GEN_CANCEL",
                           "UI_TUT_DISABLE_GEN_*,-UI_TUT_DISABLE_GEN_OK"})
-        same &= ui::contextList10(l).empty();
+        same &= di1::ui::contextList10(l).empty();
     r.check(same, "every other 1.0 IN list and every shipped 3.0 exclusion list is unchanged");
 }
 
@@ -338,8 +340,9 @@ int testUi(const Args& a)
     checkLoadingScreens(r, e10, e30);
     checkFlashImages(r, e10, e30);
     // 3. FMV: the clip names the player asks for -> 1.0 fmv/PC1 (only via the install, so names only here)
-    r.check(ui::fmvClip("PC1\\IN_COM_GP") == "IN_COM_GP" && ui::fmvClip("HOH__Info_MrInc.bik") == "HOH__Info_MrInc" &&
-                ui::fmvClip("http://x/y.bik").empty(),
+    r.check(di1::ui::fmvClip("PC1\\IN_COM_GP") == "IN_COM_GP" &&
+                di1::ui::fmvClip("HOH__Info_MrInc.bik") == "HOH__Info_MrInc" &&
+                di1::ui::fmvClip("http://x/y.bik").empty(),
             "FMV clip names");
     checkTips(r, a, e10, e30, out);
     checkText(r, e10, e30, out);

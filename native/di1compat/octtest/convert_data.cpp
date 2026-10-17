@@ -23,7 +23,7 @@
 #include "../games/di1/psdna.hpp"
 #include "../games/di1/supplement.hpp"
 #include "../formats/luachunk.hpp"
-#include "../gameplay.hpp"
+#include "../games/di1/zones.hpp"
 #include "../formats/slang.hpp"
 #include "../games/di1/aitables.hpp"
 #include "../games/di1/avperc.hpp"
@@ -174,7 +174,7 @@ int convertGroups30(const Args& a)
 int convertCurrency10(const Args& a)
 {
     auto g = luachunk::eval(slurp(a.argv[2]));
-    for (auto& [f, c] : gameplay::currencies10(g["ZoneList"])) printf("%s -> %s\n", f.c_str(), c.c_str());
+    for (auto& [f, c] : di1::currencies10(g["ZoneList"])) printf("%s -> %s\n", f.c_str(), c.c_str());
     return 0;
 }
 
