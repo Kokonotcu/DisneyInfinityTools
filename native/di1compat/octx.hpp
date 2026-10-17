@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include "formats/oct.hpp"
+#include "convert/records.hpp"
 
 namespace octx {
 
@@ -32,15 +33,6 @@ inline int typeSize(const std::string& t, bool is64)
     if (t == "Transform") return 64;
     if (t == "Visibility" || t == "Bool" || t == "Float") return is64 ? 8 : 4;
     return -1;
-}
-
-inline oct::Rec blobRec(oct::File& f, uint16_t level, const std::string& n, const std::string& data)
-{
-    int cw = data.size() < 0x100 ? 1 : data.size() < 0x10000 ? 2 : 3;
-    oct::Rec r{level, (uint16_t)(oct::SCALAR | oct::BYTE << 3 | (cw - 1) << 6), f.addName(n), {}};
-    oct::File::put(r.pay, (uint32_t)data.size(), cw);
-    r.pay += data;
-    return r;
 }
 
 // Base DataNode links (characters, props: 767 1.0 files; 15 shipped 3.0 exploders, one of them a 1.0 twin,
@@ -348,38 +340,6 @@ inline bool addAssetPool(oct::File& f)
     return true;
 }
 
-// A name list record's values replaced (keeps its key).
-inline void setNames(oct::File& f, oct::Rec& r, const std::vector<std::string>& v)
-{
-    oct::Spec s = oct::spec(r.type);
-    int cw = s.cw < 1 ? 1 : s.cw;
-    while (v.size() >= ((size_t)1 << (8 * cw))) ++cw;
-    r.type = (uint16_t)(oct::LIST | (s.keyed << 2) | oct::NAME << 3 | (cw - 1) << 6);
-    std::string pay = r.pay.substr(0, 2 * s.keyed);
-    oct::File::put(pay, (uint32_t)v.size(), cw);
-    for (auto& x : v) oct::File::put(pay, f.addName(x), 2);
-    r.pay = pay;
-}
-inline oct::Rec nameList(oct::File& f, uint16_t level, const std::string& n, const std::vector<std::string>& v)
-{
-    oct::Rec r{level, (uint16_t)(oct::LIST | oct::NAME << 3), f.addName(n), {}};
-    setNames(f, r, v);
-    return r;
-}
-inline oct::Rec floatList(oct::File& f, uint16_t level, const std::string& n, const std::vector<float>& v)
-{
-    oct::Rec r{level, (uint16_t)(oct::LIST | oct::FLOAT << 3), f.addName(n), {}};
-    oct::File::put(r.pay, (uint32_t)v.size(), 1);
-    r.pay.append((const char*)v.data(), v.size() * 4);
-    return r;
-}
-inline oct::Rec keyedNode(oct::File& f, uint16_t level, const std::string& n, int key)
-{
-    oct::Rec r{level, (uint16_t)(oct::NODE | 4), f.addName(n), {}};
-    oct::File::put(r.pay, f.addName(std::to_string(key)), 2);
-    return r;
-}
-
 // A variant processor's Input / Output pair as a VariantGroup (cfg variant10). Every *VariantProcessor of both shipped
 // corpora has its pair in a VariantGroup of its SubNetwork (choreographies + exploders + motions: 1.0 324/324, 3.0
 // 39,182/39,182; for the three kinds made here, DilationToTransform / DilationToMatrix4x4 / TransformToMatrix4x4,
@@ -572,72 +532,6 @@ struct SnEdit {
         // ponytail: a SubNetwork without a VariantGroupPool keeps its processors ungrouped (none seen in 1.0 files)
     }
 };
-
-// Edits children of a top-level pool (SubNetworks) one at a time, each in a File of its own -- the child's block at
-// record 0, f's name table swapped in (not copied, so names are added in the same order) -- and writes the pool back
-// once. Editing in place shifted every record after each insert: in_city has 283 SubNetworks among ~200k records, and
-// each pass that inserted per SubNetwork (counts, locators, collision) cost ~0.25 s at load. kids = the children's
-// record indices in file order; edit(g, k) runs for k in `order`.
-template <class Edit> inline void editPoolChildren(oct::File& f, long pool, const std::vector<size_t>& kids, const std::vector<size_t>& order, Edit edit)
-{
-    if (order.empty()) return;
-    std::vector<size_t> ends(kids.size());
-    for (size_t k = 0; k < kids.size(); ++k) ends[k] = f.blockEnd(kids[k]);
-    size_t poolEnd = f.blockEnd(pool);
-    std::vector<std::vector<oct::Rec>> edited(kids.size());
-    std::vector<char> done(kids.size(), 0);
-    struct Names {   // f's name table lives in g while the edits run, and goes back even on an exception
-        oct::File &f, &g;
-        Names(oct::File& a, oct::File& b) : f(a), g(b) { swap(); }
-        ~Names() { swap(); }
-        void swap() { f.names.swap(g.names); f.nameIndex.swap(g.nameIndex); std::swap(f.nameIndexed, g.nameIndexed); }
-    };
-    oct::File g;
-    {
-        Names shared(f, g);
-        for (size_t k : order) {
-            g.recs.assign(std::make_move_iterator(f.recs.begin() + kids[k]), std::make_move_iterator(f.recs.begin() + ends[k]));
-            edit(g, k);
-            edited[k].swap(g.recs);
-            done[k] = 1;
-        }
-    }
-    std::vector<oct::Rec> out;
-    size_t grown = 0;
-    for (size_t k = 0; k < kids.size(); ++k) if (done[k]) grown += edited[k].size();
-    out.reserve(f.recs.size() + grown);
-    auto take = [&](size_t a, size_t b) { out.insert(out.end(), std::make_move_iterator(f.recs.begin() + a), std::make_move_iterator(f.recs.begin() + b)); };
-    take(0, pool + 1);
-    size_t at = pool + 1;
-    for (size_t k = 0; k < kids.size(); ++k) {
-        take(at, kids[k]);
-        if (done[k]) out.insert(out.end(), std::make_move_iterator(edited[k].begin()), std::make_move_iterator(edited[k].end()));
-        else take(kids[k], ends[k]);
-        at = ends[k];
-    }
-    take(at, poolEnd);
-    take(poolEnd, f.recs.size());
-    f.recs.swap(out);
-}
-
-// Calls fn(NodeName record, SubNetworkRef) for every association of this Type.
-template <class Fn> inline void eachAssociation(oct::File& f, const std::string& type, Fn fn)
-{
-    long a = f.pool("AssociationPool");
-    if (a < 0) return;
-    for (size_t i = a + 1, end = f.blockEnd(a); i < end; i = f.blockEnd(i)) {
-        std::string t;
-        long nn = -1;
-        int sn = -1;
-        for (size_t j = i + 1, e = f.blockEnd(i); j < e; ++j) {
-            const std::string& n = f.name(f.recs[j]);
-            if (n == "Type") t = f.name0(f.recs[j]);
-            else if (n == "NodeName") nn = (long)j;
-            else if (n == "SubNetworkRef") sn = f.int0(f.recs[j]);
-        }
-        if (t == type && nn >= 0 && sn >= 0) fn(f.recs[nn], sn);
-    }
-}
 
 // Rewrites the NodeName of each association of a Type that edit(SnEdit&, path) redirects (it returns the new path,
 // or "" to leave it). SubNetworks are edited last to first so earlier record indices stay valid.
