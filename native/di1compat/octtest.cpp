@@ -2963,7 +2963,7 @@ int main(int argc, char** argv)
         lap("collision aggregates added", di1::collision30(f));
         std::string src = argv[2];   // a realms\ asset gets the realm-file rule, as the plugin's realms/ paths
         for (char& c : src) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
-        lap("lighting nodes converted", octx::realm30w(f, src.find("/realms/") != std::string::npos));
+        lap("lighting nodes converted", di1::realm30w(f, src.find("/realms/") != std::string::npos ? di1::RealmRule::RealmFile : di1::RealmRule::WorldOnly));
         lap("curve associations bound", gameplay::curves30(f));
         if (argc > 4 && std::string(argv[4]) == "cho") {   // the plugin's choreography steps too (transcodeCho, const30)
             lap("clip blocks re-packed", cho::clips30(f, nullptr));

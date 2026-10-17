@@ -429,7 +429,11 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
         note += "+collision(" + std::to_string(n) + ") ";
         changed = true;
     }
-    if (int n = octx::realm30w(f, g_cfg.realmFile10 && path.rfind("realms/", 0) == 0)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
+    const bool realmAsset = g_cfg.realmFile10 && path.rfind("realms/", 0) == 0;
+    if (int n = di1::realm30w(f, realmAsset ? di1::RealmRule::RealmFile : di1::RealmRule::WorldOnly)) {
+        note += "+lighting(" + std::to_string(n) + " nodes) ";
+        changed = true;
+    }
     if (transcodeCho(f, note)) changed = true;
     int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
     if (ncv || nfl) { note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) "; changed = true; }
