@@ -13,6 +13,7 @@
 #include "octx.hpp"
 #include "luachunk.hpp"
 #include "base/bytes.hpp"
+#include "base/lua_lex.hpp"
 #include "formats/mer.hpp"
 
 namespace gameplay {
@@ -137,106 +138,17 @@ inline int surfaces30(oct::File& f, const std::vector<std::string>& names30)
 //               Its .ap init (3.0 0x1507380) reads ChallengeType (returns at once without one), ActorTagName,
 //               BeaconType; 1.0's (0xf46d38) read ActorTagName and ActivityIcon (default AnythingGoes).
 
-// Lua source tokens outside strings and comments: identifiers (with brace depth) and braces.
-struct LuaTok { size_t at, len; char kind; int depth; };   // kind 'i' identifier, '{', '}'
-inline std::vector<LuaTok> luaTokens(const std::string& s)
-{
-    std::vector<LuaTok> out;
-    int depth = 0;
-    auto longEnd = [&](size_t from) { size_t e = s.find("]]", from); return e == std::string::npos ? s.size() : e + 2; };
-    for (size_t i = 0; i < s.size();) {
-        char c = s[i];
-        if (c == '-' && i + 1 < s.size() && s[i + 1] == '-') {
-            if (i + 3 < s.size() && s[i + 2] == '[' && s[i + 3] == '[') i = longEnd(i + 4);
-            else { size_t e = s.find('\n', i); i = e == std::string::npos ? s.size() : e; }
-        } else if (c == '"' || c == '\'') {
-            size_t j = i + 1;
-            while (j < s.size() && s[j] != c) j += s[j] == '\\' ? 2 : 1;
-            i = j + 1;
-        } else if (c == '[' && i + 1 < s.size() && s[i + 1] == '[') i = longEnd(i + 2);
-        else if (isalpha((unsigned char)c) || c == '_') {
-            size_t j = i;
-            while (j < s.size() && (isalnum((unsigned char)s[j]) || s[j] == '_')) ++j;
-            out.push_back({i, j - i, 'i', depth});
-            i = j;
-        } else if (isdigit((unsigned char)c)) {
-            while (i < s.size() && (isalnum((unsigned char)s[i]) || s[i] == '.')) ++i;
-        } else {
-            if (c == '{') out.push_back({i, 1, '{', depth++});
-            else if (c == '}') out.push_back({i, 1, '}', --depth});
-            ++i;
-        }
-    }
-    return out;
-}
-
-inline bool assignedAt(const std::string& s, size_t after)   // 'name =' (not '==') follows
-{
-    size_t j = s.find_first_not_of(" \t\r\n", after);
-    return j != std::string::npos && s[j] == '=' && (j + 1 >= s.size() || s[j + 1] != '=');
-}
-
-// Renames table keys / globals ('Old =' outside strings and comments). Returns the number renamed.
-inline int luaRenameKeys(std::string& s, const std::vector<std::pair<std::string, std::string>>& map)
-{
-    auto toks = luaTokens(s);
-    int n = 0;
-    for (size_t k = toks.size(); k-- > 0;) {
-        const LuaTok& t = toks[k];
-        if (t.kind != 'i' || !assignedAt(s, t.at + t.len)) continue;
-        for (auto& m : map)
-            if (t.len == m.first.size() && !s.compare(t.at, t.len, m.first)) { s.replace(t.at, t.len, m.second); ++n; break; }
-    }
-    return n;
-}
-
-// Replaces whole quoted string values "Old" -> "New". Returns the count.
-inline int luaRenameStrings(std::string& s, const std::vector<std::pair<std::string, std::string>>& map)
-{
-    int n = 0;
-    for (auto& m : map) {
-        std::string a = "\"" + m.first + "\"", b = "\"" + m.second + "\"";
-        for (size_t p = s.find(a); p != std::string::npos; p = s.find(a, p + b.size())) { s.replace(p, a.size(), b); ++n; }
-    }
-    return n;
-}
-
-// The table assigned to global `name`: [open brace, one past its close); {npos, npos} if absent.
-inline std::pair<size_t, size_t> luaGlobalTable(const std::string& s, const std::vector<LuaTok>& toks, const std::string& name)
-{
-    for (size_t k = 0; k + 1 < toks.size(); ++k) {
-        if (toks[k].kind != 'i' || toks[k].depth != 0 || s.compare(toks[k].at, toks[k].len, name) || toks[k + 1].kind != '{') continue;
-        for (size_t e = k + 2; e < toks.size(); ++e)
-            if (toks[e].kind == '}' && toks[e].depth == 0) return {toks[k + 1].at, toks[e].at + 1};
-    }
-    return {std::string::npos, std::string::npos};
-}
-
-// Direct entries 'Key = { ... }' of the table opened at `open`: key -> [key start, one past the value's '}').
-inline std::vector<std::pair<std::string, std::pair<size_t, size_t>>> luaTableEntries(const std::string& s, const std::vector<LuaTok>& toks, size_t open)
-{
-    std::vector<std::pair<std::string, std::pair<size_t, size_t>>> out;
-    size_t k = 0;
-    while (k < toks.size() && toks[k].at != open) ++k;
-    if (k == toks.size()) return out;
-    int d = toks[k].depth + 1;
-    for (++k; k + 1 < toks.size(); ++k) {
-        if (toks[k].kind == '}' && toks[k].depth < d) break;
-        if (toks[k].kind != 'i' || toks[k].depth != d || toks[k + 1].kind != '{' || !assignedAt(s, toks[k].at + toks[k].len)) continue;
-        for (size_t e = k + 2; e < toks.size(); ++e)
-            if (toks[e].kind == '}' && toks[e].depth == d) { out.push_back({s.substr(toks[k].at, toks[k].len), {toks[k].at, toks[e].at + 1}}); k = e; break; }
-    }
-    return out;
-}
-
 // 1.0 ActivityTypePackage (ActivityData/ActivityTypeData_<playset>.lua) -> 3.0 ChallengeTypePackage. Returns the keys
 // renamed (activitytypedata_in.lua: 1 + 1 + 16 + 16 + 6 + 13 + 5 = 58, challenge.py).
 inline int challengeTypes30(std::string& lua)
 {
-    return luaRenameKeys(lua, {{"ActivityTypePackage", "ChallengeTypePackage"}, {"ActivityTypes", "ChallengeTypes"},
-                               {"ActivityTypeKey", "ChallengeTypeKey"}, {"ActivityDescriptionKey", "DescriptionKey"},
-                               {"ActivityLockedAdvertKey", "LockedAdvertKey"}, {"ActivityOffAdvertKey", "OffAdvertKey"},
-                               {"ActivityFMV", "FMVName"}});
+    return lualex::renameKeys(lua, {{"ActivityTypePackage", "ChallengeTypePackage"},
+                                    {"ActivityTypes", "ChallengeTypes"},
+                                    {"ActivityTypeKey", "ChallengeTypeKey"},
+                                    {"ActivityDescriptionKey", "DescriptionKey"},
+                                    {"ActivityLockedAdvertKey", "LockedAdvertKey"},
+                                    {"ActivityOffAdvertKey", "OffAdvertKey"},
+                                    {"ActivityFMV", "FMVName"}});
 }
 
 // 3.0 ChallengeData/ChallengeData.lua + the 1.0 beacon records (ActivityData/DefaultActivityBeacons.lua) that 3.0's
@@ -244,18 +156,20 @@ inline int challengeTypes30(std::string& lua)
 // SmallActivityBeacon).
 inline int beacons30(std::string& t30, const std::string& t10)
 {
-    auto toks10 = luaTokens(t10), toks30 = luaTokens(t30);
-    auto p10 = luaGlobalTable(t10, toks10, "ActivityBeaconPackage"), p30 = luaGlobalTable(t30, toks30, "BeaconTypePackage");
+    auto toks10 = lualex::tokens(t10), toks30 = lualex::tokens(t30);
+    auto p10 = lualex::globalTable(t10, toks10, "ActivityBeaconPackage");
+    auto p30 = lualex::globalTable(t30, toks30, "BeaconTypePackage");
     if (p10.first == std::string::npos || p30.first == std::string::npos) return 0;
     std::set<std::string> have;
-    for (auto& e : luaTableEntries(t30, toks30, p30.first)) have.insert(e.first);
+    for (auto& e : lualex::tableEntries(t30, toks30, p30.first)) have.insert(e.first);
     std::string add;
     int n = 0;
-    for (auto& e : luaTableEntries(t10, toks10, p10.first)) {
+    for (auto& e : lualex::tableEntries(t10, toks10, p10.first)) {
         if (have.count(e.first)) continue;
         std::string rec = t10.substr(e.second.first, e.second.second - e.second.first);
-        luaRenameStrings(rec, {{"ActivityInitiate", "ChallengeInitiate"}, {"ActivityOffAdvert", "ChallengeOffAdvert"},
-                               {"ActivityLockedAdvert", "ChallengeLockedAdvert"}});
+        lualex::renameStrings(rec, {{"ActivityInitiate", "ChallengeInitiate"},
+                                    {"ActivityOffAdvert", "ChallengeOffAdvert"},
+                                    {"ActivityLockedAdvert", "ChallengeLockedAdvert"}});
         add += "\n\t" + rec + ",";
         ++n;
     }
@@ -267,10 +181,11 @@ inline int beacons30(std::string& t30, const std::string& t10)
 // file (3.0 reads only that key, 0x143d603; served from ActivityData by challengeTypePath). Returns records changed.
 inline int zonelist30(std::string& t)
 {
-    auto toks = luaTokens(t);
+    auto toks = lualex::tokens(t);
     std::vector<size_t> at;
     for (size_t k = 0; k < toks.size(); ++k) {
-        if (toks[k].kind != 'i' || t.compare(toks[k].at, toks[k].len, "ActivityTypeDataFile") || !assignedAt(t, toks[k].at + toks[k].len)) continue;
+        const bool key = toks[k].kind == 'i' && !t.compare(toks[k].at, toks[k].len, "ActivityTypeDataFile");
+        if (!key || !lualex::assignedAt(t, toks[k].at + toks[k].len)) continue;
         int d = toks[k].depth;
         bool has = false;
         for (size_t j = k; j-- > 0 && !(toks[j].kind == '{' && toks[j].depth < d);)
@@ -354,34 +269,34 @@ struct Additions {
 };
 
 // The direct entry names of Records table `table` (none when the text has no such table).
-inline std::set<std::string> names(const std::string& t, const std::vector<LuaTok>& toks, const Text& z,
+inline std::set<std::string> names(const std::string& t, const std::vector<lualex::Tok>& toks, const Text& z,
                                    const char* table)
 {
     std::set<std::string> s;
     if (!z.recs.count(table)) return s;
-    for (auto& e : luaTableEntries(t, toks, z.recs.at(table))) s.insert(e.first);
+    for (auto& e : lualex::tableEntries(t, toks, z.recs.at(table))) s.insert(e.first);
     return s;
 }
 
 // The zone list text t; nullopt without a ZoneList table.
 inline std::optional<Text> scan(const std::string& t)
 {
-    auto toks = luaTokens(t);
-    auto zl = luaGlobalTable(t, toks, "ZoneList");
+    auto toks = lualex::tokens(t);
+    auto zl = lualex::globalTable(t, toks, "ZoneList");
     if (zl.first == std::string::npos) return std::nullopt;
     Text z;
-    for (auto& e : luaTableEntries(t, toks, zl.first)) {
+    for (auto& e : lualex::tableEntries(t, toks, zl.first)) {
         if (e.first != "Records") continue;
-        for (auto& r : luaTableEntries(t, toks, t.find('{', e.second.first)))
+        for (auto& r : lualex::tableEntries(t, toks, t.find('{', e.second.first)))
             z.recs[r.first] = t.find('{', r.second.first);
     }
     z.playsets = names(t, toks, z, "PlaysetProperties");
     z.zones = names(t, toks, z, "Zones");
     for (auto& k : toks)
-        if (k.kind == 'i' && !t.compare(k.at, k.len, "PlaysetUniqueID") && assignedAt(t, k.at + k.len))
+        if (k.kind == 'i' && !t.compare(k.at, k.len, "PlaysetUniqueID") && lualex::assignedAt(t, k.at + k.len))
             z.used.insert(atoi(t.c_str() + t.find('=', k.at) + 1));
     if (!z.recs.count("GlobalData")) return z;
-    for (auto& e : luaTableEntries(t, toks, z.recs["GlobalData"])) {
+    for (auto& e : lualex::tableEntries(t, toks, z.recs["GlobalData"])) {
         if (e.first != "OrderedPlaysets") continue;
         z.opOpen = t.find('{', e.second.first);
         z.ordered = t.substr(z.opOpen, e.second.second - z.opOpen);
@@ -909,12 +824,13 @@ inline int activityGraph30(oct::File& f, int* rerouted = nullptr, int* dropped =
 // ChallengeZone added to the state machine (61/61 shipped tables carry it). Returns the tables changed (0: unchanged).
 inline int activityTasks30(std::string& lua)
 {
-    auto toks = luaTokens(lua);
+    auto toks = lualex::tokens(lua);
     struct Edit { size_t at, len; std::string text; };
     std::vector<Edit> edits;
     int n = 0;
     for (size_t k = 0; k < toks.size(); ++k) {
-        if (toks[k].kind != 'i' || lua.compare(toks[k].at, toks[k].len, "Type") || !assignedAt(lua, toks[k].at + 4)) continue;
+        const bool type = toks[k].kind == 'i' && !lua.compare(toks[k].at, toks[k].len, "Type");
+        if (!type || !lualex::assignedAt(lua, toks[k].at + 4)) continue;
         size_t q = lua.find('"', toks[k].at), e = q == std::string::npos ? q : lua.find('"', q + 1);
         if (e == std::string::npos || lua.find_first_not_of(" \t=", toks[k].at + 4) != q) continue;
         std::string t = lua.substr(q + 1, e - q - 1);
@@ -927,7 +843,7 @@ inline int activityTasks30(std::string& lua)
         while (open > 0 && !(toks[open].kind == '{' && toks[open].depth < d)) --open;
         while (close < toks.size() && !(toks[close].kind == '}' && toks[close].depth < d)) ++close;
         for (size_t j = open + 1; j < close; ++j)
-            if (toks[j].kind == 'i' && toks[j].depth == d && assignedAt(lua, toks[j].at + toks[j].len))
+            if (toks[j].kind == 'i' && toks[j].depth == d && lualex::assignedAt(lua, toks[j].at + toks[j].len))
                 for (auto& p : c->params)
                     if (!lua.compare(toks[j].at, toks[j].len, p.first)) edits.push_back({toks[j].at, toks[j].len, p.second});
         if (std::string(c->cls30) == "MissionTask_ChallengeStateMachine" && close < toks.size())

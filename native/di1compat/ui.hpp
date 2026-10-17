@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
+#include "base/lua_lex.hpp"
 
 namespace ui {
 
@@ -95,36 +97,6 @@ inline std::string contextList10(const std::string& s)
 // Both exes pick loading-screen tips the same way (3.0 FUN_00b70da0 = 1.0 FUN_00b4af50, 3.0 adds UIPlaysetFilter):
 // ZoneTipCategories[zone] or [playset] (lower case), weights TipCounts, text "Load_Tips_%s_%.2d". 3.0's table has no
 // 'incredibles' and no Incredibles category, so IN_City got none of the 28 Incredibles tips.
-struct LuaEntry { std::string key, text; };   // one top-level entry of a table, its lines verbatim
-// The entries of the top-level table `name` in t (the shipped files' layout: "name = \n{\n", entries indented one tab,
-// "}" closes). [b, e) = the body's line range in t. false if absent.
-inline bool luaTable(const std::string& t, const char* name, std::vector<LuaEntry>& out, size_t& b, size_t& e)
-{
-    std::string head = std::string(name) + " = ";
-    size_t h = t.rfind("\n" + head, std::string::npos), at = t.compare(0, head.size(), head) == 0 ? 0 : h == std::string::npos ? h : h + 1;
-    if (at == std::string::npos) return false;
-    size_t o = t.find("\n{", at);
-    if (o == std::string::npos) return false;
-    b = t.find('\n', o + 1);
-    if (b == std::string::npos) return false;
-    ++b;
-    out.clear();
-    for (size_t p = b; p < t.size();) {
-        size_t nl = t.find('\n', p);
-        size_t end = nl == std::string::npos ? t.size() : nl + 1;
-        if (t[p] == '}') { e = p; return true; }
-        bool top = t[p] == '\t' && p + 1 < t.size() && t[p + 1] != '\t' && t[p + 1] != '{' && t[p + 1] != '}';
-        if (top) {
-            std::string k = t.substr(p + 1, t.find('=', p) - p - 1);
-            while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
-            if (k.size() > 4 && k[0] == '[' && k[1] == '"') k = k.substr(2, k.size() - 4);
-            out.push_back({k, ""});
-        }
-        if (!out.empty()) out.back().text.append(t, p, end - p);
-        p = end;
-    }
-    return false;
-}
 
 // t30 with the entries of the 1.0 table t10 that t30 lacks (by key) added verbatim to TipCounts and
 // ZoneTipCategories; a ZoneTipCategories key that names a registered zone (zone(key) true) stays 3.0's: of the 55
@@ -134,14 +106,14 @@ inline int mergeTips(std::string& t30, const std::string& t10, IsZone zone)
 {
     int added = 0;
     for (const char* name : {"TipCounts", "ZoneTipCategories"}) {
-        std::vector<LuaEntry> a, b;
-        size_t ab, ae, bb, be;
-        if (!luaTable(t30, name, a, ab, ae) || !luaTable(t10, name, b, bb, be)) return -1;
+        const std::optional<lualex::LineTable> a = lualex::lineTable(t30, name);
+        const std::optional<lualex::LineTable> b = a ? lualex::lineTable(t10, name) : std::nullopt;
+        if (!a || !b) return -1;
         bool zones = name[0] == 'Z';
         std::string add;
-        for (auto& x : b) {
+        for (auto& x : b->entries) {
             bool have = zones && zone(x.key);
-            for (auto& y : a) have |= y.key == x.key;
+            for (auto& y : a->entries) have |= y.key == x.key;
             if (have) continue;
             std::string s = x.text;
             size_t z = s.find_last_not_of("\r\n\t ");
@@ -152,9 +124,14 @@ inline int mergeTips(std::string& t30, const std::string& t10, IsZone zone)
             ++added;
         }
         // the last 3.0 entry ends with ',' in every shipped tips.lua; one without gets it
-        size_t last = t30.find_last_not_of("\r\n\t ", ae - 1);
-        if (!add.empty() && last != std::string::npos && last >= ab && t30[last] != ',') { t30.insert(last + 1, ","); ++ae; }
-        t30.insert(ae, add);
+        size_t end = a->end;
+        const size_t last = t30.find_last_not_of("\r\n\t ", end - 1);
+        const bool inBody = last != std::string::npos && last >= a->begin;
+        if (!add.empty() && inBody && t30[last] != ',') {
+            t30.insert(last + 1, ",");
+            ++end;
+        }
+        t30.insert(end, add);
     }
     return added;
 }
