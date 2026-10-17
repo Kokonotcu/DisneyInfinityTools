@@ -22,5 +22,10 @@ target_compile_features(octtest PRIVATE cxx_std_17)
 target_compile_options(octtest PRIVATE /MP)   # its sources compile in parallel
 # /W4 on our C++ only; minhook and miniz keep the default level. Warnings, not errors.
 set_source_files_properties(di1compat.cpp ${OCTTEST_SOURCES} PROPERTIES COMPILE_OPTIONS /W4)
+# Release writes a PDB for crash dumps (docs/audit OT-29); /OPT:REF,ICF keep the folding /DEBUG turns off.
+foreach(target di1compat octtest)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(${target} PRIVATE "$<$<CONFIG:Release>:/DEBUG;/OPT:REF;/OPT:ICF>")
+endforeach()
 # cmake --install <build> --config Release --prefix "<3.0 install>" copies the DLL into Pentane\Plugins
 install(FILES $<TARGET_FILE:di1compat> DESTINATION Pentane/Plugins)

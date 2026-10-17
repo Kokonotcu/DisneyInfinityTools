@@ -99,6 +99,8 @@ cmake --build build --config Release
 The build produces `di1compat.dll` (the plugin) and `octtest.exe` (the offline test driver). The plugin links the CRT
 statically, so the game needs no Visual C++ runtime; `octtest.exe` uses the runtime DLL (Visual C++ Redistributable,
 x86). Configuring for any architecture other than Win32 stops with an error. Our C++ compiles at `/W4`, as warnings.
+Release builds also write `di1compat.pdb` beside the DLL, so crash dumps of the plugin can be symbolised; the install
+step does not copy it.
 
 ## Installing
 
