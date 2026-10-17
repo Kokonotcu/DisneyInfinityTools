@@ -15,7 +15,7 @@
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
-#include "dct.hpp"
+#include "formats/dct.hpp"
 #include "base/hash.hpp"
 #include "luachunk.hpp"
 #include "sx.hpp"
@@ -232,9 +232,9 @@ static int uiTest(char** a, int argc)
     check(add > 0 && !shadow && (int)d1.keys.size() == kept + add, "text10: " + std::to_string(add) + " 1.0 lang/main keys added, none a 3.0 key");
     auto probe = [&](std::string key) {   // the engine's probe (octtest --dct)
         for (char& c : key) c = (char)tolower((unsigned char)c);
-        uint32_t h = hash::lookup2((const uint8_t*)key.data(), key.size(), dct::u32(in, 8)), ns = dct::u32(in, 0x10);
-        for (uint32_t i = h % ns; dct::u32(in, 0x24 + 12 * i); i = (i + 1) % ns)
-            if (dct::u32(in, 0x20 + 12 * i) == h) return std::string(in.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(in, 0x24 + 12 * i));
+        uint32_t h = hash::lookup2((const uint8_t*)key.data(), key.size(), bytes::le32(in, 8)), ns = bytes::le32(in, 0x10);
+        for (uint32_t i = h % ns; bytes::le32(in, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (bytes::le32(in, 0x20 + 12 * i) == h) return std::string(in.c_str() + 0x25 + 12 * i + (int32_t)bytes::le32(in, 0x24 + 12 * i));
         return std::string();
     };
     int tips = 0;
@@ -2806,9 +2806,9 @@ int main(int argc, char** argv)
         // the engine's probe: lowercase key, hash with the table's seed, slot = hash % slots, linear
         std::string k = argv[4];
         for (char& c : k) c = (char)tolower((unsigned char)c);
-        uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), dct::u32(raw, 8)), ns = dct::u32(raw, 0x10);
-        for (uint32_t i = h % ns; dct::u32(raw, 0x24 + 12 * i); i = (i + 1) % ns)
-            if (dct::u32(raw, 0x20 + 12 * i) == h) { printf("%s = \"%s\"\n", argv[4], raw.c_str() + 0x25 + 12 * i + (int32_t)dct::u32(raw, 0x24 + 12 * i)); return 0; }
+        uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::le32(raw, 8)), ns = bytes::le32(raw, 0x10);
+        for (uint32_t i = h % ns; bytes::le32(raw, 0x24 + 12 * i); i = (i + 1) % ns)
+            if (bytes::le32(raw, 0x20 + 12 * i) == h) { printf("%s = \"%s\"\n", argv[4], raw.c_str() + 0x25 + 12 * i + (int32_t)bytes::le32(raw, 0x24 + 12 * i)); return 0; }
         printf("%s not found\n", argv[4]);
         return 1;
     }

@@ -42,7 +42,7 @@
 #include "render.hpp"
 #include "arc30.hpp"
 #include "datamap.hpp"
-#include "dct.hpp"
+#include "formats/dct.hpp"
 #include "luachunk.hpp"
 #include "sx.hpp"
 #include "sys.hpp"
