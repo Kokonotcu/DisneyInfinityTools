@@ -43,6 +43,7 @@
 #include "games/di1/zones.hpp"
 #include "trace/breaktrace.hpp"
 #include "trace/fade.hpp"
+#include "trace/loadprof.hpp"
 #include "trace/locktrace.hpp"
 #include "trace/mission.hpp"
 #include "trace/opacity.hpp"
@@ -102,13 +103,15 @@ using core::safeCopy;
 using core::afterCall;
 using core::avHandler;
 using core::stackOf;
-using core::watch;
 using core::copyToMemFile;
 using core::memFile;
 using core::readStream;
 using hash::fnv64;
 using text::endsWith;
 using text::norm;
+using trace::loadprof::frameNo;
+using trace::loadprof::noteOpenThread;
+using trace::loadprof::nowMs;
 
 static di1::Config g_cfg;   // the cfg file's values (games/di1/config.hpp): set once in Pentane_Main, before any hook
 
@@ -591,383 +594,6 @@ static const char* __fastcall hkAssetDef(void* self, void*, const char* key)
 static bool installAssetDefs(const di1::Config&)
 {
     return hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
-}
-// test (fpslog10): FUN_0047aab0 runs once per frame on the main thread (FUN_0047f0a0, the frame's render submit) and
-// spins while the render thread still holds the previous frame (+0x71f0 == 2). Call-to-call time = frame time; time
-// inside = the main thread waiting on rendering. Mostly waiting -> render thread / GPU / present bound; hardly
-// waiting at 33 ms -> the main thread's own work (simulation, graphs, AI) is the limit.
-typedef void(__cdecl* FrameSyncFn)();
-static FrameSyncFn g_frameSync;
-static volatile DWORD g_frameTid;   // loadprof10: the thread that runs the frame sync
-static volatile LONG g_frameNo;     // loadprof10: frames so far (served lines carry it)
-static double qpcMs();
-
-// loadprof10: which fiber of the resource scheduler (DAT_0213d4f8: +0x5c main, +0x60/+0x64 the two "Resource Loader
-// Fiber"s, +0x68 the extra fiber = the loading screen's draw loop, LAB_00678730) runs on the frame thread, and the ms
-// each had. A zone load is a ZoneManager::ZoneLoadTask on loader fiber 0 (full dumps of 2026-10-12) while main waits
-// for it (FUN_0041ef40); the loading screen draws when a yield (FUN_0041eb60) finds its 44 ms period (0x01fa9740)
-// over. Every switch goes through FUN_0041e480 (cdecl from, to, ctx; ret): only the scheduler's thread calls it.
-static const char* const kFiberRole[5] = {"main", "load0", "load1", "screen", "other"};
-static volatile LONG g_fiberRole = 4;   // read by the sampler
-static double g_fiberMs[5], g_fiberSince;   // cumulative, frame thread only
-static int fiberRole(void* f)
-{
-    const uint8_t* s = *(const uint8_t* const*)rt(0x0213D4F8);
-    for (int i = 0; s && f && i < 4; ++i)
-        if (*(void* const*)(s + 0x5c + 4 * i) == f) return i;
-    return 4;
-}
-static double fiberMsNow(int role)   // role's cumulative ms, the running stretch included
-{
-    return g_fiberMs[role] + (g_fiberRole == role && g_fiberSince ? qpcMs() - g_fiberSince : 0);
-}
-typedef void(__cdecl* FiberSwitchFn)(void* from, void* to, int ctx);
-static FiberSwitchFn g_fiberSwitch;
-static void __cdecl hkFiberSwitch(void* from, void* to, int ctx)
-{
-    double now = qpcMs();
-    if (g_fiberSince) g_fiberMs[g_fiberRole] += now - g_fiberSince;
-    g_fiberSince = now;
-    g_fiberRole = fiberRole(to);
-    g_fiberSwitch(from, to, ctx);
-}
-// Per-fiber counters (fibers share their thread, so thread_local alone would mix them): the .oct load depth and the
-// file waits of the fiber running now (GetCurrentFiber: on a thread that never became a fiber, a per-thread value).
-struct FiberProf { void* fiber; int depth; int waits; double waitMs; };
-static FiberProf& fiberProf()
-{
-    thread_local FiberProf s[8];
-    void* f = GetCurrentFiber();
-    for (auto& e : s) if (e.fiber == f) return e;
-    for (auto& e : s) if (!e.depth) { e = {f, 0, 0, 0}; return e; }   // ponytail: 8 busy fibers per thread at most
-    return s[0];
-}
-// loadprof10: time spent in the engine's file-done wait (FUN_0041fc10, thiscall on the completion, no args, ret:
-// WaitForSingleObject(ev, 1) + a yield until the file thread signals; EAX passed through)
-typedef uint32_t(__fastcall* FileWaitFn)(void* done, void* edx);
-static FileWaitFn g_fileWait;
-static uint32_t __fastcall hkFileWait(void* done, void*)
-{
-    double t = qpcMs();
-    uint32_t r = g_fileWait(done, nullptr);
-    FiberProf& p = fiberProf();   // after: the wait may switch fibers, but it returns on the one that waited
-    p.waitMs += qpcMs() - t;
-    ++p.waits;
-    return r;
-}
-// loadprof10: one .oct asset load in the engine (FUN_00786d00, cdecl (out, char** path, a3, a4), ret; its
-// Zoo::AssetFileTask reads, parses and instances the file). Logged per outermost call on a fiber: wall ms, frames,
-// each scheduler fiber's ms meanwhile, the file waits.
-typedef int*(__cdecl* OctLoadFn)(int* out, char** path, uint32_t a3, uint32_t a4);
-static OctLoadFn g_octLoad;
-static int* __cdecl hkOctLoad(int* out, char** path, uint32_t a3, uint32_t a4)
-{
-    FiberProf& fp = fiberProf();
-    if (fp.depth++) {
-        int* r = g_octLoad(out, path, a3, a4);
-        --fiberProf().depth;
-        return r;
-    }
-    const bool ft = GetCurrentThreadId() == g_frameTid;
-    double t0 = qpcMs(), w0 = fp.waitMs, f[5];
-    int n0 = fp.waits;
-    LONG fr0 = g_frameNo;
-    for (int i = 0; i < 5; ++i) f[i] = ft ? fiberMsNow(i) : 0;
-    char p[200] = "";
-    if (path) safeCopy(p, sizeof(p), *path);
-    int* r = g_octLoad(out, path, a3, a4);
-    FiberProf& fq = fiberProf();   // the same slot (same fiber), looked up again: never hold a slot across a switch
-    --fq.depth;
-    char fib[160] = "";
-    if (ft)
-        sprintf_s(fib, ", fibers main %.1f load0 %.1f load1 %.1f screen %.1f", fiberMsNow(0) - f[0], fiberMsNow(1) - f[1],
-                  fiberMsNow(2) - f[2], fiberMsNow(3) - f[3]);
-    logf("prof oct load %s: %.1f ms, frames %ld, on %s%s, file waits %d / %.1f ms", p, qpcMs() - t0, g_frameNo - fr0,
-         ft ? kFiberRole[g_fiberRole] : "other-thread", fib, fq.waits - n0, fq.waitMs - w0);
-    return r;
-}
-
-static void __cdecl hkFrameSync()
-{
-    g_frameTid = GetCurrentThreadId();
-    InterlockedIncrement(&g_frameNo);
-    static LARGE_INTEGER freq, last, second;
-    static double sumFrame, maxFrame, sumWait;
-    static int frames;
-    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-    LARGE_INTEGER a, b;
-    QueryPerformanceCounter(&a);
-    g_frameSync();
-    QueryPerformanceCounter(&b);
-    if (last.QuadPart) {
-        double frame = 1000.0 * (a.QuadPart - last.QuadPart) / freq.QuadPart;
-        sumFrame += frame; maxFrame = (std::max)(maxFrame, frame); ++frames;
-        sumWait += 1000.0 * (b.QuadPart - a.QuadPart) / freq.QuadPart;
-    } else second = a;
-    last = a;
-    if (frames && a.QuadPart - second.QuadPart >= freq.QuadPart) {
-        static double lastF[5];
-        char fib[120] = "";
-        if (g_fiberSince) {   // loadprof10: the scheduler's fibers over the last second
-            double d[5];
-            for (int i = 0; i < 5; ++i) { double v = fiberMsNow(i); d[i] = v - lastF[i]; lastF[i] = v; }
-            sprintf_s(fib, "; fibers main %.0f load0 %.0f load1 %.0f screen %.0f ms", d[0], d[1], d[2], d[3]);
-        }
-        logf("fps %.1f: frame %.2f ms avg, %.2f max; main thread waits on rendering %.2f ms of it%s", 1000.0 * frames / sumFrame,
-             sumFrame / frames, maxFrame, sumWait / frames, fib);
-        sumFrame = maxFrame = sumWait = 0; frames = 0; second = a;
-    }
-}
-
-// ---- loadprof10 (diagnostic): where a load's wall time goes ----
-// hkOpen appends its own timings to the served / MISSING lines. A sampler thread (high-resolution waitable timer,
-// ~1 kHz, so the system timer resolution the engine sees is untouched) suspends the frame thread, every thread that
-// entered hkOpen and the 3 busiest other threads of the last second, copies EIP and the top of the stack, resumes,
-// and only then attributes the sample (nothing is allocated or locked while a thread is suspended). Every 5 s:
-// a summary per thread in the log and every (thread, leaf, caller, caller's caller) count in di1compat_prof.tsv.
-// leaf = the static EIP in the exe, else 'm<module>!<nearest export>+<off>' (a waiting thread sits in ntdll's
-// NtWaitFor... / NtDelayExecution); callers = the first two exe return addresses on the stack (static VAs).
-static double qpcMs()
-{
-    static LARGE_INTEGER f;
-    if (!f.QuadPart) QueryPerformanceFrequency(&f);
-    LARGE_INTEGER c;
-    QueryPerformanceCounter(&c);
-    return 1000.0 * (double)c.QuadPart / (double)f.QuadPart;
-}
-static volatile LONG g_openTidN;
-static volatile DWORD g_openTids[8];
-static void noteOpenThread()
-{
-    thread_local bool seen;
-    if (seen) return;
-    seen = true;
-    LONG i = InterlockedIncrement(&g_openTidN) - 1;
-    if (i < 8) g_openTids[i] = GetCurrentThreadId();
-}
-// bounded by the stack region, so no fault can reach the vectored handlers (avHandler logs, CrabeLoader dumps)
-// while the thread is suspended
-static int copyStack(const uint32_t* sp, uint32_t* out, int max)
-{
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return 0;
-    size_t room = ((const uint8_t*)mbi.BaseAddress + mbi.RegionSize - (const uint8_t*)sp) / 4;
-    int n = (int)(std::min)(room, (size_t)max);
-    memcpy(out, sp, n * 4);
-    return n;
-}
-static bool afterCallSafe(uint32_t v)
-{
-    __try { return afterCall(v); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-static uintptr_t g_selfLo, g_selfHi;   // di1compat.dll's image
-// a return address into di1compat.dll (right after a call instruction)
-static bool ourRetSafe(uint32_t v)
-{
-    if (v < g_selfLo + 6 || v >= g_selfHi) return false;
-    __try {
-        const uint8_t* p = (const uint8_t*)(uintptr_t)v;
-        return p[-5] == 0xE8 || (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) || (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) ||
-               (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-// 'module!export+0xoff' for a code address outside the exe (nearest named export at or below it); in di1compat.dll
-// 'di1compat.dll+0x<rva>' (resolve with the build's .map)
-static std::string symbolAt(uintptr_t a)
-{
-    HMODULE m = nullptr;
-    char full[MAX_PATH];
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) || !m ||
-        !GetModuleFileNameA(m, full, MAX_PATH))
-        return "?";
-    std::string s = strrchr(full, '\\') ? strrchr(full, '\\') + 1 : full;
-    if ((uintptr_t)m == g_selfLo) {
-        char off[24];
-        sprintf_s(off, "+0x%X", (unsigned)(a - g_selfLo));
-        return s + off;
-    }
-    const uint8_t* b = (const uint8_t*)m;
-    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew);
-    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    uint32_t rva = (uint32_t)(a - (uintptr_t)m), best = 0;
-    const char* name = nullptr;
-    if (dir.VirtualAddress && dir.Size) {
-        const IMAGE_EXPORT_DIRECTORY* ex = (const IMAGE_EXPORT_DIRECTORY*)(b + dir.VirtualAddress);
-        const uint32_t* fns = (const uint32_t*)(b + ex->AddressOfFunctions);
-        const uint32_t* names = (const uint32_t*)(b + ex->AddressOfNames);
-        const uint16_t* ords = (const uint16_t*)(b + ex->AddressOfNameOrdinals);
-        for (DWORD i = 0; i < ex->NumberOfNames; ++i)
-            if (uint32_t f = fns[ords[i]]; f <= rva && f > best) { best = f; name = (const char*)(b + names[i]); }
-    }
-    char off[48];
-    sprintf_s(off, "+0x%X", rva - best);
-    return s + "!" + (name ? name : "") + off;
-}
-static std::string g_profPath;
-static DWORD WINAPI profThread(void*)
-{
-    HANDLE tm = CreateWaitableTimerExW(nullptr, nullptr, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
-    logf("loadprof10: sampler up (%s timer)", tm ? "high-resolution" : "Sleep(1)");
-    const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
-    {
-        HMODULE me = nullptr;
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&profThread, &me);
-        const uint8_t* b = (const uint8_t*)me;
-        g_selfLo = (uintptr_t)me;
-        g_selfHi = me ? g_selfLo + ((const IMAGE_NT_HEADERS*)(b + ((const IMAGE_DOS_HEADER*)b)->e_lfanew))->OptionalHeader.SizeOfImage : 0;
-    }
-    std::map<DWORD, HANDLE> handles;
-    std::map<DWORD, uint64_t> cpuLast;
-    // {tid, outside the exe?, EIP, 4 callers, ours, fiber}: fiber = the scheduler fiber the frame thread ran (kFiberRole;
-    // 5: another thread); ours = for a sample outside the exe, the outermost
-    // di1compat.dll code on the stack below the first exe frame (the detour or plugin thread it runs for) as an RVA + 1
-    // (0: none) -- time the plugin itself costs, its system calls included; inside the engine's own functions it is not
-    std::map<std::array<uint32_t, 9>, uint32_t> counts;
-    std::map<uint32_t, std::string> syms;
-    std::map<DWORD, uint32_t> samples;
-    std::vector<DWORD> busy;
-    double nextCpu = qpcMs() + 1000, nextDump = qpcMs() + 5000;
-    int window = 0;
-    auto handle = [&](DWORD tid) {
-        auto it = handles.find(tid);
-        if (it != handles.end()) return it->second;
-        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
-        return handles[tid] = h;
-    };
-    auto role = [&](DWORD tid) {
-        std::string r = tid == g_frameTid ? "frame" : "";
-        for (LONG i = 0; i < g_openTidN && i < 8; ++i)
-            if (g_openTids[i] == tid) r += r.empty() ? "open" : "+open";
-        return r.empty() ? std::string("busy") : r;
-    };
-    auto leafName = [&](const std::array<uint32_t, 9>& k) {
-        char b[16];
-        if (!k[1]) { sprintf_s(b, "%08X", k[2]); return std::string(b); }
-        auto it = syms.find(k[2]);
-        if (it == syms.end()) it = syms.emplace(k[2], symbolAt(k[2])).first;
-        return "m" + it->second;
-    };
-    for (;;) {
-        if (tm) {
-            LARGE_INTEGER due;
-            due.QuadPart = -10000;   // 1 ms
-            SetWaitableTimer(tm, &due, 0, nullptr, nullptr, FALSE);
-            WaitForSingleObject(tm, 50);
-        } else Sleep(1);
-        std::vector<DWORD> tids;
-        if (DWORD f = g_frameTid) tids.push_back(f);
-        for (LONG i = 0; i < g_openTidN && i < 8; ++i)
-            if (DWORD o = g_openTids[i]; std::find(tids.begin(), tids.end(), o) == tids.end()) tids.push_back(o);
-        for (DWORD t : busy)
-            if (std::find(tids.begin(), tids.end(), t) == tids.end()) tids.push_back(t);
-        for (DWORD tid : tids) {
-            HANDLE h = handle(tid);
-            if (!h || tid == self) continue;
-            CONTEXT c{};
-            c.ContextFlags = CONTEXT_CONTROL;
-            uint32_t stk[384];
-            int n = 0;
-            if (SuspendThread(h) == (DWORD)-1) continue;
-            bool ok = GetThreadContext(h, &c) != 0;
-            if (ok) n = copyStack((const uint32_t*)(uintptr_t)c.Esp, stk, 384);
-            LONG fib = tid == g_frameTid ? g_fiberRole : 5;   // the fiber it runs (frame thread); 5 = not tracked
-            ResumeThread(h);
-            if (!ok) continue;
-            uintptr_t eip = c.Eip;
-            bool inExe = eip >= g_base && eip < g_base + 0x2100000;
-            std::array<uint32_t, 9> k{tid, inExe ? 0u : 1u, (uint32_t)(inExe ? eip - g_base + 0x400000 : eip), 0, 0, 0, 0, 0, (uint32_t)fib};
-            if (!inExe && eip >= g_selfLo && eip < g_selfHi) k[7] = (uint32_t)(eip - g_selfLo) + 1;
-            for (int i = 0, f = 3; i < n && f < 7; ++i) {
-                if ((stk[i] & 0xff00ff00) && afterCallSafe(stk[i])) k[f++] = (uint32_t)(stk[i] - g_base + 0x400000);
-                else if (!inExe && f == 3 && ourRetSafe(stk[i])) k[7] = (uint32_t)(stk[i] - g_selfLo) + 1;   // outermost wins
-            }
-            ++counts[k];
-            ++samples[tid];
-        }
-        double now = qpcMs();
-        if (now >= nextCpu) {   // CPU time per thread over the last second; the 3 busiest others are sampled next
-            nextCpu = now + 1000;
-            std::vector<std::pair<uint64_t, DWORD>> d;
-            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            THREADENTRY32 te{sizeof(te)};
-            for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-                if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
-                HANDLE h = handle(te.th32ThreadID);
-                FILETIME a, b, k, u;
-                if (!h || !GetThreadTimes(h, &a, &b, &k, &u)) continue;
-                uint64_t t = ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
-                uint64_t& last = cpuLast[te.th32ThreadID];
-                if (last) d.push_back({t - last, te.th32ThreadID});
-                last = t;
-            }
-            CloseHandle(snap);
-            std::sort(d.rbegin(), d.rend());
-            busy.clear();
-            std::string line;
-            uint64_t total = 0;
-            for (auto& [t, tid] : d) total += t;
-            for (size_t i = 0; i < d.size() && i < 6; ++i) {
-                std::string r = role(d[i].second);
-                if (r == "busy" && busy.size() < 3) busy.push_back(d[i].second);
-                char b[80];
-                sprintf_s(b, " %s %u %.0f ms;", r.c_str(), (unsigned)d[i].second, d[i].first / 1e4);
-                line += b;
-            }
-            logf("prof cpu last second: process %.0f ms over %zu threads; busiest:%s", total / 1e4, d.size(), line.c_str());
-        }
-        if (now >= nextDump) {
-            nextDump = now + 5000;
-            ++window;
-            FILE* f = nullptr;
-            if (!fopen_s(&f, g_profPath.c_str(), window == 1 ? "w" : "a") && f) {
-                if (window == 1) fprintf(f, "window\ttid\trole\tleaf\tcaller\tcaller2\tcaller3\tcaller4\tours\tcount\n");
-                for (auto& [k, v] : counts)   // role 'frame/load0': the frame thread running that scheduler fiber
-                    fprintf(f, "%d\t%u\t%s%s%s\t%s\t%08X\t%08X\t%08X\t%08X\t%X\t%u\n", window, k[0], role(k[0]).c_str(), k[8] < 5 ? "/" : "",
-                            k[8] < 5 ? kFiberRole[k[8]] : "", leafName(k).c_str(), k[3], k[4], k[5], k[6], k[7] ? k[7] - 1 : 0xffffffffu, v);
-                fclose(f);
-            }
-            for (auto& [tid, n] : samples) {   // per thread: share in the exe and in each module
-                std::map<std::string, uint32_t> mods;
-                uint32_t ours = 0;
-                for (auto& [k, v] : counts)
-                    if (k[0] == tid) {
-                        std::string s = k[1] ? leafName(k).substr(1) : "exe";
-                        mods[s.substr(0, s.find_first_of("!+"))] += v;
-                        if (k[7]) ours += v;
-                    }
-                std::string line;
-                for (auto& [m, v] : mods) {
-                    char b[MAX_PATH + 24];
-                    sprintf_s(b, " %s %.0f%%", m.c_str(), 100.0 * v / n);
-                    line += b;
-                }
-                logf("prof window %d %s %u: %u samples, %.1f%% in di1compat code (its calls included):%s", window, role(tid).c_str(),
-                     (unsigned)tid, n, 100.0 * ours / n, line.c_str());
-            }
-            counts.clear();
-            samples.clear();
-        }
-    }
-}
-
-// fpslog10's frame sync and loadprof10's hooks (H1); the sampler starts only with all of loadprof10's.
-static bool installLoadProf(const di1::Config& c)
-{
-    bool ok = true;
-    if (c.fpsLog10 || c.loadProf10)
-        ok &= hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync,
-                   (void**)&g_frameSync);
-    if (!c.loadProf10) return ok;
-    const bool profiler = installFeature("loadprof10", {
-        {"fiber switch (loadprof10)", 0x0041E480, "8B44240C85C0740C", (void*)&hkFiberSwitch, (void**)&g_fiberSwitch},
-        {"file-done wait (loadprof10)", 0x0041FC10, "56578B3D????????8BF1", (void*)&hkFileWait, (void**)&g_fileWait},
-        {".oct asset load (loadprof10)", 0x00786D00, "6AFF68????????64A100000000", (void*)&hkOctLoad,
-         (void**)&g_octLoad},
-    });
-    if (!profiler) return false;
-    g_profPath = g_gameDir + "\\di1compat_prof.tsv";
-    if (HANDLE h = CreateThread(nullptr, 0, profThread, nullptr, 0, nullptr); h) CloseHandle(h);
-    return ok;
 }
 
 // PS-1 (zones10): the 1.0 playsets the 3.0 zone list holds once it has loaded (gameplay::playsets10; added here unless
@@ -1821,7 +1447,7 @@ static int* serveSession(const Open& o, const std::string& hit)
     char pf[100] = "";
     if (o.prof)
         format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, total %.2f ms]",
-                              GetCurrentThreadId(), g_frameNo, o.t30, qpcMs() - o.tIn);
+                              GetCurrentThreadId(), frameNo(), o.t30, nowMs() - o.tIn);
     logf("served %s %u B from asset session -> %s%s", o.p, (unsigned)hit.size(), r ? "ok" : "FAILED", pf);
     return r;
 }
@@ -1878,7 +1504,7 @@ static void* read10Lipsync(const char* p, size_t* n, std::string* where)
 // The 1.0 read of a missing file: overlay member, ChallengeData redirect, stand-ins, lipsync. Sets the miss reason.
 static Read10 read10For(Open& o, const std::string& np, const std::string& over)
 {
-    double tR = o.prof ? qpcMs() : 0;
+    double tR = o.prof ? nowMs() : 0;
     Read10 rd;
     // the count includes the candidate names that were not there (A-12)
     o.missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)"
@@ -1889,7 +1515,7 @@ static Read10 read10For(Open& o, const std::string& np, const std::string& over)
     rd.data = scoped ? nullptr : read10(from, &rd.n, &rd.where);
     if (!rd.data) rd.data = read10StandIn(o, np, &rd.n, &rd.where);
     if (!rd.data) rd.data = read10Lipsync(o.p, &rd.n, &rd.where);
-    if (o.prof) o.tRead = qpcMs() - tR;
+    if (o.prof) o.tRead = nowMs() - tR;
     return rd;
 }
 
@@ -1968,17 +1594,17 @@ static void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_
 static int* serveRead(const Open& o, const std::string& np, const std::string& over, const Read10& rd)
 {
     indexZip10(rd.where.substr(0, rd.where.find(':')));
-    double tT = o.prof ? qpcMs() : 0;
+    double tT = o.prof ? nowMs() : 0;
     Transcoded t = transcodeServed(o, np, over, rd);
     noteServedUi(np, o.p);
-    double tTc = o.prof ? qpcMs() - tT : 0;
-    double tM = o.prof ? qpcMs() : 0;
+    double tTc = o.prof ? nowMs() - tT : 0;
+    double tM = o.prof ? nowMs() : 0;
     int* r = t.codec ? memFile(t.out.data(), t.out.size()) : memFile(rd.data, rd.n);
     char pf[600] = "";
     if (o.prof) {
         int len = format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 read %.2f, "
-                                        "transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(), g_frameNo,
-                                        o.t30, o.tRead, tTc, qpcMs() - tM, qpcMs() - o.tIn);
+                                        "transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(), frameNo(),
+                                        o.t30, o.tRead, tTc, nowMs() - tM, nowMs() - o.tIn);
         appendServedStack(o.p, o.sp, pf, sizeof(pf), len);
     }
     logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s%s", o.p, (unsigned)(t.codec ? t.out.size() : rd.n),
@@ -2011,7 +1637,7 @@ static void logOpen(const Open& o)
     char pf[120] = "";
     if (o.prof)
         format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]",
-                              GetCurrentThreadId(), g_frameNo, o.t30, o.tRead, qpcMs() - o.tIn);
+                              GetCurrentThreadId(), frameNo(), o.t30, o.tRead, nowMs() - o.tIn);
     if (g_cfg.trace || !o.r)
         logf("open %s flags=%X -> %s%s%s", o.p, o.flags & 0xff, o.r ? "ok" : "MISSING", o.r ? "" : o.missWhy.c_str(),
              pf);
@@ -2030,11 +1656,11 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
     Open o{path, flags, a3, a4, a5, (const uint32_t*)_AddressOfReturnAddress(), (flags & kOpenWrite) != 0,
            g_cfg.loadProf10};
     if (o.prof) {
-        o.tIn = qpcMs();
+        o.tIn = nowMs();
         noteOpenThread();
     }
     o.r = g_open(path, flags, a3, a4, a5);
-    if (o.prof) o.t30 = qpcMs() - o.tIn;
+    if (o.prof) o.t30 = nowMs() - o.tIn;
     safeCopy(o.p, sizeof(o.p), path);
     for (OpenStage stage : kOpenStages) {
         int* out = nullptr;
@@ -2572,7 +2198,7 @@ extern "C" void __stdcall Pentane_Main()
     trace::locktrace::install({g_cfg.lockTrace10});
     trace::opacity::install({g_cfg.opacityLog10});
     trace::fade::install({g_cfg.fadeProbe10});
-    installLoadProf(g_cfg);
+    trace::loadprof::install({g_cfg.fpsLog10, g_cfg.loadProf10, g_gameDir});
     installAssetDefs(g_cfg);
     installCrt(g_cfg);
     installSx(g_cfg);
