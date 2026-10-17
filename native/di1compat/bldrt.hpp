@@ -30,7 +30,6 @@
 #include "core/log.hpp"
 #include "core/memcheck.hpp"
 #include "games/di1/config.hpp"
-#include "sys.hpp"
 
 namespace bldrt {
 
@@ -116,8 +115,8 @@ static void __fastcall hkLotState(void* self, void*, int order, uint8_t isStatic
 static void __cdecl hkNode(void* call)
 {
     char n[128] = "";
-    uint8_t* node = sys::readable((uint8_t*)call + 4, 4) ? *(uint8_t**)((uint8_t*)call + 4) : nullptr;
-    if (node && sys::readable(node + 0x1c, 4)) safeCopy(n, sizeof(n), *(const char**)(node + 0x1c));
+    uint8_t* node = core::readable((uint8_t*)call + 4, 4) ? *(uint8_t**)((uint8_t*)call + 4) : nullptr;
+    if (node && core::readable(node + 0x1c, 4)) safeCopy(n, sizeof(n), *(const char**)(node + 0x1c));
     logf("spawntrace10: SpawnBuilding node fired: '%s'", n);
     g_node(call);
 }

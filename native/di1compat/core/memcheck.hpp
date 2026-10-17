@@ -1,12 +1,12 @@
-// Checked reads of memory the plugin does not own (H8). Windows, sys.hpp. Any thread; vq* and readableWords in VEHs.
+// Checked reads of memory the plugin does not own (H8). Windows, psapi. Any thread; vq* and readableWords in VEHs.
 #pragma once
 #include <windows.h>
+#include <psapi.h>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include "../sys.hpp"
 
 namespace core {
 
@@ -14,6 +14,8 @@ namespace detail {
 // The protections vqReadable reads through: an execute-only page has none of them.
 constexpr DWORD kReadProtect = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
                                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+constexpr uintptr_t kPageSize = 0x1000;
+constexpr uintptr_t kLowestReadable = 0x10000;   // Windows never maps the first 64 KiB
 
 inline bool readableRegion(const MEMORY_BASIC_INFORMATION& mbi)
 {
@@ -24,15 +26,38 @@ inline bool readableRegion(const MEMORY_BASIC_INFORMATION& mbi)
 }
 }  // namespace detail
 
-// Whether [p, p+n) can be read without a fault: sys::readable, the fast check hooks use before every read (H8).
-inline bool readable(const void* p, size_t n) { return sys::readable(p, n); }
+// Whether [p, p+n) can be read now: every page committed, neither no-access nor guard. The fast check (H8).
+inline bool readable(const void* p, size_t n)
+{
+    uintptr_t a = (uintptr_t)p, end = a + (n ? n : 1);
+    if (a < detail::kLowestReadable || end < a) return false;
+    for (uintptr_t pg = a & ~(detail::kPageSize - 1); pg < end;) {
+        // the working set first: 0.4 us a page; VirtualQuery took up to 5.1 ms in big regions (vqbench.cpp)
+        PSAPI_WORKING_SET_EX_INFORMATION ws{};
+        ws.VirtualAddress = (void*)pg;
+        DWORD prot = K32QueryWorkingSetEx(GetCurrentProcess(), &ws, sizeof(ws)) && ws.VirtualAttributes.Valid
+                         ? (DWORD)ws.VirtualAttributes.Win32Protection : 0;
+        // a resident page with a protection is readable: no-access and guard pages are never resident
+        if (prot && !(prot & (PAGE_NOACCESS | PAGE_GUARD))) {
+            pg += detail::kPageSize;
+            continue;
+        }
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery((void*)pg, &m, sizeof(m))) return false;
+        const bool committed = m.State == MEM_COMMIT && m.Protect != 0;
+        const bool blocked = (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0;
+        if (!committed || blocked) return false;
+        pg = (uintptr_t)m.BaseAddress + m.RegionSize;   // the rest of that region is readable too
+    }
+    return true;
+}
 
 // Whether [p, p+n) is readable, by VirtualQuery alone: slow on big regions, so only diagnostic stack walks use it.
 inline bool vqReadable(const void* p, size_t n)
 {
     const uint8_t* a = (const uint8_t*)p;
     MEMORY_BASIC_INFORMATION mbi;
-    // n == 0 is readable and low addresses are queried: sys::readable answers both differently
+    // n == 0 is readable and low addresses are queried: readable answers both differently
     while (n) {
         // ponytail: query-then-read can race a protection change; never seen.
         if (!VirtualQuery(a, &mbi, sizeof(mbi)) || !detail::readableRegion(mbi)) return false;
@@ -61,7 +86,7 @@ inline int readableWords(const uint32_t* sp, int max)
 inline void safeCopy(char* out, size_t cap, const char* src)
 {
     // trace hooks may pass non-pointers: check first, as CrabeLoader dumps every AV, even one the __try handles
-    if (!sys::readable(src, 1)) {
+    if (!readable(src, 1)) {
         if (cap) out[0] = 0;
         return;
     }
@@ -79,7 +104,7 @@ inline void safeCopy(char* out, size_t cap, const char* src)
 inline const char* cstr(const void* at, char* buf, size_t cap)
 {
     const char* p = nullptr;
-    if (sys::readable(at, sizeof(p))) p = *(const char* const*)at;
+    if (readable(at, sizeof(p))) p = *(const char* const*)at;
     safeCopy(buf, cap, p);
     return buf;
 }

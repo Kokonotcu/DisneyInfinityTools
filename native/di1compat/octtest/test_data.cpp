@@ -9,10 +9,10 @@
 #include <string>
 #include "../formats/chd.hpp"
 #include "../formats/dct.hpp"
+#include "../formats/gamedblua.hpp"
 #include "../gameplay.hpp"
 #include "../games/di1/mission.hpp"
-#include "../npc.hpp"
-#include "../sys.hpp"
+#include "../base/text.hpp"
 #include "../third_party/miniz/miniz.h"
 #include "files.hpp"
 #include "modes.hpp"
@@ -27,7 +27,7 @@ namespace fs = std::filesystem;
 
 // ---- --keep ----
 
-// chd::V trees equal (the chd parser is independent of sys::keepRecords' scanner).
+// chd::V trees equal (the chd parser is independent of gamedblua::keepRecords' scanner).
 bool sameTree(const chd::V& a, const chd::V& b)
 {
     const bool sameScalar = a.t == b.t && a.i == b.i && !memcmp(&a.f, &b.f, sizeof a.f);
@@ -164,7 +164,7 @@ void scanMember(mz_zip_archive& z, mz_uint i, const std::string& zipName, GpScan
 {
     char nm[kMemberNameMax];
     mz_zip_reader_get_filename(&z, i, nm, sizeof(nm));
-    const char* kind = memberKind(npc::lower(nm));
+    const char* kind = memberKind(text::lower(nm));
     if (!kind) return;
     size_t n = 0;
     void* d = mz_zip_reader_extract_to_heap(&z, i, &n, 0);
@@ -193,7 +193,7 @@ int testKeep(const Args& a)
     if (!uids30(a, excl)) return 2;
     std::string src = slurp(a.argv[2]), out;
     int kept = 0, total = 0;
-    if (!sys::keepRecords(src, [&](uint32_t u) { return !excl.count(u); }, out, kept, total)) {
+    if (!gamedblua::keepRecords(src, [&](uint32_t u) { return !excl.count(u); }, out, kept, total)) {
         printf("layout not found\n");
         return 1;
     }

@@ -17,7 +17,6 @@
 #include "games/di1/config.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/vfs.hpp"
-#include "sys.hpp"
 #include "third_party/miniz/miniz.h"
 
 namespace gprt {
@@ -201,11 +200,11 @@ static bool movie10(const uint8_t* screen)
 
 static const char* gfxString(const uint8_t* v)   // a GFx Value (type +0xc: 6 string, bit 6 managed = one more hop)
 {
-    if (!sys::readable(v, 0x14)) return nullptr;
+    if (!core::readable(v, 0x14)) return nullptr;
     uint32_t t = *(const uint32_t*)(v + 0xc);
     const uint8_t* p = *(const uint8_t* const*)(v + 0x10);
     if ((t & 0x8f) != 6) return nullptr;
-    if (t & 0x40) p = sys::readable(p, 4) ? *(const uint8_t* const*)p : nullptr;
+    if (t & 0x40) p = core::readable(p, 4) ? *(const uint8_t* const*)p : nullptr;
     return (const char*)p;
 }
 
