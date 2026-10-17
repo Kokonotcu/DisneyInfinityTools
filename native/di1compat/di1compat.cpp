@@ -35,6 +35,7 @@
 #include "core/veh.hpp"
 #include "core/zip.hpp"
 #include "engine/assets.hpp"
+#include "engine/crt.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/expendables.hpp"
@@ -841,50 +842,6 @@ static int* sysServe(const char* p)
          (unsigned)have.size(), ok ? "" : " -- layout not found, not served");
     return ok ? memFile(out.data(), out.size()) : nullptr;
 }
-// __invoke_watson (0x12CA1D1): the CRT's invalid-parameter fail-fast terminates without any exception handler
-// seeing it (in-game 2026-10-12: 0xC0000417 loading the 1.0 side-missions graph). Log who called it, then die.
-typedef void(__cdecl* WatsonFn)(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t);
-static WatsonFn g_watson;
-static void __cdecl hkWatson(const wchar_t* a, const wchar_t* b, const wchar_t* c, unsigned d, uintptr_t e)
-{
-    void* frames[24];
-    USHORT n = CaptureStackBackTrace(0, 24, frames, nullptr);
-    char line[600] = "CRT invalid parameter (__invoke_watson); stack (static):";
-    for (USHORT i = 0; i < n; ++i) {
-        uintptr_t f = (uintptr_t)frames[i];
-        char s[24];
-        if (f >= g_base && f < g_base + 0x2100000) sprintf_s(s, " %08X", (unsigned)(f - g_base + 0x400000));
-        else sprintf_s(s, " ext:%08X", (unsigned)f);
-        strcat_s(line, s);
-    }
-    logf("%s", line);
-    g_watson(a, b, c, d, e);
-}
-
-// FUN_0041fef0: the resident-file handlers' path normaliser, strcpy_s into a 0x80-byte stack buffer; a longer path
-// is a CRT fail-fast (found through the watson hook). A too-long path is logged and truncated (the lookup misses).
-typedef void(__cdecl* NormPathFn)(char* dst, unsigned size, const char* src);
-static NormPathFn g_normPath;
-static void __cdecl hkNormPath(char* dst, unsigned size, const char* src)
-{
-    size_t n = src ? strnlen(src, 4096) : 0;
-    if (src && n >= size) {
-        logf("path too long for the engine's %u-byte buffer (%u): %s", size, (unsigned)n, src);
-        std::string cut(src, size - 1);
-        g_normPath(dst, size, cut.c_str());
-        return;
-    }
-    g_normPath(dst, size, src);
-}
-
-// The exe CRT's fail-fast hooks (H1): always on.
-static bool installCrt(const di1::Config&)
-{
-    bool ok = hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
-    ok &= hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
-    return ok;
-}
-
 // ---- ui (ui.hpp) ----
 // 3.0's zone string getter FUN_0139e0b0 (thiscall on the zone manager *0x0225f548: key, zone, a3, default; ret 0x10).
 // Its only "LoadingScreens" reader is the loading-screen choice FUN_00b78c70; a zone whose record carries 1.0's
@@ -1980,7 +1937,7 @@ extern "C" void __stdcall Pentane_Main()
     trace::fade::install({g_cfg.fadeProbe10});
     trace::loadprof::install({g_cfg.fpsLog10, g_cfg.loadProf10, g_gameDir});
     installAssetDefs(g_cfg);
-    installCrt(g_cfg);
+    engine::crt::install({});
     installSx(g_cfg);
     npcrt::install(g_cfg);
     installUi(g_cfg);
