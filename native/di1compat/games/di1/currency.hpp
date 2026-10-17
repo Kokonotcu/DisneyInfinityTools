@@ -12,11 +12,12 @@
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
 #include "../../engine/zones.hpp"
+#include "../../trace/currency.hpp"
 #include "config.hpp"
 
 namespace di1::currency {
 
-// Installs the currency hooks when c has currency10, all or none (H1, H2, H4); false when they were refused.
+// Installs currencytrace10's probes, then currency10's hooks all or none (H1, H2, H4); false when any were refused.
 inline bool install(const Config& c);
 // inventoryFilter -> the 1.0 playset's currency (currencies10, zones.hpp), as the zone list read finds them.
 inline void setCurrencies(std::map<std::string, std::string> currencies);
@@ -231,7 +232,8 @@ inline void setCurrencies(std::map<std::string, std::string> currencies)
 
 inline bool install(const Config& c)
 {
-    if (!c.currency10) return true;
+    const bool traced = ::trace::currency::install({c.currencyTrace10});
+    if (!c.currency10) return traced;
     if (!core::prologueMatches(detail::eng::kRecordByUid, detail::eng::kRecordByUidPrologue)) {
         core::logf("feature currency10 off: FUN_0070f700's prologue differs");
         return false;
@@ -254,7 +256,7 @@ inline bool install(const Config& c)
          (void*)&detail::hkItemReadChd, (void**)&s.g_itemReadChd},
         {"StatEvent reward pay (currency10)", 0x0159BFE0, "6AFF68????????64A10000000050648925000000005156",
          (void*)&detail::hkStatEventPay, (void**)&s.g_statEventPay},
-    });
+    }) && traced;
 }
 
 }  // namespace di1::currency

@@ -143,6 +143,7 @@ Diagnostics, all off by default and log-only:
 | `missiontrace` | Mission context state changes |
 | `spawntrace10` | Building lots registered, SpawnBuilding nodes firing, lot spawns, the player start lookups |
 | `capsuletrace10` | SpawnExpendable nodes firing, their spawn requests, which branch each 1.0 expendable's spawn took, the async completions, and the actors `shutdown10` keeps drawn |
+| `currencytrace10` | Each currency payout (source, inventory key, amount, balance after), each pickup award by kind, mission StatEvent grants, and the currency balances the HUD and the store read |
 | `renderdoc10` | Captures one frame with RenderDoc that many seconds into the world |
 
 The full list, including the per-subsystem switches, is `di1::Config` and its key table `kConfigKeys` in
