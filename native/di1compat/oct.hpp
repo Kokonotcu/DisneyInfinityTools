@@ -31,7 +31,7 @@ inline Spec spec(int t)
     return {shape, keyed, kind, (shape == LIST || kind == BYTE) ? cw : 0, kind == INT ? iw : el, ok};
 }
 
-inline uint32_t u(const uint8_t* p, int w) { uint32_t v = 0; for (int i = 0; i < w; ++i) v |= (uint32_t)p[i] << (8 * i); return v; }
+inline uint32_t u(const uint8_t* p, int w) { return bytes::le(p, w); }
 
 // Payload length of record at p, or -1 if bad or past end. 64-bit, so huge counts cannot wrap (CO-15).
 inline long paylen(int t, const uint8_t* p, const uint8_t* end)
@@ -204,7 +204,7 @@ struct File {
             while (w < 4 && !(v >= -(1 << (8 * w - 1)) && v < (1 << (8 * w - 1)))) ++w;
         return w;
     }
-    static void put(std::string& s, uint32_t v, int w) { for (int i = 0; i < w; ++i) s.push_back((char)(v >> (8 * i))); }
+    static void put(std::string& s, uint32_t v, int w) { bytes::appendLe(s, v, w); }
 
     // In-place writes with oct.py's rules: an int scalar/list keeps its widths unless the values outgrow them
     // (never narrows); values >= 2^31 are written as their signed 32-bit twin.

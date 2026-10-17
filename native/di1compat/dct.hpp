@@ -10,34 +10,16 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "base/bytes.hpp"
+#include "base/hash.hpp"
 
 namespace dct {
 
 constexpr uint32_t SEED30 = 0x99fc0d82;   // all 3.0 tables but atvremote's
 
-// Bob Jenkins' lookup2 hash() (the engine's FUN_0040b900).
-inline uint32_t lookup2(const uint8_t* k, size_t n, uint32_t c)
-{
-    uint32_t a = 0x9e3779b9, b = 0x9e3779b9;
-    auto mix = [&]() {
-        a -= b; a -= c; a ^= c >> 13;  b -= c; b -= a; b ^= a << 8;   c -= a; c -= b; c ^= b >> 13;
-        a -= b; a -= c; a ^= c >> 12;  b -= c; b -= a; b ^= a << 16;  c -= a; c -= b; c ^= b >> 5;
-        a -= b; a -= c; a ^= c >> 3;   b -= c; b -= a; b ^= a << 10;  c -= a; c -= b; c ^= b >> 15;
-    };
-    auto word = [](const uint8_t* p, size_t m) { uint32_t v = 0; for (size_t i = 0; i < m && i < 4; ++i) v |= (uint32_t)p[i] << (8 * i); return v; };
-    size_t i = 0;
-    for (; i + 12 <= n; i += 12) { a += word(k + i, 4); b += word(k + i + 4, 4); c += word(k + i + 8, 4); mix(); }
-    size_t r = n - i;
-    a += word(k + i, r);
-    b += r > 4 ? word(k + i + 4, r - 4) : 0;
-    c += (uint32_t)n + ((r > 8 ? word(k + i + 8, r - 8) : 0) << 8);
-    mix();
-    return c;
-}
-
 struct Dict { uint32_t initval = 0; std::vector<std::pair<uint32_t, std::string>> keys; };   // table order
 
-inline uint32_t u32(const std::string& s, size_t o) { uint32_t v; memcpy(&v, s.data() + o, 4); return v; }
+inline uint32_t u32(const std::string& s, size_t o) { return bytes::le32(s, o); }
 
 inline bool load(const std::string& raw, Dict& d)
 {
@@ -118,7 +100,7 @@ inline int reseed(std::string& raw, const std::string& stringids, uint32_t seed,
     for (auto& [h, v] : d.keys) {
         auto it = names.find(h);
         if (it == names.end() || !latin1(*it->second, b)) continue;
-        o.keys.emplace_back(lookup2((const uint8_t*)b.data(), b.size(), seed), v);
+        o.keys.emplace_back(hash::lookup2((const uint8_t*)b.data(), b.size(), seed), v);
     }
     if (dropped) *dropped = (int)(d.keys.size() - o.keys.size());
     raw = dump(o);
@@ -153,7 +135,7 @@ inline int supplement(std::string& raw, const std::string& raw10, const std::str
     for (auto& [h, v] : s.keys) {
         auto it = names.find(h);
         if (it == names.end() || !latin1(*it->second, b)) continue;
-        uint32_t h30 = lookup2((const uint8_t*)b.data(), b.size(), SEED30);
+        uint32_t h30 = hash::lookup2((const uint8_t*)b.data(), b.size(), SEED30);
         if (have.count(h30) || !own.insert(h30).second) continue;
         d.keys.emplace_back(h30, v);
         ++added;
