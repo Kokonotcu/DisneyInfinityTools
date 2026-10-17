@@ -303,7 +303,7 @@ inline void SnEdit::apply()
 template <class Edit>
 inline int redirectAssociations(oct::File& f, const std::string& type, Edit edit, const Options& opt = {})
 {
-    // gameplay::curves30 passes no options: it makes no variant processor, so they change nothing there
+    // di1::curves::curves30 passes no options: it makes no variant processor, so they change nothing there
     long sp = f.pool("SubNetworkPool");
     if (sp < 0) return 0;
     std::vector<size_t> sns;

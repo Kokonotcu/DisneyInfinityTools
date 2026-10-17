@@ -14,7 +14,7 @@
 #include "../../engine/gamedb.hpp"
 #include "../../engine/zones.hpp"
 #include "../../formats/chd.hpp"
-#include "../../gameplay.hpp"
+#include "challenges.hpp"
 #include "../../ui.hpp"
 #include "config.hpp"
 #include "mission.hpp"
@@ -164,10 +164,10 @@ inline bool zoneListStage(openstage::Open& o, int*& out)
     if (full && !t.empty() && t[0] != openstage::kLuaChunk) {
         if (zl10) kz = playsets::registerPlaysets(t, o.p, vfs::read10s);   // first: later steps see the added records
         if (zl && c.challenge10) {
-            k = gameplay::zonelist30(t);
+            k = challenges::zonelist30(t);
         } else if (cd) {
             const bool got10 = vfs::read10s("activitydata/defaultactivitybeacons.lua", t10);
-            if (got10) k = gameplay::beacons30(t, t10);
+            if (got10) k = challenges::beacons30(t, t10);
         }
         if (beacon) kb = mission::beaconMap30(t, &ka);
     }

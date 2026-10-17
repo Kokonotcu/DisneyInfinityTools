@@ -8,7 +8,8 @@
 #include "cho.hpp"
 #include "choconst.hpp"
 #include "cholayout.hpp"
-#include "../../gameplay.hpp"
+#include "curves.hpp"
+#include "surfaces.hpp"
 #include "../../convert/assets.hpp"
 #include "../../convert/counts.hpp"
 #include "../../npc.hpp"
@@ -130,12 +131,12 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
     const RealmRule rule = realmFile ? RealmRule::RealmFile : RealmRule::WorldOnly;
     changed |= detail::noted(note, realm30w(f, rule), "+lighting(", " nodes) ");
     changed |= detail::choSteps(f, o, note);
-    int nfl = 0, ncv = o.curves ? gameplay::curves30(f, &nfl) : 0;
+    int nfl = 0, ncv = o.curves ? curves::curves30(f, &nfl) : 0;
     if (ncv || nfl) {
         note += "+curves(" + std::to_string(ncv) + " bound, " + std::to_string(nfl) + " flagged) ";
         changed = true;
     }
-    changed |= detail::noted(note, o.surfaceTable ? gameplay::surfaces30(f, o.surfaceTable()) : 0, "+surfaces(", ") ");
+    changed |= detail::noted(note, o.surfaceTable ? surfaces::surfaces30(f, o.surfaceTable()) : 0, "+surfaces(", ") ");
     return changed;
 }
 

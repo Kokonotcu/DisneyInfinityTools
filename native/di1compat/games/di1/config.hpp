@@ -62,7 +62,7 @@ struct Config {
     bool playset30 = true;           // gamedb30 on: the 1.0 playset's Playset record (3.0 includes) as a DataMap
     bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass screen (npc.hpp)
     bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (sys.hpp)
-    bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType (gameplay.hpp)
+    bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType (zones.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (npc.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (npcrt.hpp)
@@ -98,10 +98,10 @@ struct Config {
     bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
     bool vfxChan10 = true;           // emitter curve channels re-laid for the shader of their material (chan.hpp)
     bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
-    bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (gameplay::curves30)
+    bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (curves::curves30)
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
     bool assetBufs10 = true;         // gp+npc: read10 finds <stem>_<n>.* members in <dir>/<stem>.zip
-    bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (gameplay.hpp)
+    bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (challenges.hpp, activities.hpp)
     bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
     bool actionMap10 = true;         // ui: a 1.0 movie's UsesActionMap sets its screen's action map (gprt.hpp)
     bool focus10 = true;             // ui: a 3.0 Screen on a 1.0 movie gets 3.0's non-FSM focus (gprt.hpp)
@@ -109,7 +109,7 @@ struct Config {
     bool accept10 = true;            // gp: a 1.0 mission activated in a 1.0 zone posts 'mission accepted' (gprt.hpp)
     bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0 refuses is judged by its 1.0 list (gprt.hpp)
     bool playsetMenu10 = true;       // menu: a Play Sets entry per registered 1.0 playset (ui::playsetMenu10)
-    bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (gameplay::playsets10)
+    bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (playsets10, zones.hpp)
     bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (bldrt.hpp)
     bool spawnTrace10 = false;       // probe: lots, SpawnBuilding firing, lot spawns, player start lookups (log only)
     bool capsuleTrace10 = false;     // probe: 1.0 expendable spawns, branches, completions (caprt.hpp, log only)

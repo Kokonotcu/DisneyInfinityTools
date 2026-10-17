@@ -9,7 +9,6 @@
 #include <vector>
 #include "../../base/text.hpp"
 #include "../../core/log.hpp"
-#include "../../gameplay.hpp"
 #include "config.hpp"
 #include "currency.hpp"
 #include "zones.hpp"
@@ -33,7 +32,7 @@ struct State {
     bool add = false, currencies = false;          // zones10, currency10: set once in install()
     std::string install10;                         // set once in install()
     std::mutex mx;                                 // guards playsets and prefixes
-    std::vector<gameplay::Playset10> playsets;     // the zone list's 1.0 playsets, once it has loaded
+    std::vector<Playset10> playsets;     // the zone list's 1.0 playsets, once it has loaded
     std::vector<std::string> prefixes;             // their zones' name prefixes
 };
 inline State g_state;
@@ -41,7 +40,7 @@ inline State g_state;
 inline bool world10(const std::string& zone) { return worldInstalled(g_state.install10.c_str(), zone); }
 
 // Each playset's line: registered, or already in 3.0's list.
-inline int logPlaysets(const std::vector<gameplay::Playset10>& playsets)
+inline int logPlaysets(const std::vector<Playset10>& playsets)
 {
     int added = 0;
     for (auto& x : playsets) {

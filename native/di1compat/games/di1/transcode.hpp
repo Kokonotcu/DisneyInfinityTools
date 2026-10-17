@@ -15,7 +15,8 @@
 #include "chan.hpp"
 #include "cho.hpp"
 #include "../../convert/datamap.hpp"
-#include "../../gameplay.hpp"
+#include "activities.hpp"
+#include "challenges.hpp"
 #include "../../formats/btd.hpp"
 #include "../../formats/dct.hpp"
 #include "../../formats/luachunk.hpp"
@@ -181,11 +182,11 @@ inline bool missionLua(const Request& r)
 
 enum class Challenge { None, Types, Tasks, Givers, Gadgets };
 
-// gp: which 1.0 activity file of 3.0's Challenge system this is (gameplay.hpp), checked in this order.
+// gp: which 1.0 activity file of 3.0's Challenge system this is (activities, challenges), checked in this order.
 inline Challenge challengeKind(const Request& r)
 {
     const bool lua = ((const char*)r.data)[0] != 0x1b;
-    if (!gameplay::challengeTypePath(r.np).empty() && lua) return Challenge::Types;
+    if (!challenges::challengeTypePath(r.np).empty() && lua) return Challenge::Types;
     if (missionLua(r) && lua) return Challenge::Tasks;
     if (ends(r, ".ap") && std::string((const char*)r.data, r.n).find("\nActivityIcon=") != std::string::npos)
         return Challenge::Givers;
@@ -199,12 +200,12 @@ inline int apGivers(const Request& r, std::string& t)
     std::string graph, dir = r.np.substr(0, r.np.rfind('/') + 1);
     std::set<std::string> ok;
     if (r.io.read10(dropSuffix(r, ".ap") + ".lua", graph))
-        ok = gameplay::activityGivers(graph, [&](const std::string& name, std::string& o) {
+        ok = activities::activityGivers(graph, [&](const std::string& name, std::string& o) {
             std::string m = dir + name + ".lua";
             for (char& c : m) c = (char)tolower((unsigned char)c);
             return r.io.read10(m, o);
         });
-    return gameplay::apGivers30(t, &ok);
+    return activities::apGivers30(t, &ok);
 }
 
 // giver DNA: the converted chunk replaces t; a chunk that does not convert gives 0
@@ -213,7 +214,7 @@ inline int gadgets(std::string& t)
     std::string o;
     int k = 0;
     try {
-        k = gameplay::dnaGadgets30(t, o);
+        k = activities::dnaGadgets30(t, o);
     } catch (std::exception&) {
         k = 0;
     }
@@ -231,11 +232,11 @@ inline Verdict challenge(Request& r)
     const char* codec = nullptr;
     switch (challengeKind(r)) {
     case Challenge::Types:
-        k = gameplay::challengeTypes30(t);
+        k = challenges::challengeTypes30(t);
         codec = "challengetypes";
         break;
     case Challenge::Tasks:
-        k = gameplay::activityTasks30(t);
+        k = activities::activityTasks30(t);
         codec = "activitytasks";
         break;
     case Challenge::Givers:
@@ -366,7 +367,7 @@ inline Verdict merGraph(Request& r)
     } else graph.assign((const char*)r.data, r.n);
     if (graph.size() < 4 || oct::u((const uint8_t*)graph.data(), 4) != oct::MAGIC) return kRaw;
     oct::File f = oct::File::parse(graph.data(), graph.size());
-    int actRe = 0, actDrop = 0, act = r.o.challenge ? gameplay::activityGraph30(f, &actRe, &actDrop) : 0;   // gp
+    int actRe = 0, actDrop = 0, act = r.o.challenge ? activities::activityGraph30(f, &actRe, &actDrop) : 0;   // gp
     if (act)
         r.note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) +
                   " participant links, " + std::to_string(actDrop) + " dropped) ";
