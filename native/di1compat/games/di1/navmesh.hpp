@@ -92,7 +92,21 @@ inline const char* walkRegion(Walk& w, uint32_t r, size_t& o)
 
 inline void put(std::string& out, uint32_t v, int width) { out.append((const char*)&v, width); }
 
-// 3.0 vertices: u16 kind, u16 nLinks, u32 w, the 0x2c body; links u16 v0 v1 v2 n, u32, v3, v3.
+// A 3.0 link: u16 v0 v1 v2 n, u32, v3, v3; false when a vertex pointer names no vertex.
+inline bool writeLink(const Walk& w, size_t l, std::string& out)
+{
+    for (size_t j = 0; j < 3; ++j) {
+        auto it = w.vidx.find(w.u32(l + kLinkVerts + 4 * j));
+        if (it == w.vidx.end()) return false;
+        put(out, it->second, 2);
+    }
+    put(out, w.u32(l + kLinkCount), 2);
+    put(out, w.u32(l), 4);
+    out.append((const char*)w.b + l + kLinkVectors, kLinkVectorsSize);
+    return true;
+}
+
+// 3.0 vertices: u16 kind, u16 nLinks, u32 w, the 0x2c body, then the links.
 inline const char* writeVertices(const Walk& w, std::string& out)
 {
     for (size_t v : w.order) {
@@ -101,17 +115,8 @@ inline const char* writeVertices(const Walk& w, std::string& out)
         put(out, nl, 2);
         put(out, w.u32(v + kVtxW), 4);
         out.append((const char*)w.b + v + kVtxBody, kVtxBodySize);
-        for (uint32_t k = 0; k < nl; ++k) {
-            size_t l = lp + kLink * k;
-            for (size_t j = 0; j < 3; ++j) {
-                auto it = w.vidx.find(w.u32(l + kLinkVerts + 4 * j));
-                if (it == w.vidx.end()) return "link target";
-                put(out, it->second, 2);
-            }
-            put(out, w.u32(l + kLinkCount), 2);
-            put(out, w.u32(l), 4);
-            out.append((const char*)w.b + l + kLinkVectors, kLinkVectorsSize);
-        }
+        for (uint32_t k = 0; k < nl; ++k)
+            if (!writeLink(w, lp + kLink * k, out)) return "link target";
     }
     return nullptr;
 }

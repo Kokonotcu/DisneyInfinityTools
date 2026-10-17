@@ -174,7 +174,8 @@ inline void prepare(State& s, void* self, const char* name)
 {
     std::string n = text::lower(name);
     // "Core" is 3.0's boot include: routing for it ran before DAT_0228db60 exists, an AV at boot
-    if (n == "core" || (s.db && s.playset == n)) return;
+    const bool built = s.db && s.playset == n;
+    if (n == "core" || built) return;
     std::string b10, b30, why;
     if (engine::datamaps::findRecord(self, name, kPlaysetKind)) return;
     if (!vfs::read10s("GameDB/Core/" + std::string(name) + "DataMap.lua", b10)) return;
