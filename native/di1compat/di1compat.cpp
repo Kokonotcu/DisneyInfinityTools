@@ -319,7 +319,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.tails10 = &g_tails10;
     sceneSettingsIO(io);
     render::Result r;
-    if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
+    if (!render::transcodeWorld(g_render, io, f, {stem, mtb, vbuf, ibuf}, r)) {
         for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
         note += "render FAILED ";
         return false;

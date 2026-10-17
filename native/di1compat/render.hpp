@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -1307,156 +1308,327 @@ inline const char* patchBufferPools(oct::File& f, RecEdits& e, const std::string
 
 }  // namespace detail
 
-// Materials, vertices and the .oct primitive records of one 1.0 world. stem = 'in_city'; f = the 1.0 .oct (edited
-// in place); mtb10/vbuf10/ibuf10 = the 1.0 files. Returns false with r.problems (f then unchanged) if a material
-// cannot be placed or the geometry does not convert.
-inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const std::string& stem, const std::string& mtb10,
-                           const std::string& vbuf10, const std::string& ibuf10, Result& r)
+// The 1.0 world's files: its stem ('in_city'), .mtb, _0.vbuf and _0.ibuf
+struct World10 {
+    const std::string& stem;
+    const std::string& mtb;
+    const std::string& vbuf;
+    const std::string& ibuf;
+};
+
+namespace detail {
+
+constexpr uint32_t kIndexValues16 = 0x10000;   // every value a 16-bit index takes
+constexpr uint64_t kMaxIndex16 = 0xffff;       // a node past it gets 32-bit indices (FORMATS.md 4.4)
+constexpr int32_t kIndexBuffer16 = 0, kIndexBuffer32 = 2;   // Idata[0] in 3.0 (FORMATS.md 4.3)
+constexpr int kIndexBytes16 = 2, kIndexBytes32 = 4;
+constexpr int kNodeLevel = 2;   // a pool's entries (Node, Material); their fields one level deeper (FORMATS.md 4.1)
+
+using FormatMap = std::map<std::pair<int, uint32_t>, uint32_t>;    // (material, 1.0 vformat) -> 3.0 vformat
+using ShaderFormats = std::map<int, const std::set<uint32_t>*>;   // material -> vformats its final shader declares
+
+// One transcodeWorld call: its inputs and what the passes before the geometry found
+struct WorldRun {
+    const Table& T;
+    const IO& io;
+    Result& r;
+    std::map<uint32_t, std::set<int>> users;   // 1.0 vformat -> materials drawn with it
+    std::map<int, std::set<uint32_t>> drawn;   // material -> 1.0 vformats it is drawn with
+    ShaderFormats shaderVf;
+    FormatMap vmap;   // the first 3.0 target the material's shader takes
+    FormatMap smap;   // for skinned nodes: the first target with an R plan the shader takes
+};
+
+inline bool fail(Result& r, const std::string& why)
 {
-    const auto fail = [&r](const std::string& why) {
-        r.problems.push_back(why);
-        return false;
-    };
-    std::map<uint32_t, std::set<int>> users;
-    std::map<int, std::set<uint32_t>> drawn;
-    if (const char* why = detail::primPairs(f, users, drawn)) return fail(why);
-    std::map<int, const std::set<uint32_t>*> shaderVf;   // material -> vformats its final shader declares
-    if (!transcodeMaterials(T, io, mtb10, drawn, "", r, shaderVf)) return false;
+    r.problems.push_back(why);
+    return false;
+}
 
-    // (material, 1.0 vformat) -> the first 3.0 target that material's shader takes
-    std::map<std::pair<int, uint32_t>, uint32_t> vmap;
-    for (auto& [crc, refs] : users) {
-        bool all = true;
-        const bool skinnedFmt = io.skinned && io.skinned(crc);
-        for (int ref : refs) {
-            // its own shader takes the 1.0 format as it is -- a skinned one its 3.0 skin target (skintr10)
-            if (r.translated.count(ref)) vmap[{ref, crc}] = skinnedFmt ? skinTarget30(T, crc) : crc;
-            else all = false;
-        }
-        if (all) continue;
-        auto t = T.targets.find(crc);
-        if (t == T.targets.end() || t->second.empty()) { r.problems.push_back("vformat " + std::to_string(crc) + ": no 3.0 target"); continue; }
-        for (int ref : refs) {
-            if (r.translated.count(ref)) continue;
-            auto sv = shaderVf.find(ref);
-            uint32_t pick = 0;
-            bool found = false;
-            for (uint32_t c : t->second)
-                if (sv == shaderVf.end() || sv->second->count(c)) { pick = c; found = true; break; }
-            if (!found) r.problems.push_back("vformat: no 3.0 format accepted by material " + std::to_string(ref));
-            else vmap[{ref, crc}] = pick;
-        }
+// Material ref's final shader declares vformat c; no entry: any format
+inline bool shaderTakes(const ShaderFormats& shaderVf, int ref, uint32_t c)
+{
+    auto sv = shaderVf.find(ref);
+    return sv == shaderVf.end() || sv->second->count(c);
+}
+
+inline bool skinnedFormat(const IO& io, uint32_t c) { return io.skinned && io.skinned(c); }
+
+// Translated materials keep the 1.0 format, a skinned one its 3.0 skin target (skintr10). true: all users are
+inline bool mapTranslated(WorldRun& w, uint32_t crc, const std::set<int>& refs)
+{
+    bool all = true;
+    const bool skinnedFmt = skinnedFormat(w.io, crc);
+    for (int ref : refs) {
+        if (w.r.translated.count(ref)) w.vmap[{ref, crc}] = skinnedFmt ? skinTarget30(w.T, crc) : crc;
+        else all = false;
     }
-    if (!r.problems.empty()) return false;
-    // (material, 1.0 vformat) -> for a skinned node's primitives: the first target with an R plan the shader takes
-    std::map<std::pair<int, uint32_t>, uint32_t> smap;
-    for (auto& [crc, refs] : users)
-        for (int ref : refs) {
-            auto t = T.targets.find(crc);
-            if (!io.skinLayout || t == T.targets.end()) continue;
-            if (r.translated.count(ref) && !(io.skinned && io.skinned(crc))) continue;   // translated rigid: 1.0 format
-            auto sv = shaderVf.find(ref);
-            for (uint32_t c : t->second)
-                if (T.skinPlans.count({crc, c}) && (sv == shaderVf.end() || sv->second->count(c))) { smap[{ref, crc}] = c; break; }
-        }
+    return all;
+}
 
-    // ---- geometry (conv.convert_geometry + build_buffers); assets without buffers (most mission graphs) skip it ----
-    const bool geometry = !vbuf10.empty() && !ibuf10.empty();
-    std::string& nv = r.vbuf;
-    std::string& ni = r.ibuf;
-    std::string& ni2 = r.ibuf2;
-    long stp = geometry ? f.pool("SceneTreeNodePool") : -1;
-    const size_t stpEnd = stp >= 0 ? f.blockEnd(stp) : 0;   // the loop only reads records: edits wait in `edits`
-    detail::Remap remap;
-    remap.stamp.assign(geometry ? 0x10000 : 0, 0);
-    remap.to.assign(geometry ? 0x10000 : 0, 0);
-    detail::RecEdits edits;   // only with geometry; committed by patchBufferPools
+inline void mapConverted(WorldRun& w, int ref, uint32_t crc, const std::vector<uint32_t>& targets)
+{
+    if (w.r.translated.count(ref)) return;
+    const auto takes = [&](uint32_t c) { return shaderTakes(w.shaderVf, ref, c); };
+    auto c = std::find_if(targets.begin(), targets.end(), takes);
+    if (c != targets.end()) w.vmap[{ref, crc}] = *c;
+    else w.r.problems.push_back("vformat: no 3.0 format accepted by material " + std::to_string(ref));
+}
+
+inline void mapFormats(WorldRun& w)
+{
+    for (auto& [crc, refs] : w.users) {
+        if (mapTranslated(w, crc, refs)) continue;
+        auto t = w.T.targets.find(crc);
+        if (t == w.T.targets.end() || t->second.empty()) {
+            w.r.problems.push_back("vformat " + std::to_string(crc) + ": no 3.0 target");
+            continue;
+        }
+        for (int ref : refs) mapConverted(w, ref, crc, t->second);
+    }
+}
+
+inline void mapSkin(WorldRun& w, uint32_t crc, int ref)
+{
+    auto t = w.T.targets.find(crc);
+    if (!w.io.skinLayout || t == w.T.targets.end()) return;
+    if (w.r.translated.count(ref) && !skinnedFormat(w.io, crc)) return;   // translated rigid: 1.0 format
+    const auto takes = [&](uint32_t c) { return w.T.skinPlans.count({crc, c}) && shaderTakes(w.shaderVf, ref, c); };
+    auto c = std::find_if(t->second.begin(), t->second.end(), takes);
+    if (c != t->second.end()) w.smap[{ref, crc}] = *c;
+}
+
+inline void mapSkinFormats(WorldRun& w)
+{
+    for (auto& [crc, refs] : w.users)
+        for (int ref : refs) mapSkin(w, crc, ref);
+}
+
+// One geometry pass: the 1.0 buffers, the index remap, the record edits patchBufferPools commits
+struct Geometry {
+    const std::string& vbuf10;
+    const std::string& ibuf10;
+    Remap remap;
+    RecEdits edits;
+};
+
+// A scene node: whether it is geometry, skinned, and its primitive records
+struct NodeScan {
+    bool geometry = false, skinned = false;
+    std::vector<size_t> prims;
+};
+
+inline NodeScan scanNode(const oct::File& f, size_t n)
+{
+    NodeScan s;
+    for (size_t j = n + 1, end = f.blockEnd(n); j < end; ++j) {
+        const std::string& nm = f.name(f.recs[j]);
+        const bool field = f.recs[j].level == kNodeLevel + 1;
+        if (field && nm == "Type") {
+            auto v = f.nameValues(f.recs[j]);
+            s.geometry = !v.empty() && v[0] == "Geometry";
+        }
+        if (field && nm == "NumInfluences") s.skinned = true;
+        if (nm == "Primitive") s.prims.push_back(j);
+    }
+    return s;
+}
+
+// A primitive's 3.0 vformat and plan; a null plan means same, the 1.0 format kept
+struct PrimPlan {
+    uint32_t dst = 0;
+    Plan same;
+    const Plan* plan = nullptr;
+    const Plan& get() const { return plan ? *plan : same; }
+};
+
+// A skinned node's primitive goes to its 'skin' layout target (R plan); a translated one keeps its format
+inline std::optional<PrimPlan> planFor(WorldRun& w, const PrimData& d, const NodeScan& node)
+{
+    PrimPlan p;
+    auto vm = w.vmap.find({d.ref, d.src});
+    const bool noTarget = vm == w.vmap.end() && w.T.targets.at(d.src).empty();
+    if (noTarget) {
+        fail(w.r, "vformat " + std::to_string(d.src) + ": no 3.0 target");
+        return std::nullopt;
+    }
+    p.dst = vm != w.vmap.end() ? vm->second : w.T.targets.at(d.src)[0];
+    const Plan* skinPlan = nullptr;
+    auto s = w.smap.find({d.ref, d.src});
+    if (node.skinned && p.dst != d.src && s != w.smap.end()) {
+        p.dst = s->second;
+        skinPlan = &w.T.skinPlans.at({d.src, p.dst});
+        ++w.r.skinned;
+    }
+    if (p.dst != d.src) {
+        p.plan = skinPlan ? skinPlan : &w.T.plans.at({d.src, p.dst});
+        return p;
+    }
+    if (const char* why = samePlan(w.io, d.src, d.vda, p.same)) {
+        fail(w.r, why);
+        return std::nullopt;
+    }
+    return p;
+}
+
+// One converted primitive: destination streams and strides, local indices, vertex count, 3.0 vformat
+struct PrimOut {
+    std::vector<std::string> streams;
+    std::vector<int> strides;
+    std::vector<uint32_t> sub;
+    uint32_t count = 0, dst = 0;
+};
+
+// The primitive's vertices through its plan, its indices made local; nullopt: a problem says why
+inline std::optional<PrimOut> convertPrimitive(WorldRun& w, Geometry& g, const PrimData& d, const NodeScan& node)
+{
+    const std::optional<PrimPlan> p = planFor(w, d, node);
+    if (!p) return std::nullopt;
+    const Plan& plan = p->get();
+    PrimOut out;
+    std::vector<uint32_t> order;
+    const char* why = remapIndices(d.ida, g.ibuf10, g.remap, order, out.sub);
+    if (!why) why = convertPrim(plan, d.vda, order, g.vbuf10, out.streams);
+    if (why) {
+        fail(w.r, why);
+        return std::nullopt;
+    }
+    out.strides = plan.ds;
+    out.count = (uint32_t)order.size();
+    out.dst = p->dst;
+    return out;
+}
+
+// The node's vertices stream-major (FORMATS.md 4.4) -> each primitive's stream offsets in nv
+inline std::vector<std::vector<uint32_t>> appendStreams(const std::vector<PrimOut>& outs, std::string& nv)
+{
+    std::vector<std::vector<uint32_t>> off(outs.size());
+    size_t maxS = 0;
+    for (auto& o : outs) maxS = o.strides.size() > maxS ? o.strides.size() : maxS;
+    for (size_t i = 0; i < outs.size(); ++i) off[i].assign(outs[i].strides.size(), 0);
+    for (size_t s = 0; s < maxS; ++s)
+        for (size_t i = 0; i < outs.size(); ++i) {
+            if (s >= outs[i].strides.size()) continue;
+            off[i][s] = (uint32_t)nv.size();
+            nv += outs[i].streams[s];
+        }
+    return off;
+}
+
+// sub + vbase, indexBytes each, appended to buf -> where they start
+inline uint32_t appendIndices(const std::vector<uint32_t>& sub, uint32_t vbase, int indexBytes, std::string& buf)
+{
+    const uint32_t at = (uint32_t)buf.size();
+    for (uint32_t x : sub) {
+        uint32_t v = x + vbase;
+        buf.append((const char*)&v, indexBytes);
+    }
+    return at;
+}
+
+// Vdata: [streams, vertices, (0, offset, stride) per stream]
+inline std::vector<int32_t> vdataOf(const PrimOut& o, const std::vector<uint32_t>& off)
+{
+    std::vector<int32_t> v = {(int32_t)o.strides.size(), (int32_t)o.count};
+    for (size_t s = 0; s < o.strides.size(); ++s) {
+        v.push_back(0);
+        v.push_back((int32_t)off[s]);
+        v.push_back(o.strides[s]);
+    }
+    return v;
+}
+
+// The node's buffers and each primitive's new Idata, Vdata, vformatCRC and RenderCaps, queued in g.edits
+inline bool layoutNode(WorldRun& w, oct::File& f, Geometry& g, const std::vector<PrimRecs>& ps,
+                       const std::vector<PrimOut>& outs)
+{
+    const std::vector<std::vector<uint32_t>> off = appendStreams(outs, w.r.vbuf);
+    uint64_t total = 0;
+    for (auto& o : outs) total += o.count;
+    const bool wide = total > kMaxIndex16;
+    uint32_t vbase = 0;
+    for (size_t i = 0; i < ps.size(); ++i) {
+        const PrimOut& o = outs[i];
+        const int indexBytes = wide ? kIndexBytes32 : kIndexBytes16;
+        const uint32_t at = appendIndices(o.sub, vbase, indexBytes, wide ? w.r.ibuf2 : w.r.ibuf);
+        const int32_t width = wide ? kIndexBuffer32 : kIndexBuffer16;
+        g.edits.setInts(f, ps[i].at[kIdata], {width, (int32_t)at, (int32_t)vbase, (int32_t)o.sub.size()});
+        g.edits.setInts(f, ps[i].at[kVdata], vdataOf(o, off[i]));
+        g.edits.setInt(f, ps[i].at[kCrc], o.dst);
+        const bool caps = ps[i].has[kCaps];
+        if (caps && !caps30(f, g.edits, ps[i].at[kCaps])) return fail(w.r, "RenderCaps without a value");
+        vbase += o.count;
+    }
+    return true;
+}
+
+inline bool convertNode(WorldRun& w, oct::File& f, Geometry& g, size_t n)
+{
+    const NodeScan node = scanNode(f, n);
+    if (!node.geometry || node.prims.empty()) return true;
+    std::vector<PrimRecs> ps(node.prims.size());
+    for (size_t i = 0; i < node.prims.size(); ++i)
+        if (!primRecords(f, node.prims[i], ps[i]))
+            return fail(w.r, "primitive without Idata, Vdata, vformatCRC or MaterialReference");
+    std::vector<PrimOut> outs;
+    outs.reserve(ps.size());
+    for (auto& p : ps) {
+        PrimData d;
+        if (const char* why = readPrim(f, p, d)) return fail(w.r, why);
+        std::optional<PrimOut> o = convertPrimitive(w, g, d, node);
+        if (!o) return false;
+        outs.push_back(std::move(*o));
+    }
+    return layoutNode(w, f, g, ps, outs);
+}
+
+inline bool convertNodes(WorldRun& w, oct::File& f, Geometry& g)
+{
+    const long stp = f.pool("SceneTreeNodePool");
+    const size_t stpEnd = stp >= 0 ? f.blockEnd(stp) : 0;   // reads only: the edits wait in g.edits
     for (size_t n = stp + 1; stp >= 0 && n < stpEnd; n = f.blockEnd(n)) {
-        if (f.recs[n].level != 2 || f.name(f.recs[n]) != "Node") continue;
-        size_t end = f.blockEnd(n);
-        bool geo = false, skinned = false;
-        std::vector<size_t> prims;
-        for (size_t j = n + 1; j < end; ++j) {
-            const std::string& nm = f.name(f.recs[j]);
-            if (f.recs[j].level == 3 && nm == "Type") { auto v = f.nameValues(f.recs[j]); geo = !v.empty() && v[0] == "Geometry"; }
-            if (f.recs[j].level == 3 && nm == "NumInfluences") skinned = true;
-            if (nm == "Primitive") prims.push_back(j);
-        }
-        if (!geo || prims.empty()) continue;
-        std::vector<detail::PrimRecs> ps(prims.size());
-        for (size_t i = 0; i < prims.size(); ++i)
-            if (!detail::primRecords(f, prims[i], ps[i]))
-                return fail("primitive without Idata, Vdata, vformatCRC or MaterialReference");
-        // per primitive: dst streams, strides, local indices, vertex count
-        std::vector<std::vector<std::string>> streams;
-        std::vector<std::vector<int>> strides;
-        std::vector<std::vector<uint32_t>> subs;
-        std::vector<uint32_t> counts, dsts;
-        for (auto& p : ps) {
-            detail::PrimData d;
-            if (const char* why = detail::readPrim(f, p, d)) return fail(why);
-            const uint32_t src = d.src;
-            const int ref = d.ref;
-            auto vm = vmap.find({ref, src});
-            const bool noTarget = vm == vmap.end() && T.targets.at(src).empty();
-            if (noTarget) return fail("vformat " + std::to_string(src) + ": no 3.0 target");
-            uint32_t dst = vm != vmap.end() ? vm->second : T.targets.at(src)[0];
-            const Plan* skinPlan = nullptr;
-            if (auto s = smap.find({ref, src}); skinned && dst != src && s != smap.end()) {
-                dst = s->second;
-                skinPlan = &T.skinPlans.at({src, dst});
-                ++r.skinned;
-            }
-            Plan same;   // a translated material's primitive keeps its 1.0 format
-            const char* sameWhy = dst == src ? detail::samePlan(io, src, d.vda, same) : nullptr;
-            if (sameWhy) return fail(sameWhy);
-            const Plan& plan = dst == src ? same : skinPlan ? *skinPlan : T.plans.at({src, dst});
-            std::vector<uint32_t> order, sub;
-            if (const char* why = detail::remapIndices(d.ida, ibuf10, remap, order, sub)) return fail(why);
-            std::vector<std::string> per;
-            if (const char* why = detail::convertPrim(plan, d.vda, order, vbuf10, per)) return fail(why);
-            streams.push_back(std::move(per)); strides.push_back(plan.ds); subs.push_back(std::move(sub));
-            counts.push_back((uint32_t)order.size()); dsts.push_back(dst);
-        }
-        // stream-major within the node
-        std::vector<std::vector<uint32_t>> nodeOff(ps.size());
-        size_t maxS = 0;
-        for (auto& s : strides) maxS = s.size() > maxS ? s.size() : maxS;
-        for (size_t i = 0; i < ps.size(); ++i) nodeOff[i].assign(strides[i].size(), 0);
-        for (size_t s = 0; s < maxS; ++s)
-            for (size_t i = 0; i < ps.size(); ++i)
-                if (s < strides[i].size()) { nodeOff[i][s] = (uint32_t)nv.size(); nv += streams[i][s]; }
-        uint64_t total = 0;
-        for (auto c : counts) total += c;
-        bool wide = total > 0xffff;
-        uint32_t vbase = 0;
-        for (size_t i = 0; i < ps.size(); ++i) {
-            std::string& buf = wide ? ni2 : ni;
-            uint32_t ioff = (uint32_t)buf.size();
-            for (uint32_t x : subs[i]) {
-                uint32_t v = x + vbase;
-                buf.append((const char*)&v, wide ? 4 : 2);
-            }
-            std::vector<int32_t> vdata = {(int32_t)strides[i].size(), (int32_t)counts[i]};
-            for (size_t s = 0; s < strides[i].size(); ++s) { vdata.push_back(0); vdata.push_back((int32_t)nodeOff[i][s]); vdata.push_back(strides[i][s]); }
-            const std::vector<int32_t> idata = {wide ? 2 : 0, (int32_t)ioff, (int32_t)vbase, (int32_t)subs[i].size()};
-            edits.setInts(f, ps[i].at[detail::kIdata], idata);
-            edits.setInts(f, ps[i].at[detail::kVdata], vdata);
-            edits.setInt(f, ps[i].at[detail::kCrc], dsts[i]);
-            const bool caps = ps[i].has[detail::kCaps];
-            if (caps && !detail::caps30(f, edits, ps[i].at[detail::kCaps])) return fail("RenderCaps without a value");
-            vbase += counts[i];
-        }
+        const bool node = f.recs[n].level == kNodeLevel && f.name(f.recs[n]) == "Node";
+        if (node && !convertNode(w, f, g, n)) return false;
     }
+    return true;
+}
 
-    // buffer sizes; the 32-bit index buffer gets its own file (IndexBuffer 2)
-    if (geometry)
-        if (const char* why = detail::patchBufferPools(f, edits, stem, r)) return fail(why);
-    // 1.0-only Material RenderCaps removed (conv.prepare)
-    if (long mp = f.pool("MaterialPool"); mp >= 0) {
-        auto b = f.recs.begin() + mp + 1, e = f.recs.begin() + f.blockEnd(mp);
-        f.recs.erase(std::remove_if(b, e, [&](const oct::Rec& x) { return x.level >= 3 && f.name(x) == "RenderCaps"; }), e);
-    }
+// conv.convert_geometry + build_buffers; the 32-bit index buffer gets its own file (IndexBuffer 2)
+inline bool convertGeometry(WorldRun& w, oct::File& f, const World10& w10)
+{
+    Geometry g{w10.vbuf, w10.ibuf, {}, {}};
+    g.remap.stamp.assign(kIndexValues16, 0);
+    g.remap.to.assign(kIndexValues16, 0);
+    if (!convertNodes(w, f, g)) return false;
+    if (const char* why = patchBufferPools(f, g.edits, w10.stem, w.r)) return fail(w.r, why);
+    return true;
+}
+
+// Material RenderCaps is 1.0-only (FORMATS.md 4.5, conv.prepare)
+inline void dropMaterialRenderCaps(oct::File& f)
+{
+    const long mp = f.pool("MaterialPool");
+    if (mp < 0) return;
+    auto b = f.recs.begin() + mp + 1, e = f.recs.begin() + f.blockEnd(mp);
+    const auto caps = [&](const oct::Rec& x) { return x.level > kNodeLevel && f.name(x) == "RenderCaps"; };
+    f.recs.erase(std::remove_if(b, e, caps), e);
+}
+
+}  // namespace detail
+
+// Materials, vertices and .oct primitive records of one 1.0 world, f edited in place. false: r.problems, f unchanged
+inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const World10& w10, Result& r)
+{
+    detail::WorldRun w{T, io, r};
+    if (const char* why = detail::primPairs(f, w.users, w.drawn)) return detail::fail(r, why);
+    if (!transcodeMaterials(T, io, w10.mtb, w.drawn, "", r, w.shaderVf)) return false;
+    detail::mapFormats(w);
+    if (!r.problems.empty()) return false;
+    detail::mapSkinFormats(w);
+    // assets without buffers (most mission graphs) have no geometry
+    const bool geometry = !w10.vbuf.empty() && !w10.ibuf.empty();
+    if (geometry && !detail::convertGeometry(w, f, w10)) return false;
+    detail::dropMaterialRenderCaps(f);
     return true;
 }
 

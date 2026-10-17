@@ -343,8 +343,8 @@ static int renderTest(char** a)
     std::string ob = slurp(world / (stem + ".oct"));
     oct::File f = oct::File::parse(ob.data(), ob.size());
     render::Result r;
-    bool ok = render::transcodeWorld(T, io, f, stem, slurp(world / (stem + ".mtb")), slurp(world / (stem + "_0.vbuf")),
-                                     slurp(world / (stem + "_0.ibuf")), r);
+    bool ok = render::transcodeWorld(T, io, f, {stem, slurp(world / (stem + ".mtb")), slurp(world / (stem + "_0.vbuf")),
+                                     slurp(world / (stem + "_0.ibuf"))}, r);
     printf("render %.0f ms, %d 3.0 reads %.0f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
            reads, readMs);
     for (auto& p : r.problems) printf("problem: %s\n", p.c_str());
