@@ -37,7 +37,7 @@ inline void indexArchive(const std::string& zipRel);
 // A flash/<dir>/<movie> served from 1.0 (ui: its images may be too), and whether one was.
 inline void noteMovie(const std::string& movie);
 inline bool movieServed(const std::string& movie);
-// A presentation/<screen>.lua served from 1.0 by its lower-case name (gprt), and whether one was.
+// A presentation/<screen>.lua served from 1.0 by its lower-case name (movies, selectmenu), and whether one was.
 inline void noteScreen(const std::string& screen);
 inline bool screenServed(const std::string& screen);
 

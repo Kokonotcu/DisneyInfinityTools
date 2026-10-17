@@ -264,7 +264,7 @@ inline Transcoded transcodeServed(const openstage::Open& o, const std::string& n
     return t;
 }
 
-// ui: a flash movie served from 1.0 (its images may be too) and a presentation screen served from 1.0 (gprt).
+// ui: a flash movie served from 1.0 (its images may be too) and a presentation screen served from 1.0 (movies).
 inline void noteServedUi(const std::string& np, const char* p)
 {
     std::string mv = ui::flashMovie(np);

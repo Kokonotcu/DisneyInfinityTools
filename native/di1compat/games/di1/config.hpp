@@ -70,10 +70,10 @@ struct Config {
     bool choTime10 = true;           // cho.hpp: SubNetwork MinTime/MaxTime (choreography play range)
     bool choAnim10 = true;           // cho.hpp: Float 'Global.Time' clip/event input -> AnimState 'AnimState'
     bool choScene10 = true;          // cho.hpp: SceneTreeNodeRef on PlacementNode Associations
-    bool variant10 = true;           // octx.hpp: VariantGroup for the variant processors skin30 / locator30 add
+    bool variant10 = true;           // snedit.hpp: VariantGroup for the variant processors skin30 / locator30 add
     bool choConst10 = true;          // choconst.hpp: choreography Static nodes stay Static under constant headers
-    bool camWorld10 = true;          // octx.hpp: a camera's world-basis twin (Transform/In WorldBasis) as 3.0 ships it
-    bool realmFile10 = true;         // octx.hpp: a 1.0 realm file's RealmDataPool as 3.0's RealmData node
+    bool camWorld10 = true;          // associations.hpp: a camera's world-basis twin (Transform/In WorldBasis)
+    bool realmFile10 = true;         // realms.hpp: a 1.0 realm file's RealmDataPool as 3.0's RealmData node
     bool choLayout10 = true;         // cholayout.hpp: ContextNodes -> InstanceNodes (actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
@@ -95,25 +95,25 @@ struct Config {
     bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
     bool cineSync10 = true;          // audio10: an audio-synced choreography starts the 1.0 sound event of its name
     bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
-    bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (vfxrt.hpp; needs vfx10)
+    bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (particles.hpp; needs vfx10)
     bool vfxChan10 = true;           // emitter curve channels re-laid for the shader of their material (chan.hpp)
-    bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (vfxrt.hpp)
+    bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (trace/vfx.hpp)
     bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (curves::curves30)
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
     bool assetBufs10 = true;         // gp+npc: read10 finds <stem>_<n>.* members in <dir>/<stem>.zip
     bool challenge10 = true;         // gp: 1.0 activities into 3.0's Challenge system (challenges.hpp, activities.hpp)
-    bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log / Toy Store) in 1.0 zones (gprt.hpp)
-    bool actionMap10 = true;         // ui: a 1.0 movie's UsesActionMap sets its screen's action map (gprt.hpp)
-    bool focus10 = true;             // ui: a 3.0 Screen on a 1.0 movie gets 3.0's non-FSM focus (gprt.hpp)
-    bool keys10 = true;              // ui: a 1.0 movie's 3.0 script: mapped actions reach the movie as keys (gprt.hpp)
-    bool accept10 = true;            // gp: a 1.0 mission activated in a 1.0 zone posts 'mission accepted' (gprt.hpp)
-    bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0 refuses is judged by its 1.0 list (gprt.hpp)
+    bool selectMenu10 = true;        // gp: Tab opens 1.0's SelectMenu (Mission Log, Toy Store) in 1.0 zones
+    bool actionMap10 = true;         // ui: a 1.0 movie's UsesActionMap sets its screen's action map (movies.hpp)
+    bool focus10 = true;             // ui: a 3.0 Screen on a 1.0 movie gets 3.0's non-FSM focus (movies.hpp)
+    bool keys10 = true;              // ui: a 1.0 movie's 3.0 script: mapped actions reach the movie as keys (movies)
+    bool accept10 = true;            // gp: a 1.0 mission activated in a 1.0 zone posts 'mission accepted' (accept.hpp)
+    bool tools10 = true;             // gp: in a 1.0 zone a tool 3.0 refuses is judged by its 1.0 list (tools.hpp)
     bool playsetMenu10 = true;       // menu: a Play Sets entry per registered 1.0 playset (ui::playsetMenu10)
     bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (playsets10, zones.hpp)
-    bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (bldrt.hpp)
+    bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (buildings)
     bool spawnTrace10 = false;       // probe: lots, SpawnBuilding firing, lot spawns, player start lookups (log only)
-    bool capsuleTrace10 = false;     // probe: 1.0 expendable spawns, branches, completions (caprt.hpp, log only)
-    bool shutdown10 = true;          // a 1.0 expendable's actor stays drawn while shut down (caprt.hpp; needs popin10)
+    bool capsuleTrace10 = false;     // probe: 1.0 expendable spawns, branches, completions (shutdown.hpp, log only)
+    bool shutdown10 = true;          // a 1.0 expendable's actor stays drawn while shut down (shutdown; needs popin10)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
