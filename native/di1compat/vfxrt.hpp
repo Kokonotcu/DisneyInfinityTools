@@ -18,7 +18,6 @@
 #include "engine/assets.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/session.hpp"
-#include "sys.hpp"
 
 namespace vfxrt {
 
@@ -86,7 +85,7 @@ static std::mutex g_traceLock;
 static std::map<uint64_t, int> g_traceSeen;
 static LONG g_traceLines;
 
-using sys::readable;
+using core::readable;
 
 static void trace(const char* what, uint32_t key, const char* name, const float* pl, uint32_t site, const char* note = "")
 {

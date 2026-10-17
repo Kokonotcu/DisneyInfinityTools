@@ -1,4 +1,4 @@
-// Acceptance tests of plugin helpers: sys::readable's pointer check, and ui.hpp with dct::supplement on the extracts.
+// Acceptance tests of plugin helpers: core::readable's pointer check, and ui.hpp with dct::supplement on the extracts.
 #include <windows.h>
 #include <algorithm>
 #include <cstdint>
@@ -8,9 +8,9 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include "../core/memcheck.hpp"
 #include "../formats/dct.hpp"
-#include "../npc.hpp"
-#include "../sys.hpp"
+#include "../base/text.hpp"
 #include "../ui.hpp"
 #include "files.hpp"
 #include "modes.hpp"
@@ -30,7 +30,7 @@ constexpr size_t kProbe = 8, kArenaAt = 16, kArenaProbe = 64, kHeapBytes = 64;
 constexpr int kTimedCalls = 200;
 constexpr double kMaxCostUs = 50;
 
-// The VirtualQuery check sys::readable replaced: committed, neither no-access nor guard, the range inside.
+// The VirtualQuery check core::readable replaced: committed, neither no-access nor guard, the range inside.
 bool queryReadable(const void* p, size_t n)
 {
     constexpr uintptr_t kNullPages = 0x10000;   // never mapped
@@ -43,7 +43,7 @@ bool queryReadable(const void* p, size_t n)
 
 int checkReadable(const char* what, const void* p, size_t n, bool want)
 {
-    bool now = sys::readable(p, n), was = queryReadable(p, n);
+    bool now = core::readable(p, n), was = queryReadable(p, n);
     printf("%-44s new %d old %d%s\n", what, now, was,
            now != want ? "  <-- WRONG" : now != was ? "  (both pages readable)" : "");
     return now != want;
@@ -115,7 +115,7 @@ int checkArenaCost()
     char* arena = allocate(kArenaBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!arena) return 0;
     for (size_t o = 0; o < kArenaBytes; o += kPage) arena[o] = 1;
-    double tNew = usPerCall([&] { sys::readable(arena + kArenaAt, kArenaProbe); });
+    double tNew = usPerCall([&] { core::readable(arena + kArenaAt, kArenaProbe); });
     double tOld = usPerCall([&] { queryReadable(arena + kArenaAt, kArenaProbe); });
     int bad = checkReadable("start of a touched 256 MB region", arena + kArenaAt, kArenaProbe, true);
     printf("cost per check there: new %.2f us, old (VirtualQuery) %.1f us\n", tNew, tOld);
@@ -152,7 +152,7 @@ void checkLoadingScreens(UiRun& r, const fs::path& e10, const fs::path& e30)
     std::string seq;
     bool movies = true;
     for (int i = 0; i < kLoads; ++i) {
-        std::string s = ui::loadingScreen10("LoadingScreen_Inc", counter), f = npc::lower(s);
+        std::string s = ui::loadingScreen10("LoadingScreen_Inc", counter), f = text::lower(s);
         seq += s.substr(sizeof kScreenPrefix - 1) + " ";
         movies &= fs::exists(e10 / "flash/loadingscreen/loadingscreen" / (f + ".gfx")) &&
                   !fs::exists(e30 / "flash/loadingscreen/loadingscreen" / (f + ".gfx"));
@@ -182,7 +182,7 @@ bool movieFound(const FlashScan& s, const fs::path& dir, const fs::path& sub, co
 
 void flashImage(FlashScan& s, const fs::path& dir, const fs::path& sub, const fs::path& file)
 {
-    const std::string n = npc::lower(file.filename().string());
+    const std::string n = text::lower(file.filename().string());
     std::string mv = ui::flashImageMovie("flash/" + dir.filename().string() + "/" + n);
     if (mv.empty()) return;
     ++s.imgs;
@@ -235,7 +235,7 @@ void checkTips(UiRun& r, const Args& a, const fs::path& e10, const fs::path& e30
     if (a.argc > 5) zl = slurp(a.argv[5]);
     zl.erase(std::remove(zl.begin(), zl.end(), '\r'), zl.end());
     auto isZone = [&](const std::string& k) {
-        std::string lk = npc::lower("\n" + k + "\n"), z = npc::lower("\n" + zl);
+        std::string lk = text::lower("\n" + k + "\n"), z = text::lower("\n" + zl);
         return z.find(lk) != std::string::npos;
     };
     std::string merged = t30;
@@ -319,7 +319,7 @@ void checkContextLists(UiRun& r)
 
 }  // namespace
 
-// sys::readable (working set first) against the VirtualQuery check it replaced, on every kind of page.
+// core::readable (working set first) against the VirtualQuery check it replaced, on every kind of page.
 int testReadable(const Args&)
 {
     int bad = checkPageKinds();

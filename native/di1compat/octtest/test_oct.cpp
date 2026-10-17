@@ -14,7 +14,7 @@
 #include "../convert/counts.hpp"
 #include "../convert/records.hpp"
 #include "../formats/vtxf.hpp"
-#include "../npc.hpp"
+#include "../base/text.hpp"
 #include "files.hpp"
 #include "modes.hpp"
 #include "run.hpp"
@@ -34,7 +34,7 @@ void forEachTupleFile(const Args& a, int first, Fn fn)
     for (int i = first; i < a.argc; ++i)
         for (auto& e : fs::recursive_directory_iterator(a.argv[i], fs::directory_options::skip_permission_denied)) {
             if (!e.is_regular_file()) continue;
-            const std::string ext = npc::lower(e.path().extension().string());
+            const std::string ext = text::lower(e.path().extension().string());
             bool want = false;
             for (auto x : kTupleExts) want |= ext == x;
             if (!want) continue;

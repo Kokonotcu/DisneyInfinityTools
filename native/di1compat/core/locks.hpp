@@ -25,8 +25,8 @@ struct LockNesting {
 
 // Take locks outer to inner, never against a row. None is inverted anywhere.
 inline constexpr LockNesting kLockOrder[] = {
-    {"g_dbLock (npcrt)", "di1::vfs mx", "prepare -> read10s"},
-    {"g_dbLock (npcrt)", "di1::session mx", "prepare -> keep"},
+    {"di1::gamedb30 mx", "di1::vfs mx", "prepare -> read10s"},
+    {"di1::gamedb30 mx", "di1::session mx", "prepare -> keep"},
     {"di1::vfs mx", "di1::session mx", "session::indexArchive"},
     {"engine::shaders mx (shaders10)", "di1::vfs mx", "make -> generateShader10 -> gen30::generate -> read10s"},
     {"di1::render10 sceneMx", "di1::vfs mx", "sceneSettingsIO -> read10s"},
@@ -44,7 +44,7 @@ inline constexpr LockNesting kLockOrder[] = {
 // Fibers (B-09): a std::mutex held across a yielding engine call deadlocks its own thread. Add none here.
 inline constexpr const char* kHeldAcrossEngineCalls[] = {
     "di1::assetdefs mx (fallbackDef -> read30)",
-    "g_dbLock (prepare's engine opens)",
+    "di1::gamedb30 mx (prepare's engine opens)",
     "engine::shaders mx (program registration)",
     "engine::shaders recCs (input layouts)",
 };

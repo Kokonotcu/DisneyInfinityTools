@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <string>
 #include "../games/di1/options.hpp"
-#include "../npc.hpp"
+#include "../base/text.hpp"
 #include "files.hpp"
 
 namespace octtest {
@@ -12,7 +12,7 @@ namespace octtest {
 inline std::string enginePath(const std::filesystem::path& p)
 {
     constexpr char kAssets[] = "/assets/";
-    const std::string s = npc::lower(p.generic_string());
+    const std::string s = text::lower(p.generic_string());
     size_t a = s.rfind(kAssets);
     return a == std::string::npos ? s : s.substr(a + sizeof(kAssets) - 1);
 }

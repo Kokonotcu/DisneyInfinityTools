@@ -11,8 +11,8 @@
 #include "../../gameplay.hpp"
 #include "../../convert/assets.hpp"
 #include "../../convert/counts.hpp"
-#include "../../npc.hpp"
 #include "associations.hpp"
+#include "navmesh.hpp"
 #include "realms.hpp"
 
 namespace di1 {
@@ -98,7 +98,7 @@ inline bool choSteps(oct::File& f, const OctSteps& o, std::string& note)
 inline bool navSteps(oct::File& f, const OctSteps& o, std::string& note)
 {
     std::string navWhy = "navmesh10 off";
-    int navs = o.navmesh ? npc::navmesh30(f, &navWhy) : -1;
+    int navs = o.navmesh ? navmesh::navmesh30(f, &navWhy) : -1;
     if (navs > 0) {
         note += "+navmesh(" + std::to_string(navs) + ") ";
         return true;
