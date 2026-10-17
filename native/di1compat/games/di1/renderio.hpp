@@ -6,7 +6,7 @@
 #include <string>
 #include "../../formats/ssf.hpp"
 #include "../../formats/vtxf.hpp"
-#include "../../render.hpp"
+#include "render.hpp"
 
 namespace di1 {
 

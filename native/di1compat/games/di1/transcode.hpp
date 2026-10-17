@@ -23,7 +23,7 @@
 #include "../../mer.hpp"
 #include "../../mission.hpp"
 #include "../../npc.hpp"
-#include "../../render.hpp"
+#include "rendermtb.hpp"
 #include "../../sx.hpp"
 #include "../../sys.hpp"
 #include "../../ui.hpp"

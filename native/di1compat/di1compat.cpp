@@ -44,7 +44,7 @@
 #include "formats/chd.hpp"
 #include "mer.hpp"
 #include "mernode.hpp"
-#include "render.hpp"
+#include "games/di1/renderoct.hpp"
 #include "formats/arc30.hpp"
 #include "convert/datamap.hpp"
 #include "formats/dct.hpp"

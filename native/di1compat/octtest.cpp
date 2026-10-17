@@ -16,7 +16,7 @@
 #include "games/di1/btd.hpp"
 #include "formats/chd.hpp"
 #include "mer.hpp"
-#include "render.hpp"
+#include "games/di1/renderoct.hpp"
 #include "formats/arc30.hpp"
 #include "core/readonly_file.hpp"
 #include "convert/datamap.hpp"
