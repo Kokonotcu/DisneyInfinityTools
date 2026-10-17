@@ -1,4 +1,6 @@
 // Tuple acceptance tests: the codec round trip (oct.py --selftest's oracle), OCT-1 counts, the served vformat.
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
@@ -7,7 +9,10 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
+#include "../base/bytes.hpp"
 #include "../convert/counts.hpp"
+#include "../convert/records.hpp"
 #include "../formats/vtxf.hpp"
 #include "../npc.hpp"
 #include "files.hpp"
@@ -138,46 +143,149 @@ void compareFields(Fields& shipped, Fields& ours, const std::string& path, Count
     ++(all ? run.ok : run.bad);
 }
 
-// A processor-free graph without constant data comes back byte-identical.
-void compareFile(const oct::File& g, const std::string& b, const std::string& path, size_t i, CountsRun& run)
+// One file, written once with its record offsets: a SubNetwork's check then costs its block only (OT-25).
+struct CountsFile {
+    oct::File f;
+    const std::string& b;      // the shipped bytes
+    const std::string& path;
+    std::string written;       // f.write()
+    std::vector<size_t> at;    // record k's offset in written; at[f.recs.size()] = the tail's
+    size_t namesEnd = 0;       // where the name table ends
+    size_t sameHead = 0;       // the first offset past the header where written and b differ
+    size_t sameTail = 0;       // the length of their common suffix
+};
+
+void indexWritten(CountsFile& cf)
 {
-    if (g.write() == b) {
+    cf.written = cf.f.write();
+    cf.namesEnd = oct::HDR;
+    for (const std::string& s : cf.f.names) cf.namesEnd += s.size() + 1;
+    cf.at.reserve(cf.f.recs.size() + 1);
+    size_t p = cf.namesEnd;
+    for (const oct::Rec& r : cf.f.recs) {
+        cf.at.push_back(p);
+        p += oct::kRecordHead + r.pay.size();
+    }
+    cf.at.push_back(p);
+    const std::string& w = cf.written;
+    const size_t n = (std::min)(w.size(), cf.b.size());
+    size_t h = oct::HDR, t = 0;
+    while (h < n && w[h] == cf.b[h]) ++h;
+    while (t < n && w[w.size() - 1 - t] == cf.b[cf.b.size() - 1 - t]) ++t;
+    cf.sameHead = h;
+    cf.sameTail = t;
+}
+
+// The SubNetwork [first, last) of the file, edited alone in g, which holds the file's names and those it added.
+struct Edited {
+    size_t first, last;
+    const oct::File& g;
+    size_t names0;   // the file's own names
+};
+
+// The record bytes oct::File::write gives recs: a file without names, past its header.
+std::string recordBytes(const std::vector<oct::Rec>& recs)
+{
+    oct::File t;
+    t.hdr.assign(oct::HDR, '\0');
+    t.recs = recs;
+    return t.write().substr(oct::HDR);
+}
+
+// The edited file's header, as oct::File::write sets its sizes and record count.
+std::string editedHeader(const CountsFile& cf, const Edited& e, size_t added, size_t len)
+{
+    std::string hdr = cf.f.hdr;
+    const size_t namesSize = cf.namesEnd - oct::HDR + added;
+    const size_t recs = cf.f.recs.size() - (e.last - e.first) + e.g.recs.size();
+    bytes::setLe32(hdr, oct::kNamesSizeAt, (uint32_t)namesSize);
+    bytes::setLe32(hdr, oct::kDataSizeAt, (uint32_t)(len - oct::HDR - namesSize));
+    bytes::setLe32(hdr, oct::kRecordCountAt, cf.f.recordCount == 0 ? 0u : (uint32_t)recs);
+    return hdr;
+}
+
+// The edited file written equals b. Its parts against b: header, names, records before, block, the rest.
+bool editedEquals(const CountsFile& cf, const Edited& e)
+{
+    std::string added;
+    for (size_t k = e.names0; k < e.g.names.size(); ++k) added += e.g.names[k] + '\0';
+    const std::string block = recordBytes(e.g.recs);
+    const std::string& w = cf.written;
+    const size_t start = cf.at[e.first], rest = w.size() - cf.at[e.last];
+    const size_t len = start + added.size() + block.size() + rest;
+    if (len != cf.b.size() || cf.b.compare(0, oct::HDR, editedHeader(cf, e, added.size(), len)) != 0) return false;
+    if (cf.sameHead < cf.namesEnd || cf.b.compare(cf.namesEnd, added.size(), added) != 0) return false;
+    const size_t pre = start - cf.namesEnd;   // the records before the block, shifted by the added names
+    const bool before = added.empty() ? cf.sameHead >= start
+                                      : cf.b.compare(cf.namesEnd + added.size(), pre, w, cf.namesEnd, pre) == 0;
+    if (!before || cf.b.compare(start + added.size(), block.size(), block) != 0) return false;
+    return cf.sameTail >= rest;
+}
+
+// The whole edited file, for OCTTEST_DUMP.
+oct::File editedFile(const CountsFile& cf, const Edited& e)
+{
+    oct::File full = cf.f;
+    full.names = e.g.names;
+    full.recs.erase(full.recs.begin() + e.first, full.recs.begin() + e.last);
+    full.recs.insert(full.recs.begin() + e.first, e.g.recs.begin(), e.g.recs.end());
+    return full;
+}
+
+// A processor-free graph without constant data comes back byte-identical.
+void compareEdited(const CountsFile& cf, const Edited& e, CountsRun& run)
+{
+    if (editedEquals(cf, e)) {
         ++run.ok;
         return;
     }
     ++run.bad;
-    if (run.bad <= kShownMismatches) printf("MISMATCH %s subnetwork @%zu\n", path.c_str(), i);
-    if (run.bad == 1 && env("OCTTEST_DUMP")) writeFile(env("OCTTEST_DUMP"), g.write());
+    if (run.bad <= kShownMismatches) printf("MISMATCH %s subnetwork @%zu\n", cf.path.c_str(), e.first);
+    if (run.bad == 1 && env("OCTTEST_DUMP")) writeFile(env("OCTTEST_DUMP"), editedFile(cf, e).write());
 }
 
-// SubNetwork i: its counts stripped and regenerated by octx::addCounts, then compared.
-void countsSubNetwork(const oct::File& f, size_t i, const std::string& b, const std::string& path, CountsRun& run)
+// Drops the names an edit added past n, keeping addName's index in step with the table.
+void dropNames(oct::File& f, size_t n)
 {
-    Fields shipped = countFields(f, i);
+    if (f.names.size() == n) return;
+    for (size_t k = n; k < f.names.size(); ++k) f.nameIndex.erase(f.names[k]);
+    if (f.nameIndexed == f.names.size()) f.nameIndexed = n;
+    f.names.resize(n);
+}
+
+// SubNetwork i alone, the file's names lent (as addAllCounts edits it): counts stripped, regenerated, compared.
+void countsSubNetwork(CountsFile& cf, size_t i, CountsRun& run)
+{
+    Fields shipped = countFields(cf.f, i);
     bool fits = !shipped["ProcessorNodeCount"] && !shipped["ConstantDataNodeCount"];
-    oct::File g = f;
-    stripCounts(g, i);
-    std::string why;
-    if (!octx::addCounts(g, i, run.octx, &why)) {
-        ++run.skip;
-        ++run.skipWhy[why];
-        return;
+    const size_t end = cf.f.blockEnd(i), names0 = cf.f.names.size();
+    oct::File g;
+    g.recs.assign(cf.f.recs.begin() + i, cf.f.recs.begin() + end);
+    {
+        octx::detail::LentNames lent(cf.f, g);
+        stripCounts(g, 0);
+        std::string why;
+        if (!octx::addCounts(g, 0, run.octx, &why)) {
+            ++run.skip;
+            ++run.skipWhy[why];
+        } else if (fits) {
+            compareEdited(cf, {i, end, g, names0}, run);
+        } else {
+            Fields ours = countFields(g, 0);
+            compareFields(shipped, ours, cf.path, run);
+        }
     }
-    if (fits) {
-        compareFile(g, b, path, i, run);
-        return;
-    }
-    Fields ours = countFields(g, i);
-    compareFields(shipped, ours, path, run);
+    dropNames(cf.f, names0);
 }
 
 void countsFile(const std::string& b, const std::string& path, CountsRun& run)
 {
-    oct::File f = parse(b);
-    long pool = f.pool("SubNetworkPool");
+    CountsFile cf{parse(b), b, path};
+    long pool = cf.f.pool("SubNetworkPool");
     if (pool < 0) return;
-    for (size_t i = pool + 1, end = f.blockEnd(pool); i < end; i = f.blockEnd(i))
-        if (f.recs[i].level == 2) countsSubNetwork(f, i, b, path, run);
+    indexWritten(cf);
+    for (size_t i = pool + 1, end = cf.f.blockEnd(pool); i < end; i = cf.f.blockEnd(i))
+        if (cf.f.recs[i].level == 2) countsSubNetwork(cf, i, run);
 }
 
 // ---- --vtxf ----
