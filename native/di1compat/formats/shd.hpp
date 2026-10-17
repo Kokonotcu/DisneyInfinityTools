@@ -27,6 +27,9 @@ inline constexpr Layout kLayout30 = {0x18, 0xE0, 0x50, 0x18, 0x28, 0x30, 0x68, 0
 
 constexpr int kRegisterBytes = 16;      // one float4 constant register
 constexpr int kFirstSlotRegister = 5;   // material slot i is t(5 + i) in 821 of 836 shaders (FORMATS.md 7.1)
+constexpr uint32_t kConstantBuffers = 5;   // the engine binds b0..b4 (gen30.py globals30, RDEF)
+inline constexpr const char* kConstantBufferNames[kConstantBuffers] = {"perFrame", "perView", "perDraw",
+                                                                       "perMaterial", "perInstance"};
 
 // 3.0 pass word fields (gen30.py: depth 3..5, blend 6..9, cull 10..11, X 12..15, Y 16..19)
 inline uint32_t depthField(uint32_t w) { return (w >> 3) & 7; }

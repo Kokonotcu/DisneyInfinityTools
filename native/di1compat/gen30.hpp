@@ -19,16 +19,11 @@
 #include "base/bytes.hpp"
 #include "base/hash.hpp"
 #include "formats/shd.hpp"
+#include "formats/rentable.hpp"
 #include "formats/sm3.hpp"
 #include "formats/vtxf.hpp"
 
 namespace gen30 {
-
-struct Tables {
-    std::unordered_map<std::string, std::array<int, 3>> globals;           // name -> buffer, offset, size
-    std::map<std::tuple<uint32_t, int, int>, uint32_t> wordRules;         // (technique, depth kind, X) -> bits
-    std::map<std::pair<uint32_t, uint32_t>, int> passByte;                // (technique, 3.0 word) -> +0x1c
-};
 
 struct Param { uint32_t hash; bool A; int offset, type; };
 struct Pass { uint32_t word, vf, vs, ps; };
@@ -74,7 +69,7 @@ inline uint32_t convWord(uint32_t w)
 {
     return ((w & 7) << 3) | (((w >> 3) & 0xf) << 6) | (((w >> 7) & 3) << 10) | (((w >> 9) & 0xf) << 12) | (((w >> 13) & 7) << 16);
 }
-inline uint32_t word30(const Tables& T, uint32_t tech, uint32_t w10)
+inline uint32_t word30(const rentable::ShaderRules& T, uint32_t tech, uint32_t w10)
 {
     uint32_t w = convWord(w10);
     auto it = T.wordRules.find({tech, (int)shd::depthField(w), (int)shd::xField(w)});
@@ -124,12 +119,9 @@ static const char* GBUFFER_EPILOGUE =
     "        o.o2 = float4(1, 1, 1, 0);\n"
     "    }";
 
-// cbuffer registers b0..b4 Binding30 declares, one name each (perFrame .. perInstance); the table's V lines name one
-constexpr int kConstantBuffers = 5;
-
 // sm3::toHlsl's binding for a 1.0 program in 3.0
 struct Binding30 {
-    const Tables& T;
+    const rentable::ShaderRules& T;
     const Layout& L;
     std::map<std::string, std::string> fmt;
     std::map<int, std::pair<std::string, int>> creg;
@@ -152,7 +144,8 @@ struct Binding30 {
         needed.insert(sem);
         return false;
     }
-    Binding30(const Tables& t, const Layout& l, const std::vector<sm3::Const>& ct, std::map<std::string, std::string> f)
+    Binding30(const rentable::ShaderRules& t, const Layout& l, const std::vector<sm3::Const>& ct,
+              std::map<std::string, std::string> f)
         : T(t), L(l), fmt(std::move(f))
     {
         for (auto& c : ct) {
@@ -211,7 +204,7 @@ struct Binding30 {
     std::string boolean(int) { return "false"; }
     std::string cbuffers()
     {
-        static const char* names[kConstantBuffers] = {"perFrame", "perView", "perDraw", "perMaterial", "perInstance"};
+        const char* const* names = shd::kConstantBufferNames;
         std::string s;
         for (auto& [k, n] : used)
             if (n) s += (s.empty() ? "" : "\n") + std::string("cbuffer ") + names[k] + " : register(b" + std::to_string(k) + ") { float4 CB" +
@@ -329,7 +322,7 @@ inline PassFormat passFormat(const Sources& in, const Pass& p, const std::string
 
 // One 1.0 shader being generated
 struct ShaderJob {
-    const Tables& T;
+    const rentable::ShaderRules& T;
     const Sources& in;
     const std::string& shader;
     const Shd10& s;
@@ -405,7 +398,7 @@ inline ProgramRef addProgram(const PassJob& job, Stage stage, uint32_t id10, Gen
 }
 
 // The render table's +0x1c byte for (technique, word); a technique's passes take texture masks instead (RE-24)
-inline uint16_t passByte(const Tables& T, uint32_t tech, uint32_t w)
+inline uint16_t passByte(const rentable::ShaderRules& T, uint32_t tech, uint32_t w)
 {
     auto b = T.passByte.find({tech, w});
     return (uint8_t)(b != T.passByte.end() ? b->second : 0);
@@ -489,7 +482,7 @@ inline shd::Shader shader30(const std::string& raw10, const Shd10& s, const Layo
 }
 
 // gen30.generate: a 1.0 shader -> its 3.0 .shd and the programs' HLSL (compiled when in.compile is set)
-inline bool generate(const Tables& T, const Sources& in, const std::string& shader, Generated& g)
+inline bool generate(const rentable::ShaderRules& T, const Sources& in, const std::string& shader, Generated& g)
 {
     std::string raw10;
     if (!in.read10("shaders/shaders/" + shader + ".shd", raw10)) {

@@ -235,7 +235,7 @@ static std::map<std::string, std::string> g_over10;
 static std::set<std::string> g_indexed10;
 static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1.0 (ui: their images may be too)
 static std::set<std::string> g_screens10;   // presentation/<screen>.lua served from 1.0: lower-case screen names (gprt)
-static render::Table g_render;
+static rentable::Table g_render;
 static vtxf::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
 static vtxf::VFormats g_vf30;              // 3.0's (skintr10: the formats skinned passes draw in), set with the vtxf
 static std::map<uint32_t, vtxf::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
@@ -3559,7 +3559,7 @@ static uint8_t* shader10(const char* name, bool create)
     g_compiling10 = name;
     std::function<uint32_t(uint32_t)> skinTarget;
     if (g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty()) skinTarget = [](uint32_t vf) { return render::skinTarget30(g_render, vf); };
-    gen30::generate(g_render.shaders10, {read10s, g_vf10, compile10, skinTarget, &g_vf30}, std::string(name + 1), g);
+    gen30::generate(g_render.shaderRules, {read10s, g_vf10, compile10, skinTarget, &g_vf30}, std::string(name + 1), g);
     for (auto& pr : g.problems) logf("shaders10 %s: %s", name, pr.c_str());
     if (g.shd.empty() || !g.problems.empty()) return nullptr;
     std::map<uint32_t, uint32_t> engineId, vsIndex, psIndex;   // generator id -> engine id; engine id -> index
@@ -3694,7 +3694,7 @@ extern "C" void __stdcall Pentane_Main()
         std::string v10;
         if (read10s("shaders/vformat.vtxf", v10)) g_vf10 = vtxf::formats(v10);
         logf("shaders10: compiler %s, %u 1.0 vertex formats, %u 3.0 globals, cache %s", g_d3dCompile ? "ok" : "MISSING",
-             (unsigned)g_vf10.size(), (unsigned)g_render.shaders10.globals.size(), g_shaderCache.c_str());
+             (unsigned)g_vf10.size(), (unsigned)g_render.shaderRules.globals.size(), g_shaderCache.c_str());
     }
 
     AddVectoredExceptionHandler(1, avHandler);

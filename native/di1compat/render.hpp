@@ -12,264 +12,17 @@
 #include <map>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <unordered_map>
 #include "base/bytes.hpp"
 #include "base/hash.hpp"
 #include "oct.hpp"
 #include "gen30.hpp"
 #include "formats/bndl.hpp"
+#include "formats/rentable.hpp"
 #include "formats/ssf.hpp"
 #include "formats/vtxf.hpp"
 
 namespace render {
-
-// ---- the table ----
-struct Shader { int A = 0, B = 0, slots = 0; std::set<uint32_t> vf; std::vector<std::string> roles; };
-struct Op {
-    int dsi = 0, doff = 0, size = 0;
-    char kind = 0;
-    int ssi = 0, soff = 0;
-    std::string st, dt;
-    vtxf::ElementType sv{}, dv{};
-    std::vector<double> dflt;
-    std::string bytes;
-};
-struct Plan { std::vector<int> ss, ds; std::vector<Op> ops; };
-struct Ref { std::string engine, extract; int idx = 0, count = 0; };
-
-struct Table {
-    std::unordered_map<std::string, Shader> shaders;
-    std::map<std::string, Ref> donors;                 // ordered: the generic tier iterates them
-    std::unordered_map<std::string, Ref> matindex;
-    std::set<std::string> filled, notReal;
-    std::map<std::string, std::vector<int>> genericSlots;
-    std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
-    std::map<std::pair<uint32_t, uint32_t>, Plan> plans;
-    std::map<std::pair<uint32_t, uint32_t>, Plan> skinPlans;   // R lines: into the target's 'skin' layout (bones kept)
-    gen30::Tables shaders10;                           // real 1.0 shaders: V / W / Q lines (gen30)
-
-    // false: no shaders or plans, or a corrupt line (later lines unread, earlier ones kept)
-    bool load(const std::string& text);
-};
-
-namespace detail {
-
-// A count in a table line: never negative, never more than the line has characters (RE-20)
-inline bool countOk(int n, size_t limit) { return n >= 0 && (size_t)n <= limit; }
-
-inline bool loadShader(Table& T, std::istringstream& t, size_t limit)
-{
-    std::string name;
-    Shader s;
-    int n = 0;
-    t >> name >> s.A >> s.B >> s.slots >> n;
-    if (!countOk(n, limit)) return false;
-    for (int i = 0; i < n; ++i) {
-        std::string h;
-        t >> h;
-        s.vf.insert((uint32_t)std::stoul(h, nullptr, 16));
-    }
-    t >> n;
-    if (!countOk(n, limit)) return false;
-    for (int i = 0; i < n; ++i) {
-        std::string r;
-        t >> r;
-        s.roles.push_back(r == "-" ? "" : r);
-    }
-    T.shaders[name] = s;
-    return true;
-}
-
-// D and M lines: a malformed line is dropped, never half-read (extract paths are read with substr(2))
-inline bool loadDonor(Table& T, std::istringstream& t)
-{
-    std::string sh;
-    Ref r;
-    t >> sh >> r.engine >> r.idx >> r.count >> r.extract;
-    if (!t.fail() && r.extract.size() > 2) T.donors[sh] = r;
-    return true;
-}
-
-inline bool loadMaterialRef(Table& T, std::istringstream& t)
-{
-    std::string g;
-    Ref r;
-    t >> g >> r.engine >> r.idx >> r.extract;
-    if (!t.fail() && r.extract.size() > 2) T.matindex[g] = r;
-    return true;
-}
-
-inline bool loadName(std::istringstream& t, std::set<std::string>& into)
-{
-    std::string s;
-    t >> s;
-    into.insert(s);
-    return true;
-}
-
-inline bool loadGlobal(Table& T, std::istringstream& t)
-{
-    std::string n;
-    int cb = 0, off = 0, sz = 0;
-    t >> n >> cb >> off >> sz;
-    if (cb < 0 || cb >= gen30::kConstantBuffers) return false;
-    T.shaders10.globals[n] = {cb, off, sz};
-    return true;
-}
-
-inline bool loadWordRule(Table& T, std::istringstream& t)
-{
-    std::string th, bits;
-    int kind = 0, x = 0;
-    t >> th >> kind >> x >> bits;
-    T.shaders10.wordRules[{(uint32_t)std::stoul(th, nullptr, 16), kind, x}] = (uint32_t)std::stoul(bits, nullptr, 16);
-    return true;
-}
-
-inline bool loadPassByte(Table& T, std::istringstream& t)
-{
-    std::string th, w;
-    int v = 0;
-    t >> th >> w >> v;
-    T.shaders10.passByte[{(uint32_t)std::stoul(th, nullptr, 16), (uint32_t)std::stoul(w, nullptr, 16)}] = v;
-    return true;
-}
-
-// slot indices: transcodeMaterials indexes the material's slots with them
-inline bool loadGenericSlots(Table& T, std::istringstream& t)
-{
-    std::string sh;
-    int i = 0;
-    t >> sh;
-    while (t >> i) {
-        if (i < 0) return false;
-        T.genericSlots[sh].push_back(i);
-    }
-    return true;
-}
-
-inline bool loadTargets(Table& T, std::istringstream& t)
-{
-    std::string a, b;
-    t >> a;
-    auto& v = T.targets[(uint32_t)std::stoul(a, nullptr, 16)];
-    while (t >> b) v.push_back((uint32_t)std::stoul(b, nullptr, 16));
-    return true;
-}
-
-inline bool loadStrides(std::istringstream& t, size_t limit, std::vector<int>& v)
-{
-    int n = 0;
-    t >> n;
-    if (!countOk(n, limit)) return false;
-    v.resize(n);
-    for (auto& x : v) t >> x;
-    return true;
-}
-
-inline bool loadOp(std::istringstream& t, size_t limit, Op& o)
-{
-    t >> o.dsi >> o.doff >> o.size >> o.kind;
-    if (o.kind == 'C') {
-        t >> o.ssi >> o.soff;
-        return true;
-    }
-    if (o.kind == 'X') {
-        int m = 0;
-        t >> o.ssi >> o.soff >> o.st >> o.dt >> m;
-        if (!countOk(m, limit)) return false;
-        o.dflt.resize(m);
-        for (auto& d : o.dflt) t >> d;
-        const bool types = vtxf::elementType(o.st, o.sv) && vtxf::elementType(o.dt, o.dv);
-        return types && o.sv.n <= 4 && o.dv.n <= 4;
-    }
-    std::string hex;
-    t >> hex;
-    if (hex == "-") return true;
-    for (size_t j = 0; j + 1 < hex.size(); j += 2) o.bytes.push_back((char)std::stoi(hex.substr(j, 2), nullptr, 16));
-    return true;
-}
-
-// convertVertex writes [doff, doff+size) of stream dsi and reads inside source stream ssi (vtxf.plan builds them so)
-inline bool opOk(const Plan& p, const Op& o)
-{
-    const bool stream = o.dsi >= 0 && (size_t)o.dsi < p.ds.size();
-    const bool span = o.doff >= 0 && o.size >= 0;
-    if (!stream || !span || o.doff + (int64_t)o.size > p.ds[o.dsi]) return false;
-    if (o.kind == 'K') return true;
-    if (o.kind != 'C' && o.kind != 'X') return false;
-    const int64_t read = o.kind == 'C' ? o.size : (int64_t)o.sv.n * o.sv.csize;
-    const bool from = o.ssi >= 0 && (size_t)o.ssi < p.ss.size() && o.soff >= 0;
-    return from && o.soff + read <= p.ss[o.ssi];
-}
-
-inline bool planOk(const Plan& p)
-{
-    const auto negative = [](int s) { return s < 0; };
-    if (std::any_of(p.ss.begin(), p.ss.end(), negative) || std::any_of(p.ds.begin(), p.ds.end(), negative)) return false;
-    return std::all_of(p.ops.begin(), p.ops.end(), [&](const Op& o) { return opOk(p, o); });
-}
-
-// P and R lines: source strides, destination strides, ops; a plan outside its streams rejects the table
-inline bool loadPlan(Table& T, std::istringstream& t, size_t limit, char kind)
-{
-    std::string a, b;
-    Plan p;
-    int n = 0;
-    t >> a >> b;
-    if (!loadStrides(t, limit, p.ss) || !loadStrides(t, limit, p.ds)) return false;
-    t >> n;
-    if (!countOk(n, limit)) return false;
-    for (int i = 0; i < n; ++i) {
-        Op o;
-        if (!loadOp(t, limit, o)) return false;
-        p.ops.push_back(o);
-    }
-    if (!planOk(p)) return false;
-    auto& into = kind == 'R' ? T.skinPlans : T.plans;
-    into[{(uint32_t)std::stoul(a, nullptr, 16), (uint32_t)std::stoul(b, nullptr, 16)}] = p;
-    return true;
-}
-
-// one line by its tag; any other first word is not a table line
-inline bool loadLine(Table& T, const std::string& line)
-{
-    std::istringstream t(line);
-    std::string k;
-    t >> k;
-    if (k.size() != 1) return true;
-    switch (k[0]) {
-    case 'S': return loadShader(T, t, line.size());
-    case 'D': return loadDonor(T, t);
-    case 'M': return loadMaterialRef(T, t);
-    case 'F': return loadName(t, T.filled);
-    case 'N': return loadName(t, T.notReal);
-    case 'V': return loadGlobal(T, t);
-    case 'W': return loadWordRule(T, t);
-    case 'Q': return loadPassByte(T, t);
-    case 'G': return loadGenericSlots(T, t);
-    case 'T': return loadTargets(T, t);
-    case 'P': case 'R': return loadPlan(T, t, line.size(), k[0]);
-    default: return true;
-    }
-}
-
-}  // namespace detail
-
-// Runs at boot outside any try: a corrupt number (std::stoul) or count is a load failure, never a throw.
-inline bool Table::load(const std::string& text)
-{
-    try {
-        std::istringstream in(text);
-        std::string line;
-        while (std::getline(in, line))
-            if (!detail::loadLine(*this, line)) return false;
-    } catch (const std::exception&) {
-        return false;
-    }
-    return !shaders.empty() && !plans.empty();
-}
 
 inline double halfToDouble(uint16_t h)
 {
@@ -342,10 +95,11 @@ inline void encode(const vtxf::ElementType& v, const double* vals, char* out)
 
 // One vertex through plan p, appended to the destination streams per[0..p.ds.size()). Per vertex of a 52 MB
 // world, so no allocation here (the string/vector form cost in_city ~1.5 s of load).
-inline void convertVertex(const std::vector<const uint8_t*>& src, const Plan& p, std::vector<std::string>& per)
+inline void convertVertex(const std::vector<const uint8_t*>& src, const rentable::Plan& p,
+                          std::vector<std::string>& per)
 {
     for (size_t s = 0; s < p.ds.size(); ++s) per[s].append(p.ds[s], '\0');
-    for (const Op& o : p.ops) {
+    for (const rentable::Op& o : p.ops) {
         std::string& ds = per[o.dsi];
         char* d = &ds[ds.size() - p.ds[o.dsi] + o.doff];
         if (o.kind == 'K') memcpy(d, o.bytes.data(), o.size < (int)o.bytes.size() ? o.size : o.bytes.size());
@@ -404,7 +158,7 @@ struct IO {
 
 // The 3.0 format a skinned 1.0 format's vertices go to: its first target with an R plan (into the target's 'skin'
 // layout) -- the pick transcodeWorld makes for a material whose shader declares no format (0: none).
-inline uint32_t skinTarget30(const Table& T, uint32_t crc10)
+inline uint32_t skinTarget30(const rentable::Table& T, uint32_t crc10)
 {
     auto t = T.targets.find(crc10);
     if (t != T.targets.end())
@@ -429,7 +183,7 @@ struct Src { bndl::Bundle b; int i; };   // one material of a source bundle (mer
 namespace detail {
 
 // The table's material index inside the bundle read from the install; another 3.0 build moves it (RE-18)
-inline bool hasMaterial(const bndl::Bundle& b, const Ref& ref, std::vector<std::string>& problems)
+inline bool hasMaterial(const bndl::Bundle& b, const rentable::Ref& ref, std::vector<std::string>& problems)
 {
     if (ref.idx >= 0 && (size_t)ref.idx < b.mats.size()) return true;
     problems.push_back("3.0 bundle " + ref.extract + ": no material " + std::to_string(ref.idx));
@@ -484,7 +238,7 @@ constexpr size_t kParamBytes = 16;   // one float4 parameter of block A
 
 // One transcodeMaterials call: inputs, the 1.0 bundle, the 3.0 bundles read so far, the merge sources
 struct MaterialRun {
-    const Table& T;
+    const rentable::Table& T;
     const IO& io;
     const MaterialInput& in;
     Result& r;
@@ -494,7 +248,7 @@ struct MaterialRun {
     std::string err;                          // the last bundle parse failure
 };
 
-inline bool blockSizes30(const Table& T, const std::string& sh, int& A, int& B, int& slots)
+inline bool blockSizes30(const rentable::Table& T, const std::string& sh, int& A, int& B, int& slots)
 {
     auto it = T.shaders.find(sh);
     if (it == T.shaders.end()) return false;
@@ -529,7 +283,7 @@ inline bool BlockSizes10::get(const std::string& sh, int& A, int& B, int& slots)
 }
 
 // The 3.0 bundle at ref.extract, read once per call; null (and a problem) when it does not read
-inline bndl::Bundle* bundle30(MaterialRun& run, const Ref& ref)
+inline bndl::Bundle* bundle30(MaterialRun& run, const rentable::Ref& ref)
 {
     auto it = run.cache30.find(ref.extract);
     if (it != run.cache30.end()) return &it->second;
@@ -547,7 +301,7 @@ inline bndl::Bundle* bundle30(MaterialRun& run, const Ref& ref)
 }
 
 // Disney ships this 1.0 material in 3.0 (the real tier)
-inline bool isReal(const Table& T, const std::string& name)
+inline bool isReal(const rentable::Table& T, const std::string& name)
 {
     return !name.empty() && T.matindex.count(name) && !T.notReal.count(name);
 }
@@ -630,7 +384,7 @@ inline std::string slotTextures(const bndl::Bundle& b, const bndl::Material& m)
 }
 
 // The real tier: the 3.0 material as it ships. false: a problem says why
-inline bool addReal(MaterialRun& run, const bndl::Material& m10, const Ref& ref)
+inline bool addReal(MaterialRun& run, const bndl::Material& m10, const rentable::Ref& ref)
 {
     bndl::Bundle* bnd = bundle30(run, ref);
     if (!bnd || !hasMaterial(*bnd, ref, run.r.problems)) return false;
@@ -644,7 +398,7 @@ inline bool addReal(MaterialRun& run, const bndl::Material& m10, const Ref& ref)
 }
 
 // The 3.0 targets of each format the material is drawn with
-inline std::vector<std::set<uint32_t>> twinSets(const Table& T, const std::set<uint32_t>* formats)
+inline std::vector<std::set<uint32_t>> twinSets(const rentable::Table& T, const std::set<uint32_t>* formats)
 {
     std::vector<std::set<uint32_t>> need;
     if (!formats) return need;
@@ -673,7 +427,7 @@ inline bool readsRole(const std::set<uint32_t>& slots10, const std::string& role
 }
 
 // A generic donor candidate and its slot roles in common with the 1.0 shader
-struct Candidate { int common = 0; const std::string* shader = nullptr; const Ref* ref = nullptr; };
+struct Candidate { int common = 0; const std::string* shader = nullptr; const rentable::Ref* ref = nullptr; };
 
 // Python max over (roles in common, count, shader, extract path, index)
 inline bool better(const Candidate& a, const Candidate& b)
@@ -696,7 +450,7 @@ inline bool donorFits(const MaterialRun& run, const Candidate& c, const std::vec
 }
 
 // A colour-buffer reader (refraction, distortion) keeps a 3.0 one -> the slot roles they share; nullopt: no reader
-inline std::optional<int> colourBufferRoles(const Table& T, const std::set<uint32_t>& slots10,
+inline std::optional<int> colourBufferRoles(const rentable::Table& T, const std::set<uint32_t>& slots10,
                                             const std::string& shader)
 {
     const std::vector<std::string>& roles = T.shaders.at(shader).roles;
@@ -707,7 +461,8 @@ inline std::optional<int> colourBufferRoles(const Table& T, const std::set<uint3
 }
 
 // The generic tier: the most common 3.0 shader taking a twin of every drawn format; colour-buffer readers first
-inline const Ref* genericDonor(const MaterialRun& run, const bndl::Material& m10, const std::set<uint32_t>* formats)
+inline const rentable::Ref* genericDonor(const MaterialRun& run, const bndl::Material& m10,
+                                        const std::set<uint32_t>* formats)
 {
     const std::vector<std::set<uint32_t>> need = twinSets(run.T, formats);
     const std::set<uint32_t> slots10 = slotNames10(run.io, m10.shader);
@@ -724,7 +479,7 @@ inline const Ref* genericDonor(const MaterialRun& run, const bndl::Material& m10
     return best.ref;
 }
 
-struct DonorPick { const Ref* ref = nullptr; const char* tier = "same-sh"; };
+struct DonorPick { const rentable::Ref* ref = nullptr; const char* tier = "same-sh"; };
 
 // same-sh: the table's donor for the 1.0 shader; else generic. No donor: a problem
 inline DonorPick pickDonor(MaterialRun& run, const bndl::Material& m10, const std::set<uint32_t>* formats)
@@ -742,8 +497,8 @@ inline DonorPick pickDonor(MaterialRun& run, const bndl::Material& m10, const st
 }
 
 // On another shader the 1.0 textures go in order into the slots whose role materials fill (FORMATS.md 6.4)
-inline std::vector<uint32_t> genericSlots(const Table& T, const std::string& shader10, const bndl::Material& dm,
-                                          std::vector<uint32_t> used)
+inline std::vector<uint32_t> genericSlots(const rentable::Table& T, const std::string& shader10,
+                                          const bndl::Material& dm, std::vector<uint32_t> used)
 {
     auto g = T.genericSlots.find(shader10);
     if (g != T.genericSlots.end()) {
@@ -765,8 +520,8 @@ inline std::vector<uint32_t> genericSlots(const Table& T, const std::string& sha
 }
 
 // The 1.0 material's textures into the donor's slots (whole 8-byte slots, FORMATS.md 6.2) -> the slot assignment
-inline std::vector<uint32_t> substituteSlots(const Table& T, const bndl::Bundle& b10, const bndl::Material& m10,
-                                             bndl::Material& dm)
+inline std::vector<uint32_t> substituteSlots(const rentable::Table& T, const bndl::Bundle& b10,
+                                             const bndl::Material& m10, bndl::Material& dm)
 {
     std::vector<uint32_t> used;
     for (int s = 0; s < m10.slots; ++s) used.push_back(b10.slot(m10, s));
@@ -912,7 +667,7 @@ inline std::vector<std::string> relaySceneSettings(const IO& io, const bndl::Bun
 }  // namespace detail
 
 // autobundle.resolve: the 1.0 materials onto 3.0 shaders -> r.mtb; shaderVf: material -> its shader's vformats
-inline bool transcodeMaterials(const Table& T, const IO& io, const MaterialInput& in, Result& r,
+inline bool transcodeMaterials(const rentable::Table& T, const IO& io, const MaterialInput& in, Result& r,
                                std::map<int, const std::set<uint32_t>*>& shaderVf)
 {
     detail::MaterialRun run{T, io, in, r, {}, {}, {}, {}};
@@ -934,7 +689,8 @@ inline bool transcodeMaterials(const Table& T, const IO& io, const MaterialInput
 }
 
 // A material bundle without geometry of its own (particles/<x>.mtb): materials only, generic donors from donorPrefix.
-inline bool transcodeBundle(const Table& T, const IO& io, const std::string& mtb10, const std::string& donorPrefix, Result& r)
+inline bool transcodeBundle(const rentable::Table& T, const IO& io, const std::string& mtb10,
+                            const std::string& donorPrefix, Result& r)
 {
     const std::map<int, std::set<uint32_t>> drawn;
     std::map<int, const std::set<uint32_t>*> vf;
@@ -1014,9 +770,9 @@ inline const char* readPrim(const oct::File& f, const PrimRecs& p, PrimData& d)
     return nullptr;
 }
 
-inline Op copyOp(int dsi, int size, int ssi, int soff)
+inline rentable::Op copyOp(int dsi, int size, int ssi, int soff)
 {
-    Op o{};
+    rentable::Op o{};
     o.dsi = dsi;
     o.doff = 0;
     o.size = size;
@@ -1033,7 +789,7 @@ inline bool tailFits(const vtxf::ColourTail& ct, const std::vector<int32_t>& vda
 }
 
 // A translated material's primitive: every stream copied as it is; a re-laid format's colour tail to its own stream
-inline const char* samePlan(const IO& io, uint32_t src, const std::vector<int32_t>& vda, Plan& same)
+inline const char* samePlan(const IO& io, uint32_t src, const std::vector<int32_t>& vda, rentable::Plan& same)
 {
     const vtxf::ColourTail* ct = nullptr;
     if (io.tails10)
@@ -1086,8 +842,9 @@ inline bool vertexFits(int32_t off, int32_t stride, uint32_t last, size_t size)
 }
 
 // Every vertex of order through plan into per (one string per destination stream); strides and ranges checked first
-inline const char* convertPrim(const Plan& plan, const std::vector<int32_t>& vda, const std::vector<uint32_t>& order,
-                               const std::string& vbuf10, std::vector<std::string>& per)
+inline const char* convertPrim(const rentable::Plan& plan, const std::vector<int32_t>& vda,
+                               const std::vector<uint32_t>& order, const std::string& vbuf10,
+                               std::vector<std::string>& per)
 {
     for (int s = 0; s < vda[0]; ++s)
         if (s >= (int)plan.ss.size() || vda[4 + 3 * s] != plan.ss[s]) return "stride mismatch";
@@ -1212,7 +969,7 @@ using ShaderFormats = std::map<int, const std::set<uint32_t>*>;   // material ->
 
 // One transcodeWorld call: its inputs and what the passes before the geometry found
 struct WorldRun {
-    const Table& T;
+    const rentable::Table& T;
     const IO& io;
     Result& r;
     std::map<uint32_t, std::set<int>> users;   // 1.0 vformat -> materials drawn with it
@@ -1320,9 +1077,9 @@ inline NodeScan scanNode(const oct::File& f, size_t n)
 // A primitive's 3.0 vformat and plan; a null plan means same, the 1.0 format kept
 struct PrimPlan {
     uint32_t dst = 0;
-    Plan same;
-    const Plan* plan = nullptr;
-    const Plan& get() const { return plan ? *plan : same; }
+    rentable::Plan same;
+    const rentable::Plan* plan = nullptr;
+    const rentable::Plan& get() const { return plan ? *plan : same; }
 };
 
 // A skinned node's primitive goes to its 'skin' layout target (R plan); a translated one keeps its format
@@ -1336,7 +1093,7 @@ inline std::optional<PrimPlan> planFor(WorldRun& w, const PrimData& d, const Nod
         return std::nullopt;
     }
     p.dst = vm != w.vmap.end() ? vm->second : w.T.targets.at(d.src)[0];
-    const Plan* skinPlan = nullptr;
+    const rentable::Plan* skinPlan = nullptr;
     auto s = w.smap.find({d.ref, d.src});
     if (node.skinned && p.dst != d.src && s != w.smap.end()) {
         p.dst = s->second;
@@ -1367,7 +1124,7 @@ inline std::optional<PrimOut> convertPrimitive(WorldRun& w, Geometry& g, const P
 {
     const std::optional<PrimPlan> p = planFor(w, d, node);
     if (!p) return std::nullopt;
-    const Plan& plan = p->get();
+    const rentable::Plan& plan = p->get();
     PrimOut out;
     std::vector<uint32_t> order;
     const char* why = remapIndices(d.ida, g.ibuf10, g.remap, order, out.sub);
@@ -1500,7 +1257,7 @@ inline void dropMaterialRenderCaps(oct::File& f)
 }  // namespace detail
 
 // Materials, vertices and .oct primitive records of one 1.0 world, f edited in place. false: r.problems, f unchanged
-inline bool transcodeWorld(const Table& T, const IO& io, oct::File& f, const World10& w10, Result& r)
+inline bool transcodeWorld(const rentable::Table& T, const IO& io, oct::File& f, const World10& w10, Result& r)
 {
     detail::WorldRun w{T, io, r};
     if (const char* why = detail::primPairs(f, w.users, w.drawn)) return detail::fail(r, why);

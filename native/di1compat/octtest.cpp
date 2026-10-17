@@ -262,7 +262,7 @@ static int renderTest(char** a)
     namespace fs = std::filesystem;
     fs::path world = a[2], out = a[6];
     std::string stem = world.filename().string();
-    render::Table T;
+    rentable::Table T;
     if (!T.load(slurp(a[3]))) { printf("table load failed\n"); return 2; }
     std::string ext30 = a[4], ext10 = a[5];
     render::IO io;
@@ -335,7 +335,7 @@ static int renderTest(char** a)
                 return true;
             };
             gen30::Generated g;
-            gen30::generate(T.shaders10, {rd, vf10, comp, st, &vf30}, sh, g);
+            gen30::generate(T.shaderRules, {rd, vf10, comp, st, &vf30}, sh, g);
             for (auto& p : g.problems) printf("shaders10 x%s: %s\n", sh.c_str(), p.c_str());
             return made[sh] = !g.shd.empty() && g.problems.empty();
         };
@@ -3156,7 +3156,7 @@ int main(int argc, char** argv)
         chan::Read r10 = [&](const std::string& p, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / p); return !o.empty(); };
         chan::Read r30 = [&](const std::string& p, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / p.substr(2)); return !o.empty(); };
         if (argc > 7 && vfx::isPd10(in)) {
-            render::Table T;
+            rentable::Table T;
             if (!T.load(slurp(argv[4]))) { printf("table load failed\n"); return 2; }
             render::IO io;
             io.read30 = r30;
@@ -3181,7 +3181,7 @@ int main(int argc, char** argv)
     // stand-alone bundle (di1compat.cpp transcode() .mtb case: donors from the engine path's 3.0 folder); a failure
     // there serves the 1.0 bundle raw
     if (argc > 6 && std::string(argv[1]) == "--mtb") {
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         std::string ext30 = argv[3], ext10 = argv[4], p = argv[6];
         render::IO io;
@@ -3210,7 +3210,7 @@ int main(int argc, char** argv)
     }
     if (argc > 4 && std::string(argv[1]) == "--gen30") {   // --gen30 <render table> <1.0 extract root> <gen30.py dump dir>
         // every shader gen30.py dumped (.shd + <shader>.<program id>.hlsl, compile off): the C++ port must match
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         fs::path ext10 = fs::path(argv[3]) / "assets", dump = argv[4];
         gen30::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(ext10 / p); return !o.empty(); };
@@ -3220,7 +3220,7 @@ int main(int argc, char** argv)
             if (e.path().extension() != ".shd") continue;
             std::string sh = e.path().stem().string();
             gen30::Generated g;
-            gen30::generate(T.shaders10, {read10, vf, nullptr}, sh, g);
+            gen30::generate(T.shaderRules, {read10, vf, nullptr}, sh, g);
             bool same = g.shd == slurp(e.path());
             for (auto& p : g.programs) {
                 char nm[64];
@@ -3240,7 +3240,7 @@ int main(int argc, char** argv)
     }
     if (argc > 5 && std::string(argv[1]) == "--warm") {   // --warm <render table> <1.0 extract root> <cache dir> <1.0 .mtb>...
         // compile the translated shaders these bundles name into the plugin's cache (same compiler, same keys)
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         fs::path ext10 = fs::path(argv[3]) / "assets";
         std::string cache = argv[4];
@@ -3295,7 +3295,7 @@ int main(int argc, char** argv)
         if (!vf30.empty()) st = [&](uint32_t v) { return render::skinTarget30(T, v); };
         for (auto& sh : shaders) {
             gen30::Generated g;
-            gen30::generate(T.shaders10, {read10, vf, comp, st, &vf30}, sh, g);
+            gen30::generate(T.shaderRules, {read10, vf, comp, st, &vf30}, sh, g);
             for (auto& pr : g.problems) if (++probs <= 10) printf("  %s: %s\n", sh.c_str(), pr.c_str());
         }
         printf("%zu shaders: %zu programs compiled, %zu already cached, %zu failed, %zu problems\n", shaders.size(), compiled, cached, failed, probs);
@@ -3368,7 +3368,7 @@ int main(int argc, char** argv)
     }
     if (argc > 4 && std::string(argv[1]) == "--arc") {   // --arc <render table> <game dir> <3.0 extract root>
         // every table bundle read from the install's archive (arc30) must equal the extract's file
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) return 2;
         std::set<std::string> seen;
         size_t ok = 0, bad = 0;
