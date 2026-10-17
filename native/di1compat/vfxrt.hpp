@@ -80,7 +80,7 @@ static void trace(const char* what, uint32_t key, const char* name, const float*
 inline uint32_t nameHash(char* n)
 {
     for (char* p = n; *p; ++p) *p = (char)tolower((unsigned char)*p);
-    return vfx::h131(n, strlen(n));
+    return hash::h131Signed(n, strlen(n));
 }
 
 // FUN_0065e3a0(hash, placement, info, 0): every effect (FUN_0065e5a0 / FUN_0065e6d0, the name hashed by FUN_0040bb80)

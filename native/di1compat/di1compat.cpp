@@ -44,7 +44,7 @@
 #include "formats/chd.hpp"
 #include "mer.hpp"
 #include "mernode.hpp"
-#include "render.hpp"
+#include "games/di1/renderoct.hpp"
 #include "formats/arc30.hpp"
 #include "convert/datamap.hpp"
 #include "formats/dct.hpp"
@@ -55,8 +55,8 @@
 #include "cho.hpp"
 #include "ui.hpp"
 #include "audio.hpp"
-#include "vfx.hpp"
-#include "chan.hpp"
+#include "games/di1/vfx.hpp"
+#include "games/di1/chan.hpp"
 #include "gameplay.hpp"
 #include "third_party/miniz/miniz.h"
 #include "renderdoc_app.h"
@@ -230,19 +230,19 @@ static std::map<std::string, std::string> g_over10;
 static std::set<std::string> g_indexed10;
 static std::set<std::string> g_movies10;    // flash/<dir>/<movie> served from 1.0 (ui: their images may be too)
 static std::set<std::string> g_screens10;   // presentation/<screen>.lua served from 1.0: lower-case screen names (gprt)
-static render::Table g_render;
-static gen30::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
-static gen30::VFormats g_vf30;              // 3.0's (skintr10: the formats skinned passes draw in), set with the vtxf
-static std::map<uint32_t, gen30::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
+static rentable::Table g_render;
+static vtxf::VFormats g_vf10;              // 1.0 vertex formats (real 1.0 shaders: shaders10)
+static vtxf::VFormats g_vf30;              // 3.0's (skintr10: the formats skinned passes draw in), set with the vtxf
+static std::map<uint32_t, vtxf::ColourTail> g_tails10;   // re-laid 1.0 formats in the served vformat.vtxf
 static uint8_t* shader10(const char* name, bool create);
 static bool g_renderOk;
 
-// Both games' scenesettingsformat.ssf (render.hpp ssfBlock30), parsed on first use; both or neither (cfg scenesettings10)
+// Both games' scenesettingsformat.ssf (ssf::relayBlock), parsed on first use; both or neither (cfg scenesettings10)
 static void sceneSettingsIO(render::IO& io)
 {
     static std::mutex mx;
     static bool done, ok;
-    static render::Ssf f10, f30;
+    static ssf::Format f10, f30;
     std::lock_guard<std::mutex> lock(mx);
     if (!done) {
         done = true;
@@ -309,7 +309,7 @@ static bool transcodeAssetRender(const std::string& p, oct::File& f, std::string
     io.translatable = [](const std::string& sh) { return shader10(("x" + sh).c_str(), true) != nullptr; };
     sceneSettingsIO(io);
     render::Result r;
-    if (!render::transcodeWorld(g_render, io, f, stem, mtb, vbuf, ibuf, r)) {
+    if (!render::transcodeWorld(g_render, io, f, {stem, mtb, vbuf, ibuf}, r)) {
         for (auto& pr : r.problems) logf("render problem %s: %s", p.c_str(), pr.c_str());
         note += "render FAILED ";
         return false;
@@ -3208,7 +3208,7 @@ static uint8_t* shader10(const char* name, bool create)
     g_compiling10 = name;
     std::function<uint32_t(uint32_t)> skinTarget;
     if (g_cfg.skinTr10 && g_cfg.skinLayout10 && !g_vf30.empty()) skinTarget = [](uint32_t vf) { return render::skinTarget30(g_render, vf); };
-    gen30::generate(g_render.shaders10, read10s, g_vf10, std::string(name + 1), compile10, g, skinTarget, &g_vf30);
+    gen30::generate(g_render.shaderRules, {read10s, g_vf10, compile10, skinTarget, &g_vf30}, std::string(name + 1), g);
     for (auto& pr : g.problems) logf("shaders10 %s: %s", name, pr.c_str());
     if (g.shd.empty() || !g.problems.empty()) return nullptr;
     std::map<uint32_t, uint32_t> engineId, vsIndex, psIndex;   // generator id -> engine id; engine id -> index
@@ -3251,13 +3251,12 @@ static uint8_t* __cdecl hkShaderByName(const char* name)
     return s;
 }
 
-// vformat.vtxf: 3.0's formats plus every 1.0 format 3.0 lacks, so 1.0 vertex buffers draw as they are (their
-// trailing vertex colour in a stream of its own: gen30::mergeVtxf). Read once at boot, before any asset transcode.
+// vformat.vtxf: 3.0's formats plus the 1.0 formats 3.0 lacks (vtxf::merge). Read at boot, before any transcode.
 static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 {
     int n = 0;
-    std::string m = gen30::mergeVtxf(t30, t10, n, g_tails10);
-    g_vf30 = gen30::vformats(t30);
+    std::string m = vtxf::merge(t30, t10, n, g_tails10);
+    g_vf30 = vtxf::formats(t30);
     logf("shaders10: vformat.vtxf + %d 1.0 formats, %u with their vertex colour in its own stream", n, (unsigned)g_tails10.size());
     return m;
 }
@@ -3340,9 +3339,9 @@ extern "C" void __stdcall Pentane_Main()
         g_shaderCache = std::string(dir) + "\\di1compat_shaders";
         CreateDirectoryA(g_shaderCache.c_str(), nullptr);
         std::string v10;
-        if (read10s("shaders/vformat.vtxf", v10)) g_vf10 = gen30::vformats(v10);
+        if (read10s("shaders/vformat.vtxf", v10)) g_vf10 = vtxf::formats(v10);
         logf("shaders10: compiler %s, %u 1.0 vertex formats, %u 3.0 globals, cache %s", g_d3dCompile ? "ok" : "MISSING",
-             (unsigned)g_vf10.size(), (unsigned)g_render.shaders10.globals.size(), g_shaderCache.c_str());
+             (unsigned)g_vf10.size(), (unsigned)g_render.shaderRules.globals.size(), g_shaderCache.c_str());
     }
 
     AddVectoredExceptionHandler(1, avHandler);

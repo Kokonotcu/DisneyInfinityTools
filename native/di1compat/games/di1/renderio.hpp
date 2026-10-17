@@ -4,8 +4,9 @@
 #include <functional>
 #include <map>
 #include <string>
-#include "../../gen30.hpp"
-#include "../../render.hpp"
+#include "../../formats/ssf.hpp"
+#include "../../formats/vtxf.hpp"
+#include "render.hpp"
 
 namespace di1 {
 
@@ -25,16 +26,16 @@ struct WorldRender {
     bool translate = false;     // shaders10 && translate10: real 1.0 shaders where they translate
     bool skinLayout = false;    // skinlayout10
     bool skinTr = false;        // skintr10: only with skinLayout and 3.0's vertex formats
-    const gen30::VFormats* vf10 = nullptr;   // 1.0's vertex formats: those with bone indices are skinned
-    const gen30::VFormats* vf30 = nullptr;   // 3.0's, from the served vformat.vtxf
-    const std::map<uint32_t, gen30::ColourTail>* tails10 = nullptr;   // the served vtxf's re-laid 1.0 formats
+    const vtxf::VFormats* vf10 = nullptr;   // 1.0's vertex formats: those with bone indices are skinned
+    const vtxf::VFormats* vf30 = nullptr;   // 3.0's, from the served vformat.vtxf
+    const std::map<uint32_t, vtxf::ColourTail>* tails10 = nullptr;   // the served vtxf's re-laid 1.0 formats
 };
 
 inline render::IO worldIO(const WorldRender& w, const Read& read10, const Read& read30)
 {
     render::IO io = bundleIO(read10, read30);
     io.translate = w.translate;
-    const gen30::VFormats* vf10 = w.vf10;
+    const vtxf::VFormats* vf10 = w.vf10;
     io.skinned = [vf10](uint32_t vf) {
         auto f = vf10->find(vf);
         return f != vf10->end() && f->second.count("BLENDINDICES0");
@@ -46,13 +47,13 @@ inline render::IO worldIO(const WorldRender& w, const Read& read10, const Read& 
     return io;
 }
 
-// Both games' scenesettingsformat.ssf, read and parsed (render.hpp ssfBlock30); false if either is missing or bad.
-inline bool sceneSettings(const Read& read10, const Read& read30, render::Ssf& f10, render::Ssf& f30)
+// Both games' scenesettingsformat.ssf, read and parsed (ssf::relayBlock); false if either is missing or bad.
+inline bool sceneSettings(const Read& read10, const Read& read30, ssf::Format& f10, ssf::Format& f30)
 {
     std::string a, b;
     if (!read10("shaders/shaders/scenesettingsformat.ssf", a)) return false;
     if (!read30("3:shaders/shaders/scenesettingsformat.ssf", b)) return false;
-    return render::parseSsf(a, false, f10) && render::parseSsf(b, true, f30);
+    return ssf::parse(a, render::kSsfLayout10, f10) && ssf::parse(b, ssf::kLayout30, f30);
 }
 
 }  // namespace di1

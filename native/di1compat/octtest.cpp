@@ -16,7 +16,7 @@
 #include "games/di1/btd.hpp"
 #include "formats/chd.hpp"
 #include "mer.hpp"
-#include "render.hpp"
+#include "games/di1/renderoct.hpp"
 #include "formats/arc30.hpp"
 #include "core/readonly_file.hpp"
 #include "convert/datamap.hpp"
@@ -30,8 +30,8 @@
 #include "ui.hpp"
 #include "audio.hpp"
 #include <cstdarg>
-#include "vfx.hpp"
-#include "chan.hpp"
+#include "games/di1/vfx.hpp"
+#include "games/di1/chan.hpp"
 #include "gameplay.hpp"
 #include "base/hash.hpp"
 #include "base/text.hpp"
@@ -164,14 +164,14 @@ static int vfxChanTest(char** a)
         const auto& kb = y->second.keys;
         std::vector<int> ours, verb;
         for (int i = 0; i < (int)x.keys.size(); ++i) verb.push_back(i);
-        if (!chan::layout(r10, r30, x.shader, y->second.shader, (int)x.keys.size(), ours)) {
-            std::vector<char> ra = chan::shaderRoles(r10, x.shader, false), rb = chan::shaderRoles(r30, y->second.shader, true);
+        if (!chan::layout({r10, r30}, {x.shader, y->second.shader}, (int)x.keys.size(), ours)) {
+            std::vector<char> ra = chan::shaderRoles(r10, x.shader, chan::kGame10), rb = chan::shaderRoles(r30, y->second.shader, chan::kGame30);
             if (ra.empty() || rb.empty()) { ++c["  no channel roles (layout kept)"]; continue; }
             ours = verb;   // same layout
         }
         for (auto& [name, m] : {std::make_pair(std::string("roles"), ours), std::make_pair(std::string("1.0 as is"), verb)}) {
             std::vector<std::string> got;
-            for (int s : m) got.push_back(s >= 0 && s < (int)x.keys.size() ? x.keys[s] : std::string(vfx::constKey(), 8));
+            for (int s : m) got.push_back(s >= 0 && s < (int)x.keys.size() ? x.keys[s] : std::string(particledata::kConstantKey, particledata::kKeyBytes));
             ++c[name + ": emitters"];
             c[name + ": count = Disney's"] += got.size() == kb.size();
             c[name + ": whole emitter = Disney's"] += got == kb;
@@ -318,7 +318,7 @@ static int renderTest(char** a)
     namespace fs = std::filesystem;
     fs::path world = a[2], out = a[6];
     std::string stem = world.filename().string();
-    render::Table T;
+    rentable::Table T;
     if (!T.load(slurp(a[3]))) { printf("table load failed\n"); return 2; }
     std::string ext30 = a[4], ext10 = a[5];
     // ARC30_GAME=<3.0 install>: read donors from the install's archives as the plugin does (arc30), timed
@@ -336,11 +336,11 @@ static int renderTest(char** a)
         return ok;
     };
     di1::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(fs::path(ext10) / "assets" / p); return !o.empty(); };
-    gen30::VFormats vf10 = gen30::vformats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
-    gen30::VFormats vf30 = gen30::vformats(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"));
-    std::map<uint32_t, gen30::ColourTail> tails;   // as the plugin serves vformat.vtxf
+    vtxf::VFormats vf10 = vtxf::formats(slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"));
+    vtxf::VFormats vf30 = vtxf::formats(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"));
+    std::map<uint32_t, vtxf::ColourTail> tails;   // as the plugin serves vformat.vtxf
     int added = 0;
-    gen30::mergeVtxf(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"),
+    vtxf::merge(slurp(fs::path(ext30) / "assets/shaders/shaders/vformat.vtxf"),
                      slurp(fs::path(ext10) / "assets/shaders/shaders/vformat.vtxf"), added, tails);
     // the plugin's render IO (games/di1/renderio.hpp), its cfg keys from the environment
     di1::WorldRender w;
@@ -353,7 +353,7 @@ static int renderTest(char** a)
     render::IO io = di1::worldIO(w, read10, read30);
     io.verbose = getenv("RENDER_VERBOSE") != nullptr;
     io.log = [](const std::string& l) { printf("%s\n", l.c_str()); };
-    render::Ssf ssf10, ssf30;   // cfg scenesettings10 (RENDER_SSF): SSET re-laid and kept
+    ssf::Format ssf10, ssf30;   // cfg scenesettings10 (RENDER_SSF): SSET re-laid and kept
     if (getenv("RENDER_SSF") && di1::sceneSettings(read10, read30, ssf10, ssf30)) {
         io.ssf10 = &ssf10;
         io.ssf30 = &ssf30;
@@ -389,7 +389,7 @@ static int renderTest(char** a)
                 return true;
             };
             gen30::Generated g;
-            gen30::generate(T.shaders10, rd, vf10, sh, comp, g, st, &vf30);
+            gen30::generate(T.shaderRules, {rd, vf10, comp, st, &vf30}, sh, g);
             for (auto& p : g.problems) printf("shaders10 x%s: %s\n", sh.c_str(), p.c_str());
             return made[sh] = !g.shd.empty() && g.problems.empty();
         };
@@ -397,8 +397,8 @@ static int renderTest(char** a)
     std::string ob = slurp(world / (stem + ".oct"));
     oct::File f = oct::File::parse(ob.data(), ob.size());
     render::Result r;
-    bool ok = render::transcodeWorld(T, io, f, stem, slurp(world / (stem + ".mtb")), slurp(world / (stem + "_0.vbuf")),
-                                     slurp(world / (stem + "_0.ibuf")), r);
+    bool ok = render::transcodeWorld(T, io, f, {stem, slurp(world / (stem + ".mtb")), slurp(world / (stem + "_0.vbuf")),
+                                     slurp(world / (stem + "_0.ibuf"))}, r);
     printf("render %.0f ms, %d 3.0 reads %.0f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
            reads, readMs);
     for (auto& p : r.problems) printf("problem: %s\n", p.c_str());
@@ -416,30 +416,30 @@ static int renderTest(char** a)
 }
 
 // octtest --vtxf <3.0 extract root> <1.0 extract root> [merged out]
-// The engine's vformat parser gives each element name 8 descriptor slots and 32 names (gen30::mergeVtxf): counts
+// The engine's vformat parser gives each element name 8 descriptor slots and 32 names (vtxf::merge): counts
 // them over the shipped 3.0 file and the served one, which must stay within both.
 static int vtxfTest(char** a, int argc)
 {
     namespace fs = std::filesystem;
     std::string t30 = slurp(fs::path(a[2]) / "assets/shaders/shaders/vformat.vtxf"), t10 = slurp(fs::path(a[3]) / "assets/shaders/shaders/vformat.vtxf");
-    std::map<uint32_t, gen30::ColourTail> tails;
+    std::map<uint32_t, vtxf::ColourTail> tails;
     int added = 0;
-    std::string m = gen30::mergeVtxf(t30, t10, added, tails);
+    std::string m = vtxf::merge(t30, t10, added, tails);
     if (argc > 4) std::ofstream(a[4], std::ios::binary).write(m.data(), m.size());
     int fails = 0;
     for (auto* t : {&t30, &m}) {
-        auto sizes = gen30::typeSizes(*t);
+        auto sizes = vtxf::typeSizes(*t);
         std::map<std::string, std::set<std::tuple<int, std::string, std::string, int, int>>> desc;
-        auto ents = gen30::ventries(*t);
+        auto ents = vtxf::entries(*t);
         for (auto& e : ents) {
             size_t mn = t->find("main", e.start), st = mn < e.end ? t->find("streams", mn) : std::string::npos;
             if (st == std::string::npos || st > e.end) continue;
-            auto streams = gen30::children(*t, t->find('{', st));
+            auto streams = vtxf::children(*t, t->find('{', st));
             for (size_t s = 0; s < streams.size(); ++s) {
                 int off = 0;
-                for (auto [x, y] : gen30::children(*t, streams[s].first)) {
-                    std::string ty = gen30::field(*t, x, y, "type");
-                    desc[gen30::field(*t, x, y, "name")].insert({sizes[ty], ty, gen30::field(*t, x, y, "semantic"), off, (int)s});
+                for (auto [x, y] : vtxf::children(*t, streams[s].first)) {
+                    std::string ty = vtxf::field(*t, x, y, "type");
+                    desc[vtxf::field(*t, x, y, "name")].insert({sizes[ty], ty, vtxf::field(*t, x, y, "semantic"), off, (int)s});
                     off += sizes[ty];
                 }
             }
@@ -3175,7 +3175,7 @@ int main(int argc, char** argv)
         chan::Read r10 = [&](const std::string& p, std::string& o) { o = slurp(std::filesystem::path(ext10) / "assets" / p); return !o.empty(); };
         chan::Read r30 = [&](const std::string& p, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / p.substr(2)); return !o.empty(); };
         if (argc > 7 && vfx::isPd10(in)) {
-            render::Table T;
+            rentable::Table T;
             if (!T.load(slurp(argv[4]))) { printf("table load failed\n"); return 2; }
             std::string p = argv[7], suffix = ".particledata", note;
             std::string mtbFile = std::string(argv[2]).substr(0, strlen(argv[2]) - suffix.size()) + ".mtb";
@@ -3184,7 +3184,7 @@ int main(int argc, char** argv)
             if (!pb.ok) { printf("bundle FAILED\n"); return 1; }
             shaders = pb.shaders;
             cm = [&](uint16_t mat, int n10, std::vector<int>& chans) {
-                return mat < shaders.size() && chan::layout(r10, r30, shaders[mat].first, shaders[mat].second, n10, chans);
+                return mat < shaders.size() && chan::layout({r10, r30}, shaders[mat], n10, chans);
             };
         }
         bool ok = vfx::isPd10(in) ? vfx::transcode(in, out, &st, &cm) : vfx::p3d30(in, out);
@@ -3199,7 +3199,7 @@ int main(int argc, char** argv)
     // stand-alone bundle (di1compat.cpp transcode() .mtb case: donors from the engine path's 3.0 folder); a failure
     // there serves the 1.0 bundle raw
     if (argc > 6 && std::string(argv[1]) == "--mtb") {
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         std::string ext30 = argv[3], ext10 = argv[4], p = argv[6];
         di1::Read r30 = [&](const std::string& q, std::string& o) { o = slurp(std::filesystem::path(ext30) / "assets" / q.substr(2)); return !o.empty(); };
@@ -3228,17 +3228,17 @@ int main(int argc, char** argv)
     }
     if (argc > 4 && std::string(argv[1]) == "--gen30") {   // --gen30 <render table> <1.0 extract root> <gen30.py dump dir>
         // every shader gen30.py dumped (.shd + <shader>.<program id>.hlsl, compile off): the C++ port must match
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         fs::path ext10 = fs::path(argv[3]) / "assets", dump = argv[4];
         gen30::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(ext10 / p); return !o.empty(); };
-        gen30::VFormats vf = gen30::vformats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
+        vtxf::VFormats vf = vtxf::formats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
         size_t ok = 0, bad = 0, progs = 0;
         for (auto& e : fs::directory_iterator(dump)) {
             if (e.path().extension() != ".shd") continue;
             std::string sh = e.path().stem().string();
             gen30::Generated g;
-            gen30::generate(T.shaders10, read10, vf, sh, nullptr, g);
+            gen30::generate(T.shaderRules, {read10, vf, nullptr}, sh, g);
             bool same = g.shd == slurp(e.path());
             for (auto& p : g.programs) {
                 char nm[64];
@@ -3258,13 +3258,13 @@ int main(int argc, char** argv)
     }
     if (argc > 5 && std::string(argv[1]) == "--warm") {   // --warm <render table> <1.0 extract root> <cache dir> <1.0 .mtb>...
         // compile the translated shaders these bundles name into the plugin's cache (same compiler, same keys)
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) { printf("table load failed\n"); return 2; }
         fs::path ext10 = fs::path(argv[3]) / "assets";
         std::string cache = argv[4];
         fs::create_directories(cache);
         gen30::Read read10 = [&](const std::string& p, std::string& o) { o = slurp(ext10 / p); return !o.empty(); };
-        gen30::VFormats vf = gen30::vformats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
+        vtxf::VFormats vf = vtxf::formats(slurp(ext10 / "shaders/shaders/vformat.vtxf"));
         typedef HRESULT(WINAPI * CompileFn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, void**, void**);
         HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
         CompileFn cf = dc ? (CompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
@@ -3291,26 +3291,26 @@ int main(int argc, char** argv)
         std::set<std::string> shaders;
         for (int a = 5; a < argc; ++a) {
             std::string b = slurp(argv[a]);
-            size_t o = 16, nc = b.size() >= 16 ? gen30::u32(b, 12) : 0;
+            size_t o = 16, nc = b.size() >= 16 ? bytes::u32OrZero(b, 12) : 0;
             for (size_t c = 0; c < nc && o + 16 <= b.size(); ++c) {
                 if (!b.compare(o, 4, "MATP")) {
                     size_t p = (o + 16 + 3) & ~(size_t)3;
-                    uint32_t ns = gen30::u32(b, p);
+                    uint32_t ns = bytes::u32OrZero(b, p);
                     p += 4;
                     for (uint32_t i = 0; i < ns; ++i) { size_t e = b.find('\0', p); shaders.insert(b.substr(p, e - p)); p = e + 1; }
                 }
-                o += gen30::u32(b, o + 8);
+                o += bytes::u32OrZero(b, o + 8);
             }
         }
         size_t probs = 0;
         // WARM_EXT30=<3.0 extract root>: as the plugin with cfg skintr10 on (skinned passes take their 3.0 skin target)
-        gen30::VFormats vf30;
-        if (const char* e30 = getenv("WARM_EXT30")) vf30 = gen30::vformats(slurp(fs::path(e30) / "assets/shaders/shaders/vformat.vtxf"));
+        vtxf::VFormats vf30;
+        if (const char* e30 = getenv("WARM_EXT30")) vf30 = vtxf::formats(slurp(fs::path(e30) / "assets/shaders/shaders/vformat.vtxf"));
         std::function<uint32_t(uint32_t)> st;
         if (!vf30.empty()) st = [&](uint32_t v) { return render::skinTarget30(T, v); };
         for (auto& sh : shaders) {
             gen30::Generated g;
-            gen30::generate(T.shaders10, read10, vf, sh, comp, g, st, &vf30);
+            gen30::generate(T.shaderRules, {read10, vf, comp, st, &vf30}, sh, g);
             for (auto& pr : g.problems) if (++probs <= 10) printf("  %s: %s\n", sh.c_str(), pr.c_str());
         }
         printf("%zu shaders: %zu programs compiled, %zu already cached, %zu failed, %zu problems\n", shaders.size(), compiled, cached, failed, probs);
@@ -3382,7 +3382,7 @@ int main(int argc, char** argv)
     }
     if (argc > 4 && std::string(argv[1]) == "--arc") {   // --arc <render table> <game dir> <3.0 extract root>
         // every table bundle read from the install's archive (arc30) must equal the extract's file
-        render::Table T;
+        rentable::Table T;
         if (!T.load(slurp(argv[2]))) return 2;
         std::set<std::string> seen;
         size_t ok = 0, bad = 0;
