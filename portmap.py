@@ -13,7 +13,7 @@ the port is dropped (DROP, table()).
 Evidence (twin clips, the ids never used to build the table): rule.py in wt/_scratch/anim10, octtest --clip-ids.
 
 usage: portmap.py scan <assets> <out.json> [sub ...]   models' port names (default subs: characters choreographies)
-       portmap.py header <links10.json> <links30.json> <out.hpp>
+       portmap.py header <links10.json> <links30.json> <out.hpp>   (native/di1compat/games/di1/ports10.hpp)
 Run scans under capped.ps1."""
 import sys, os, json, collections, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
