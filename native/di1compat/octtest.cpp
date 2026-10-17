@@ -1057,9 +1057,9 @@ static int choConstTest(char** a)
             if (!scene::tuple(b) || b.find(std::string("ProcessorNodePool\0", 18)) == std::string::npos) continue;
             oct::File f = oct::File::parse(b.data(), b.size());
             octx::addAssetPool(f);
-            octx::skin30(f);
-            octx::locator30(f);
-            octx::collision30(f);
+            di1::skin30(f);
+            di1::locator30(f);
+            di1::collision30(f);
             cho::clips30(f, nullptr);
             cho::layout30(f);
             cho::time30(f);
@@ -1271,8 +1271,8 @@ static int variantsTest(char** a)
     };
     auto convert = [](oct::File& f) {
         octx::addAssetPool(f);
-        int n = octx::skin30(f) + octx::locator30(f);
-        octx::collision30(f);
+        int n = di1::skin30(f) + di1::locator30(f);
+        di1::collision30(f);
         octx::addAllCounts(f);
         return n;
     };
@@ -2956,11 +2956,11 @@ int main(int argc, char** argv)
         };
         oct::File f = oct::File::parse(b.data(), b.size());
         lap("parse", 0);
-        lap("skin influences redirected", octx::skin30(f));
-        lap("locators redirected", octx::locator30(f));
-        lap("cameras given world twins", octx::camera30(f));
+        lap("skin influences redirected", di1::skin30(f));
+        lap("locators redirected", di1::locator30(f));
+        lap("cameras given world twins", di1::camera30(f));
         lap("asset pool added", (int)octx::addAssetPool(f));
-        lap("collision aggregates added", octx::collision30(f));
+        lap("collision aggregates added", di1::collision30(f));
         std::string src = argv[2];   // a realms\ asset gets the realm-file rule, as the plugin's realms/ paths
         for (char& c : src) c = c == '\\' ? '/' : (char)tolower((unsigned char)c);
         lap("lighting nodes converted", octx::realm30w(f, src.find("/realms/") != std::string::npos));

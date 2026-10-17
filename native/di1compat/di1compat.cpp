@@ -413,10 +413,22 @@ static bool transcodeOct(const std::string& path, oct::File& f, std::string& not
     if (navs > 0) { note += "+navmesh(" + std::to_string(navs) + ") "; changed = true; }
     else if (navs < 0 && f.dropPool("NavMeshPool")) { note += "-NavMeshPool (" + navWhy + ") "; changed = true; }
     if (octx::addAssetPool(f)) { note += "+AssetPool "; changed = true; }
-    if (int n = octx::skin30(f)) { note += "+skin(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::locator30(f)) { note += "+locators(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = g_cfg.camWorld10 ? octx::camera30(f) : 0) { note += "+cameras(" + std::to_string(n) + ") "; changed = true; }
-    if (int n = octx::collision30(f)) { note += "+collision(" + std::to_string(n) + ") "; changed = true; }
+    if (int n = di1::skin30(f)) {
+        note += "+skin(" + std::to_string(n) + ") ";
+        changed = true;
+    }
+    if (int n = di1::locator30(f)) {
+        note += "+locators(" + std::to_string(n) + ") ";
+        changed = true;
+    }
+    if (int n = g_cfg.camWorld10 ? di1::camera30(f) : 0) {
+        note += "+cameras(" + std::to_string(n) + ") ";
+        changed = true;
+    }
+    if (int n = di1::collision30(f)) {
+        note += "+collision(" + std::to_string(n) + ") ";
+        changed = true;
+    }
     if (int n = octx::realm30w(f, g_cfg.realmFile10 && path.rfind("realms/", 0) == 0)) { note += "+lighting(" + std::to_string(n) + " nodes) "; changed = true; }
     if (transcodeCho(f, note)) changed = true;
     int nfl = 0, ncv = g_cfg.curves10 ? gameplay::curves30(f, &nfl) : 0;
