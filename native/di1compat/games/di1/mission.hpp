@@ -35,6 +35,13 @@ namespace detail {
 // 1.0 presentation event (FUN_00fa7220) -> the 3.0 one (FUN_015e5dc0), by 1.0 value
 inline constexpr int kPresentEvent30[] = {0, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 15, 16};
 
+// The mission's Parms block: its '\n\tParms = ' and its closing '\n\t}' (npos when either is missing)
+inline std::pair<size_t, size_t> parmsBlock(const std::string& t)
+{
+    size_t p = t.find("\n\tParms = "), e = p == std::string::npos ? p : t.find("\n\t}", p);
+    return {p, e};
+}
+
 inline bool isLineBreak(char c) { return c == '\n' || c == '\r'; }
 
 // The line at a without its line break; next = where the following line starts
@@ -342,7 +349,7 @@ inline int luaEvents30(std::string& t)
 // Returns 1 if changed.
 inline int progress30(std::string& t)
 {
-    size_t p = t.find("\n\tParms = "), e = p == std::string::npos ? p : t.find("\n\t}", p);
+    const auto [p, e] = detail::parmsBlock(t);
     if (e == std::string::npos) return 0;
     size_t f = t.find("\n\t\tUseMissionGeneratedProgressStringNew = true,", p);
     if (f > e || t.find("\n\t\tProgressString = ", p) < e) return 0;
@@ -354,7 +361,7 @@ inline int progress30(std::string& t)
 // Returns the evals changed.
 inline int taskLines30(std::string& t)
 {
-    size_t pp = t.find("\n\tParms = "), pe = pp == std::string::npos ? pp : t.find("\n\t}", pp);
+    const auto [pp, pe] = detail::parmsBlock(t);
     if (pe == std::string::npos || t.find("\n\t\tUseMissionGeneratedProgressStringNew = false,", pp) > pe) return 0;
     const std::vector<detail::EvalBlock> bs = detail::evalBlocks(t);
     std::vector<std::pair<size_t, std::string>> ins;
