@@ -55,6 +55,7 @@ typedef uint32_t(__fastcall* HandleEventFn)(void* movie, void* edx, const void* 
 
 struct State {
     bool actionMap10 = false, keys10 = false, lockTrace10 = false;   // set once in install()
+    bool uiTrace10 = false;                                          // set once in install()
     // originals: set once by hook() / installFeature in install()
     FlashCallFn g_flashCall = nullptr;
     FocusGainFn g_focusGain = nullptr;
@@ -144,6 +145,16 @@ inline void movieFocus10(uint8_t* screen, bool focus, const char* why)
                screen[scr::kFocus]);
 }
 
+// uitrace10: a focus change of a screen on a 3.0 movie; 1.0 movies have their focus10 line.
+inline void focusTrace(const uint8_t* screen, const char* why)
+{
+    if (!g_state.uiTrace10 || !screen || movie10(screen)) return;
+    char name[64] = "";
+    engine::screens::copyField(screen, scr::kName, name, sizeof(name));
+    core::logf("uitrace10: focus %s %s (3.0 movie), player %d, +0x60 %d", name, why,
+               *(const int*)(screen + scr::kPlayer), screen[scr::kFocus]);
+}
+
 // FUN_01559480, thiscall on the manager (screen; ret 4), main thread, per focus change: the top screen gains it.
 inline void __fastcall hkFocusGain(uint8_t* mgr, void* edx, uint8_t* screen)
 {
@@ -153,6 +164,7 @@ inline void __fastcall hkFocusGain(uint8_t* mgr, void* edx, uint8_t* screen)
         screen ? *(uint8_t**)(mgr + eng::kFocusLists + *(int*)(screen + scr::kPlayer) * eng::kFocusListBytes) : nullptr;
     uint8_t** holder = head ? *(uint8_t***)(head + eng::kFocusTop) : nullptr;
     movieFocus10(holder ? holder[0] : nullptr, true, "gain");
+    focusTrace(holder ? holder[0] : nullptr, "gain");
 }
 
 // FUN_01554590, thiscall on the manager (holder; ret 4), main thread, per focus change.
@@ -160,6 +172,7 @@ inline void __fastcall hkFocusLoss(uint8_t* mgr, void* edx, uint8_t** holder)
 {
     g_state.g_focusLoss(mgr, edx, holder);
     movieFocus10(holder ? holder[0] : nullptr, false, "loss");
+    focusTrace(holder ? holder[0] : nullptr, "loss");
 }
 
 // A KeyDown event for the movie as FUN_007f3320 fills one: type, modifiers, keyCode, the player slot twice.
@@ -256,6 +269,7 @@ inline bool install(const Config& c)
     s.actionMap10 = c.actionMap10;
     s.keys10 = c.keys10;
     s.lockTrace10 = c.lockTrace10;
+    s.uiTrace10 = c.uiTrace10;
     bool ok = true;
     if (c.actionMap10 || c.lockTrace10)
         ok &= core::hook("movie ExternalInterface call (1.0 UsesActionMap; input10 probe)", 0x01564790,
