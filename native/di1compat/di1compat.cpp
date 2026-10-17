@@ -39,6 +39,7 @@
 #include "games/di1/renderio.hpp"
 #include "games/di1/transcode.hpp"
 #include "games/di1/zones.hpp"
+#include "trace/breaktrace.hpp"
 #include "trace/fade.hpp"
 #include "trace/opacity.hpp"
 #include "octx.hpp"
@@ -729,104 +730,7 @@ static uint32_t tdProt(uintptr_t p)
 }
 static uint32_t tdStatic(uint32_t v) { return v >= g_base && v < g_base + 0x0209B000 ? v - (uint32_t)g_base + 0x400000u : v; }
 
-// Probe (breaktrace, log only): do played choreographies animate, and where does a 1.0 destructible's break stop?
-// - ClipProcessor evaluate FUN_00543f40 (thiscall, ret 0; time = FUN_00528a70, the processor's input clock, which it
-//   reads itself first): the first 40 processors (clip node +0x3c, output table +0x48, block +0x40, time), then a
-//   summary every 20000 evaluations: processors seen and how many of them had their time change (= animating).
-// - Exploder munition impact FUN_0151e420(actor, ?, munition) (cdecl, the callback FUN_01521560 registers when the
-//   Exploder gadget reads): first 40 with the munition's weapon FourCC (+0x68) and energy (+0x60).
-// - Exploder explode FUN_0151e130 (thiscall on ExploderData, 1 arg, ret 4): first 40 with PieceFile (+0x1c), PieceName
-//   (+0x20), PieceCount (+0x60) before / after (the piece spawners write the pieces found) and +0xf1 after (0x40 =
-//   exploded).
-typedef void(__fastcall* BtThisFn)(void* self, void* edx);
-static BtThisFn g_clipEval;
-static std::mutex g_btMx;
-static std::unordered_map<void*, float> g_btFirst;   // processor -> first time seen
-static std::unordered_set<void*> g_btMoving;
-static volatile LONG g_btEvals;
-struct BtClock { ULONGLONG born, changed; float first, last; };
-static std::unordered_map<void*, BtClock> g_btClock;   // every processor's clock, for the 2-second report
-static ULONGLONG g_btReport;
-static void __fastcall hkClipEval(void* self, void*)
-{
-    float t = ((float(__fastcall*)(void*, void*))rt(0x00528A70))(self, nullptr);
-    LONG n = InterlockedIncrement(&g_btEvals);
-    {
-        std::lock_guard<std::mutex> l(g_btMx);
-        ULONGLONG now = GetTickCount64();
-        auto it = g_btFirst.find(self);
-        if (it == g_btFirst.end()) {
-            g_btFirst[self] = t;
-            if (g_btFirst.size() <= 40) {
-                uint32_t* p = (uint32_t*)self;
-                logf("breaktrace clip eval: processor %p clip %08X table %08X block %08X t=%.3f", self, p[0x3c / 4], p[0x48 / 4],
-                     p[0x40 / 4], t);
-            }
-        } else if (it->second != t) g_btMoving.insert(self);
-        auto c = g_btClock.emplace(self, BtClock{now, now, t, t}).first;
-        if (c->second.last != t) { c->second.last = t; c->second.changed = now; }
-        if (n % 20000 == 0) logf("breaktrace clip evals %ld: %zu processors, %zu with a moving clock", n, g_btFirst.size(), g_btMoving.size());
-        // every 2 s: the processors born in the last 60 s (a cinematic's), the youngest first, each one's clock and how
-        // long it has stood
-        if (now - g_btReport >= 2000) {
-            g_btReport = now;
-            std::vector<std::pair<ULONGLONG, void*>> fresh;
-            int moving = 0;
-            for (auto& e : g_btClock)
-                if (now - e.second.born <= 60000) {
-                    fresh.emplace_back(e.second.born, e.first);
-                    moving += e.second.first != e.second.last;
-                }
-            std::sort(fresh.begin(), fresh.end(), [](auto& a, auto& b) { return a.first > b.first; });
-            char line[900] = "";
-            size_t at = 0;
-            for (size_t i = 0; i < fresh.size() && i < 8; ++i) {
-                const BtClock& c = g_btClock[fresh[i].second];
-                at += sprintf_s(line + at, sizeof(line) - at, " %p born -%llu ms %.2f->%.2f (still %llu ms)", fresh[i].second,
-                                now - c.born, c.first, c.last, now - c.changed);
-            }
-            if (!fresh.empty()) logf("breaktrace clocks: %zu born in the last 60 s, %d moved; youngest:%s", fresh.size(), moving, line);
-        }
-    }
-    g_clipEval(self, nullptr);
-}
-// - choreography instance audio-sync wait FUN_01442ee0 (thiscall on the instance's +0x8c object {dialog request id,
-//   active, seconds left}; true = go) and start FUN_01449390 (thiscall on the instance; +0x38 its path, +0x1b4 flags:
-//   0x20 audio sync, 0x80 started). The tick FUN_0144a4d0 calls the wait until it says go, then the start.
-typedef char(__fastcall* BtReadyFn)(int32_t* sync, void* edx);
-static BtReadyFn g_choReady;
-static std::unordered_map<int32_t*, char> g_btReady;
-static char __fastcall hkChoReady(int32_t* sync, void*)
-{
-    int32_t id = sync ? sync[0] : -1;
-    int act = sync ? ((uint8_t*)sync)[4] : 0;
-    float left = sync ? ((float*)sync)[2] : 0.f;
-    char r = g_choReady(sync, nullptr);
-    std::lock_guard<std::mutex> l(g_btMx);
-    auto it = g_btReady.find(sync);
-    if (it == g_btReady.end() || it->second != r) {
-        g_btReady[sync] = r;
-        logf("breaktrace cho audio-sync %p: request %d active %d, %.2f s left -> %s", sync, id, act, left, r ? "go" : "waiting");
-    }
-    return r;
-}
-// Play FUN_01445e70 (thiscall on a handle {instance, ?, network, ?}; true = handled): not started -> sets the pending
-// flag 0x40000; started -> plays the network only when its +0x63 bit 0 is set, else does nothing. Logged for
-// audio-synced instances (0x20) only.
-typedef char(__fastcall* BtPlayFn)(uint32_t* h, void* edx);
-static BtPlayFn g_btPlay;
-static char __fastcall hkBtPlay(uint32_t* h, void*)
-{
-    uint8_t* inst = h ? (uint8_t*)(uintptr_t)h[0] : nullptr;
-    uint32_t before = inst ? *(uint32_t*)(inst + 0x1b4) : 0;
-    char r = g_btPlay(h, nullptr);
-    if (inst && (before & 0x20)) {
-        uint8_t* net = (uint8_t*)(uintptr_t)h[2];
-        logf("breaktrace cho play %p flags %08X -> %08X, network %p ready byte %d, sub %08X -> %d", inst, before,
-             *(uint32_t*)(inst + 0x1b4), net, net ? net[0x63] : -1, h[3], r);
-    }
-    return r;
-}
+// FUN_01449390, thiscall on a choreography instance (+0x38 its path, +0x1b4 flags: 0x20 audio sync): its start.
 typedef void(__fastcall* BtStartFn)(uint8_t* self, void* edx);
 static BtStartFn g_choStart;
 static void __fastcall hkChoStart(uint8_t* self, void*)
@@ -846,162 +750,6 @@ static bool installChoStart(const di1::Config& c)
     if (!c.breakTrace && !cineSync) return true;
     return hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart,
                 (void**)&g_choStart);
-}
-// - choreography layout attachments FUN_00788280 (thiscall on the layout, 4 args, ret 0x10): after its gate
-//   FUN_00785b40(a1, a2) (ret 8; 0 = nothing applied) it walks the attachments (+0x30, count +0x34; 0xc each, base
-//   instance u16 +8, layer instance u16 +10) and binds one only when both instance objects (a3 +4: 0xc each, object
-//   first) exist; the base's vtable +0x14 accepts the layer and FUN_00787830 (4 args, ret 0x10) attaches the clip.
-//   Logged: each attachment's instances and objects as the applier sees them, the gate's result, every bind.
-typedef int(__fastcall* BtApplyFn)(uint8_t* self, void* edx, uint32_t a1, uint32_t a2, uint8_t* inst, uint32_t a4);
-static BtApplyFn g_layApply;
-static volatile LONG g_btApplies;
-static int __fastcall hkLayApply(uint8_t* self, void*, uint32_t a1, uint32_t a2, uint8_t* inst, uint32_t a4)
-{
-    if (InterlockedIncrement(&g_btApplies) <= 80 && tdReadable((uintptr_t)self, 0x38)) {
-        uint32_t n = *(uint32_t*)(self + 0x34);
-        uint8_t* att = *(uint8_t**)(self + 0x30);
-        uint8_t* objs = inst && tdReadable((uintptr_t)inst, 8) ? *(uint8_t**)(inst + 4) : nullptr;
-        char line[900] = "";
-        size_t at = 0;
-        for (uint32_t k = 0; k < n && k < 24 && att && tdReadable((uintptr_t)(att + 0xc * k), 0xc); ++k) {
-            uint16_t b = *(uint16_t*)(att + 0xc * k + 8), l = *(uint16_t*)(att + 0xc * k + 10);
-            const char* ob = objs && tdReadable((uintptr_t)(objs + 0xc * b), 4) ? (*(uint32_t*)(objs + 0xc * b) ? "" : "(null)") : "(?)";
-            const char* ol = objs && tdReadable((uintptr_t)(objs + 0xc * l), 4) ? (*(uint32_t*)(objs + 0xc * l) ? "" : "(null)") : "(?)";
-            char m0[40] = "", m1[40] = "";
-            safeCopy(m0, sizeof(m0), *(const char**)(att + 0xc * k));
-            safeCopy(m1, sizeof(m1), *(const char**)(att + 0xc * k + 4));
-            at += sprintf_s(line + at, sizeof(line) - at, " %u:%u%s'%s'/%u%s'%s'", k, b, ob, m0, l, ol, m1);
-            if (at > sizeof(line) - 80) break;
-        }
-        logf("breaktrace layout apply %p: %u attachments, %u instances, args %08X %08X %p %08X:%s", self, n,
-             *(uint32_t*)(self + 0x24), a1, a2, inst, a4, line);
-    }
-    return g_layApply(self, nullptr, a1, a2, inst, a4);
-}
-typedef int(__fastcall* BtGateFn)(void* self, void* edx, uint32_t a1, uint32_t a2);
-static BtGateFn g_layGate;
-static volatile LONG g_btGates;
-static int __fastcall hkLayGate(void* self, void*, uint32_t a1, uint32_t a2)
-{
-    int r = g_layGate(self, nullptr, a1, a2);
-    if (InterlockedIncrement(&g_btGates) <= 80) logf("breaktrace layout gate (%08X, %08X) -> %08X", a1, a2, r);
-    return r;
-}
-// - clip setup FUN_00552fc0 (thiscall on a clip evaluator, 3 args, ret 0xc): takes a clip (a1) and its block's
-//   descriptor (a2, u16 [1] = outputs); with a connection table at +0x44 (motion clips) FUN_005329b0 reads the outputs
-//   through it, else FUN_00532050 (scene clips). Logged: evaluator, clip, outputs, table.
-typedef void(__fastcall* BtClipSetFn)(uint8_t* self, void* edx, uint32_t clip, uint16_t* desc, uint32_t a3);
-static BtClipSetFn g_clipSet;
-static volatile LONG g_btClipSets;
-// After the set-up ran: how many output ids of the descriptor's sampled / constant tables reach a node. FUN_00532050
-// maps an id through the port table at +0x1c (+0x10 u16 per port, +0x14 port count, +0x18 mask; 0xffff = none; no
-// table: the id itself) to a local, applied if < the local count at +0x34 (nodes at +0x30).
-static void btClipBound(uint8_t* self, const uint16_t* desc, char* out, size_t cap)
-{
-    out[0] = 0;
-    if (!tdReadable((uintptr_t)self, 0x4c) || !desc || !tdReadable((uintptr_t)desc, 8)) return;
-    uint32_t map = *(uint32_t*)(self + 0x1c), nLoc = *(uint32_t*)(self + 0x34), arr = 0, ports = 0, mask = 0xffff;
-    if (map && tdReadable(map, 0x1c)) { arr = *(uint32_t*)(map + 0x10); ports = *(uint32_t*)(map + 0x14); mask = *(uint16_t*)(map + 0x18); }
-    uint16_t n = desc[1];
-    if (!tdReadable((uintptr_t)(desc + 3 + n), 2)) return;
-    const uint16_t* tabs[2] = {desc + 3 + n, (const uint16_t*)((const uint8_t*)desc + desc[2 + n])};
-    uint32_t tot[2] = {}, hit[2] = {};
-    for (int t = 0; t < 2; ++t) {
-        if (!tdReadable((uintptr_t)tabs[t], 2) || !tdReadable((uintptr_t)tabs[t], 2 + 2 * (size_t)tabs[t][0])) continue;
-        tot[t] = tabs[t][0];
-        for (uint32_t k = 0; k < tot[t]; ++k) {
-            uint32_t id = tabs[t][1 + k] & 0x1fff, loc = id;
-            if (map)
-                loc = id < ports && tdReadable(arr + 2 * id, 2) && *(uint16_t*)(uintptr_t)(arr + 2 * id) != 0xffff
-                          ? *(uint16_t*)(uintptr_t)(arr + 2 * id) & mask : 0xffffffffu;
-            hit[t] += loc < nLoc;
-        }
-    }
-    sprintf_s(out, cap, "; ids reaching a node: sampled %u/%u, constant %u/%u (port table %08X: %u ports, %u locals)", hit[0], tot[0],
-              hit[1], tot[1], map, ports, nLoc);
-}
-static void __fastcall hkClipSet(uint8_t* self, void*, uint32_t clip, uint16_t* desc, uint32_t a3)
-{
-    uint32_t table = tdReadable((uintptr_t)self, 0x48) ? *(uint32_t*)(self + 0x44) : 0;
-    g_clipSet(self, nullptr, clip, desc, a3);
-    if (InterlockedIncrement(&g_btClipSets) <= 400) {
-        char bound[160];
-        btClipBound(self, desc, bound, sizeof(bound));
-        logf("breaktrace clip set %p: clip %08X desc %p outputs %d table %08X a3 %08X%s", self, clip, desc,
-             desc && tdReadable((uintptr_t)desc, 4) ? desc[1] : -1, table, a3, bound);
-    }
-}
-// - music cue push FUN_0073c5c0 (thiscall on the music stack, 4 args, ret 0x10; name, priority, float, string)
-typedef uint32_t(__fastcall* BtMusicFn)(void* self, void* edx, const char* name, int prio, float f, const char* s);
-static BtMusicFn g_musicPush;
-static uint32_t __fastcall hkMusicPush(void* self, void*, const char* name, int prio, float f, const char* s)
-{
-    char n[80] = "", t[80] = "";
-    safeCopy(n, sizeof(n), name);
-    safeCopy(t, sizeof(t), s);
-    uint32_t r = g_musicPush(self, nullptr, name, prio, f, s);
-    logf("breaktrace music push '%s' priority %d %.2f '%s' -> %08X", n, prio, f, t, r);
-    return r;
-}
-typedef int(__fastcall* BtBindFn)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4);
-static BtBindFn g_layBind;
-static volatile LONG g_btBinds;
-static int __fastcall hkLayBind(void* self, void*, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4)
-{
-    if (InterlockedIncrement(&g_btBinds) <= 300) logf("breaktrace layout bind %p (%08X %08X %08X %08X)", self, a1, a2, a3, a4);
-    return g_layBind(self, nullptr, a1, a2, a3, a4);
-}
-typedef void(__cdecl* BtHitFn)(uint32_t actor, uint32_t a2, uint8_t* mun);
-static BtHitFn g_munHit;
-static volatile LONG g_btHits;
-static void __cdecl hkMunHit(uint32_t actor, uint32_t a2, uint8_t* mun)
-{
-    if (InterlockedIncrement(&g_btHits) <= 40 && tdReadable((uintptr_t)mun, 0x6c)) {
-        char cc[5] = {};
-        memcpy(cc, mun + 0x68, 4);
-        logf("breaktrace exploder hit: actor %08X weapon '%s' energy %.2f", actor, cc, *(float*)(mun + 0x60));
-    }
-    g_munHit(actor, a2, mun);
-}
-typedef void(__fastcall* BtOneFn)(void* self, void* edx, uint32_t a1);
-static BtOneFn g_explode;
-static volatile LONG g_btBooms;
-static void __fastcall hkExplode(void* self, void*, uint32_t a1)
-{
-    uint8_t* d = (uint8_t*)self;
-    int before = *(int*)(d + 0x60);
-    g_explode(self, nullptr, a1);
-    if (InterlockedIncrement(&g_btBooms) <= 40) {
-        char file[100] = "", piece[40] = "";
-        safeCopy(file, sizeof(file), *(const char**)(d + 0x1c));
-        safeCopy(piece, sizeof(piece), *(const char**)(d + 0x20));
-        logf("breaktrace explode: data %p actor %08X PieceFile '%s' PieceName '%s' pieces %d -> %d flags %02X", self,
-             *(uint32_t*)d, file, piece, before, *(int*)(d + 0x60), d[0xf1]);
-    }
-}
-
-// breaktrace's hooks (H1), all or none.
-static bool installBreakTrace(const di1::Config& c)
-{
-    if (!c.breakTrace) return true;
-    return installFeature("breaktrace", {
-        {"ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&hkClipEval, (void**)&g_clipEval},
-        {"exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&hkMunHit,
-         (void**)&g_munHit},
-        {"exploder explode (breaktrace)", 0x0151E130, "6AFF64A100000000", (void*)&hkExplode, (void**)&g_explode},
-        {"choreography audio-sync wait (breaktrace)", 0x01442EE0, "568BF185F6744D8B06", (void*)&hkChoReady,
-         (void**)&g_choReady},
-        {"choreography play (breaktrace)", 0x01445E70, "5183790C00753B8B01", (void*)&hkBtPlay, (void**)&g_btPlay},
-        {"layout attachments apply (breaktrace)", 0x00788280, "6AFF68????????64A100000000", (void*)&hkLayApply,
-         (void**)&g_layApply},
-        {"layout attachments gate (breaktrace)", 0x00785B40, "8B4C240885C97407", (void*)&hkLayGate,
-         (void**)&g_layGate},
-        {"layout attachment bind (breaktrace)", 0x00787830, "6AFF68????????64A100000000", (void*)&hkLayBind,
-         (void**)&g_layBind},
-        {"clip setup (breaktrace)", 0x00552FC0, "8B44240456578BF1", (void*)&hkClipSet, (void**)&g_clipSet},
-        {"music cue push (breaktrace)", 0x0073C5C0, "81EC1C010000538BD9807B1000", (void*)&hkMusicPush,
-         (void**)&g_musicPush},
-    });
 }
 // "ptr vt=<static> <rtti> ref=<word> prot=<protect>"
 static void tdObj(char* out, size_t cap, uintptr_t p)
@@ -3671,7 +3419,7 @@ extern "C" void __stdcall Pentane_Main()
     installShaders(g_cfg);
     installMissionTrace(g_cfg);
     installChoStart(g_cfg);
-    installBreakTrace(g_cfg);
+    trace::breaktrace::install({g_cfg.breakTrace});
     installTeardownTrace(g_cfg);
     installMerRegistry(g_cfg);
     installLockTrace(g_cfg);
