@@ -1,21 +1,24 @@
-// Bounded text formatting that keeps sprintf_s's contract. Standard library and the MSVC CRT only. Any thread.
+// Bounded text formatting: text that does not fit is cut, never a fail-fast (N21, A-37). Standard library only.
 #pragma once
-#include <corecrt.h>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 
 namespace format {
 
-// sprintf_s without its name (N21): the length, and text that does not fit ends the process (A-37 decides).
-inline int fitOrFailFast(char* out, size_t cap, const char* fmt, ...)
+// Appends printf text at out[len], cut to fit; returns the new length, below cap. Integer formats never allocate (H9).
+inline size_t appendCut(char* out, size_t cap, size_t len, const char* fmt, ...)
 {
+    if (cap == 0 || len >= cap - 1) return len;
     va_list a;
     va_start(a, fmt);
-    const int n = vsnprintf(out, cap, fmt, a);
+    const int n = vsnprintf(out + len, cap - len, fmt, a);
     va_end(a);
-    if (n < 0 || (size_t)n >= cap) _invalid_parameter_noinfo_noreturn();
-    return n;
+    if (n < 0) {
+        out[len] = 0;
+        return len;
+    }
+    return (size_t)n < cap - len ? len + (size_t)n : cap - 1;
 }
 
 }  // namespace format

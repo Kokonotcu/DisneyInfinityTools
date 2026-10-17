@@ -12,7 +12,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "../base/format.hpp"
 #include "../core/hooks.hpp"
 #include "../core/log.hpp"
 #include "../core/memcheck.hpp"
@@ -182,9 +181,8 @@ inline void logOctLoad(const OctLoad& l, const char* p, const FiberProf& fq)
     const State& s = g_state;
     char fib[160] = "";
     if (l.frameThread)
-        format::fitOrFailFast(fib, sizeof(fib), ", fibers main %.1f load0 %.1f load1 %.1f screen %.1f",
-                              fiberMsNow(0) - l.fiber0[0], fiberMsNow(1) - l.fiber0[1], fiberMsNow(2) - l.fiber0[2],
-                              fiberMsNow(3) - l.fiber0[3]);
+        snprintf(fib, sizeof(fib), ", fibers main %.1f load0 %.1f load1 %.1f screen %.1f", fiberMsNow(0) - l.fiber0[0],
+                 fiberMsNow(1) - l.fiber0[1], fiberMsNow(2) - l.fiber0[2], fiberMsNow(3) - l.fiber0[3]);
     core::logf("prof oct load %s: %.1f ms, frames %ld, on %s%s, file waits %d / %.1f ms", p, qpcMs() - l.t0,
                s.frameNo - l.frame0, l.frameThread ? kFiberRole[s.fiberRole] : "other-thread", fib, fq.waits - l.waits0,
                fq.waitMs - l.waitMs0);
@@ -223,8 +221,7 @@ inline void logSecond(const LARGE_INTEGER& a)
             d[i] = v - s.lastFiberMs[i];
             s.lastFiberMs[i] = v;
         }
-        format::fitOrFailFast(fib, sizeof(fib), "; fibers main %.0f load0 %.0f load1 %.0f screen %.0f ms", d[0], d[1],
-                              d[2], d[3]);
+        snprintf(fib, sizeof(fib), "; fibers main %.0f load0 %.0f load1 %.0f screen %.0f ms", d[0], d[1], d[2], d[3]);
     }
     core::logf("fps %.1f: frame %.2f ms avg, %.2f max; main thread waits on rendering %.2f ms of it%s",
                1000.0 * s.frames / s.sumFrame, s.sumFrame / s.frames, s.maxFrame, s.sumWait / s.frames, fib);

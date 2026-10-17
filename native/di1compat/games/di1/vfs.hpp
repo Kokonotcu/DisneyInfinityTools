@@ -1,4 +1,4 @@
-// The 1.0 install's zips read in place by engine path (VFS1). core/zip.hpp, choalias. Any open or loader thread.
+// The 1.0 install's zips read in place by engine path (VFS1). core/zip, core/log, choalias. Any open or loader thread.
 #pragma once
 #include <windows.h>
 #include <cstddef>
@@ -7,7 +7,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include "../../base/text.hpp"
+#include "../../core/log.hpp"
 #include "../../core/zip.hpp"
 #include "../../third_party/miniz/miniz.h"
 #include "archives.hpp"
@@ -22,7 +24,7 @@ inline bool install(const Config& c);
 inline void* read10(const char* enginePath, size_t* size, std::string* where);
 // read10 into out; false: no such 1.0 file, out untouched.
 inline bool read10s(const std::string& path, std::string& out);
-// Runs f(archive) under the archives' lock (miniz is not thread-safe); null: rel is no zip of the install.
+// Runs f(archive) under the archives' lock (miniz is not thread-safe); null: rel is no zip, or did not open.
 template <class F>
 void withArchive(const std::string& rel, F&& f);
 // The archive names looked up so far, opened or not (A-12: failures are kept too).
@@ -31,23 +33,59 @@ inline size_t archiveCount();
 namespace detail {
 
 constexpr int kOpenFiles = 8192;   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
+// Chosen, not measured: a transient failure (a scanner holding the zip) gets kOpenRetries more tries, kRetryMs apart.
+constexpr int kOpenRetries = 3;
+constexpr ULONGLONG kRetryMs = 1000;
+
+// One archive name the search asked for.
+struct Archive {
+    std::unique_ptr<mz_zip_archive> zip;   // null: no such zip, or it did not open
+    int retriesLeft = 0;                   // tries left after a transient failure; 0: a null zip stays null
+    ULONGLONG retryAt = 0;                 // GetTickCount64 from which the next try may run
+};
 
 struct State {
     std::string install10;   // set once in install()
     bool assetBufs = false;  // assetbufs10: set once in install()
     bool root = false;       // root10: set once in install()
     std::mutex mx;           // guards zips and each archive's use
-    std::map<std::string, std::unique_ptr<mz_zip_archive>> zips;   // by path under assets; nullptr: no such zip
+    std::map<std::string, Archive> zips;   // guarded by mx; by path under assets
 };
 inline State g_state;
 
-// The archive rel, opened on first use and kept for the session; failures too (A-12). Caller holds mx.
+// Whether a transient failure's next try is due.
+inline bool retryDue(const Archive& a) { return !a.zip && a.retriesLeft > 0 && GetTickCount64() >= a.retryAt; }
+
+// An archive's first failed open, with its reason (E6).
+inline void logOpenFailure(const std::string& path, const core::ZipOpen& o)
+{
+    if (o.failure == core::ZipOpenFailure::Transient)
+        core::logf("vfs10: %s not opened: %s; tried again up to %d times, %u ms apart", path.c_str(), o.why.c_str(),
+                   kOpenRetries, (unsigned)kRetryMs);
+    else
+        core::logf("vfs10: %s not opened: %s", path.c_str(), o.why.c_str());
+}
+
+// rel's archive, kept all session; caller holds mx. Transient open failures are retried; missing and broken zips stay
+// null (A-12).
 inline mz_zip_archive* zipFor(const std::string& rel)
 {
     State& s = g_state;
     auto it = s.zips.find(rel);
-    if (it != s.zips.end()) return it->second.get();
-    return (s.zips[rel] = core::openZip(archivePath(s.install10.c_str(), rel))).get();
+    if (it != s.zips.end() && !retryDue(it->second)) return it->second.zip.get();
+    const bool first = it == s.zips.end();
+    Archive& a = first ? s.zips[rel] : it->second;
+    const std::string path = archivePath(s.install10.c_str(), rel);
+    core::ZipOpen o = core::openZip(path);
+    a.zip = std::move(o.zip);
+    if (o.failure != core::ZipOpenFailure::Transient)
+        a.retriesLeft = 0;
+    else
+        a.retriesLeft = first ? kOpenRetries : a.retriesLeft - 1;
+    a.retryAt = GetTickCount64() + kRetryMs;
+    const bool failed = o.failure == core::ZipOpenFailure::Transient || o.failure == core::ZipOpenFailure::Broken;
+    if (first && failed) logOpenFailure(path, o);
+    return a.zip.get();
 }
 
 // p's member from the first archive that has it: the candidates of each split, deepest first, then (root10) the roots.

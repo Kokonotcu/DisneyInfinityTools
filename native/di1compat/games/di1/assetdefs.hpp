@@ -29,10 +29,9 @@ typedef const char*(__fastcall* AssetDefFn)(void* self, void* edx, const char* k
 
 struct State {
     AssetDefFn g_assetDef = nullptr;   // set once by hook() in install()
-    // held across the first miss's engine read (A-38)
-    std::mutex mx;
+    std::mutex mx;                     // guards defs; never held across the engine read (L3, A-38)
     std::map<std::string, std::string> defs;   // guarded by mx; lowercase DefID -> FileName; nodes never move (S5)
-    bool loaded = false;                       // guarded by mx; read at the first miss, once the engine runs
+    std::atomic<bool> loaded{false};           // set under mx once defs is published, never cleared; read without it
     std::atomic<LONG> logged{0};               // fallback answers so far
 };
 inline State g_state;
@@ -62,20 +61,34 @@ inline void addChoDefs(const std::string& t, std::map<std::string, std::string>&
     }
 }
 
+// assetdefs.lua's Cho entries, read at the first miss (the engine runs by then) with no lock held (L3).
+inline std::map<std::string, std::string> readDefs()
+{
+    std::map<std::string, std::string> defs;
+    std::string t;
+    if (engine::assets::read30("gamedb/incredibles/assetdefs.lua", t)) addChoDefs(t, defs);
+    return defs;
+}
+
+// Publishes defs once: the first build to finish wins, a later one is dropped. Its count is logged once.
+inline void publishDefs(std::map<std::string, std::string> defs)
+{
+    State& s = g_state;
+    std::lock_guard<std::mutex> lock(s.mx);
+    if (s.loaded.load()) return;
+    s.defs.swap(defs);
+    s.loaded.store(true);
+    core::logf("asset defs fallback: %u Cho entries from gamedb/incredibles/assetdefs.lua", (unsigned)s.defs.size());
+}
+
 // The Incredibles package loads by the fixed-list path, which never opens its assetdefs.lua: key's Cho from here.
 inline const char* fallbackDef(const char* key)
 {
     State& s = g_state;
-    std::lock_guard<std::mutex> lock(s.mx);
-    if (!s.loaded) {
-        s.loaded = true;
-        std::string t;
-        if (engine::assets::read30("gamedb/incredibles/assetdefs.lua", t)) addChoDefs(t, s.defs);
-        core::logf("asset defs fallback: %u Cho entries from gamedb/incredibles/assetdefs.lua",
-                   (unsigned)s.defs.size());
-    }
     std::string k = key ? key : "";
     for (char& c : k) c = (char)tolower((unsigned char)c);
+    if (!s.loaded.load()) publishDefs(readDefs());
+    std::lock_guard<std::mutex> lock(s.mx);
     auto it = s.defs.find(k);
     return it == s.defs.end() ? nullptr : it->second.c_str();
 }

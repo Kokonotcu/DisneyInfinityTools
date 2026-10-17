@@ -4,7 +4,7 @@
 #include <windows.h>
 #include <intrin.h>
 #include <cstdint>
-#include "../../base/format.hpp"
+#include <cstdio>
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
 #include "../../engine/assets.hpp"
@@ -41,9 +41,8 @@ inline void logOpen(const openstage::Open& o)
 {
     char pf[120] = "";
     if (o.prof)
-        format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]",
-                              GetCurrentThreadId(), trace::loadprof::frameNo(), o.t30, o.tRead,
-                              trace::loadprof::nowMs() - o.tIn);
+        snprintf(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]",
+                 GetCurrentThreadId(), trace::loadprof::frameNo(), o.t30, o.tRead, trace::loadprof::nowMs() - o.tIn);
     if (o.cfg->trace || !o.r)
         core::logf("open %s flags=%X -> %s%s%s", o.p, o.flags & kFlagsLogged, o.r ? "ok" : "MISSING",
                    o.r ? "" : o.missWhy.c_str(), pf);

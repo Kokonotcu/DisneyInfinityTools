@@ -1,4 +1,4 @@
-// Vectored exception handlers (first AV, trace DR0 watchpoint) that never fault or allocate (H9); the hooks' start.
+// Vectored exception handlers (first AVs, trace DR0 watchpoint) that never fault or allocate (H9); the hooks' start.
 #pragma once
 #include <windows.h>
 #include <tlhelp32.h>
@@ -14,7 +14,7 @@ namespace core {
 
 namespace detail {
 struct VehState {
-    std::atomic<LONG> avLogged{0};         // avHandler's one-shot; any thread
+    std::atomic<LONG> avLogged{0};         // AVs avHandler took, stops near kAvLogged; any thread
     std::atomic<uintptr_t> watchAddr{0};   // the watched address: set once by watch()
     std::atomic<LONG> watchHits{0};        // watchpoint hits so far; any thread
 };
@@ -25,24 +25,32 @@ constexpr unsigned long kDr7L0 = 1ul;               // local enable
 constexpr unsigned long kDr7Rw0Write = 1ul << 16;   // break on data writes
 constexpr unsigned long kDr7Len0Dword = 3ul << 18;  // 4 bytes
 constexpr unsigned long kDr6B0 = 1ul;               // DR6: breakpoint 0 fired
+constexpr LONG kAvLogged = 10;                      // chosen: access violations that get a line, handled ones too
 constexpr LONG kWatchHitsLogged = 10;               // watch hits that get a line
 constexpr int kWatchStackWords = 400;               // stack words a watch hit scans
 constexpr int kWatchStackFound = 14;                // exe addresses a watch hit lists
 constexpr DWORD kArmWaitMs = 5000;                  // watch() waits this long for the arming thread
 }  // namespace detail
 
-// First access violation: its address and exe call stack, as static addresses. Logged once; the search continues.
+// The first kAvLogged access violations of any thread, handled ones too: address and exe call stack. The search
+// continues.
 inline LONG CALLBACK avHandler(EXCEPTION_POINTERS* e)
 {
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || detail::g_veh.avLogged.exchange(1))
-        return EXCEPTION_CONTINUE_SEARCH;
+    detail::VehState& v = detail::g_veh;
+    const bool av = e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION;
+    if (!av || v.avLogged.load() >= detail::kAvLogged) return EXCEPTION_CONTINUE_SEARCH;
+    const LONG nth = ++v.avLogged;
+    if (nth > detail::kAvLogged) return EXCEPTION_CONTINUE_SEARCH;
     uintptr_t eip = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
     const ULONG_PTR* info = e->ExceptionRecord->ExceptionInformation;
-    // never cut: at most 54 characters, plus 24 stack words of 9 (stackOf)
+    // lines after the first say their place in the cap
+    char place[24] = "";
+    if (nth > 1) snprintf(place, sizeof(place), " [%ld of %ld]", nth, detail::kAvLogged);
+    // never cut: at most 64 characters, plus 24 stack words of 9 (stackOf)
     char line[900];
     const unsigned at = (unsigned)(inExeImage(eip) ? toStaticVa(eip) : eip);
-    int len = snprintf(line, sizeof(line), "ACCESS VIOLATION at %08X (%s %08X), stack:", at, info[0] ? "write" : "read",
-                       (unsigned)info[1]);
+    int len = snprintf(line, sizeof(line), "ACCESS VIOLATION at %08X (%s %08X)%s, stack:", at,
+                       info[0] ? "write" : "read", (unsigned)info[1], place);
     stackOf((const uint32_t*)e->ContextRecord->Esp, line, sizeof(line), len);
     logf("%s", line);
     return EXCEPTION_CONTINUE_SEARCH;

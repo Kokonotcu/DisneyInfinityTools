@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include "../base/format.hpp"
 #include "hooks.hpp"
 #include "memcheck.hpp"
 
@@ -49,8 +50,8 @@ inline bool afterCall(uintptr_t ret)
     return callRm(p - 6) || callRm(p - 3) || callRm(p - 2);
 }
 
-// Appends the exe return addresses found on a stack (static VAs, call-site validated) to line.
-inline void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max = 24)
+// Appends the exe return addresses found on a stack (static VAs, call-site validated) to line, cut to fit.
+inline void stackOf(const uint32_t* sp, char* line, size_t cap, size_t len, int max = 24)
 {
     MEMORY_BASIC_INFORMATION mbi;   // stay inside the stack's committed region (see vqReadable)
     if (!VirtualQuery(sp, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return;
@@ -71,8 +72,7 @@ inline void stackOf(const uint32_t* sp, char* line, size_t cap, int len, int max
             ok = false;
         }
         if (!ok) continue;
-        // sprintf_s kept (N21): an overflow fail-fasts, where snprintf would cut and push len past cap (A-37)
-        len += sprintf_s(line + len, cap - len, " %08X", (unsigned)toStaticVa(v));
+        len = format::appendCut(line, cap, len, " %08X", (unsigned)toStaticVa(v));
         ++found;
     }
 }

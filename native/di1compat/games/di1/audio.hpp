@@ -3,11 +3,11 @@
 #include <windows.h>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 #include "../../base/bytes.hpp"
-#include "../../base/format.hpp"
 #include "../../base/text.hpp"
 #include "../../core/hooks.hpp"
 #include "../../core/wholefile.hpp"
@@ -107,7 +107,7 @@ inline void loadMixer(const std::string& install10)
     for (auto& s : rest.active) a += (a.empty() ? "" : ", ") + s;
     char b[64];
     for (auto& x : rest.vol) {
-        format::fitOrFailFast(b, sizeof b, "%s%s %.3f", v.empty() ? "" : ", ", x.first.c_str(), x.second);
+        snprintf(b, sizeof b, "%s%s %.3f", v.empty() ? "" : ", ", x.first.c_str(), x.second);
         v += b;
     }
     engine::audio::log("mixer10: %s: active %s; at rest %s%s", paths[0].c_str(), a.c_str(), v.c_str(),
