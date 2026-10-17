@@ -63,6 +63,7 @@
 #include "trace/locktrace.hpp"
 #include "trace/mission.hpp"
 #include "trace/opacity.hpp"
+#include "trace/renderdoc.hpp"
 #include "trace/spawn.hpp"
 #include "trace/spawntrace.hpp"
 #include "trace/teardown.hpp"
@@ -87,8 +88,6 @@
 #include "chan.hpp"
 #include "gameplay.hpp"
 #include "third_party/miniz/miniz.h"
-#include "renderdoc_app.h"
-#include <thread>
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -463,19 +462,6 @@ static bool installChoStart(const di1::Config& c)
         cho.started = [](const uint8_t*, const char* name, uint32_t flags) { audio::choreographyStarted(name, flags); };
     return engine::choreography::install(cho);
 }
-static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc in-process, one frame captured once the world runs
-// renderdoc10: one frame captured renderdoc10 seconds after the first 1.0 playset mission's tick (missiontrace).
-static void armRenderDocCapture()
-{
-    static bool armed;   // first mission tick only; missiontrace's tick runs on one thread (B-48: unverified)
-    if (armed) return;
-    armed = true;
-    std::thread([] {
-        Sleep(1000 * g_cfg.renderdoc10);
-        g_rdoc->TriggerCapture();
-        logf("renderdoc: capture triggered");
-    }).detach();
-}
 
 // missiontrace's config: a 1.0 playset's missions by zones10's prefixes; renderdoc10 arms on the first one's tick.
 static trace::mission::Config missionTraceOf(const di1::Config& c)
@@ -483,7 +469,7 @@ static trace::mission::Config missionTraceOf(const di1::Config& c)
     trace::mission::Config m;
     m.on = c.missionTrace;
     m.ownMission = di1::playsets::ownMission;
-    if (g_rdoc) m.ownMissionTick = armRenderDocCapture;
+    if (trace::renderdoc::loaded()) m.ownMissionTick = trace::renderdoc::arm;
     return m;
 }
 
@@ -1079,21 +1065,6 @@ static bool installAudio(const di1::Config& c)
     return false;
 }
 
-// renderdoc10: RenderDoc in-process before the renderer creates its device, so its hooks see the device.
-static void loadRenderDoc(const di1::Config& c)
-{
-    if (c.renderdoc10 <= 0) return;
-    HMODULE rd = LoadLibraryExA("C:\\Program Files\\RenderDoc\\x86\\renderdoc.dll", nullptr,
-                                LOAD_WITH_ALTERED_SEARCH_PATH);
-    auto get = rd ? (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI") : nullptr;
-    if (get && get(eRENDERDOC_API_Version_1_1_2, (void**)&g_rdoc) == 1) {
-        g_rdoc->SetCaptureFilePathTemplate((g_gameDir + "\\di3cap").c_str());
-        logf("renderdoc: loaded; capture %d s after the first mission tick (missiontrace)", c.renderdoc10);
-    } else {
-        logf("renderdoc: not loaded (%lu)", GetLastError());
-    }
-}
-
 // resident10: 1.0 loads assets\startup*.zip resident, so their members are found by full path.
 static void indexResident10(const di1::Config& c)
 {
@@ -1162,7 +1133,7 @@ constexpr int kOpenFiles = 8192;   // every 1.0 archive used stays open (miniz h
 // Returns shaders10's compiler.
 static engine::shaders::Compiler prepare(const di1::Config& c, const char* dir)
 {
-    loadRenderDoc(c);
+    trace::renderdoc::install({c.renderdoc10, g_gameDir + "\\di3cap"});
     _setmaxstdio(kOpenFiles);
     indexResident10(c);
     loadTables(c, dir);
