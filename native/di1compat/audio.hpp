@@ -1597,6 +1597,10 @@ struct Cfg {
     bool vo = true;       // vo10: 1.0 dialog banks and scripts in 3.0's dialog system
     bool trace = false;   // audiotrace10: log each posted name once with the backend that took it
     bool mixer = true;    // mixer10: 1.0's Mixer presets (GameDB/Core/Mixer.lua) as the 'Mixer' source of the 1.0 categories
+    std::string install10;                                   // the 1.0 install: FMOD DLLs and sound data
+    std::string game30;                                      // the 3.0 install
+    core::InstallFeatureFn installFeature = nullptr;   // core::installFeature; octtest passes stand-ins for both
+    uintptr_t (*rt)(uint32_t) = nullptr;               // core::rt
 };
 inline Cfg cfg;
 inline std::string sound30;   // <3.0 install>\assets\sound
@@ -2213,16 +2217,57 @@ inline bool ready()
     return hostState > 0;
 }
 
-// Returns false only when the FMOD host thread could not start; refused hooks are logged by installFeature.
-inline bool install(core::InstallFeatureFn installFeature, uintptr_t (*rt)(uint32_t), const std::string& install10,
-                    const std::string& game30)
+namespace detail {
+// music10's hooks; the MusicStack pop they call is bound first.
+inline bool installMusic(const Cfg& c)
 {
-    sound30 = game30 + "\\assets\\sound";
-    g.idCounter = (volatile LONG*)rt(0x022AFBE8);
-    hostStart.install10 = install10;
+    const core::InstallFeatureFn installFeature = c.installFeature;
+    stackPop = (StackPopFn)c.rt(0x0073B2C0);
+    return installFeature("music10", {
+        {"MusicStates cue check (music10)", 0x007397B0, "578BF9837F1400", (void*)&hkMusicState, (void**)&oMusicState},
+        {"Wwise SetState (music10)", 0x01947BD0, "558BEC8B450856", (void*)&hkSetState, (void**)&oSetState},
+        {"MusicStack tick (music10)", 0x0073EDE0, "A1????????DB05????????81EC04010000", (void*)&hkStackTick,
+         (void**)&oStackTick},
+        {"music cue once (music10)", 0x0073ED10, "8B44240883EC08535657", (void*)&hkMusicOnce, (void**)&oMusicOnce},
+    });
+}
+
+// vo10's hooks; the dialog engine functions and tables they use are bound first.
+inline bool installVo(const Cfg& c)
+{
+    const core::InstallFeatureFn installFeature = c.installFeature;
+    uintptr_t (*const rt)(uint32_t) = c.rt;
+    vo.root10 = c.install10 + "\\assets\\sound\\dialog";
+    *(void**)&vo.lang = (void*)rt(0x00680C00);
+    vo.mgr = (uint8_t*)rt(0x0228D668);
+    *(void**)&vo.mapFind = (void*)rt(0x013CC1F0);
+    *(void**)&vo.mapAdd = (void*)rt(0x018308E0);
+    mapPut = (MapPutFn)rt(0x006EAA00);
+    dialogMgr = (uint8_t*)rt(0x02204128);
+    engineAlloc = (AllocFn)rt(0x00409E90);
+    engineFree = (FreeFn)rt(0x00409ED0);
+    return installFeature("vo10", {
+        {"dialog line post (vo10)", 0x01948D80, "558BEC83EC105356578B7D1C", (void*)&hkPostExt, (void**)&oPostExt},
+        {"sound file read (vo10)", 0x0182F570, "8B44240485C0741F803800741A", (void*)&hkLoadFile, (void**)&oLoadFile},
+        {"dialog request (vo10)", 0x0073BF50, "53568BF1E8????????8D4618", (void*)&hkDlgReq, (void**)&oDlgReq},
+    });
+}
+}  // namespace detail
+
+// Returns false only when the FMOD host thread could not start; refused hooks are logged by installFeature.
+inline bool install(const Cfg& c)
+{
+    cfg = c;   // before the host thread starts: it reads cfg.mixer
+    const core::InstallFeatureFn installFeature = c.installFeature;
+    sound30 = c.game30 + "\\assets\\sound";
+    g.idCounter = (volatile LONG*)c.rt(0x022AFBE8);
+    hostStart.install10 = c.install10;
     hostStart.done = CreateEventA(nullptr, TRUE, FALSE, nullptr);
     HANDLE th = hostStart.done ? CreateThread(nullptr, 0, hostThread, &hostStart, 0, nullptr) : nullptr;
-    if (!th) { AUDLOG("audio10: FMOD host thread not started (%lu)", GetLastError()); return false; }
+    if (!th) {
+        AUDLOG("audio10: FMOD host thread not started (%lu)", GetLastError());
+        return false;
+    }
     CloseHandle(th);
     idPauseAll = fnv1("Pause_All");
     idPauseExUi = fnv1("Pause_All_Except_UI");
@@ -2244,34 +2289,8 @@ inline bool install(core::InstallFeatureFn installFeature, uintptr_t (*rt)(uint3
             {"volume fader (audio10)", 0x0182C460, "8B4424048B4C240883EC30", (void*)&hkFader, (void**)&oFader},
         });
     if (!base) return true;
-    if (cfg.music) {
-        stackPop = (StackPopFn)rt(0x0073B2C0);
-        installFeature("music10", {
-            {"MusicStates cue check (music10)", 0x007397B0, "578BF9837F1400", (void*)&hkMusicState,
-             (void**)&oMusicState},
-            {"Wwise SetState (music10)", 0x01947BD0, "558BEC8B450856", (void*)&hkSetState, (void**)&oSetState},
-            {"MusicStack tick (music10)", 0x0073EDE0, "A1????????DB05????????81EC04010000", (void*)&hkStackTick,
-             (void**)&oStackTick},
-            {"music cue once (music10)", 0x0073ED10, "8B44240883EC08535657", (void*)&hkMusicOnce, (void**)&oMusicOnce},
-        });
-    }
-    if (cfg.vo) {
-        vo.root10 = install10 + "\\assets\\sound\\dialog";
-        *(void**)&vo.lang = (void*)rt(0x00680C00);
-        vo.mgr = (uint8_t*)rt(0x0228D668);
-        *(void**)&vo.mapFind = (void*)rt(0x013CC1F0);
-        *(void**)&vo.mapAdd = (void*)rt(0x018308E0);
-        mapPut = (MapPutFn)rt(0x006EAA00);
-        dialogMgr = (uint8_t*)rt(0x02204128);
-        engineAlloc = (AllocFn)rt(0x00409E90);
-        engineFree = (FreeFn)rt(0x00409ED0);
-        installFeature("vo10", {
-            {"dialog line post (vo10)", 0x01948D80, "558BEC83EC105356578B7D1C", (void*)&hkPostExt, (void**)&oPostExt},
-            {"sound file read (vo10)", 0x0182F570, "8B44240485C0741F803800741A", (void*)&hkLoadFile,
-             (void**)&oLoadFile},
-            {"dialog request (vo10)", 0x0073BF50, "53568BF1E8????????8D4618", (void*)&hkDlgReq, (void**)&oDlgReq},
-        });
-    }
+    if (cfg.music) detail::installMusic(c);
+    if (cfg.vo) detail::installVo(c);
     if (cfg.trace)
         installFeature("audiotrace10", {
             {"queued sound post (audiotrace10)", 0x01830270, "83EC44538B5C244C", (void*)&hkQueuedPost,

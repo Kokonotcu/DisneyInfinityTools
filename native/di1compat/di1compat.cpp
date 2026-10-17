@@ -493,7 +493,7 @@ static uint8_t __fastcall hkPlaysetChar(void* self, void*, const char* key, int 
 }
 
 // The playset slot's hook (H1): always on, it has no cfg key (B-20).
-static bool installPlaysetSlot()
+static bool installPlaysetSlot(const di1::Config&)
 {
     return hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar,
                 (void**)&g_playsetChar);
@@ -647,9 +647,9 @@ static uint8_t __fastcall hkStartQuery(uint8_t* self, void*, uint32_t a1, int pl
 }
 
 // spawntrace10's hooks (H1): where the player is put (Pirates fall); trace installs the same two itself.
-static bool installSpawnTrace()
+static bool installSpawnTrace(const di1::Config& c)
 {
-    if (!g_cfg.spawnTrace10 || g_cfg.trace) return true;
+    if (!c.spawnTrace10 || c.trace) return true;
     return installFeature("spawntrace10", {
         {"start lookup (spawntrace10)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&hkStartLookup,
          (void**)&g_startLookup},
@@ -838,10 +838,10 @@ static void __fastcall hkChoStart(uint8_t* self, void*)
 }
 
 // The choreography start hook (H1): cinesync10 starts 1.0's audio-sync sound event (audio.hpp); breaktrace logs.
-static bool installChoStart()
+static bool installChoStart(const di1::Config& c)
 {
-    const bool cineSync = g_cfg.audio10 && g_cfg.cineSync10;
-    if (!g_cfg.breakTrace && !cineSync) return true;
+    const bool cineSync = c.audio10 && c.cineSync10;
+    if (!c.breakTrace && !cineSync) return true;
     return hook("choreography start (cinesync10 / breaktrace)", 0x01449390, "83EC18568BF1E8", (void*)&hkChoStart,
                 (void**)&g_choStart);
 }
@@ -979,9 +979,9 @@ static void __fastcall hkExplode(void* self, void*, uint32_t a1)
 }
 
 // breaktrace's hooks (H1), all or none.
-static bool installBreakTrace()
+static bool installBreakTrace(const di1::Config& c)
 {
-    if (!g_cfg.breakTrace) return true;
+    if (!c.breakTrace) return true;
     return installFeature("breaktrace", {
         {"ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&hkClipEval, (void**)&g_clipEval},
         {"exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&hkMunHit,
@@ -1201,9 +1201,9 @@ static void __cdecl hkHeapFree(uint32_t p)
 }
 
 // teardowntrace's hooks (H1), all or none.
-static bool installTeardownTrace()
+static bool installTeardownTrace(const di1::Config& c)
 {
-    if (!g_cfg.teardownTrace) return true;
+    if (!c.teardownTrace) return true;
     return installFeature("teardowntrace", {
         {"Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&hkLayoutDtor,
          (void**)&g_layoutDtor},
@@ -1323,7 +1323,7 @@ static const char* __fastcall hkAssetDef(void* self, void*, const char* key)
 }
 
 // The asset defs fallback's hook (H1): always on.
-static bool installAssetDefs()
+static bool installAssetDefs(const di1::Config&)
 {
     return hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
 }
@@ -1705,13 +1705,13 @@ static DWORD WINAPI profThread(void*)
 }
 
 // fpslog10's frame sync and loadprof10's hooks (H1); the sampler starts only with all of loadprof10's.
-static bool installLoadProf()
+static bool installLoadProf(const di1::Config& c)
 {
     bool ok = true;
-    if (g_cfg.fpsLog10 || g_cfg.loadProf10)
+    if (c.fpsLog10 || c.loadProf10)
         ok &= hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&hkFrameSync,
                    (void**)&g_frameSync);
-    if (!g_cfg.loadProf10) return ok;
+    if (!c.loadProf10) return ok;
     const bool profiler = installFeature("loadprof10", {
         {"fiber switch (loadprof10)", 0x0041E480, "8B44240C85C0740C", (void*)&hkFiberSwitch, (void**)&g_fiberSwitch},
         {"file-done wait (loadprof10)", 0x0041FC10, "56578B3D????????8BF1", (void*)&hkFileWait, (void**)&g_fileWait},
@@ -1813,13 +1813,13 @@ static uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t
 }
 
 // The render probes' hooks (H1): opacitylog10 and fadeprobe10, each on its own.
-static bool installRenderProbes()
+static bool installRenderProbes(const di1::Config& c)
 {
     bool ok = true;
-    if (g_cfg.opacityLog10)
+    if (c.opacityLog10)
         ok &= hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&hkOpacityMask,
                    (void**)&g_opacityMask);
-    if (g_cfg.fadeProbe10)
+    if (c.fadeProbe10)
         ok &= hook("visibility test (fadeprobe10)", 0x0044B8F0, "8B5424088A442414F30F10620C", (void*)&hkVisTest,
                    (void**)&g_visTest);
     return ok;
@@ -1918,9 +1918,9 @@ static uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
 }
 
 // currency10's hooks (H1), all or none.
-static bool installCurrency()
+static bool installCurrency(const di1::Config& c)
 {
-    if (!g_cfg.currency10) return true;
+    if (!c.currency10) return true;
     return installFeature("currency10", {
         {"zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&hkZoneCurrency,
          (void**)&g_zoneCurrency},
@@ -2032,9 +2032,9 @@ static void __cdecl hkMerRegistry()
 }
 
 // The Meridian registry hook (H1): aliases10 or native10, and only with the mer table loaded.
-static bool installMerRegistry()
+static bool installMerRegistry(const di1::Config& c)
 {
-    const bool classes = g_cfg.aliases10 || g_cfg.native10;
+    const bool classes = c.aliases10 || c.native10;
     if (!classes || !g_merOk) return true;
     return hook("Meridian class registry", 0x0178E330, "6A006A0068????????68????????", (void*)&hkMerRegistry,
                 (void**)&g_merRegistry);
@@ -2319,9 +2319,9 @@ static void __fastcall hkMisProgress(uint8_t* mission, void*, void* table)
 }
 
 // locktrace10's hooks (H1), all or none.
-static bool installLockTrace()
+static bool installLockTrace(const di1::Config& c)
 {
-    if (!g_cfg.lockTrace10) return true;
+    if (!c.lockTrace10) return true;
     return installFeature("locktrace10", {
         {"GamePlayers lock controls (locktrace10)", 0x0139B8D0, "833D????????00558BE9", (void*)&hkCtlLock,
          (void**)&g_ctlLock},
@@ -2498,9 +2498,9 @@ static void __fastcall hkFpScan(uint8_t* fp, void*)
 }
 
 // missiontrace's hooks (H1), all or none.
-static bool installMissionTrace()
+static bool installMissionTrace(const di1::Config& c)
 {
-    if (!g_cfg.missionTrace) return true;
+    if (!c.missionTrace) return true;
     return installFeature("missiontrace", {
         {"MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&hkMissionTick,
          (void**)&g_missionTick},
@@ -2564,9 +2564,9 @@ static void __fastcall hkHdrClone(void* self, void*, uint32_t index, uint32_t a2
 }
 
 // trace's hooks (H1), all or none; hkInst's dead-root guard stays under trace (owner's choice, B-04).
-static bool installTrace()
+static bool installTrace(const di1::Config& c)
 {
-    if (!g_cfg.trace) return true;
+    if (!c.trace) return true;
     return installFeature("trace", {
         {"actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&hkActorExists, (void**)&g_actorExists},
         {"figure check (trace)", 0x00DDAE30, "64A1000000006AFF68", (void*)&hkFigureOk, (void**)&g_figureOk},
@@ -2723,9 +2723,9 @@ static void __fastcall hkExpPkg(void* ecx, void*, const char* path, uint32_t a2)
 }
 
 // The expendables package hook (H1): popin10 or deliv10.
-static bool installExpPkg()
+static bool installExpPkg(const di1::Config& c)
 {
-    if (!g_cfg.popin10 && !g_cfg.deliv10) return true;
+    if (!c.popin10 && !c.deliv10) return true;
     return hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg,
                 (void**)&g_expPkg);
 }
@@ -2774,9 +2774,9 @@ static uint32_t __fastcall hkEconOnDeath(uint8_t* self, void*)
 }
 
 // econ10's hook (H1).
-static bool installEcon()
+static bool installEcon(const di1::Config& c)
 {
-    if (!g_cfg.econ10) return true;
+    if (!c.econ10) return true;
     return hook("combat SpawnEconomyOnDeath get", 0x00FF69C0, "53568BF1F6860C09000020", (void*)&hkEconOnDeath,
                 (void**)&g_econOnDeath);
 }
@@ -2793,9 +2793,9 @@ static void* __fastcall hkExpDef(void* self, void*, void* entry)
 }
 
 // popin10's definition ctor hook (H1).
-static bool installExpDef()
+static bool installExpDef(const di1::Config& c)
 {
-    if (!g_cfg.popin10) return true;
+    if (!c.popin10) return true;
     return hook("expendable definition ctor", 0x016022C0, "6AFF68????????64A100000000", (void*)&hkExpDef,
                 (void**)&g_expDef);
 }
@@ -2843,14 +2843,14 @@ static uint32_t __fastcall hkLoadInventory(void* self, void*, const char* path, 
 }
 
 // The GameDB loader hooks (H1); the callback loader only for bits10 or perc10.
-static bool installGameDb()
+static bool installGameDb(const di1::Config& c)
 {
     bool ok = hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
     ok &= hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory,
                (void**)&g_loadInventory);
     ok &= hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback,
                (void**)&g_loadChdCallback);
-    if (g_cfg.bits10 || g_cfg.perc10)
+    if (c.bits10 || c.perc10)
         ok &= hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad,
                    (void**)&g_cbLoad);
     return ok;
@@ -2893,7 +2893,7 @@ static void __cdecl hkNormPath(char* dst, unsigned size, const char* src)
 }
 
 // The exe CRT's fail-fast hooks (H1): always on.
-static bool installCrt()
+static bool installCrt(const di1::Config&)
 {
     bool ok = hook("CRT __invoke_watson", 0x012CA1D1, "8BFF566A01", (void*)&hkWatson, (void**)&g_watson);
     ok &= hook("resident path normaliser", 0x0041FEF0, "8B44240C56", (void*)&hkNormPath, (void**)&g_normPath);
@@ -2994,26 +2994,26 @@ static bool selectMenuPushFound()
 }
 
 // The ui hooks (H1), each with serve10; the ui keys are logged first.
-static bool installUi()
+static bool installUi(const di1::Config& c)
 {
-    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d context10=%d", g_cfg.loadScreen10,
-         g_cfg.uiScope10, g_cfg.fmv10, g_cfg.text10, g_cfg.tips10, g_cfg.tutorial10, g_cfg.context10);
-    if (!g_cfg.serve10) return true;
+    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d context10=%d", c.loadScreen10,
+         c.uiScope10, c.fmv10, c.text10, c.tips10, c.tutorial10, c.context10);
+    if (!c.serve10) return true;
     bool ok = true;
-    if (g_cfg.loadScreen10)
+    if (c.loadScreen10)
         ok &= hook("zone string field (ui: 1.0 loading screen)", 0x0139E0B0, "83EC08568BF180BEE403000000",
                    (void*)&hkZoneStr, (void**)&g_zoneStr);
-    if (g_cfg.fmv10)
+    if (c.fmv10)
         ok &= hook("FMV path (ui: 1.0 clips)", 0x0067E460, "81EC0401000053568BB42418010000", (void*)&hkFmvPath,
                    (void**)&g_fmvPath);
-    if (g_cfg.tutorial10 && selectMenuPushFound()) {
+    if (c.tutorial10 && selectMenuPushFound()) {
         ok &= hook("screen by name (ui: tutorial element 61)", 0x0154FF90, "837C2404007505", (void*)&hkFindScreen,
                    (void**)&g_findScreen);
-    } else if (g_cfg.tutorial10) {
+    } else if (c.tutorial10) {
         logf("tutorial10: the element-61 push of \"SelectMenu\" is not where it was analysed: not hooked");
         ok = false;
     }
-    if (g_cfg.context10)
+    if (c.context10)
         ok &= hook("controller context list (ui: 1.0 tutorial contexts)", 0x01224880, "5153558BE98A85A4000000",
                    (void*)&hkCtxParse, (void**)&g_ctxParse);
     return ok;
@@ -3249,7 +3249,7 @@ static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32
 }
 
 // The asset open hook (H1). Code outside hkOpen calls its original, so a refused AssetOpen installs nothing else.
-static bool installAssetOpen()
+static bool installAssetOpen(const di1::Config&)
 {
     if (hook("AssetOpen", 0x0041CB10, "6AFF68????????", (void*)&hkOpen, (void**)&g_open)) return true;
     logf("feature AssetOpen off: no other hook installed, the game runs as plain 3.0");
@@ -3578,13 +3578,13 @@ static uint8_t* __cdecl hkShaderByName(const char* name)
 }
 
 // shaders10's hooks (H1), all or none; the record lock is ready before the first can run (B-01).
-static bool installShaders()
+static bool installShaders(const di1::Config& c)
 {
-    if (!g_cfg.shaders10) return true;
+    if (!c.shaders10) return true;
     InitializeCriticalSection(&g_recCs);
     std::vector<core::HookSpec> shaders = {
         {"shader by name", 0x0045C820, "8B44240450E8????????8B0D", (void*)&hkShaderByName, (void**)&g_shaderByName}};
-    if (g_cfg.lazyLink10)
+    if (c.lazyLink10)
         shaders.push_back({"shader linker (deferred)", 0x00472050, "83EC50A1????????535657", (void*)&hkLinkAll,
                            (void**)&g_linkAll});
     shaders.push_back({"pass-state clone (locked)", 0x0045C5C0, "83EC4856578B7C2454", (void*)&hkCloneRec,
@@ -3609,56 +3609,61 @@ static std::string mergeVtxf(const std::string& t30, const std::string& t10)
 #include "caprt.hpp"
 
 // sxnatives10's hooks (H1). sx::g_log is set in every config: BMX-1 and BTX-1 log unpaired key ids through it.
-static bool installSx()
+static bool installSx(const di1::Config& c)
 {
     sx::g_log = logf;
-    if (!g_cfg.sx10 || !g_cfg.sxNatives10) return true;
+    if (!c.sx10 || !c.sxNatives10) return true;
     sx::g_exe = g_base;
-    sx::init(g_cfg.sxPorts10);
+    sx::init(c.sxPorts10);
     std::vector<core::HookSpec> natives = {
         {"Slang linker (1.0 natives)", 0x00736DA0, "51538B5C240C568BF18BCBE8", (void*)&sx::hkLink,
          (void**)&sx::g_link}};
-    if (g_cfg.sxPorts10 && g_cfg.sxBeh10)
+    if (c.sxPorts10 && c.sxBeh10)
         natives.push_back({"Slang call by name (1.0 behavior type)", 0x00739090, "56578B7C240C8BF18B4E04",
                            (void*)&sx::hkCallByName, (void**)&sx::g_callByName});
     return installFeature("sxnatives10", natives);
 }
 
-// audio10's hooks (audio::install) need the 1.0 install; its keys and log go in first.
-static bool installAudio()
+// audio10's hooks (audio::install) need the 1.0 install; its log goes in first.
+static bool installAudio(const di1::Config& c)
 {
-    if (!g_cfg.audio10 || !g_cfg.install10[0]) return true;
+    if (!c.audio10 || !c.install10[0]) return true;
     audio::logfn = logf;
-    audio::cfg.music = g_cfg.music10;
-    audio::cfg.vo = g_cfg.vo10;
-    audio::cfg.trace = g_cfg.audioTrace10;
-    audio::cfg.mixer = g_cfg.mixer10;
-    if (audio::install(installFeature, rt, g_cfg.install10, g_gameDir)) return true;
+    audio::Cfg a;
+    a.music = c.music10;
+    a.vo = c.vo10;
+    a.trace = c.audioTrace10;
+    a.mixer = c.mixer10;
+    a.install10 = c.install10;
+    a.game30 = g_gameDir;
+    a.installFeature = installFeature;
+    a.rt = rt;
+    if (audio::install(a)) return true;
     logf("audio10: off (FMOD host failed)");
     return false;
 }
 
 // renderdoc10: RenderDoc in-process before the renderer creates its device, so its hooks see the device.
-static void loadRenderDoc()
+static void loadRenderDoc(const di1::Config& c)
 {
-    if (g_cfg.renderdoc10 <= 0) return;
+    if (c.renderdoc10 <= 0) return;
     HMODULE rd = LoadLibraryExA("C:\\Program Files\\RenderDoc\\x86\\renderdoc.dll", nullptr,
                                 LOAD_WITH_ALTERED_SEARCH_PATH);
     auto get = rd ? (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI") : nullptr;
     if (get && get(eRENDERDOC_API_Version_1_1_2, (void**)&g_rdoc) == 1) {
         g_rdoc->SetCaptureFilePathTemplate((g_gameDir + "\\di3cap").c_str());
-        logf("renderdoc: loaded; capture %d s after the first mission tick (missiontrace)", g_cfg.renderdoc10);
+        logf("renderdoc: loaded; capture %d s after the first mission tick (missiontrace)", c.renderdoc10);
     } else {
         logf("renderdoc: not loaded (%lu)", GetLastError());
     }
 }
 
 // resident10: 1.0 loads assets\startup*.zip resident, so their members are found by full path.
-static void indexResident10()
+static void indexResident10(const di1::Config& c)
 {
-    if (!g_cfg.serve10 || !g_cfg.resident10 || !g_cfg.install10[0]) return;
+    if (!c.serve10 || !c.resident10 || !c.install10[0]) return;
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((std::string(g_cfg.install10) + "\\assets\\startup*.zip").c_str(), &fd);
+    HANDLE h = FindFirstFileA((std::string(c.install10) + "\\assets\\startup*.zip").c_str(), &fd);
     for (BOOL ok = h != INVALID_HANDLE_VALUE; ok; ok = FindNextFileA(h, &fd)) indexZip10(fd.cFileName);
     if (h != INVALID_HANDLE_VALUE) FindClose(h);
     logf("resident10: %u full-path members of the 1.0 startup archives indexed", (unsigned)g_over10.size());
@@ -3680,29 +3685,29 @@ static std::string slurpFile(const char* dir, const char* name)
 constexpr size_t kOctSlack = 4096;   // octx arena slack: instanced 1.0 SubNetworks must fit their arenas (octx.hpp)
 
 // The render and Meridian tables beside the DLL, and the octx switches the transcode runs with.
-static void loadTables(const char* dir)
+static void loadTables(const di1::Config& c, const char* dir)
 {
     g_renderOk = g_render.load(slurpFile(dir, "di1compat_render.txt"));
     logf("render table: %s (%u shaders, %u donors, %u materials, %u vertex plans)", g_renderOk ? "ok" : "MISSING",
          (unsigned)g_render.shaders.size(), (unsigned)g_render.donors.size(), (unsigned)g_render.matindex.size(),
          (unsigned)g_render.plans.size());
     octx::g_slack = kOctSlack;
-    octx::g_variantGroups = g_cfg.variant10;
+    octx::g_variantGroups = c.variant10;
     g_merOk = g_mer.load(slurpFile(dir, "di1compat_mer.txt"));
-    g_mer.events10 = g_cfg.events10;
-    g_mer.portRefs = g_cfg.portRefs10;
-    g_mer.ports10 = g_cfg.ports10;
-    g_mer.pins10 = g_cfg.pins10;
-    g_mer.gate10 = g_cfg.gate10;
-    g_mer.toggleType10 = g_cfg.toggleType10;
+    g_mer.events10 = c.events10;
+    g_mer.portRefs = c.portRefs10;
+    g_mer.ports10 = c.ports10;
+    g_mer.pins10 = c.pins10;
+    g_mer.gate10 = c.gate10;
+    g_mer.toggleType10 = c.toggleType10;
     logf("meridian table: %s (%u registered classes, %u described)", g_merOk ? "ok" : "MISSING",
          (unsigned)g_mer.registered.size(), (unsigned)g_mer.classes.size());
 }
 
 // shaders10: the HLSL compiler, the DXBC cache folder and 1.0's vertex formats, before any hook.
-static void prepareShaders10(const char* dir)
+static void prepareShaders10(const di1::Config& c, const char* dir)
 {
-    if (!g_cfg.shaders10) return;
+    if (!c.shaders10) return;
     HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
     g_d3dCompile = dc ? (D3DCompileFn)GetProcAddress(dc, "D3DCompile") : nullptr;
     g_shaderCache = std::string(dir) + "\\di1compat_shaders";
@@ -3746,42 +3751,42 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     di1::loadConfig(dir, g_cfg);
-    loadRenderDoc();
+    loadRenderDoc(g_cfg);
     _setmaxstdio(8192);   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
-    indexResident10();
-    loadTables(dir);
-    prepareShaders10(dir);
+    indexResident10(g_cfg);
+    loadTables(g_cfg, dir);
+    prepareShaders10(g_cfg, dir);
 
     // the modules' hooks in install order (B3): a hook is live once enabled
     if (!startHooks()) return;
-    if (!installAssetOpen()) return;
-    installGameDb();
-    installEcon();
-    installExpPkg();
-    installCurrency();
-    installExpDef();
-    installPlaysetSlot();
-    installTrace();
-    installShaders();
-    installMissionTrace();
-    installChoStart();
-    installBreakTrace();
-    installTeardownTrace();
-    installMerRegistry();
-    installLockTrace();
-    installRenderProbes();
-    installLoadProf();
-    installAssetDefs();
-    installCrt();
-    installSx();
-    npcrt::install();
-    installUi();
-    installAudio();
-    vfxrt::install();
-    gprt::install();
-    bldrt::install();
-    caprt::install();
-    installSpawnTrace();
+    if (!installAssetOpen(g_cfg)) return;
+    installGameDb(g_cfg);
+    installEcon(g_cfg);
+    installExpPkg(g_cfg);
+    installCurrency(g_cfg);
+    installExpDef(g_cfg);
+    installPlaysetSlot(g_cfg);
+    installTrace(g_cfg);
+    installShaders(g_cfg);
+    installMissionTrace(g_cfg);
+    installChoStart(g_cfg);
+    installBreakTrace(g_cfg);
+    installTeardownTrace(g_cfg);
+    installMerRegistry(g_cfg);
+    installLockTrace(g_cfg);
+    installRenderProbes(g_cfg);
+    installLoadProf(g_cfg);
+    installAssetDefs(g_cfg);
+    installCrt(g_cfg);
+    installSx(g_cfg);
+    npcrt::install(g_cfg);
+    installUi(g_cfg);
+    installAudio(g_cfg);
+    vfxrt::install(g_cfg);
+    gprt::install(g_cfg);
+    bldrt::install(g_cfg);
+    caprt::install(g_cfg);
+    installSpawnTrace(g_cfg);
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

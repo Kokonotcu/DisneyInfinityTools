@@ -458,19 +458,19 @@ static uint32_t __fastcall hkToolGate(uint8_t* tool, void* edx, const uint8_t* p
 }
 
 // The gameplay and menu runtime's hooks (H1).
-inline bool install()
+inline bool install(const di1::Config& c)
 {
     bool ok = true;
-    if (g_cfg.lockTrace10)
+    if (c.lockTrace10)
         ok &= hook("vehicle control takeover (vehicle10 probe)", 0x00D612A0, "6AFF68????????64A100000000",
                    (void*)&hkVehicleCtl, (void**)&g_vehicleCtl);
-    if (g_cfg.accept10)
+    if (c.accept10)
         ok &= hook("mission activation (accept10)", 0x015BCC10, "83EC14568BF18A86DB03000084C0",
                    (void*)&hkMissionActivate, (void**)&g_missionActivate);
-    if (g_cfg.tools10)
+    if (c.tools10)
         ok &= hook("tool level gate (1.0 lists)", 0x0150F7D0, "538BD9837B74FF", (void*)&hkToolGate,
                    (void**)&g_toolGate);
-    if (g_cfg.selectMenu10)
+    if (c.selectMenu10)
         ok &= installFeature("selectmenu10", {
             {"ribbon name (1.0 SelectMenu)", 0x00B42540, "518B0D????????8B819C010000", (void*)&hkRibbonName,
              (void**)&g_ribbonName},
@@ -482,10 +482,10 @@ inline bool install()
              (void*)&hkLuaAddScreen,
              (void**)&g_luaAddScreen},
         });
-    if (g_cfg.actionMap10 || g_cfg.lockTrace10)
+    if (c.actionMap10 || c.lockTrace10)
         ok &= hook("movie ExternalInterface call (1.0 UsesActionMap; input10 probe)", 0x01564790,
                    "64A1000000006AFF68????????506489250000000081ECC8000000", (void*)&hkFlashCall, (void**)&g_flashCall);
-    if (g_cfg.focus10)
+    if (c.focus10)
         ok &= installFeature("focus10", {
             {"screen focus gain (1.0 movies)", 0x01559480, "568B742408578BF98B4E50C1E105", (void*)&hkFocusGain,
              (void**)&g_focusGain},
@@ -493,7 +493,7 @@ inline bool install()
              (void*)&hkFocusLoss,
              (void**)&g_focusLoss},
         });
-    if (g_cfg.lockTrace10 || g_cfg.keys10)
+    if (c.lockTrace10 || c.keys10)
         ok &= installFeature("keys10", {
             {"screen action delivery (keys10; input10 probe)", 0x01565330,
              "64A1000000006AFF68????????506489250000000083EC44",

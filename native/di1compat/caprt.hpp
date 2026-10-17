@@ -200,10 +200,10 @@ static uint32_t __fastcall hkByName(void* self, void*, const char* name, const f
 }
 
 // The 1.0 expendables runtime's hooks (H1); capsuletrace10 hooks the two spawns itself when shutdown10 did not.
-inline bool install()
+inline bool install(const di1::Config& c)
 {
-    if (g_cfg.shutdown10 && !g_cfg.popin10) logf("shutdown10: off, it finds 1.0 definitions by popin10's stamp");
-    const bool keep10 = g_cfg.shutdown10 && g_cfg.popin10;
+    if (c.shutdown10 && !c.popin10) logf("shutdown10: off, it finds 1.0 definitions by popin10's stamp");
+    const bool keep10 = c.shutdown10 && c.popin10;
     const core::HookSpec spawn = {"expendable base spawn (shutdown10)", 0x0160A3E0, "558BEC83E4F06AFF68????????64A1",
                                   (void*)&hkBase, (void**)&g_base};
     const core::HookSpec done = {"expendable async spawn done (shutdown10)", 0x0160A270, "8B0D????????568B74240C",
@@ -216,7 +216,7 @@ inline bool install()
         done,
     });
     bool ok = spawnsHooked || !keep10;
-    if (!g_cfg.capsuleTrace10) return ok;
+    if (!c.capsuleTrace10) return ok;
     if (!spawnsHooked) ok = installFeature("capsuletrace10 spawns", {spawn, done}) && ok;
     ok &= installFeature("capsuletrace10", {
         {"SpawnExpendable Link_In (capsuletrace10)", 0x017BF050, "6AFF68????????64A100000000", (void*)&hkNode,
