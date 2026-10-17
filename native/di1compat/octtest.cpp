@@ -2825,7 +2825,7 @@ int main(int argc, char** argv)
     if (argc > 4 && std::string(argv[1]) == "--bent") {   // --bent <1.0 .bent> <engine path> <out>: 4.1 -> 4.1f
         std::string b = slurp(argv[2]), why;
         oct::File f = oct::File::parse(b.data(), b.size());
-        if (!bent::transcode(f, argv[3], &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
+        if (!di1::bent::transcode(f, argv[3], &why)) { printf("not transcoded: %s\n", why.c_str()); return 1; }
         std::string o = f.write();
         std::ofstream(argv[4], std::ios::binary).write(o.data(), o.size());
         printf("wrote %zu B, %zu records\n", o.size(), f.recs.size());
