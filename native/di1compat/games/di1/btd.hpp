@@ -30,8 +30,8 @@ inline constexpr uint32_t kGapWord = 0xffffffff;  // the 8-byte gap after the in
 struct Header10 { uint32_t aoff, alen, boff, blen, voff, vcnt, ioff, tcnt; };
 inline Header10 header10(const std::string& src)
 {
-    return {bytes::le32(src, 0), bytes::le32(src, 4), bytes::le32(src, 8), bytes::le32(src, 12),
-            bytes::le32(src, 16), bytes::le32(src, 20), bytes::le32(src, 24), bytes::le32(src, 28)};
+    return {bytes::u32At(src, 0), bytes::u32At(src, 4), bytes::u32At(src, 8), bytes::u32At(src, 12),
+            bytes::u32At(src, 16), bytes::u32At(src, 20), bytes::u32At(src, 24), bytes::u32At(src, 28)};
 }
 // True when the sections tile the block and fit it. 64-bit sums: in 32 bits a wrapped sum passes (CO-07).
 inline bool layoutFits(const Header10& h, size_t size)
@@ -62,17 +62,17 @@ inline bool convertBlock(const std::string& src, std::string& out)
     if (h.alen > 188) memcpy(&out[A + 204], src.data() + h.aoff + 188, h.alen - 188);
     // section B: u32 pointers widen to u64, so 32 zero bytes, then 1.0's from +16; size field 72
     if (h.blen > 16) memcpy(&out[B + 32], src.data() + h.boff + 16, h.blen - 16);
-    bytes::setLe64(out, B + 16, detail::kSectionBSize);
+    bytes::put64(out, B + 16, detail::kSectionBSize);
     memcpy(&out[V], src.data() + h.voff, (size_t)(detail::kVertexBytes * (uint64_t)h.vcnt));
     memcpy(&out[I], src.data() + h.ioff, (size_t)(detail::kTriangleBytes * (uint64_t)h.tcnt));
-    bytes::setLe32(out, IE + 4, detail::kGapWord);
+    bytes::put32(out, IE + 4, detail::kGapWord);
     // AABB min / max at absolute +80 / +96, as btdconv writes them (the copied section A header)
     memcpy(&out[80], src.data() + 80, 12);
     memcpy(&out[96], src.data() + 96, 12);
-    bytes::setLe64(out, 0, V);
-    bytes::setLe64(out, 8, I);
+    bytes::put64(out, 0, V);
+    bytes::put64(out, 8, I);
     const uint32_t fields[10] = {h.vcnt, h.tcnt, A, aNew, B, bNew, IE, 1, P, h.tcnt};   // the 3.0 header, +16..55
-    for (size_t k = 0; k < 10; ++k) bytes::setLe32(out, 16 + 4 * k, fields[k]);
+    for (size_t k = 0; k < 10; ++k) bytes::put32(out, 16 + 4 * k, fields[k]);
     return true;
 }
 

@@ -30,8 +30,8 @@ inline constexpr size_t kSlotValueAt = 4;   // within a slot: u32 hash, rel -> v
 inline bool headerOk(const std::string& raw)
 {
     if (raw.size() < kHeader || raw.compare(0, 4, "DICT")) return false;
-    const bool fixed = bytes::le32(raw, kVersionAt) == kVersion && bytes::le32(raw, kSlotsRelAt) == kSlotsRel;
-    const bool noContainers = bytes::le32(raw, kOneAt) == 1 && !bytes::le32(raw, kContainersAt);
+    const bool fixed = bytes::u32At(raw, kVersionAt) == kVersion && bytes::u32At(raw, kSlotsRelAt) == kSlotsRel;
+    const bool noContainers = bytes::u32At(raw, kOneAt) == 1 && !bytes::u32At(raw, kContainersAt);
     return fixed && noContainers;
 }
 
@@ -112,11 +112,11 @@ inline bool rehash(const std::unordered_map<uint32_t, const std::string*>& names
 inline bool load(const std::string& raw, Dict& d)
 {
     if (!detail::headerOk(raw)) return false;
-    const uint32_t ns = bytes::le32(raw, detail::kSlotsAt);
+    const uint32_t ns = bytes::u32At(raw, detail::kSlotsAt);
     if (!ns || detail::kHeader + (uint64_t)detail::kSlotBytes * ns > raw.size()) return false;
-    d.initval = bytes::le32(raw, detail::kSeedAt);
+    d.initval = bytes::u32At(raw, detail::kSeedAt);
     d.keys.clear();
-    auto rel = [&](uint32_t slot) { return bytes::le32(raw, detail::kHeader + detail::kSlotBytes * slot + 4); };
+    auto rel = [&](uint32_t slot) { return bytes::u32At(raw, detail::kHeader + detail::kSlotBytes * slot + 4); };
     uint32_t empty = 0;   // slots > keys, so there is one
     while (empty < ns && rel(empty)) ++empty;
     if (empty == ns) return false;
@@ -127,7 +127,7 @@ inline bool load(const std::string& raw, Dict& d)
         const size_t p = detail::kHeader + detail::kSlotBytes * (size_t)i + detail::kSlotValueAt + 1 + r;
         const size_t end = raw.find('\0', p);
         if (p >= raw.size() || end == std::string::npos) return false;
-        d.keys.emplace_back(bytes::le32(raw, detail::kHeader + detail::kSlotBytes * i), raw.substr(p, end - p));
+        d.keys.emplace_back(bytes::u32At(raw, detail::kHeader + detail::kSlotBytes * i), raw.substr(p, end - p));
     }
     return true;
 }
@@ -181,14 +181,14 @@ inline bool hashes(const std::string& raw, std::unordered_set<uint32_t>& out)
     return true;
 }
 
-// raw plus raw10's keys (named by ids10) that neither raw nor have answers -> keys added; -1: no table.
-inline int supplement(std::string& raw, const std::string& raw10, const std::string& ids10,
+// raw plus other's keys (named by otherIds) that neither raw nor have answers -> keys added; -1: no table.
+inline int supplement(std::string& raw, const std::string& other, const std::string& otherIds,
                       const std::unordered_set<uint32_t>& have)
 {
     // 1.0 loaded lang/main for every playset; 3,154 of 9,467 named english keys are in no 3.0 table
     Dict d, s, ids;
     if (!load(raw, d) || d.initval != SEED30) return -1;
-    if (!load(raw10, s) || !load(ids10, ids)) return -1;
+    if (!load(other, s) || !load(otherIds, ids)) return -1;
     std::unordered_set<uint32_t> own;
     for (const auto& k : d.keys) own.insert(k.first);
     const auto names = detail::namesByHash(ids);

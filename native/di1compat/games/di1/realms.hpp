@@ -307,8 +307,8 @@ inline std::string uuid(const std::string& seed, int k)
     for (unsigned char c : seed) uuidStep(h1, h2, c);
     for (int q = 0; q < 4; ++q) uuidStep(h1, h2, (uint8_t)(k >> (8 * q)));
     std::string id(16, '\0');
-    bytes::setLe64(id, 0, h1);
-    bytes::setLe64(id, 8, h2);
+    bytes::put64(id, 0, h1);
+    bytes::put64(id, 8, h2);
     return id;
 }
 

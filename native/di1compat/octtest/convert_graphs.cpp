@@ -8,7 +8,10 @@
 #include <vector>
 #include "../games/di1/cho.hpp"
 #include "../formats/btd.hpp"
-#include "../gameplay.hpp"
+#include "../games/di1/activities.hpp"
+#include "../games/di1/challenges.hpp"
+#include "../games/di1/surfaces.hpp"
+#include "../games/di1/toolset.hpp"
 #include "../games/di1/bent.hpp"
 #include "../games/di1/btd.hpp"
 #include "../games/di1/zones.hpp"
@@ -17,7 +20,8 @@
 #include "../games/di1/navmesh.hpp"
 #include "../games/di1/skin.hpp"
 #include "../third_party/miniz/miniz.h"
-#include "../ui.hpp"
+#include "../formats/bndl.hpp"
+#include "../games/di1/ui.hpp"
 #include "files.hpp"
 #include "modes.hpp"
 #include "plugin.hpp"
@@ -63,29 +67,29 @@ using ChallengeFn = int (*)(std::string& t, const std::string& beacons10, std::s
 
 int challengeTypes(std::string& t, const std::string&, std::string& o)
 {
-    int k = gameplay::challengeTypes30(t);
+    int k = di1::challenges::challengeTypes30(t);
     o = t;
     return k;
 }
 int challengeBeacons(std::string& t, const std::string& beacons10, std::string& o)
 {
-    int k = gameplay::beacons30(t, beacons10);
+    int k = di1::challenges::beacons30(t, beacons10);
     o = t;
     return k;
 }
 int challengeZoneList(std::string& t, const std::string&, std::string& o)
 {
-    int k = gameplay::zonelist30(t);
+    int k = di1::challenges::zonelist30(t);
     o = t;
     return k;
 }
 int challengeAp(std::string& t, const std::string&, std::string& o)
 {
-    int k = gameplay::apGivers30(t);
+    int k = di1::activities::apGivers30(t);
     o = t;
     return k;
 }
-int challengeDna(std::string& t, const std::string&, std::string& o) { return gameplay::dnaGadgets30(t, o); }
+int challengeDna(std::string& t, const std::string&, std::string& o) { return di1::activities::dnaGadgets30(t, o); }
 
 struct ChallengeKind {
     const char* kind;
@@ -110,7 +114,7 @@ void activityMer(const mer::Table& T, const fs::path& in, const fs::path& outDir
 {
     std::string t = slurp(in), name = in.filename().string();
     oct::File f = parse(t);
-    int re = 0, dr = 0, k = gameplay::activityGraph30(f, &re, &dr);
+    int re = 0, dr = 0, k = di1::activities::activityGraph30(f, &re, &dr);
     if (!k) {
         printf("mer %-52s unchanged\n", name.c_str());
         return;
@@ -130,11 +134,11 @@ void activityAp(const fs::path& in, const fs::path& outDir)
     std::string t = slurp(in), name = in.filename().string();
     fs::path dir = in.parent_path();
     std::string graph = slurp(dir / (in.stem().string() + ".lua"));
-    auto ok = gameplay::activityGivers(graph, [&dir](const std::string& n, std::string& o) {
+    auto ok = di1::activities::activityGivers(graph, [&dir](const std::string& n, std::string& o) {
         o = slurp(dir / text::lower(n + ".lua"));
         return !o.empty();
     });
-    int k = gameplay::apGivers30(t, &ok);
+    int k = di1::activities::apGivers30(t, &ok);
     writeFile(outDir / name, t);
     printf("ap  %-52s %d givers redirected:", name.c_str(), k);
     for (auto& g : ok) printf(" %s", g.c_str());
@@ -234,7 +238,7 @@ int convertMer(const Args& a)
     return 0;
 }
 
-// Activity missions -> challenge (gameplay.hpp): .mer graphs, mission .lua tasks, missiongraph .ap givers.
+// Activity missions -> challenge (games/di1/activities.hpp): .mer graphs, mission .lua tasks, missiongraph .ap givers.
 int convertActivity(const Args& a)
 {
     mer::Table T;
@@ -249,7 +253,7 @@ int convertActivity(const Args& a)
             activityMer(T, in, outDir);
         } else if (in.extension() == ".lua") {
             std::string t = slurp(in);
-            int k = gameplay::activityTasks30(t);
+            int k = di1::activities::activityTasks30(t);
             if (k) writeFile(outDir / in.filename(), t);
             printf("lua %-52s %d\n", in.filename().string().c_str(), k);
         } else if (in.extension() == ".ap") {
@@ -259,7 +263,7 @@ int convertActivity(const Args& a)
     return 0;
 }
 
-// gameplay.hpp's activity -> challenge transforms by file kind (challenge.py checks the outputs).
+// The activity -> challenge transforms by file kind (challenge.py checks the outputs).
 int convertChallenge(const Args& a)
 {
     std::string beacons10;   // a ChallengeData.lua needs the 1.0 beacons file given before it
@@ -296,7 +300,7 @@ int convertZones10(const Args& a)
     Zones z;
     if (!zones10(a.argv[2], a.argv[3], opt, z)) return 1;
     if (opt != "only") {
-        int k = gameplay::zonelist30(z.t), ka = 0, kb = di1::mission::beaconMap30(z.t, &ka);
+        int k = di1::challenges::zonelist30(z.t), ka = 0, kb = di1::mission::beaconMap30(z.t, &ka);
         printf("zonelist30 %d records, beaconMap30 %d rows (+%d)\n", k, kb, ka);
     }
     writeFile(a.argv[4], z.t);
@@ -317,7 +321,7 @@ int convertMenu(const Args& a)
         ok = !in.empty();
     }
     if (!ok) return 1;
-    std::string out = ui::playsetMenu10(in, z.list);
+    std::string out = di1::ui::playsetMenu10(in, z.list);
     printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
     writeFile(a.argv[2], out);
     return 0;
@@ -331,7 +335,7 @@ int convertSurf(const Args& a)
     for (int i = 3; i < a.argc; ++i) {
         std::string b = slurp(a.argv[i]);
         oct::File f = parse(b);
-        if (int n = gameplay::surfaces30(f, names30)) printf("%s: %d shapes remapped\n", a.argv[i], n);
+        if (int n = di1::surfaces::surfaces30(f, names30)) printf("%s: %d shapes remapped\n", a.argv[i], n);
     }
     return 0;
 }
@@ -340,12 +344,12 @@ int convertSurf(const Args& a)
 int convertTools(const Args& a)
 {
     std::string b = slurp(a.argv[2]);
-    auto t = gameplay::toolLevels10((const uint8_t*)b.data(), b.size());
+    auto t = di1::toolset::toolLevels10((const uint8_t*)b.data(), b.size());
     int listed = 0;
     for (auto& kv : t) listed += !kv.second.empty();
     printf("%u tools, %d with a level list; with a list allowing %s:", (unsigned)t.size(), listed, a.argv[3]);
     for (auto& kv : t)
-        if (!kv.second.empty() && gameplay::levelAllows(kv.second, a.argv[3])) printf(" %s", kv.first.c_str());
+        if (!kv.second.empty() && di1::toolset::levelAllows(kv.second, a.argv[3])) printf(" %s", kv.first.c_str());
     printf("\n");
     return 0;
 }
@@ -430,7 +434,7 @@ int convertBent(const Args& a)
     return 0;
 }
 
-// ui::texBundleAs: a texture-only bundle renamed to the output's name.
+// bndl::texBundleAs: a texture-only bundle renamed to the output's name.
 int convertTexName(const Args& a)
 {
     std::string o = a.argv[3], name = o.substr(o.find_last_of("/\\") + 1);
@@ -439,7 +443,7 @@ int convertTexName(const Args& a)
         return kUsageError;
     }
     name.resize(name.size() - kExtLen);
-    std::string t = ui::texBundleAs(slurp(a.argv[2]), name);
+    std::string t = bndl::texBundleAs(slurp(a.argv[2]), name);
     if (t.empty()) {
         printf("not a texture-only bundle\n");
         return 1;

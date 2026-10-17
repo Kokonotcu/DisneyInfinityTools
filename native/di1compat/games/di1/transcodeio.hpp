@@ -7,6 +7,7 @@
 #include "../../engine/assets.hpp"
 #include "../../engine/langkeys.hpp"
 #include "../../engine/surfaces.hpp"
+#include "chan.hpp"
 #include "choalias.hpp"
 #include "config.hpp"
 #include "gamedb.hpp"
@@ -33,6 +34,7 @@ struct State {
     Config cfg;                          // set once in install()
     std::mutex sparkMx;                  // guards spark; not held across the read
     std::map<std::string, bool> spark;   // currency10: DNA path -> pays sparks; never cleared
+    chan::Roles roles;                   // vfxchan10: shader roles, guarded by its own mx; never cleared
 };
 inline State g_state;
 
@@ -92,7 +94,10 @@ inline TranscodeIO io()
     t.renderProblem = [](const std::string& p, const std::string& pr) {
         core::logf("render problem %s: %s", p.c_str(), pr.c_str());
     };
-    if (c.vfxChan10) t.particleShaders = render10::particleShaders;
+    if (c.vfxChan10) {
+        t.particleShaders = render10::particleShaders;
+        t.roles = &detail::g_state.roles;
+    }
     if (c.currency10) t.isSpark = detail::isSpark10;
     t.dataMapEntry = detail::dataMapEntry10;
     return t;

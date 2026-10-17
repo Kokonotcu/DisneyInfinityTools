@@ -1,6 +1,7 @@
 # Unattended in-game test: boot 3.0, travel to a zone with a character, run Lua probes, screenshot, quit.
 #   powershell -File harness.ps1 [-Zone OUT_Intro2] [-Sku 1000206] [-Probe a.lua,b.lua] [-Keep] [-Attach]
 #                                [-MenuProbe m.lua] [-MenuOnly]   (probes in the main menu; MenuOnly stops there)
+#                                [-Out <dir>]   screenshots (default: $env:DI_HARNESS_OUT, else harness-shots\ here)
 # Needs CrabeLoader 1.1.0 (dinput8.dll + CrabeLoader.asi next to the exe), built from tag v1.1.0 with
 # crabe\crabeloader-no-guards.patch (engine guards off): it runs
 # <game>\crabe_remote_cmd.txt in the game Lua state and logs the result to loader.log as '= ...' / '! ...'.
@@ -18,8 +19,10 @@
 param([string]$Zone = 'OUT_Intro2', [int]$Sku = 1000206, [string[]]$Probe = @(), [string[]]$MenuProbe = @(), [switch]$MenuOnly,
       [switch]$Keep, [switch]$Attach, [int]$BootTimeout = 300, [int]$LoadTimeout = 180, [int]$Settle = 3, [int]$AfterProbe = 0,
       [string]$Game = 'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition',
-      [string]$Out = "$env:TEMP\di3harness")
+      [string]$Out = '')
 $ErrorActionPreference = 'Stop'
+# Screenshots stay off %TEMP%: they filled the system drive there
+if (-not $Out) { $Out = if ($env:DI_HARNESS_OUT) { $env:DI_HARNESS_OUT } else { Join-Path $PSScriptRoot 'harness-shots' } }
 $cmd = Join-Path $Game 'crabe_remote_cmd.txt'; $loader = Join-Path $Game 'loader.log'; $pent = Join-Path $Game 'pentane.log'
 New-Item -ItemType Directory -Force $Out | Out-Null
 

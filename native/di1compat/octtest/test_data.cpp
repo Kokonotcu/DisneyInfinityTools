@@ -10,7 +10,9 @@
 #include "../formats/chd.hpp"
 #include "../formats/dct.hpp"
 #include "../formats/gamedblua.hpp"
-#include "../gameplay.hpp"
+#include "../games/di1/activities.hpp"
+#include "../games/di1/curves.hpp"
+#include "../games/di1/surfaces.hpp"
 #include "../games/di1/mission.hpp"
 #include "../base/text.hpp"
 #include "../third_party/miniz/miniz.h"
@@ -142,19 +144,19 @@ std::string gpChange(const char* kind, std::string& t, const GpScan& s)
     const bool chunk = !t.empty() && t[0] == kLuaChunk;
     if (!strcmp(kind, "oct") && isTuple(t)) {
         oct::File f = parse(t);
-        int fl = 0, cv = gameplay::curves30(f, &fl), sf = gameplay::surfaces30(f, s.names30);
+        int fl = 0, cv = di1::curves::curves30(f, &fl), sf = di1::surfaces::surfaces30(f, s.names30);
         if (cv || fl || sf)
             return "curves " + std::to_string(cv) + " flags " + std::to_string(fl) + " surf " + std::to_string(sf);
     } else if (!strcmp(kind, "mer") && isTuple(t)) {
         oct::File f = parse(t);
-        if (int k = gameplay::activityGraph30(f)) return "activity nodes " + std::to_string(k);
+        if (int k = di1::activities::activityGraph30(f)) return "activity nodes " + std::to_string(k);
     } else if (!strcmp(kind, "ap")) {
-        if (int k = gameplay::apGivers30(t)) return "givers " + std::to_string(k);
+        if (int k = di1::activities::apGivers30(t)) return "givers " + std::to_string(k);
     } else if (!strcmp(kind, "dnax") && chunk) {
         std::string o;
-        if (int k = gameplay::dnaGadgets30(t, o)) return "gadgets " + std::to_string(k);
+        if (int k = di1::activities::dnaGadgets30(t, o)) return "gadgets " + std::to_string(k);
     } else if (!strcmp(kind, "lua") && !t.empty() && !chunk) {
-        if (int k = gameplay::activityTasks30(t)) return "tasks " + std::to_string(k);
+        if (int k = di1::activities::activityTasks30(t)) return "tasks " + std::to_string(k);
     }
     return "";
 }
@@ -273,8 +275,8 @@ int testMissionChain(const Args& a)
     int both = 0, bad = 0;
     for (int i = 2; i < a.argc; ++i) {
         std::string t = slurp(a.argv[i]), x = t, y = t;
-        int a1 = gameplay::activityTasks30(x), e1 = isMission(x) ? di1::mission::luaEvents30(x) : 0;
-        int e2 = isMission(y) ? di1::mission::luaEvents30(y) : 0, a2 = gameplay::activityTasks30(y);
+        int a1 = di1::activities::activityTasks30(x), e1 = isMission(x) ? di1::mission::luaEvents30(x) : 0;
+        int e2 = isMission(y) ? di1::mission::luaEvents30(y) : 0, a2 = di1::activities::activityTasks30(y);
         if (x != y || a1 != a2 || e1 != e2) {
             ++bad;
             printf("ORDER MATTERS %s\n", a.argv[i]);

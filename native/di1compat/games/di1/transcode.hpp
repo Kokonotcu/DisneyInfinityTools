@@ -68,6 +68,7 @@ struct TranscodeIO {
     std::function<void(const std::string& path, const std::string& bytes)> keep;   // the engine reopens bundles
     std::function<void(const std::string& path, const std::string& problem)> renderProblem;   // logged per problem
     std::function<Shaders(const std::string& path, std::string& note)> particleShaders;   // vfxchan10
+    chan::Roles* roles = nullptr;   // vfxchan10: the shader roles found so far, kept by the caller
     std::function<bool(const std::string& dnaFile)> isSpark;   // currency10: does a 1.0 DNA pay sparks?
     std::function<void(const std::string& entry)> dataMapEntry;   // each DataMap entry before it is normalised
 };
@@ -536,12 +537,13 @@ inline Verdict particles(Request& r)
 {
     vfx::Stats st;
     vfx::ChanMap cm;
-    Shaders shaders = r.io.particleShaders ? r.io.particleShaders(r.np, r.note) : Shaders();
+    const bool relay = r.io.particleShaders && r.io.roles;
+    Shaders shaders = relay ? r.io.particleShaders(r.np, r.note) : Shaders();
     const TranscodeIO& io = r.io;
     if (!shaders.empty())
         cm = [&shaders, &io](uint16_t mat, int n10, std::vector<int>& chans) {
             if (mat >= shaders.size()) return false;
-            return chan::layout({io.read10, io.read30x}, shaders[mat], n10, chans);
+            return chan::layout(*io.roles, {io.read10, io.read30x}, shaders[mat], n10, chans);
         };
     if (!vfx::transcode(std::string((const char*)r.data, r.n), r.out, &st, &cm)) return kRaw;
     r.note += "+particles(" + std::to_string(st.emitters) + " emitters, " + std::to_string(st.effects) + " effects, " +

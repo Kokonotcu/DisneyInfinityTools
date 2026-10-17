@@ -53,7 +53,7 @@ constexpr ModeRow kModes[] = {
     {"--arc", 3, octtest::testArc, Job::Test, "<render table> <game dir> <3.0 extract>: arc30 reads"},
     {"--vfxchan", 2, octtest::testVfxChan, Job::Test, "<1.0 extract> <3.0 extract>: chan::layout against 3.0"},
     {"--groups30", 2, octtest::convertGroups30, Job::Convert, "<out dir> <1.0 package.lua>...: sys::groups30"},
-    {"--currency10", 1, octtest::convertCurrency10, Job::Convert, "<1.0 zonelist.lua>: gameplay::currencies10"},
+    {"--currency10", 1, octtest::convertCurrency10, Job::Convert, "<1.0 zonelist.lua>: di1::currencies10"},
     {"--sxkeys", 2, octtest::convertSxKeys, Job::Convert, "<names file> <out.tsv>: sx::keyId (keycheck.py)"},
     {"--ai", 3, octtest::convertAi, Job::Convert, "<out dir> <1.0 characters> <1.0 scripts>: BMX-1 / BTX-1"},
     {"--sx", 2, octtest::convertSx, Job::Convert, "<out dir> <dir>...: SX-1 and sx's tables (sxcheck.py)"},

@@ -24,16 +24,16 @@ inline bool dctLookup(const std::string& t, const std::string& key, std::string&
 {
     namespace d = dct::detail;
     if (t.size() < d::kHeader) return false;
-    const uint32_t ns = bytes::le32(t, d::kSlotsAt);
+    const uint32_t ns = bytes::u32At(t, d::kSlotsAt);
     if (!ns || (uint64_t)ns * d::kSlotBytes > t.size() - d::kHeader) return false;
     const std::string k = text::lower(key);
-    const uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::le32(t, d::kSeedAt));
+    const uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::u32At(t, d::kSeedAt));
     uint32_t i = h % ns;
     for (uint32_t n = 0; n < ns; ++n, i = (i + 1) % ns) {   // lower-cased key, linear from hash % slots
         const size_t slot = d::kHeader + d::kSlotBytes * i;
-        const int32_t rel = (int32_t)bytes::le32(t, slot + d::kSlotValueAt);
+        const int32_t rel = (int32_t)bytes::u32At(t, slot + d::kSlotValueAt);
         if (!rel) return false;   // an empty slot ends the probe
-        if (bytes::le32(t, slot) != h) continue;
+        if (bytes::u32At(t, slot) != h) continue;
         const int64_t at = (int64_t)(slot + d::kSlotValueAt + 1) + rel;   // a rel counts from its field + 1
         if (at < 0 || at >= (int64_t)t.size()) return false;
         value = t.c_str() + at;

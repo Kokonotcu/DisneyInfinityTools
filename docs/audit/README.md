@@ -7,24 +7,69 @@ changing behaviour, what could break, and whether the fix is a pure refactor or 
 
 Audited at commit `684539b` (master, clean). CrabeLoader was compared at v1.0.0 `2928d52` and 1.1.0-dev `a780daa`.
 
-## Applied so far (2026-10-16, uncommitted)
+## Fix pass status (2026-10-17)
 
-The owner approved these changes after the audit. They are in the working tree, not committed.
+The fix pass is merged on the `refactor` branch. Each lane kept the golden baseline (`golden.py check`: 0
+differences); a behaviour change went in only with the owner's approval, in its own commit. Line numbers in the area
+files below refer to `684539b`: the code has since moved into the layout of `CLAUDE.md`.
 
-- **Defaults.** `trace` and `lockTrace10` now default to off. `hkInst` stays under `trace` (owner's choice).
-- **A-36.** The watchpoint handler's stack walk stops where memory stops being readable.
-- **Comment fix.** The wrong "Pentane ends the game" comment is corrected.
-- **X-11 / B-05 / GP-41, all-or-nothing hooks.** `installFeature` (di1compat.cpp) checks every prologue of a feature before installing any of them.
-  - A refused AssetOpen installs nothing else.
-  - caprt calls the render-shutdown original only when it is hooked.
-  - Proof: all 149 hook rows (name, address, prologue, detour, original) are unchanged and install in the same order. A runtime test passes 4/4.
-- **X-07 and the damaged-input findings.** Each now fails cleanly through the existing path (logged reason, raw 1.0 file served).
-  - Codecs (CO-05/07/15/16/26, NP-N1): 110,443 1.0 files identical; 9 damaged cases fixed.
-  - Graphs (GR-06/07/16/17/33/39/N1): 726,611 result lines identical; every damaged case fixed.
-  - Data, scripts and audio (NP-02/03/04, SX-13, SY-07, AU-25, GP-20/21): identical on every input; every damaged case fixed.
-  - Render (RE-05/18/19/20/21/22/23/48, A-26): worlds, shaders, SM3 and particles identical, and material bundles identical on a 2,030-file sample. The damaged-input tests were not run (the agent was stopped), so these fixes are checked by code reading only.
-- **New shared files.** `base/bytes.hpp` (overflow-safe bounds check) and `core/hooks.hpp` (hook row type).
-- **Python.** 11 tools removed; see [python-tools.md](python-tools.md).
+**Phases.** Done: 0 (safety net), 1 (shared helpers), 2 (structure), 3 (god functions), 5 (approved decisions), 6
+(Python, CI, CrabeLoader v1.1.0). Phase 4: the measured hoists and caches are in; lock-scope changes wait for a game run.
+
+**Lanes** (`git log --first-parent 23514ce..refactor`):
+
+| Lane | Work | Audit IDs |
+|---|---|---|
+| tools | Python oracles fixed, CI builds both targets, `/W4` | OT-28 (part), OT-31, OT-33..36, decision 9 |
+| core1 | log, hooks, config table, lock order, memory checks into `core/` | X-01, X-02, X-09, X-12, A-13, A-28, A-49, SY-02 |
+| net | `golden.py` | X-13, OT-08, OT-18, OT-22, OT-27 |
+| core2 | the 1.0 transcode pipeline in `games/di1`, run by octtest too | A-02, A-22, A-23, OT-07, OT-09..13, CO-06 |
+| codecs | codecs into `formats/` and `convert/` | CO-01, CO-03, CO-04, CO-13 (part), CO-32, CO-36, GR-11 (part), X-06, X-07 |
+| render | render, shader and particle code | RE-03/04/06/07, RE-10/14/15, RE-25..32 |
+| core3 | hook tables, `install()`, `engine/` and `trace/` modules, hkOpen stages | X-03, X-04, B-01, B-02, GP-01 |
+| graphs | cho, mer, mernode, mission | GR-01/02/04/05/08/10/11/14/29 |
+| core4 | `di1compat.cpp` is the Pentane entry only | A-01, A-04, B-01 |
+| octtest | octtest as a mode table split by job | OT-01/05/06/15/21/23/25/26 |
+| audio | FMOD host, VO and music into `engine/audio` and `games/di1` | AU-01/02/03, AU-17, AU-20 |
+| scripts | sx, sys, npc, npcrt | SX-01/05, SY-01/02/05, NP-10, NR-03/09 |
+| gameplay | gameplay, ui, gprt, bldrt, caprt, vfxrt | GP-02..05, GP-12, GP-23, RE-32/35/37 |
+| decisions | the approved A items below | A-12, A-35, A-37, A-38 |
+| final | root forwarding headers removed, `base/` helpers merged, whole-tree rule sweep, Release PDB | X-06, OT-23, OT-29 |
+
+**Owner-approved behaviour changes applied.**
+- Before the lanes: `trace` and `lockTrace10` default off (`hkInst` stays under `trace`); A-36; all-or-nothing hook
+  features (X-11, B-05, GP-41); damaged 1.0 input fails cleanly (X-07 and the IDs in its area files); 11 Python tools
+  removed ([python-tools.md](python-tools.md)).
+- A-06: `renderdoc10` and `hide_ps` work without their diagnostic switch.
+- A-12: a 1.0 archive whose open failed transiently is retried. A-35: the first 10 access violations are logged.
+- A-37: text that does not fit its buffer is cut, not a fail-fast. A-38: asset defs are built with no lock held.
+- AU-42: audio's x131 hash sign-extends like the engine. AU-30: a reused FMOD handle no longer stops the newer play.
+- OT-02/03/04/24: octtest usage text, exit codes and bad-input handling.
+
+**Still open.**
+- BEHAVIOUR-CHANGE findings not approved, NR-01 first: `prepare()` deletes `g_db` before building its replacement
+  (rulecheck's only whole-tree finding). Others such as CO-24 and CO-28 are in the area files.
+- Timing changes that need a game run first: the lock scopes of B-07, RE-39, RE-N1, A-11, NR-02, AU-06/07/18, and
+  the rest of CO-13.
+- Build changes that change code bytes: `/permissive-` (OT-28), LTCG (OT-30), one CRT for octtest (OT-31/32).
+- `trace/start.hpp` is shared by two trace modules (M1); fixing it needs `golden.py` to read hook rows from a function.
+
+**In-game checklist.** What the lanes could not prove offline. Compare with a `di1compat.log` from before the
+refactor:
+1. `shaders10`: the `linked ...` and `shader linking deferred ...` lines; translated shaders draw.
+2. Cutscene sound stays in sync (cinesync).
+3. GameDB: the include hook, and the unload when a zone is left.
+4. `avperc10`: its two lines and the per-zone list line.
+5. Slang linker: the `sx link` line's counts.
+6. `spawner10`, `skin10`: their lines; the quarterback spawns; skinned 1.0 models draw.
+7. Meridian: `meridian native: n of n classes registered`.
+8. UI: Tab and SelectMenu (the `ribbon:` lines), the Toy Store.
+9. Catalog text keys show their text.
+10. Cape and hoverboard work.
+11. Capsules appear at a distance.
+12. `building10`: buildings stand on their lots.
+13. `universal10` particles (`vfx: 1.0 universal package ...`).
+14. CORE4's three narrowed lock scopes (merge `11ab5e7`): a zone loads and plays with no stall.
 
 ## How this was produced
 

@@ -452,8 +452,8 @@ int checkOverlap(const VoLine& v)
         std::lock_guard<std::recursive_mutex> l(g_sys.mx);
         cAlive = g_host.plays.count(c) && g_host.plays[c].ev;
     }
-    printf("PLAY overlap: old id %u ended %d time(s), new"   // split: rulecheck's N19 matches the word 'new'
-           " id %u %s\n", a, state.voEnds - endsBefore, c, cAlive ? "still playing" : "ENDED");
+    printf("PLAY overlap: old id %u ended %d time(s), new id %u %s\n", a, state.voEnds - endsBefore, c,
+           cAlive ? "still playing" : "ENDED");
     return state.voEnds - endsBefore != 1 || !cAlive;
 }
 

@@ -292,8 +292,8 @@ struct Compiler {
             const uint32_t t = typeCode(x.t);
             const uint32_t w = es[k].first ? (keyAt[*es[k].first] | t << 24) : (kArrayKey | (t | kArrayItem) << 24);
             const uint32_t val = value(x);   // a nested table appends after this one's entries
-            bytes::setLe32(data, at + 4 + 8 * k, w);
-            bytes::setLe32(data, at + 8 + 8 * k, val);
+            bytes::put32(data, at + 4 + 8 * k, w);
+            bytes::put32(data, at + 8 + 8 * k, val);
         }
         return at;
     }
@@ -307,15 +307,15 @@ inline std::string compile(const V& tree)
     detail::Compiler c;
     const std::string kt = detail::namePool(keys, c.keyAt), st = detail::namePool(strs, c.strAt);
     c.data.assign(8, '\0');
-    bytes::setLe32(c.data, 0, detail::kRootEntry);
-    bytes::setLe32(c.data, 4, 8);
+    bytes::put32(c.data, 0, detail::kRootEntry);
+    bytes::put32(c.data, 4, 8);
     c.table(tree);
     const size_t strings = detail::kHeaderSize + kt.size(), pad = (4 - (strings + st.size()) % 4) % 4;
     const uint32_t h[8] = {detail::kMagic, detail::kVersion, detail::kHeaderSize, (uint32_t)kt.size(),
                            (uint32_t)strings, (uint32_t)st.size(), (uint32_t)(strings + st.size() + pad),
                            (uint32_t)c.data.size()};
     std::string head(32, '\0');
-    for (size_t k = 0; k < 8; ++k) bytes::setLe32(head, 4 * k, h[k]);
+    for (size_t k = 0; k < 8; ++k) bytes::put32(head, 4 * k, h[k]);
     return head + kt + st + std::string(pad, '\0') + c.data;
 }
 

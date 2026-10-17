@@ -163,6 +163,7 @@ bool renderWorld(const rentable::Table& T, const render::IO& io, const fs::path&
 struct PdChannels {
     chan::Read r10, r30;
     std::vector<std::pair<std::string, std::string>> shaders;   // per material: 1.0 and 3.0 shader
+    chan::Roles roles;
 };
 
 // argv[4..7]: render table, extract roots, the package's engine path. 0, or the mode's exit code.
@@ -258,7 +259,7 @@ int convertPd(const Args& a)
     if (a.argc > 7 && vfx::isPd10(in)) {
         if (int e = pdBundle(a, pc)) return e;
         cm = [&pc](uint16_t mat, int n10, std::vector<int>& chans) {
-            return mat < pc.shaders.size() && chan::layout({pc.r10, pc.r30}, pc.shaders[mat], n10, chans);
+            return mat < pc.shaders.size() && chan::layout(pc.roles, {pc.r10, pc.r30}, pc.shaders[mat], n10, chans);
         };
     }
     bool ok = vfx::isPd10(in) ? vfx::transcode(in, out, &st, &cm) : vfx::p3d30(in, out);

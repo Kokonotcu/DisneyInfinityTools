@@ -284,13 +284,13 @@ void scoreLayout(Tally& c, const std::string& name, const PdEmitter& x, const st
 }
 
 // One emitter whose shader differs between the games: chan::layout's channels and the 1.0 ones kept.
-void vfxEmitter(Tally& c, const chan::Read& r10, const chan::Read& r30, const PdEmitter& x, const PdEmitter& y)
+void vfxEmitter(Tally& c, chan::Roles& roles, const chan::Reads& io, const PdEmitter& x, const PdEmitter& y)
 {
     std::vector<int> ours, verb;
     for (int i = 0; i < (int)x.keys.size(); ++i) verb.push_back(i);
-    if (!chan::layout({r10, r30}, {x.shader, y.shader}, (int)x.keys.size(), ours)) {
-        std::vector<char> ra = chan::shaderRoles(r10, x.shader, chan::kGame10);
-        std::vector<char> rb = chan::shaderRoles(r30, y.shader, chan::kGame30);
+    if (!chan::layout(roles, io, {x.shader, y.shader}, (int)x.keys.size(), ours)) {
+        std::vector<char> ra = chan::shaderRoles(roles, io.read10, x.shader, chan::kGame10);
+        std::vector<char> rb = chan::shaderRoles(roles, io.read30, y.shader, chan::kGame30);
         if (ra.empty() || rb.empty()) {
             ++c["  no channel roles (layout kept)"];
             return;
@@ -372,11 +372,12 @@ int testVfxChan(const Args& a)
     chan::Read r10 = readerAt(e10), r30 = reader30At(e30);
     const Emitters A = extractEmitters(e10, false), B = extractEmitters(e30, true);
     Tally c;
+    chan::Roles roles;
     for (auto& [h, x] : A) {
         auto y = B.find(h);
         if (y == B.end() || x.shader.empty()) continue;
         const bool sameShader = y->second.shader.empty() || x.shader == y->second.shader;
-        if (!sameShader) vfxEmitter(c, r10, r30, x, y->second);
+        if (!sameShader) vfxEmitter(c, roles, {r10, r30}, x, y->second);
     }
     printTally(c, 7);
     return 0;

@@ -210,9 +210,9 @@ std::string editedHeader(const CountsFile& cf, const Edited& e, size_t added, si
     std::string hdr = cf.f.hdr;
     const size_t namesSize = cf.namesEnd - oct::HDR + added;
     const size_t recs = cf.f.recs.size() - (e.last - e.first) + e.g.recs.size();
-    bytes::setLe32(hdr, oct::kNamesSizeAt, (uint32_t)namesSize);
-    bytes::setLe32(hdr, oct::kDataSizeAt, (uint32_t)(len - oct::HDR - namesSize));
-    bytes::setLe32(hdr, oct::kRecordCountAt, cf.f.recordCount == 0 ? 0u : (uint32_t)recs);
+    bytes::put32(hdr, oct::kNamesSizeAt, (uint32_t)namesSize);
+    bytes::put32(hdr, oct::kDataSizeAt, (uint32_t)(len - oct::HDR - namesSize));
+    bytes::put32(hdr, oct::kRecordCountAt, cf.f.recordCount == 0 ? 0u : (uint32_t)recs);
     return hdr;
 }
 

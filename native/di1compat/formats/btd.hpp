@@ -23,8 +23,8 @@ inline std::vector<std::pair<size_t, size_t>> blocks(const std::string& b, const
     std::vector<std::pair<size_t, size_t>> out;
     for (size_t o = 0; bytes::fits(b.size(), o, kBlockHeader);) {
         // 64-bit: as size_t, a damaged offset or count wraps to an end that passes the check (CO-07)
-        const uint64_t arrayAt = (uint64_t)o + bytes::le32(b, o + layout.arrayAt);
-        const uint64_t end = arrayAt + 4ull * bytes::le32(b, o + layout.countAt);
+        const uint64_t arrayAt = (uint64_t)o + bytes::u32At(b, o + layout.arrayAt);
+        const uint64_t end = arrayAt + 4ull * bytes::u32At(b, o + layout.countAt);
         if (!(o < end && end <= b.size())) return {};
         out.push_back({o, (size_t)end});
         o = ((size_t)end + kBlockAlign - 1) & ~(kBlockAlign - 1);
@@ -37,11 +37,11 @@ inline std::string btm(const std::string& btd3)
 {
     const auto bl = blocks(btd3, kLayout30);
     std::string r(8 + 8 * bl.size(), '\0');
-    bytes::setLe32(r, 0, kBtmMagic);
-    bytes::setLe32(r, 4, (uint32_t)bl.size());
+    bytes::put32(r, 0, kBtmMagic);
+    bytes::put32(r, 4, (uint32_t)bl.size());
     for (size_t k = 0; k < bl.size(); ++k) {
-        bytes::setLe32(r, 8 + 8 * k, (uint32_t)bl[k].first);
-        bytes::setLe32(r, 12 + 8 * k, kBtmBlockWord);
+        bytes::put32(r, 8 + 8 * k, (uint32_t)bl[k].first);
+        bytes::put32(r, 12 + 8 * k, kBtmBlockWord);
     }
     return r;
 }
