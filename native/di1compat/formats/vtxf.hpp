@@ -18,14 +18,16 @@ namespace vtxf {
 
 // A vertex element type (vtxf.TYPES): struct code, components, bytes each, normalisation divisor (0: none)
 struct ElementType { char code; int n, csize; double norm; };
+constexpr char kFloat32 = 'f', kFloat16 = 'e', kUint8 = 'B', kInt16 = 'h', kUint16 = 'H';   // Python struct codes
 
 inline bool elementType(const std::string& t, ElementType& v)
 {
     struct Named { const char* name; ElementType type; };
     static constexpr Named kTypes[] = {
-        {"FLOAT16_2", {'e', 2, 2, 0}}, {"FLOAT16_4", {'e', 4, 2, 0}}, {"FLOAT32_2", {'f', 2, 4, 0}},
-        {"FLOAT32_3", {'f', 3, 4, 0}}, {"FLOAT32_4", {'f', 4, 4, 0}}, {"S16_4_NORMALIZED", {'h', 4, 2, 32767.0}},
-        {"U16_2", {'H', 2, 2, 0}}, {"U8_4", {'B', 4, 1, 0}}, {"U8_4_NORMALIZED", {'B', 4, 1, 255.0}}};
+        {"FLOAT16_2", {kFloat16, 2, 2, 0}}, {"FLOAT16_4", {kFloat16, 4, 2, 0}}, {"FLOAT32_2", {kFloat32, 2, 4, 0}},
+        {"FLOAT32_3", {kFloat32, 3, 4, 0}}, {"FLOAT32_4", {kFloat32, 4, 4, 0}},
+        {"S16_4_NORMALIZED", {kInt16, 4, 2, 32767.0}}, {"U16_2", {kUint16, 2, 2, 0}}, {"U8_4", {kUint8, 4, 1, 0}},
+        {"U8_4_NORMALIZED", {kUint8, 4, 1, 255.0}}};
     for (const Named& x : kTypes) {
         if (t != x.name) continue;
         v = x.type;

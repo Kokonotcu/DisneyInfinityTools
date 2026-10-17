@@ -5,7 +5,6 @@
 #pragma once
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <tuple>
 #include <cstdio>
 #include <functional>
@@ -21,100 +20,9 @@
 #include "formats/rentable.hpp"
 #include "formats/ssf.hpp"
 #include "formats/vtxf.hpp"
+#include "convert/vertex.hpp"
 
 namespace render {
-
-inline double halfToDouble(uint16_t h)
-{
-    int s = h >> 15, e = (h >> 10) & 0x1f, m = h & 0x3ff;
-    double v = e == 0 ? std::ldexp(m, -24) : e == 31 ? (m ? NAN : INFINITY) : std::ldexp(m + 1024, e - 25);
-    return s ? -v : v;
-}
-
-// CPython PyFloat_Pack2 (struct 'e'): round half to even straight from the double.
-inline uint16_t doubleToHalf(double x)
-{
-    int sign = std::signbit(x) ? 1 : 0;
-    if (x == 0.0) return (uint16_t)(sign << 15);
-    if (std::isinf(x)) return (uint16_t)((sign << 15) | 0x7c00);
-    if (std::isnan(x)) return (uint16_t)((sign << 15) | 0x7e00);
-    int e;
-    double f = std::frexp(std::fabs(x), &e);
-    f *= 2.0; e--;
-    if (e >= 16) return (uint16_t)((sign << 15) | 0x7c00);     // overflow (CPython raises; never hit by real data)
-    if (e < -25) { f = 0.0; e = 0; }
-    else if (e < -14) { f = std::ldexp(f, 14 + e); e = 0; }
-    else { e += 15; f -= 1.0; }
-    f *= 1024.0;
-    unsigned bits = (unsigned)f;
-    if ((f - bits > 0.5) || ((f - bits == 0.5) && (bits % 2 == 1))) {
-        if (++bits == 1024) { bits = 0; ++e; }
-    }
-    return (uint16_t)(bits | (e << 10) | (sign << 15));
-}
-
-// One element of type v at b -> out[0..v.n).
-inline void decode(const vtxf::ElementType& v, const uint8_t* b, double* out)
-{
-    for (int i = 0; i < v.n; ++i) {
-        const uint8_t* p = b + i * v.csize;
-        double x;
-        switch (v.code) {
-        case 'f': { float f; memcpy(&f, p, 4); x = f; break; }
-        case 'e': x = halfToDouble((uint16_t)(p[0] | p[1] << 8)); break;
-        case 'B': x = p[0]; break;
-        case 'h': x = (int16_t)(p[0] | p[1] << 8); break;
-        default: x = (uint16_t)(p[0] | p[1] << 8); break;
-        }
-        if (v.norm) { x /= v.norm; if (x < -1.0) x = -1.0; }
-        out[i] = x;
-    }
-}
-
-// vals[0..v.n) as one element of type v at out (v.n * v.csize bytes).
-inline void encode(const vtxf::ElementType& v, const double* vals, char* out)
-{
-    for (int i = 0; i < v.n; ++i) {
-        double x = vals[i];
-        if (v.norm) {
-            double lo = v.code == 'B' ? 0.0 : -1.0;
-            x = std::nearbyint((x < lo ? lo : x > 1.0 ? 1.0 : x) * v.norm);   // Python round(): half to even
-        } else if (v.code != 'f' && v.code != 'e') {
-            double hi = v.code == 'B' ? 255.0 : 65535.0;
-            x = std::trunc(x);
-            x = x < 0 ? 0 : x > hi ? hi : x;
-        }
-        switch (v.code) {
-        case 'f': { float f = (float)x; memcpy(out, &f, 4); out += 4; break; }
-        case 'e': { uint16_t h = doubleToHalf(x); memcpy(out, &h, 2); out += 2; break; }
-        case 'B': *out++ = (char)(int)x; break;
-        default: { int16_t s = (int16_t)(int)x; memcpy(out, &s, 2); out += 2; break; }
-        }
-    }
-}
-
-// One vertex through plan p, appended to the destination streams per[0..p.ds.size()). Per vertex of a 52 MB
-// world, so no allocation here (the string/vector form cost in_city ~1.5 s of load).
-inline void convertVertex(const std::vector<const uint8_t*>& src, const rentable::Plan& p,
-                          std::vector<std::string>& per)
-{
-    for (size_t s = 0; s < p.ds.size(); ++s) per[s].append(p.ds[s], '\0');
-    for (const rentable::Op& o : p.ops) {
-        std::string& ds = per[o.dsi];
-        char* d = &ds[ds.size() - p.ds[o.dsi] + o.doff];
-        if (o.kind == 'K') memcpy(d, o.bytes.data(), o.size < (int)o.bytes.size() ? o.size : o.bytes.size());
-        else if (o.kind == 'C') memcpy(d, src[o.ssi] + o.soff, o.size);
-        else {
-            double vals[4] = {0, 0, 0, 0};   // source values, then the default's tail, then zeros (to dv.n)
-            decode(o.sv, src[o.ssi] + o.soff, vals);
-            for (int i = o.sv.n; i < o.dv.n; ++i) vals[i] = o.dflt.empty() ? 0.0 : i < (int)o.dflt.size() ? o.dflt[i] : 0.0;
-            char e[16];
-            encode(o.dv, vals, e);
-            int n = o.dv.n * o.dv.csize;
-            memcpy(d, e, o.size < n ? o.size : n);
-        }
-    }
-}
 
 // 1.0's scenesettingsformat.ssf (FUN_004af580): 4-byte slots, 1.0 .shd post passes, a shader name after each
 inline constexpr ssf::Layout kSsfLayout10 = {0x64, 0x1c, 0x40, 4, 4, gen30::kShd10, true};
@@ -131,33 +39,24 @@ struct IO {
     std::function<bool(const std::string& path, std::string& out)> read10;   // a 1.0 asset by path
     std::function<void(const std::string&)> log;
     bool verbose = false;   // log every substituted material's slot assignment
-    // real 1.0 shaders (gen30.hpp): a material whose 1.0 shader read10 finds keeps it, as 'x'<shader>, with its own
-    // blocks (B re-laid for 8-byte slots) and its primitives keep their 1.0 vertex formats
+    // Real 1.0 shaders: a material whose shader read10 finds keeps it as 'x'<shader>, with its 1.0 blocks and formats
     bool translate = false;
-    // a 1.0 vertex format with bone indices: 3.0 skins on the GPU before the material shader (MemExport, six
-    // layouts; a raw 1.0 skinned layout matches none -> its job list spins on purpose, FUN_0047c300, in-game
-    // 2026-10-13), so materials drawn with one keep the converted path for now
+    // The format has bone indices: 3.0 skins on the GPU first, and no 3.0 layout matches it (FUN_0047c300)
     std::function<bool(uint32_t vformat)> skinned;
     // the shader translates (and is registered): only then may a material take it
     std::function<bool(const std::string& shader)> translatable;
-    // a skinned node's converted primitives go into their target's 'skin' layout with the 1.0 bone indices/weights
-    // (R plans), as every shipped skinned primitive is stored (3,396 of 3,396; rigid ones 'main', 75,895 of 75,895).
-    // Off: the 'main' layout, bones dropped, which the GPU skinning pass then reads as bones (cfg skinlayout10)
+    // Skinned primitives go to their target's 'skin' layout with 1.0 bones (R plans); off: 'main', bones dropped
     bool skinLayout = false;
     // cfg scenesettings10: both games' scenesettingsformat.ssf; a 1.0 SSET chunk is re-laid into 3.0's and kept
     const ssf::Format* ssf10 = nullptr;
     const ssf::Format* ssf30 = nullptr;
-    // the served vformat.vtxf's re-laid 1.0 formats (gen30::mergeVtxf): a translated primitive in one has its
-    // trailing vertex colour split into a stream of its own, as that layout says
+    // Re-laid 1.0 formats of the served vformat.vtxf: a translated primitive's trailing colour gets its own stream
     const std::map<uint32_t, vtxf::ColourTail>* tails10 = nullptr;
-    // cfg skintr10: a material drawn only with skinned formats may take its translated 1.0 shader too. Its vertices
-    // still go to their 3.0 'skin' layout target (skinTarget30: 3.0's GPU skinning reads that and nothing else), and
-    // the translated shader takes that target's skinned output (gen30: skin passes, identity bones)
+    // cfg skintr10: skinned-only materials take their translated shader too; vertices still go to skinTarget30
     bool translateSkinned = false;
 };
 
-// The 3.0 format a skinned 1.0 format's vertices go to: its first target with an R plan (into the target's 'skin'
-// layout) -- the pick transcodeWorld makes for a material whose shader declares no format (0: none).
+// A skinned 1.0 format's 3.0 target, for shaders that declare none: its first with an R plan (0: none)
 inline uint32_t skinTarget30(const rentable::Table& T, uint32_t crc10)
 {
     auto t = T.targets.find(crc10);
@@ -749,12 +648,6 @@ inline bool primRecords(const oct::File& f, size_t prim, PrimRecs& p)
 // Idata: [width, first index, base, count]; Vdata: [streams, vertices, (0, offset, stride) per stream]
 struct PrimData { std::vector<int32_t> ida, vda; uint32_t src = 0; int ref = 0; };
 
-// vda holds the (0, offset, stride) triples of its first `streams` streams
-inline bool vdataHolds(const std::vector<int32_t>& vda, size_t streams)
-{
-    return vda.size() >= 2 && streams <= (vda.size() - 2) / 3;
-}
-
 // -> nullptr, or the problem: a value missing, or a list shorter than its counts (RE-19)
 inline const char* readPrim(const oct::File& f, const PrimRecs& p, PrimData& d)
 {
@@ -766,7 +659,7 @@ inline const char* readPrim(const oct::File& f, const PrimRecs& p, PrimData& d)
     d.ref = ref[0];
     if (d.ida.size() < 4) return "Idata too short";
     const bool counted = !d.vda.empty() && d.vda[0] >= 0;
-    if (!counted || !vdataHolds(d.vda, (size_t)d.vda[0])) return "Vdata too short";
+    if (!counted || !vertex::vdataHolds(d.vda, (size_t)d.vda[0])) return "Vdata too short";
     return nullptr;
 }
 
@@ -776,7 +669,7 @@ inline rentable::Op copyOp(int dsi, int size, int ssi, int soff)
     o.dsi = dsi;
     o.doff = 0;
     o.size = size;
-    o.kind = 'C';
+    o.kind = rentable::kCopy;
     o.ssi = ssi;
     o.soff = soff;
     return o;
@@ -785,7 +678,7 @@ inline rentable::Op copyOp(int dsi, int size, int ssi, int soff)
 // the primitive's last stream ends in the re-laid format's colour tail
 inline bool tailFits(const vtxf::ColourTail& ct, const std::vector<int32_t>& vda)
 {
-    return vda[0] == ct.stream + 1 && vda[4 + 3 * ct.stream] == ct.offset + ct.size;
+    return vda[0] == ct.stream + 1 && vertex::vdataStride(vda, ct.stream) == ct.offset + ct.size;
 }
 
 // A translated material's primitive: every stream copied as it is; a re-laid format's colour tail to its own stream
@@ -796,69 +689,13 @@ inline const char* samePlan(const IO& io, uint32_t src, const std::vector<int32_
         if (auto t = io.tails10->find(src); t != io.tails10->end()) ct = &t->second;
     if (ct && !tailFits(*ct, vda)) return "vertex colour tail: strides differ from the format";
     for (int s = 0; s < vda[0]; ++s) {
-        same.ss.push_back(vda[4 + 3 * s]);
-        same.ds.push_back(ct && s == ct->stream ? ct->offset : vda[4 + 3 * s]);
+        same.ss.push_back(vertex::vdataStride(vda, s));
+        same.ds.push_back(ct && s == ct->stream ? ct->offset : vertex::vdataStride(vda, s));
         same.ops.push_back(copyOp(s, same.ds.back(), s, 0));
     }
     if (ct) {
         same.ds.push_back(ct->size);
         same.ops.push_back(copyOp(vda[0], ct->size, ct->stream, ct->offset));
-    }
-    return nullptr;
-}
-
-// 16-bit index -> local index, stamped per primitive: a flat table, not a hash map per index (in_city: ~4M indices)
-struct Remap { std::vector<uint32_t> stamp, to; uint32_t gen = 0; };
-
-// The primitive's indices made local: order = the vertices it uses, first use first; sub = its local indices
-inline const char* remapIndices(const std::vector<int32_t>& ida, const std::string& ibuf10, Remap& m,
-                                std::vector<uint32_t>& order, std::vector<uint32_t>& sub)
-{
-    const int32_t first = ida[1], count = ida[3];
-    const bool inside = first >= 0 && bytes::fits(ibuf10.size(), 2 * (size_t)first, 2 * (size_t)count);
-    if (count > 0 && !inside) return "index past the ibuf";
-    const uint8_t* ib = (const uint8_t*)ibuf10.data();
-    sub.reserve(count > 0 ? (size_t)count : 0);
-    ++m.gen;
-    for (int32_t q = 0; q < count; ++q) {
-        const size_t at = 2 * ((size_t)first + q);
-        const uint32_t v = (uint32_t)(ib[at] | ib[at + 1] << 8);
-        if (m.stamp[v] != m.gen) {
-            m.stamp[v] = m.gen;
-            m.to[v] = (uint32_t)order.size();
-            order.push_back(v);
-        }
-        sub.push_back(m.to[v]);
-    }
-    return nullptr;
-}
-
-// [off, off + (last + 1) * stride) lies inside the vbuf: every vertex up to index last
-inline bool vertexFits(int32_t off, int32_t stride, uint32_t last, size_t size)
-{
-    if (off < 0 || stride < 0) return false;
-    const uint64_t span = ((uint64_t)last + 1) * (uint32_t)stride;
-    return span <= size && bytes::fits(size, (size_t)off, (size_t)span);
-}
-
-// Every vertex of order through plan into per (one string per destination stream); strides and ranges checked first
-inline const char* convertPrim(const rentable::Plan& plan, const std::vector<int32_t>& vda,
-                               const std::vector<uint32_t>& order, const std::string& vbuf10,
-                               std::vector<std::string>& per)
-{
-    for (int s = 0; s < vda[0]; ++s)
-        if (s >= (int)plan.ss.size() || vda[4 + 3 * s] != plan.ss[s]) return "stride mismatch";
-    if (!vdataHolds(vda, plan.ss.size())) return "Vdata shorter than the plan";
-    const uint32_t last = order.empty() ? 0 : *std::max_element(order.begin(), order.end());
-    for (size_t s = 0; s < plan.ss.size() && !order.empty(); ++s)
-        if (!vertexFits(vda[3 + 3 * s], plan.ss[s], last, vbuf10.size())) return "vertex past the vbuf";
-    per.assign(plan.ds.size(), std::string());
-    for (size_t s = 0; s < plan.ds.size(); ++s) per[s].reserve(order.size() * (size_t)plan.ds[s]);
-    std::vector<const uint8_t*> srcp(plan.ss.size());
-    const uint8_t* vb = (const uint8_t*)vbuf10.data();
-    for (uint32_t v : order) {
-        for (size_t s = 0; s < plan.ss.size(); ++s) srcp[s] = vb + (size_t)vda[3 + 3 * s] + (size_t)v * plan.ss[s];
-        convertVertex(srcp, plan, per);
     }
     return nullptr;
 }
@@ -958,7 +795,6 @@ struct World10 {
 
 namespace detail {
 
-constexpr uint32_t kIndexValues16 = 0x10000;   // every value a 16-bit index takes
 constexpr uint64_t kMaxIndex16 = 0xffff;       // a node past it gets 32-bit indices (FORMATS.md 4.4)
 constexpr int32_t kIndexBuffer16 = 0, kIndexBuffer32 = 2;   // Idata[0] in 3.0 (FORMATS.md 4.3)
 constexpr int kIndexBytes16 = 2, kIndexBytes32 = 4;
@@ -1048,7 +884,7 @@ inline void mapSkinFormats(WorldRun& w)
 struct Geometry {
     const std::string& vbuf10;
     const std::string& ibuf10;
-    Remap remap;
+    vertex::Remap remap;
     RecEdits edits;
 };
 
@@ -1127,8 +963,8 @@ inline std::optional<PrimOut> convertPrimitive(WorldRun& w, Geometry& g, const P
     const rentable::Plan& plan = p->get();
     PrimOut out;
     std::vector<uint32_t> order;
-    const char* why = remapIndices(d.ida, g.ibuf10, g.remap, order, out.sub);
-    if (!why) why = convertPrim(plan, d.vda, order, g.vbuf10, out.streams);
+    const char* why = vertex::remapIndices(d.ida, g.ibuf10, g.remap, order, out.sub);
+    if (!why) why = vertex::convertPrim(plan, d.vda, order, g.vbuf10, out.streams);
     if (why) {
         fail(w.r, why);
         return std::nullopt;
@@ -1237,8 +1073,8 @@ inline bool convertNodes(WorldRun& w, oct::File& f, Geometry& g)
 inline bool convertGeometry(WorldRun& w, oct::File& f, const World10& w10)
 {
     Geometry g{w10.vbuf, w10.ibuf, {}, {}};
-    g.remap.stamp.assign(kIndexValues16, 0);
-    g.remap.to.assign(kIndexValues16, 0);
+    g.remap.stamp.assign(vertex::kIndexValues16, 0);
+    g.remap.to.assign(vertex::kIndexValues16, 0);
     if (!convertNodes(w, f, g)) return false;
     if (const char* why = patchBufferPools(f, g.edits, w10.stem, w.r)) return fail(w.r, why);
     return true;
