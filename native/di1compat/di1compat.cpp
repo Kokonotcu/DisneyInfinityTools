@@ -36,6 +36,7 @@
 #include "core/zip.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
+#include "games/di1/gamedb.hpp"
 #include "games/di1/octsteps.hpp"
 #include "games/di1/options.hpp"
 #include "games/di1/renderio.hpp"
@@ -461,32 +462,6 @@ static bool memtestMatch(const char* p)
     return false;
 }
 
-// GameDB CHD-only callback loaders (DBFileLoader_Callback_CHD::load, FUN_018db450 -- RumpusData, FUN_00f63e70) given
-// a 1.0 .lua table: the file opened during that call is the table compiled to CHD (chd.hpp), not its Lua text
-// (which the CHD parser reads as a wild pointer: in-game 2026-10-12 AV in FUN_01824810 after rumpusdata.lua).
-// thiscall, three stack arguments (ret 0xc), as the dispatcher FUN_018da710 calls vtable[1]
-typedef uint8_t(__fastcall* ChdLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
-static ChdLoadFn g_loadChdCallback;
-// the path whose next open compiles to CHD; process-wide because the engine opens files on other threads
-static std::mutex g_chdLock;
-static std::string g_chdPath;
-static bool takeChdPath(const char* p)
-{
-    std::lock_guard<std::mutex> lock(g_chdLock);
-    return !g_chdPath.empty() && norm(p) == g_chdPath;
-}
-static uint8_t __fastcall hkLoadChdCallback(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
-{
-    char p[300];
-    safeCopy(p, sizeof(p), path);
-    if (!endsWith(p, ".lua")) return g_loadChdCallback(self, nullptr, path, a2, a3);
-    { std::lock_guard<std::mutex> lock(g_chdLock); g_chdPath = norm(p); }
-    uint8_t r = g_loadChdCallback(self, nullptr, path, a2, a3);
-    { std::lock_guard<std::mutex> lock(g_chdLock); g_chdPath.clear(); }
-    logf("gamedb CHD callback loader given %s -> %u", p, r);
-    return r;
-}
-
 // The PC virtual reader's remembered character per playset (FUN_00b7f910(key "IGP_PLAYSET_<playset>", sku), thiscall,
 // ret 8) has slots for 3.0's four playsets only (Empire, InsideOut, TheCloneWars, PlaysetX) and is false for any other;
 // FUN_00b83b90 then resets the current character to none every frame on such a playset world (watchpoint on the
@@ -820,68 +795,6 @@ static int* chdForLua(const char* p, int* r)
     }
 }
 
-// GameDB tables (plan PS-4). 3.0's DataMaps point its locks / inventory loaders at compiled .chd files and the
-// loader objects are built in CHD mode (byte +0x2d = 1); the 1.0 DataMap points them at the Lua tables
-// (GameDB/Incredibles/locks__lua.lua), whose text read as CHD is a wild pointer (in-game 2026-10-12: AV in
-// FUN_018249d0 under the locks loader). The same 3.0 loaders read Lua when +0x2d == 0 (FUN_01612fa0: Lua state +
-// FUN_018d9200(path), else FUN_018d91f0), so a .lua path runs the loader in its own Lua mode for that one call.
-typedef uint32_t(__fastcall* GameDbLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
-static GameDbLoadFn g_loadLocks, g_loadInventory;
-
-static uint32_t gameDbLoad(GameDbLoadFn orig, const char* tag, void* self, const char* path, uint32_t a2, uint32_t a3)
-{
-    char p[300];
-    safeCopy(p, sizeof(p), path);
-    uint8_t* mode = (uint8_t*)self + 0x2d;
-    if (*mode && endsWith(p, ".lua")) {
-        *mode = 0;
-        uint32_t r = orig(self, nullptr, path, a2, a3);
-        *mode = 1;
-        logf("gamedb %s %s: CHD loader run in its Lua mode -> %u", tag, p, r);
-        return r;
-    }
-    return orig(self, nullptr, path, a2, a3);
-}
-// DBFileLoader_Callback::load FUN_018db270 is vtable[1] (as the router FUN_018da710 calls it) and takes an engine
-// CString: it add-refs the header at path-0xc (FUN_00caa0d0 unless the count is 0x7fffffff), so a plain char* path
-// would be written through. The path goes in as a CString (ctor FUN_00418310, release FUN_00418230).
-static uint8_t cbLoad(void* loader, const char* path, uint32_t a2, uint32_t a3)
-{
-    char* cs = nullptr;
-    ((void*(__fastcall*)(void*, void*, const char*))rt(0x00418310))(&cs, nullptr, path);
-    uint8_t ok = ((uint8_t(__fastcall*)(void*, void*, char*, uint32_t, uint32_t))(*(void***)loader)[1])(loader, nullptr, cs, a2, a3);
-    ((void(__fastcall*)(void*, void*))rt(0x00418230))(&cs, nullptr);
-    return ok;
-}
-// a 3.0 singleton's DBFileLoader_Callback (+4: ChestInfo DAT_022896fc, PerceptionInfo DAT_02289700), null if unreadable
-static void* singletonLoader(uint32_t global)
-{
-    uint8_t* o = *(uint8_t**)rt(global);
-    void* loader = o && sys::readable(o + 4, 4) ? *(void**)(o + 4) : nullptr;
-    return loader && sys::readable(loader, 4) ? loader : nullptr;
-}
-static uint32_t __fastcall hkLoadLocks(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
-{
-    uint32_t r = gameDbLoad(g_loadLocks, "locks", self, path, a2, a3);
-    char p[300];
-    safeCopy(p, sizeof(p), path);
-    bool playset10 = sys::dbTrigger10(p, "locks__lua.lua");   // a 1.0 playset DataMap's locks table
-    if (g_cfg.locks10 && playset10)   // PS-5: the 1.0 tables' records the Locks DB lacks
-        for (std::string s : {std::string(sys::kLocks10Prefix) + p, std::string(sys::kLocks10Core)}) {
-            sys::setLockUids(sys::loaderUids(self));
-            gameDbLoad(g_loadLocks, "locks", self, s.c_str(), a2, a3);
-        }
-    // GLB-1: 1.0 ChestInfo.bin through 3.0's chestInfo loader
-    void* loader = g_cfg.chest10 && playset10 ? singletonLoader(0x022896FC) : nullptr;
-    if (loader) {
-        uint8_t ok = cbLoad(loader, sys::kChest10, a2, a3);
-        uint8_t *ci = *(uint8_t**)rt(0x022896FC), *chests = ci + 0x1c;
-        logf("chestInfo loader given %s -> %u; ChestInfo holds %d chests, %d resources, %d choreographies", sys::kChest10, ok,
-             *(int*)(chests + 4), *(int*)(ci + 0x10), *(int*)(ci + 0x30));
-    }
-    return r;
-}
-
 // PS-8 (sys.hpp): the expendables package loader FUN_0160aa30(path, ?) (ret 8) and the definition ctor FUN_016022c0
 // (thiscall, ret 4) -- entries of a package 3.0 lacks get the 1.0 pop-in
 typedef void(__fastcall* ExpPkgFn)(void* ecx, void* edx, const char* path, uint32_t a2);
@@ -927,29 +840,6 @@ static bool installExpPkg(const di1::Config& c)
     return hook("expendables package load", 0x0160AA30, "558BEC83E4F86AFF68????????64A1", (void*)&hkExpPkg,
                 (void**)&g_expPkg);
 }
-// PS-5 (sys.hpp): DBFileLoader_Callback::load FUN_018db270 (thiscall CString path, a2, a3; ret 0xc) -- every Lua
-// callback loader (bitMask, stats, chestInfo ...); after the playset's bitmasks, the 1.0 core masks as one more package,
-// then (GLB-1) the 1.0 perceptions 3.0 lacks, whose actor types those masks register
-typedef uint8_t(__fastcall* CbLoadFn)(void* self, void* edx, const char* path, uint32_t a2, uint32_t a3);
-static CbLoadFn g_cbLoad;
-static uint8_t __fastcall hkCbLoad(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
-{
-    uint8_t r = g_cbLoad(self, nullptr, path, a2, a3);
-    char p[300];
-    safeCopy(p, sizeof(p), path);
-    if (!sys::dbTrigger10(p, "bitmasks.lua")) return r;   // a 1.0 playset DataMap's bitmasks
-    if (g_cfg.bits10) logf("bitMask loader given %s after %s -> %u", sys::kBits10, p, cbLoad(self, sys::kBits10, a2, a3));
-    void* pl = g_cfg.perc10 ? singletonLoader(0x02289700) : nullptr;
-    const uint8_t* pi = pl ? *(uint8_t**)rt(0x02289700) : nullptr;
-    if (pi && sys::snapshotPerc30(pi)) {
-        int before = *(const int*)(pi + 0x104);
-        uint8_t ok = cbLoad(pl, sys::kPerc10, a2, a3);
-        logf("perceptions loader given %s -> %u; PerceptionInfo holds %d perceptions (%d before)", sys::kPerc10, ok,
-             *(const int*)(pi + 0x104), before);
-    }
-    return r;
-}
-
 // NPC-8: the .ap key SpawnEconomyOnDeath. 1.0's combat getter FUN_00aa1520 decides once per actor: default 1, then
 // the key from the actor's params (component DAT_016a6a80, +8; 271 uses in the 195 Metroville .ap files: 268 say 1,
 // 3 in in_city_story__missiongraph.ap say 0). 3.0's getter FUN_00ff69c0 (thiscall, decided-bit 0x20 of +0x90c) sets 1 unread; the 1.0
@@ -1035,25 +925,6 @@ static int* sysServe(const char* p)
          (unsigned)have.size(), ok ? "" : " -- layout not found, not served");
     return ok ? memFile(out.data(), out.size()) : nullptr;
 }
-static uint32_t __fastcall hkLoadInventory(void* self, void*, const char* path, uint32_t a2, uint32_t a3)
-{
-    return gameDbLoad(g_loadInventory, "inventory", self, path, a2, a3);
-}
-
-// The GameDB loader hooks (H1); the callback loader only for bits10 or perc10.
-static bool installGameDb(const di1::Config& c)
-{
-    bool ok = hook("GameDB locks load", 0x01612FA0, "6AFF64A100000000", (void*)&hkLoadLocks, (void**)&g_loadLocks);
-    ok &= hook("GameDB inventory load", 0x014C08D0, "6AFF64A100000000", (void*)&hkLoadInventory,
-               (void**)&g_loadInventory);
-    ok &= hook("GameDB CHD callback load", 0x018DB450, "6AFF64A100000000", (void*)&hkLoadChdCallback,
-               (void**)&g_loadChdCallback);
-    if (c.bits10 || c.perc10)
-        ok &= hook("GameDB callback load", 0x018DB270, "6AFF64A10000000068????????50", (void*)&hkCbLoad,
-                   (void**)&g_cbLoad);
-    return ok;
-}
-
 // __invoke_watson (0x12CA1D1): the CRT's invalid-parameter fail-fast terminates without any exception handler
 // seeing it (in-game 2026-10-12: 0xC0000417 loading the 1.0 side-missions graph). Log who called it, then die.
 typedef void(__cdecl* WatsonFn)(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t);
@@ -1390,7 +1261,7 @@ static bool bitmasksStack(Open& o, int*&)
 // A .lua the GameDB CHD callback loader is reading: its CHD compile. chdForLua consumes r (null or not).
 static bool chdStage(Open& o, int*& out)
 {
-    if (o.write || !endsWith(o.p, ".lua") || !takeChdPath(o.p)) return false;
+    if (o.write || !endsWith(o.p, ".lua") || !engine::gamedb::isChdPath(o.p)) return false;
     out = chdForLua(o.p, o.r);
     return true;
 }
@@ -2182,7 +2053,7 @@ extern "C" void __stdcall Pentane_Main()
     // the modules' hooks in install order (B3): a hook is live once enabled
     if (!startHooks()) return;
     if (!installAssetOpen(g_cfg)) return;
-    installGameDb(g_cfg);
+    di1::gamedb::install(g_cfg);
     installEcon(g_cfg);
     installExpPkg(g_cfg);
     installCurrency(g_cfg);
