@@ -450,10 +450,10 @@ std::vector<std::string> textTokens(const std::string& t)
             ++i;
             continue;
         }
-        if (c == '"') {
+        if (c == '"') {   // an unterminated string runs to the end of the text, and the scan ends (OT-24)
             size_t e = t.find('"', i + 1);
-            tok.push_back(t.substr(i, e - i + 1));
-            i = e + 1;
+            tok.push_back(t.substr(i, e == std::string::npos ? std::string::npos : e - i + 1));
+            i = e == std::string::npos ? t.size() : e + 1;
             continue;
         }
         if (strchr("={}[]", c)) {

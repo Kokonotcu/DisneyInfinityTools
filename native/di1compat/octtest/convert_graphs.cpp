@@ -433,6 +433,10 @@ int convertBent(const Args& a)
 int convertTexName(const Args& a)
 {
     std::string o = a.argv[3], name = o.substr(o.find_last_of("/\\") + 1);
+    if (name.size() <= kExtLen) {   // a name shorter than its extension fails cleanly (OT-24)
+        fprintf(stderr, "octtest: %s is no <name>.mtb\n", o.c_str());
+        return kUsageError;
+    }
     name.resize(name.size() - kExtLen);
     std::string t = ui::texBundleAs(slurp(a.argv[2]), name);
     if (t.empty()) {

@@ -336,8 +336,10 @@ int probeZip(const Args& a)
     void* d = i < 0 ? nullptr : mz_zip_reader_extract_to_heap(&z, (mz_uint)i, &n, 0);
     printf("locate %d, extract %s %zu B (%s)\n", i, d ? "ok" : "FAILED", n,
            mz_zip_get_error_string(mz_zip_get_last_error(&z)));
+    const bool ok = d != nullptr;
     mz_free(d);
-    return d ? 0 : 1;
+    mz_zip_reader_end(&z);   // the archive closed too (OT-24)
+    return ok ? 0 : 1;
 }
 
 int probeMember(const Args& a)

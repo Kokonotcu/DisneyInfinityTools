@@ -44,6 +44,13 @@ bool loadTable(rentable::Table& t, const char* path)
 
 void printLine(const std::string& l) { printf("%s\n", l.c_str()); }
 
+// D3DCompile's code and message blobs released once read (OT-24).
+void releaseBlobs(void* code, void* msg)
+{
+    if (code) releaseBlob(code);
+    if (msg) releaseBlob(msg);
+}
+
 // ---- --render ----
 
 // The 3.0 donors: from the extract, or with ARC30_GAME=<3.0 install> from its archives as the plugin reads them.
@@ -90,9 +97,11 @@ struct GenCheck {
                                                        target, 0, 0, &c, &e));
         if (failed || !c) {
             if (e) msg.assign(blobPointer(e));
+            releaseBlobs(c, e);
             return false;
         }
         code.assign(blobPointer(c), blobSize(c));
+        releaseBlobs(c, e);
         fs::create_directories(cacheDir);
         writeFile(path, code);
         return true;

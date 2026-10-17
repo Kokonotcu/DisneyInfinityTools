@@ -40,12 +40,19 @@ bool sameTree(const chd::V& a, const chd::V& b)
     return true;
 }
 
+// A GameDB table's Data.Records, or null.
+const chd::V* records(const chd::V& t)
+{
+    const chd::V* data = field(t, "Data");
+    return data ? field(*data, "Records") : nullptr;
+}
+
 // The UIDs of the 3.0 tables argv[3..]; false (printed) when one has no Records.
 bool uids30(const Args& a, std::set<uint32_t>& excl)
 {
     for (int i = 3; i < a.argc; ++i) {
         chd::V t = chd::lua(slurp(a.argv[i]));
-        const chd::V* r = field(t, "Data") ? field(*field(t, "Data"), "Records") : nullptr;
+        const chd::V* r = records(t);
         if (!r) {
             printf("no Records in %s\n", a.argv[i]);
             return false;
@@ -191,8 +198,12 @@ int testKeep(const Args& a)
         return 1;
     }
     chd::V in = chd::lua(src), got = chd::lua(out);
-    const chd::V* ri = field(*field(in, "Data"), "Records");
-    const chd::V* ro = field(got, "Data") ? field(*field(got, "Data"), "Records") : nullptr;
+    const chd::V* ri = records(in);
+    const chd::V* ro = records(got);
+    if (!ri) {   // a table without Records fails cleanly (OT-24)
+        printf("input has no Records\n");
+        return 1;
+    }
     if (!ro) {
         printf("output has no Records\n");
         return 1;

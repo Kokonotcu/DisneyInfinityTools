@@ -19,17 +19,24 @@ inline const chd::V* field(const chd::V& t, const char* k)
     return nullptr;
 }
 
-// The engine's probe of a .dct table (FORMATS.md 9): lower-cased key, seeded lookup2, linear from hash % slots.
+// The engine's .dct probe (FORMATS.md 9), bounded: false for a missing key or a too-short table (OT-24).
 inline bool dctLookup(const std::string& t, const std::string& key, std::string& value)
 {
     namespace d = dct::detail;
-    const std::string k = npc::lower(key);
-    uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::le32(t, d::kSeedAt));
+    if (t.size() < d::kHeader) return false;
     const uint32_t ns = bytes::le32(t, d::kSlotsAt);
-    for (uint32_t i = h % ns; bytes::le32(t, d::kHeader + d::kSlotBytes * i + d::kSlotValueAt); i = (i + 1) % ns) {
+    if (!ns || (uint64_t)ns * d::kSlotBytes > t.size() - d::kHeader) return false;
+    const std::string k = npc::lower(key);
+    const uint32_t h = hash::lookup2((const uint8_t*)k.data(), k.size(), bytes::le32(t, d::kSeedAt));
+    uint32_t i = h % ns;
+    for (uint32_t n = 0; n < ns; ++n, i = (i + 1) % ns) {   // lower-cased key, linear from hash % slots
         const size_t slot = d::kHeader + d::kSlotBytes * i;
+        const int32_t rel = (int32_t)bytes::le32(t, slot + d::kSlotValueAt);
+        if (!rel) return false;   // an empty slot ends the probe
         if (bytes::le32(t, slot) != h) continue;
-        value = t.c_str() + slot + d::kSlotValueAt + 1 + (int32_t)bytes::le32(t, slot + d::kSlotValueAt);   // rel: +1
+        const int64_t at = (int64_t)(slot + d::kSlotValueAt + 1) + rel;   // a rel counts from its field + 1
+        if (at < 0 || at >= (int64_t)t.size()) return false;
+        value = t.c_str() + at;
         return true;
     }
     return false;
