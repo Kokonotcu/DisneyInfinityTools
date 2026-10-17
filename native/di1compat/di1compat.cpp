@@ -13,6 +13,7 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
@@ -23,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include "minhook/MinHook.h"
+#include "base/format.hpp"
 #include "base/hash.hpp"
 #include "base/text.hpp"
 #include "core/engine_file.hpp"
@@ -1589,233 +1591,457 @@ static bool installUi(const di1::Config& c)
     return ok;
 }
 
-// data/tips.lua (3.0's, opened as r) + the 1.0 tip records it lacks (ui::mergeTips); a ZoneTipCategories key naming
-// a registered zone (the zone manager's by-name lookup FUN_01391150, thiscall (uint32_t* out, name), ret 8) stays
-// 3.0's. The stream is consumed; the merged (or, failing that, the original) bytes come back as a MemFile.
+static std::string mergeVtxf(const std::string& t30, const std::string& t10);
+
+// ---- AssetOpen: every engine file open goes through hkOpen's stages ----
+constexpr uint32_t kOpenWrite = 1;   // AssetOpen flags bit 0: a write, never served or rewritten
+constexpr char kLuaChunk = 0x1b;     // a compiled Lua chunk's first byte ("\x1bLua")
+constexpr size_t kGameDbDir = sizeof("gamedb/") - 1;
+constexpr size_t kSysDir = sizeof("di1sys/") - 1;
+
+// One open as the stages see it: FUN_0041cb10's arguments, the engine's own stream and the path copied.
+struct Open {
+    const char* path;
+    uint32_t flags, a3, a4;
+    int* a5;
+    const uint32_t* sp;                   // hkOpen's return address slot: its stack walks start there
+    bool write;                           // flags & kOpenWrite
+    bool prof;                            // loadprof10: the served and missing lines carry timings
+    double tIn = 0, t30 = 0, tRead = 0;   // loadprof10: start, the engine's own open, the 1.0 read
+    int* r = nullptr;                     // the engine's stream, null when 3.0 has no such file
+    char p[300] = "";
+    bool blocked = false;                 // block10 matched
+    std::string missWhy = " (not served)";
+
+    // A 3.0 file opened for reading: the stages that rewrite 3.0 files take these.
+    bool edits() const { return r && !write; }
+};
+
+// The engine's own open with the same arguments (a stage that consumed r answers this).
+static int* reopen(const Open& o) { return g_open(o.path, o.flags, o.a3, o.a4, o.a5); }
+
+// r read whole as read30 reads it: no Read when empty, the full size kept on a short read.
+static bool readKeep(int* r, std::string& t)
+{
+    typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
+    typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
+    void** vt = *(void***)r;
+    t.resize(((SizeFn)vt[core::eng::kFileSize])(r, nullptr));
+    uint32_t got = t.empty() ? 0 : ((ReadFn)vt[core::eng::kFileRead])(r, nullptr, &t[0], (uint32_t)t.size());
+    return got == t.size();
+}
+
+static void destroyStream(int* r)
+{
+    typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
+    ((DtorFn)(*(void***)r)[core::eng::kFileDestroy])(r, nullptr, core::eng::kDestroyFree);
+}
+
+constexpr uint32_t kZoneManager = 0x0225F548;   // *: the zone manager (FUN_0139e0b0's this)
+constexpr uint32_t kZoneByName = 0x01391150;    // FUN_01391150: thiscall (uint32_t* out, name), its zone by name
+
+// 3.0's tips (o.r, consumed) plus the 1.0 records it lacks; registered zones' keys stay 3.0's (FUN_01391150).
 typedef void(__fastcall* ZoneByNameFn)(void* self, void* edx, uint32_t* out, const char* name);
-static int* tips30(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5, int* r)
+static int* tips30(const Open& o)
 {
     std::string t30, t10;
-    if (!readStream(r, t30)) return g_open(path, flags, a3, a4, a5);
-    if (t30.find("ZoneTipCategories") == std::string::npos || !read10s("data/tips.lua", t10)) return memFile(t30.data(), t30.size());
-    void* zm = *(void**)rt(0x0225F548);
+    if (!readStream(o.r, t30)) return reopen(o);
+    if (t30.find("ZoneTipCategories") == std::string::npos) return memFile(t30.data(), t30.size());
+    const bool got10 = read10s("data/tips.lua", t10);
+    if (!got10) return memFile(t30.data(), t30.size());
+    void* zm = *(void**)rt(kZoneManager);
     int k = ui::mergeTips(t30, t10, [&](const std::string& z) {
         uint32_t id = 0;
-        if (zm) ((ZoneByNameFn)rt(0x01391150))(zm, nullptr, &id, z.c_str());
+        if (zm) ((ZoneByNameFn)rt(kZoneByName))(zm, nullptr, &id, z.c_str());
         return id != 0;
     });
-    logf("tips %s: %d 1.0 records added (zone manager %s)", path, k, zm ? "up" : "NOT up: zone keys unchecked");
+    logf("tips %s: %d 1.0 records added (zone manager %s)", o.path, k, zm ? "up" : "NOT up: zone keys unchecked");
     return memFile(t30.data(), t30.size());
 }
 
-static std::string mergeVtxf(const std::string& t30, const std::string& t10);
+// shaders10: 3.0's shaders/vformat.vtxf plus 1.0's formats. Destroys r; answers the merge or a fresh open.
+static bool vtxfStage(Open& o, int*& out)
+{
+    if (!o.edits() || !g_cfg.shaders10 || _stricmp(o.p, "shaders/vformat.vtxf") != 0) return false;
+    std::string t30, t10;
+    const bool full = readKeep(o.r, t30);
+    if (full && read10s("shaders/vformat.vtxf", t10)) {
+        std::string m = mergeVtxf(t30, t10);
+        destroyStream(o.r);
+        out = memFile(m.data(), m.size());
+        return true;
+    }
+    destroyStream(o.r);
+    out = reopen(o);
+    return true;
+}
+
+// tips10: the file named Tips.lua only (FUN_00b70da0's literal), not every *tips.lua. tips30 consumes r.
+static bool tipsStage(Open& o, int*& out)
+{
+    const bool on = g_cfg.serve10 && g_cfg.tips10;
+    if (!o.edits() || !on) return false;
+    const bool tips = !_stricmp(o.p, "tips.lua") || endsWith(o.p, "/tips.lua") || endsWith(o.p, "\\tips.lua");
+    if (!tips) return false;
+    out = tips30(o);
+    return true;
+}
+
+// playsetmenu10: the Play Sets list gets the registered 1.0 playsets. Consumes r; answers the menu or a fresh open.
+static bool playsetMenuStage(Open& o, int*& out)
+{
+    if (!o.edits() || !g_cfg.playsetMenu10) return false;
+    if (!endsWith(o.p, "playsetlistwin32.lua") || norm(o.p) != "presentation/playsetlistwin32.lua") return false;
+    std::vector<std::pair<std::string, std::string>> ps;
+    {
+        std::lock_guard<std::mutex> l(g_playsets10Lock);
+        for (auto& x : g_playsets10) ps.push_back({x.name, x.start});
+    }
+    std::string t;
+    const bool read = readStream(o.r, t);
+    const bool chunk = !t.empty() && t[0] == kLuaChunk;
+    if (read && chunk && !ps.empty()) {
+        std::string s = ui::playsetMenu10(t, ps), names;
+        for (auto& x : ps) names += " " + x.first + "->" + x.second;
+        logf("%s: %u 1.0 playset entries added:%s (%u B 3.0 chunk -> %u B Lua)", o.p, (unsigned)ps.size(),
+             names.c_str(), (unsigned)t.size(), (unsigned)s.size());
+        out = memFile(s.data(), s.size());
+        return true;
+    }
+    logf("%s: %s (%u B): unchanged", o.p, ps.empty() ? "no 1.0 playset registered" : "not the 3.0 chunk",
+         (unsigned)t.size());
+    out = reopen(o);
+    return true;
+}
+
+// zonelist.lua (zones10, challenge10, beacon10), ChallengeData.lua (challenge10). Destroys r; answers text or reopens.
+static bool zoneListStage(Open& o, int*& out)
+{
+    const bool zl = endsWith(o.p, "zonelist.lua");
+    const bool cd =
+        endsWith(o.p, "challengedata/challengedata.lua") || endsWith(o.p, "challengedata\\challengedata.lua");
+    const bool playsets = g_cfg.zones10 || g_cfg.playsetMenu10 || g_cfg.missionTrace;   // zones10() runs for these
+    const bool zl10 = zl && playsets;
+    const bool challengeFile = zl || cd;
+    const bool challenge = g_cfg.challenge10 && challengeFile;
+    const bool beacon = g_cfg.beacon10 && zl;
+    const bool wanted = challenge || beacon || zl10;
+    if (!o.edits() || !wanted) return false;
+    std::string t, t10;
+    const bool full = readKeep(o.r, t);
+    destroyStream(o.r);
+    int k = 0, kb = 0, ka = 0, kz = 0;
+    if (full && !t.empty() && t[0] != kLuaChunk) {
+        if (zl10) kz = zones10(t, o.p);   // first: the steps below apply to the added records as to written ones
+        if (zl && g_cfg.challenge10) {
+            k = gameplay::zonelist30(t);
+        } else if (cd) {
+            const bool got10 = read10s("activitydata/defaultactivitybeacons.lua", t10);
+            if (got10) k = gameplay::beacons30(t, t10);
+        }
+        if (beacon) kb = mission::beaconMap30(t, &ka);
+    }
+    if (g_cfg.challenge10)
+        logf("%s: %d %s", o.p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
+    if (beacon) logf("%s: %d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added (beacon10)", o.p, kb, ka);
+    out = k || kb || kz ? memFile(t.data(), t.size()) : reopen(o);
+    return true;
+}
+
+// trace: who opens a GameDB package's bitmasks.lua (any playset's, 1.0 or 3.0), with the stack. Always passes on.
+static bool bitmasksStack(Open& o, int*&)
+{
+    if (!g_cfg.trace) return false;
+    if (_strnicmp(o.p, "gamedb/", kGameDbDir) || !endsWith(o.p, "/bitmasks.lua")) return false;
+    char line[600];
+    // never cut: at most 327 characters before the stack's 216
+    int len = snprintf(line, sizeof(line), "gamedb package open %s, stack:", o.p);
+    stackOf(o.sp, line, sizeof(line), len, 24);
+    logf("%s", line);
+    return false;
+}
+
+// A .lua the GameDB CHD callback loader is reading: its CHD compile. chdForLua consumes r (null or not).
+static bool chdStage(Open& o, int*& out)
+{
+    if (o.write || !endsWith(o.p, ".lua") || !takeChdPath(o.p)) return false;
+    out = chdForLua(o.p, o.r);
+    return true;
+}
+
+// serve10: a di1sys/ path is a GameDB supplement (sys.hpp), served only where 3.0 has no file.
+static bool sysStage(Open& o, int*& out)
+{
+    const bool absent = !o.r && !o.write;
+    if (!absent || !g_cfg.serve10 || _strnicmp(o.p, "di1sys/", kSysDir)) return false;
+    out = sysServe(o.p);
+    return true;
+}
+
+// memtest: a listed path is served from a memory copy of 3.0's stream (consumed).
+static bool memtestStage(Open& o, int*& out)
+{
+    if (!o.edits() || !g_cfg.memtest[0] || !memtestMatch(o.p)) return false;
+    size_t n = 0;
+    out = copyToMemFile(o.r, &n);
+    logf("memtest %s %u B -> %s", o.p, (unsigned)n, out ? "MemFile" : "FAILED");
+    return true;
+}
+
+// block10: a path under a listed prefix is never served from 1.0. Always passes on.
+static bool blockStage(Open& o, int*&)
+{
+    if (!g_cfg.block10[0]) return false;
+    std::string np = norm(o.p), list = g_cfg.block10;
+    for (size_t a = 0, b; a < list.size(); a = b + 1) {
+        b = list.find(',', a);
+        if (b == std::string::npos) b = list.size();
+        std::string pre = list.substr(a, b - a);
+        if (!pre.empty() && np.rfind(pre, 0) == 0) o.blocked = true;
+    }
+    return false;
+}
+
+// A world session product (kept: the engine reopens files), else a full-path member of a loaded 1.0 archive.
+static void sessionLookup(const std::string& np, std::string& hit, std::string& over)
+{
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    auto it = g_served.find(np);
+    if (it != g_served.end()) {
+        hit = it->second;
+        return;
+    }
+    auto o = g_over10.find(np);
+    if (o != g_over10.end()) over = o->second;
+}
+
+static int* serveSession(const Open& o, const std::string& hit)
+{
+    int* r = memFile(hit.data(), hit.size());
+    char pf[100] = "";
+    if (o.prof)
+        format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, total %.2f ms]",
+                              GetCurrentThreadId(), g_frameNo, o.t30, qpcMs() - o.tIn);
+    logf("served %s %u B from asset session -> %s%s", o.p, (unsigned)hit.size(), r ? "ok" : "FAILED", pf);
+    return r;
+}
+
+// The 1.0 bytes an open is served from: the member (mz_free it), its size, "zip:member".
+struct Read10 {
+    void* data = nullptr;
+    size_t n = 0;
+    std::string where;
+    std::string chal;   // gp: the ChallengeData/<1.0 type file> path read instead, "" if none
+};
+
+// uiscope10: an image of a flash movie not served from 1.0 is not served either; that sets the miss reason.
+static bool imageOfMovie30(Open& o, const std::string& np)
+{
+    std::string movie = g_cfg.uiScope10 ? ui::flashImageMovie(np) : "";
+    if (movie.empty()) return false;
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    const bool scoped = !g_movies10.count(movie);
+    if (scoped) o.missWhy = " (image id of a movie not served from 1.0: not served)";
+    return scoped;
+}
+
+constexpr size_t kPcConSuffix = sizeof("_pc_con.dct") - 1;
+constexpr size_t kHoloSuffix = sizeof("_holo.mtb") - 1;
+
+// Stand-ins 1.0 never shipped: a language table's WIN32 for its _pc_con, a giver's portrait for its _Holo icon.
+static void* read10StandIn(const Open& o, const std::string& np, size_t* n, std::string* where)
+{
+    if (endsWith(o.p, "_pc_con.dct")) {
+        std::string w = std::string(o.p, strlen(o.p) - kPcConSuffix) + "_WIN32.dct";
+        return read10(w.c_str(), n, where);
+    }
+    if (np.rfind("ui/charactericons/", 0) != 0 || !endsWith(o.p, "_holo.mtb")) return nullptr;
+    std::string w = std::string(o.p, strlen(o.p) - kHoloSuffix) + ".mtb";
+    return read10(w.c_str(), n, where);
+}
+
+// vo10: a 1.0 dialog line's lipsync (audio.hpp annoSource), read from its zip under g_zipLock.
+static void* read10Lipsync(const char* p, size_t* n, std::string* where)
+{
+    std::string annoZip, annoMember;
+    const bool vo = g_cfg.audio10 && g_cfg.vo10;
+    if (!vo || !audio::annoSource(p, annoZip, annoMember)) return nullptr;
+    std::lock_guard<std::mutex> lock(g_zipLock);
+    mz_zip_archive* z = zipFor(annoZip);
+    int i = z ? mz_zip_reader_locate_file(z, annoMember.c_str(), nullptr, 0) : -1;
+    if (i < 0) return nullptr;
+    void* data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, n, 0);
+    if (data) *where = annoZip + ":" + annoMember;
+    return data;
+}
+
+// The 1.0 read of a missing file: overlay member, ChallengeData redirect, stand-ins, lipsync. Sets the miss reason.
+static Read10 read10For(Open& o, const std::string& np, const std::string& over)
+{
+    double tR = o.prof ? qpcMs() : 0;
+    Read10 rd;
+    // the count includes the candidate names that were not there (A-12)
+    o.missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)"
+                             : " (overlay " + over + " unreadable)";
+    const bool scoped = imageOfMovie30(o, np);
+    rd.chal = g_cfg.challenge10 ? gameplay::challengeTypePath(np) : "";
+    const char* from = !rd.chal.empty() ? rd.chal.c_str() : over.empty() ? o.p : over.c_str();
+    rd.data = scoped ? nullptr : read10(from, &rd.n, &rd.where);
+    if (!rd.data) rd.data = read10StandIn(o, np, &rd.n, &rd.where);
+    if (!rd.data) rd.data = read10Lipsync(o.p, &rd.n, &rd.where);
+    if (o.prof) o.tRead = qpcMs() - tR;
+    return rd;
+}
+
+// A served file's bytes in the form 3.0 reads, its codec ("" raw) and the note its line carries.
+struct Transcoded {
+    std::string out, note;
+    const char* codec = nullptr;
+};
+
+constexpr size_t kMerSuffix = sizeof(".mer") - 1;
+
+// A served file's transcode; a throw never reaches the engine: it is noted, the raw bytes served.
+static Transcoded transcodeServed(const Open& o, const std::string& np, const std::string& over, const Read10& rd)
+{
+    Transcoded t;
+    std::string mtc;
+    try {
+        if (endsWith(o.p, ".tbody")) {   // D3D11 refuses sub-4x4 block textures (padSmallDxt)
+            t.out.assign((const char*)rd.data, rd.n);
+            padSmallDxt(t.out);
+            t.codec = t.out.size() == rd.n && memcmp(t.out.data(), rd.data, rd.n) ? "tbody" : nullptr;
+        } else {
+            t.codec =
+                di1::transcode({o.p, rd.data, rd.n}, {t.out, t.note, &mtc}, transcodeOptions10(), transcodeIO10());
+        }
+        // the .mtc request transcodes read10s(<same path>.mer): these bytes when nothing redirected the read
+        const bool mer = t.codec && !strcmp(t.codec, "mer") && !mtc.empty();
+        if (mer && over.empty() && rd.chal.empty()) {
+            std::lock_guard<std::mutex> lock(g_sessLock);
+            g_served[np.substr(0, np.size() - kMerSuffix) + ".mtc"] = mtc;
+        }
+    } catch (std::exception& e) {   // never unwind into engine code (that ends in a silent fail-fast)
+        t.note += std::string("TRANSCODE EXCEPTION: ") + e.what() + " ";
+        t.codec = nullptr;
+    } catch (...) {
+        t.note += "TRANSCODE EXCEPTION ";
+        t.codec = nullptr;
+    }
+    if (!over.empty()) t.note += "(archive overlay) ";
+    return t;
+}
+
+constexpr size_t kPresentationDir = sizeof("presentation/") - 1;
+constexpr size_t kLuaSuffix = sizeof(".lua") - 1;
+
+// ui: a flash movie served from 1.0 (its images may be too) and a presentation screen served from 1.0 (gprt).
+static void noteServedUi(const std::string& np, const char* p)
+{
+    std::string mv = ui::flashMovie(np);
+    if (!mv.empty()) {
+        std::lock_guard<std::mutex> lock(g_sessLock);
+        g_movies10.insert(mv);
+    }
+    if (np.rfind("presentation/", 0) != 0 || !endsWith(p, ".lua")) return;
+    std::lock_guard<std::mutex> lock(g_sessLock);
+    g_screens10.insert(np.substr(kPresentationDir, np.size() - kPresentationDir - kLuaSuffix));
+}
+
+// loadprof10: the engine stack of the first 3 served files per kind (15 in all), appended to pf.
+static void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_t cap, int len)
+{
+    static const char* const kKinds[] = {".oct", ".bent", ".banm", ".mer", ".tbody"};
+    static std::atomic<LONG> stacks, perKind[5];   // any open thread
+    for (int k = 0; k < 5; ++k) {
+        if (!endsWith(p, kKinds[k])) continue;
+        const LONG ofKind = ++perKind[k];
+        if (ofKind > 3) continue;
+        const LONG all = ++stacks;
+        if (all > 15) continue;
+        len += format::fitOrFailFast(pf + len, cap - len, " stack:");
+        stackOf(sp, pf, cap, len, 16);
+    }
+}
+
+// A file served from 1.0: indexed overlay, transcode, MemFile, the served line. Frees rd's bytes.
+static int* serveRead(const Open& o, const std::string& np, const std::string& over, const Read10& rd)
+{
+    indexZip10(rd.where.substr(0, rd.where.find(':')));
+    double tT = o.prof ? qpcMs() : 0;
+    Transcoded t = transcodeServed(o, np, over, rd);
+    noteServedUi(np, o.p);
+    double tTc = o.prof ? qpcMs() - tT : 0;
+    double tM = o.prof ? qpcMs() : 0;
+    int* r = t.codec ? memFile(t.out.data(), t.out.size()) : memFile(rd.data, rd.n);
+    char pf[600] = "";
+    if (o.prof) {
+        int len = format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 read %.2f, "
+                                        "transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(), g_frameNo,
+                                        o.t30, o.tRead, tTc, qpcMs() - tM, qpcMs() - o.tIn);
+        appendServedStack(o.p, o.sp, pf, sizeof(pf), len);
+    }
+    logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s%s", o.p, (unsigned)(t.codec ? t.out.size() : rd.n),
+         rd.where.c_str(), t.codec ? t.codec : "raw", t.note.empty() ? "" : " ", t.note.c_str(), r ? "ok" : "FAILED",
+         pf);
+    mz_free(rd.data);
+    return r;
+}
+
+// serve10: a file 3.0 lacks, from the session or the 1.0 install; passes on when 1.0 has none.
+static bool serveStage(Open& o, int*& out)
+{
+    const bool absent = !o.r && !o.blocked && !o.write;
+    if (!absent || !g_cfg.serve10 || !g_cfg.install10[0]) return false;
+    std::string np = norm(o.p), hit, over;
+    sessionLookup(np, hit, over);
+    if (!hit.empty()) {
+        out = serveSession(o, hit);
+        return true;
+    }
+    Read10 rd = read10For(o, np, over);
+    if (!rd.data) return false;
+    out = serveRead(o, np, over, rd);
+    return true;
+}
+
+// Misses always (rare and cheap: what an unexplained fallback asks for), hits only when tracing.
+static void logOpen(const Open& o)
+{
+    char pf[120] = "";
+    if (o.prof)
+        format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]",
+                              GetCurrentThreadId(), g_frameNo, o.t30, o.tRead, qpcMs() - o.tIn);
+    if (g_cfg.trace || !o.r)
+        logf("open %s flags=%X -> %s%s%s", o.p, o.flags & 0xff, o.r ? "ok" : "MISSING", o.r ? "" : o.missWhy.c_str(),
+             pf);
+}
+
+// A stage answers (true, out) or passes the open on. Each one's comment says what it does with r.
+typedef bool (*OpenStage)(Open& o, int*& out);
+
+// First answer wins, in this order (B3, C3); bitmasksStack, blockStage and a serveStage miss pass on.
+static const OpenStage kOpenStages[] = {vtxfStage, tipsStage,    playsetMenuStage, zoneListStage, bitmasksStack,
+                                        chdStage,  sysStage,     memtestStage,     blockStage,    serveStage};
+
+// FUN_0041cb10, cdecl (path, flags, a3, a4, a5): AssetOpen, every engine file open; several engine threads.
 static int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
 {
-    const bool prof = g_cfg.loadProf10;   // loadprof10: ms in the engine's own open, the 1.0 read, transcode, MemFile
-    double tIn = prof ? qpcMs() : 0, t30 = 0, tRead = 0, tTc = 0;
-    if (prof) noteOpenThread();
-    int* r = g_open(path, flags, a3, a4, a5);
-    if (prof) t30 = qpcMs() - tIn;
-    char p[300];
-    safeCopy(p, sizeof(p), path);
-    if (r && g_cfg.shaders10 && !(flags & 1) && _stricmp(p, "shaders/vformat.vtxf") == 0) {   // + 1.0's formats
-        typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
-        typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
-        typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
-        void** vt = *(void***)r;
-        std::string t30, t10;
-        t30.resize(((SizeFn)vt[4])(r, nullptr));
-        uint32_t got = t30.empty() ? 0 : ((ReadFn)vt[5])(r, nullptr, &t30[0], (uint32_t)t30.size());
-        if (got == t30.size() && read10s("shaders/vformat.vtxf", t10)) {
-            std::string m = mergeVtxf(t30, t10);
-            ((DtorFn)vt[11])(r, nullptr, 1);
-            return memFile(m.data(), m.size());
-        }
-        ((DtorFn)vt[11])(r, nullptr, 1);
-        return g_open(path, flags, a3, a4, a5);
+    Open o{path, flags, a3, a4, a5, (const uint32_t*)_AddressOfReturnAddress(), (flags & kOpenWrite) != 0,
+           g_cfg.loadProf10};
+    if (o.prof) {
+        o.tIn = qpcMs();
+        noteOpenThread();
     }
-    // the file named Tips.lua only (FUN_00b70da0's literal), not every *tips.lua: the stream is consumed and re-served
-    if (r && g_cfg.serve10 && g_cfg.tips10 && !(flags & 1) && (!_stricmp(p, "tips.lua") || endsWith(p, "/tips.lua") || endsWith(p, "\\tips.lua")))
-        return tips30(path, flags, a3, a4, a5, r);
-    // menu: the Play Sets list (screen PlaysetListWin32) gets the registered 1.0 playsets; its 3.0 chunk runs as shipped
-    if (r && g_cfg.playsetMenu10 && !(flags & 1) && endsWith(p, "playsetlistwin32.lua") && norm(p) == "presentation/playsetlistwin32.lua") {
-        std::vector<std::pair<std::string, std::string>> ps;
-        {
-            std::lock_guard<std::mutex> l(g_playsets10Lock);
-            for (auto& x : g_playsets10) ps.push_back({x.name, x.start});
-        }
-        std::string t;
-        if (readStream(r, t) && !t.empty() && t[0] == 0x1b && !ps.empty()) {
-            std::string s = ui::playsetMenu10(t, ps), names;
-            for (auto& x : ps) names += " " + x.first + "->" + x.second;
-            logf("%s: %u 1.0 playset entries added:%s (%u B 3.0 chunk -> %u B Lua)", p, (unsigned)ps.size(), names.c_str(),
-                 (unsigned)t.size(), (unsigned)s.size());
-            return memFile(s.data(), s.size());
-        }
-        logf("%s: %s (%u B): unchanged", p, ps.empty() ? "no 1.0 playset registered" : "not the 3.0 chunk", (unsigned)t.size());
-        return g_open(path, flags, a3, a4, a5);
+    o.r = g_open(path, flags, a3, a4, a5);
+    if (o.prof) o.t30 = qpcMs() - o.tIn;
+    safeCopy(o.p, sizeof(o.p), path);
+    for (OpenStage stage : kOpenStages) {
+        int* out = nullptr;
+        if (stage(o, out)) return out;
     }
-    // gp: 3.0 files the activity -> challenge redirect extends (gameplay.hpp): the zone list (ChallengeTypeDataFile
-    // beside the 1.0 ActivityTypeDataFile) and ChallengeData.lua (+ the 1.0 beacons)
-    bool zl = endsWith(p, "zonelist.lua"), cd = endsWith(p, "challengedata/challengedata.lua") || endsWith(p, "challengedata\\challengedata.lua");
-    // mis (beacon10): the zone list's 1.0 MissionParams.BeaconMap rows in 3.0's row form (mission::beaconMap30)
-    bool zl10 = zl && (g_cfg.zones10 || g_cfg.playsetMenu10 || g_cfg.missionTrace);   // the 1.0 playsets (zones10)
-    if (r && !(flags & 1) && ((g_cfg.challenge10 && (zl || cd)) || (g_cfg.beacon10 && zl) || zl10)) {
-        typedef uint32_t(__fastcall * SizeFn)(void* self, void* edx);
-        typedef uint32_t(__fastcall * ReadFn)(void* self, void* edx, void* dst, uint32_t n);
-        typedef void(__fastcall * DtorFn)(void* self, void* edx, uint32_t flags);
-        void** vt = *(void***)r;
-        std::string t, t10;
-        t.resize(((SizeFn)vt[4])(r, nullptr));
-        uint32_t got = t.empty() ? 0 : ((ReadFn)vt[5])(r, nullptr, &t[0], (uint32_t)t.size());
-        ((DtorFn)vt[11])(r, nullptr, 1);
-        int k = 0, kb = 0, ka = 0, kz = 0;
-        if (got == t.size() && !t.empty() && t[0] != 0x1b) {
-            if (zl10) kz = zones10(t, p);   // first: the steps below apply to the added records as to written ones
-            if (zl && g_cfg.challenge10) k = gameplay::zonelist30(t);
-            else if (cd && read10s("activitydata/defaultactivitybeacons.lua", t10)) k = gameplay::beacons30(t, t10);
-            if (zl && g_cfg.beacon10) kb = mission::beaconMap30(t, &ka);
-        }
-        if (g_cfg.challenge10) logf("%s: %d %s", p, k, zl ? "playset records got ChallengeTypeDataFile" : "1.0 beacons added");
-        if (zl && g_cfg.beacon10) logf("%s: %d BeaconMap rows in 3.0 form, %d Beacon_Arrow_Blue rows added (beacon10)", p, kb, ka);
-        return k || kb || kz ? memFile(t.data(), t.size()) : g_open(path, flags, a3, a4, a5);
-    }
-    if (g_cfg.trace && !_strnicmp(p, "gamedb/", 7) && endsWith(p, "/bitmasks.lua")) {   // any playset's, 1.0 or 3.0
-        char line[600];
-        int len = sprintf_s(line, "gamedb package open %s, stack:", p);
-        stackOf((const uint32_t*)_AddressOfReturnAddress(), line, sizeof(line), len, 24);
-        logf("%s", line);
-    }
-    if (!(flags & 1) && endsWith(p, ".lua") && takeChdPath(p)) return chdForLua(p, r);
-    if (!r && !(flags & 1) && g_cfg.serve10 && !_strnicmp(p, "di1sys/", 7)) return sysServe(p);
-    if (r && g_cfg.memtest[0] && !(flags & 1) && memtestMatch(p)) {
-        size_t n = 0;
-        r = copyToMemFile(r, &n);
-        logf("memtest %s %u B -> %s", p, (unsigned)n, r ? "MemFile" : "FAILED");
-        return r;
-    }
-    bool blocked = false;
-    std::string missWhy = " (not served)";
-    if (g_cfg.block10[0]) {
-        std::string np = norm(p), list = g_cfg.block10;
-        for (size_t a = 0, b; a < list.size(); a = b + 1) {
-            b = list.find(',', a);
-            if (b == std::string::npos) b = list.size();
-            std::string pre = list.substr(a, b - a);
-            if (!pre.empty() && np.rfind(pre, 0) == 0) blocked = true;
-        }
-    }
-    if (!r && !blocked && g_cfg.serve10 && g_cfg.install10[0] && !(flags & 1)) {   // flags bit 0 = write (never served)
-        std::string np = norm(p), hit, over;
-        {
-            std::lock_guard<std::mutex> lock(g_sessLock);
-            auto it = g_served.find(np);                 // a world session product (.mtb/.vbuf/.ibuf)
-            if (it != g_served.end()) hit = it->second;  // kept: the engine reopens files
-            else {
-                auto o = g_over10.find(np);              // a full-path member of a loaded 1.0 archive
-                if (o != g_over10.end()) over = o->second;
-            }
-        }
-        if (!hit.empty()) {
-            r = memFile(hit.data(), hit.size());
-            char pf[100] = "";
-            if (prof) sprintf_s(pf, " [prof tid %u frame %ld: 3.0 open %.2f, total %.2f ms]", GetCurrentThreadId(), g_frameNo, t30, qpcMs() - tIn);
-            logf("served %s %u B from asset session -> %s%s", p, (unsigned)hit.size(), r ? "ok" : "FAILED", pf);
-            return r;
-        }
-        double tR = prof ? qpcMs() : 0;
-        size_t n = 0;
-        std::string where;
-        missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(g_zips.size()) + " archives open)" : " (overlay " + over + " unreadable)";
-        std::string movie = g_cfg.uiScope10 ? ui::flashImageMovie(np) : "";
-        bool scoped = false;
-        if (!movie.empty()) {
-            std::lock_guard<std::mutex> lock(g_sessLock);
-            if ((scoped = !g_movies10.count(movie))) missWhy = " (image id of a movie not served from 1.0: not served)";
-        }
-        std::string chal = g_cfg.challenge10 ? gameplay::challengeTypePath(np) : "";   // gp: ChallengeData/<1.0 type file>
-        void* data = scoped ? nullptr : read10(!chal.empty() ? chal.c_str() : over.empty() ? p : over.c_str(), &n, &where);
-        // 3.0 registers a language table only with its controller variant <lang>_pc_con.dct beside it, which 1.0
-        // never shipped: without one the whole playset table was dropped (in-game 2026-10-13, lang\IN). The WIN32
-        // table stands in (same strings).
-        if (!data && endsWith(p, "_pc_con.dct")) {
-            std::string w = std::string(p, strlen(p) - 11) + "_WIN32.dct";
-            data = read10(w.c_str(), &n, &where);
-        }
-        // 3.0's MissionPresentation shows a radio call's giver as <icon>_Holo (missionpresentation.lua GetGiverIcon,
-        // isRadioTransmission); 3.0 ships that variant for 7 givers, 1.0 for none (1.0 showed the portrait itself):
-        // the second Edna window asked for ui/charactericons/inc_edna_full_holo.mtb and fell back to the disc icon.
-        // The 1.0 portrait stands in.
-        if (!data && np.rfind("ui/charactericons/", 0) == 0 && endsWith(p, "_holo.mtb")) {
-            std::string w = std::string(p, strlen(p) - 9) + ".mtb";
-            data = read10(w.c_str(), &n, &where);
-        }
-        std::string annoZip, annoMember;   // a 1.0 dialog line's lipsync (audio.hpp annoSource, vo10)
-        if (!data && g_cfg.audio10 && g_cfg.vo10 && audio::annoSource(p, annoZip, annoMember)) {
-            std::lock_guard<std::mutex> lock(g_zipLock);
-            mz_zip_archive* z = zipFor(annoZip);
-            int i = z ? mz_zip_reader_locate_file(z, annoMember.c_str(), nullptr, 0) : -1;
-            if (i >= 0 && (data = mz_zip_reader_extract_to_heap(z, (mz_uint)i, &n, 0)) != nullptr) where = annoZip + ":" + annoMember;
-        }
-        if (prof) tRead = qpcMs() - tR;
-        if (data) {
-            indexZip10(where.substr(0, where.find(':')));
-            double tT = prof ? qpcMs() : 0;
-            std::string out, note, mtc;
-            const char* codec = nullptr;
-            try {
-                if (endsWith(p, ".tbody")) {             // D3D11 refuses sub-4x4 block textures (padSmallDxt)
-                    out.assign((const char*)data, n);
-                    padSmallDxt(out);
-                    codec = out.size() == n && memcmp(out.data(), data, n) ? "tbody" : nullptr;
-                } else codec = di1::transcode({p, data, n}, {out, note, &mtc}, transcodeOptions10(), transcodeIO10());
-                // the .mtc request transcodes read10s(<same path>.mer): these bytes when nothing redirected the read
-                if (codec && !strcmp(codec, "mer") && !mtc.empty() && over.empty() && chal.empty()) {
-                    std::lock_guard<std::mutex> lock(g_sessLock);
-                    g_served[np.substr(0, np.size() - 4) + ".mtc"] = mtc;
-                }
-            } catch (std::exception& e) {   // never unwind into engine code (that ends in a silent fail-fast)
-                note += std::string("TRANSCODE EXCEPTION: ") + e.what() + " ";
-                codec = nullptr;
-            } catch (...) {
-                note += "TRANSCODE EXCEPTION ";
-                codec = nullptr;
-            }
-            if (!over.empty()) note += "(archive overlay) ";
-            if (std::string mv = ui::flashMovie(np); !mv.empty()) { std::lock_guard<std::mutex> lock(g_sessLock); g_movies10.insert(mv); }
-            if (np.rfind("presentation/", 0) == 0 && endsWith(p, ".lua")) {
-                std::lock_guard<std::mutex> lock(g_sessLock);
-                g_screens10.insert(np.substr(13, np.size() - 17));
-            }
-            if (prof) tTc = qpcMs() - tT;
-            double tM = prof ? qpcMs() : 0;
-            r = codec ? memFile(out.data(), out.size()) : memFile(data, n);
-            char pf[600] = "";
-            if (prof) {
-                int len = sprintf_s(pf, " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 read %.2f, transcode %.2f, memfile %.2f, total %.2f ms]",
-                                    GetCurrentThreadId(), g_frameNo, t30, tRead, tTc, qpcMs() - tM, qpcMs() - tIn);
-                static volatile LONG stacks;   // who asks: the engine call stack of the first served files of each kind
-                static const char* const kinds[] = {".oct", ".bent", ".banm", ".mer", ".tbody"};
-                static volatile LONG perKind[5];
-                for (int k = 0; k < 5; ++k)
-                    if (endsWith(p, kinds[k]) && InterlockedIncrement(&perKind[k]) <= 3 && InterlockedIncrement(&stacks) <= 15) {
-                        len += sprintf_s(pf + len, sizeof(pf) - len, " stack:");
-                        stackOf((const uint32_t*)_AddressOfReturnAddress(), pf, sizeof(pf), len, 16);
-                    }
-            }
-            logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s%s", p, (unsigned)(codec ? out.size() : n), where.c_str(),
-                 codec ? codec : "raw", note.empty() ? "" : " ", note.c_str(), r ? "ok" : "FAILED", pf);
-            mz_free(data);
-            return r;
-        }
-    }
-    // misses always (rare and cheap; what an unexplained fallback asks for), hits only when tracing
-    char pf[120] = "";
-    if (prof)
-        sprintf_s(pf, " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]", GetCurrentThreadId(), g_frameNo, t30, tRead,
-                  qpcMs() - tIn);
-    if (g_cfg.trace || !r) logf("open %s flags=%X -> %s%s%s", p, flags & 0xff, r ? "ok" : "MISSING", r ? "" : missWhy.c_str(), pf);
-    return r;
+    logOpen(o);
+    return o.r;
 }
 
 // The asset open hook (H1). Code outside hkOpen calls its original, so a refused AssetOpen installs nothing else.
