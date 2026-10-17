@@ -36,12 +36,15 @@
 #include "core/zip.hpp"
 #include "engine/assets.hpp"
 #include "engine/crt.hpp"
+#include "engine/zones.hpp"
 #include "games/di1/archives.hpp"
 #include "games/di1/config.hpp"
+#include "games/di1/currency.hpp"
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
 #include "games/di1/octsteps.hpp"
 #include "games/di1/options.hpp"
+#include "games/di1/playsets.hpp"
 #include "games/di1/popin.hpp"
 #include "games/di1/renderio.hpp"
 #include "games/di1/transcode.hpp"
@@ -552,154 +555,6 @@ static bool installAssetDefs(const di1::Config&)
     return hook("asset defs lookup", 0x00703340, "8B44240456", (void*)&hkAssetDef, (void**)&g_assetDef);
 }
 
-// PS-1 (zones10): the 1.0 playsets the 3.0 zone list holds once it has loaded (gameplay::playsets10; added here unless
-// zones10 is off), for the Play Sets menu, and their zones' name prefixes ("IN_", "MU_", "PC_" ...: the 1.0 missions
-// carry them) for missiontrace.
-static std::vector<gameplay::Playset10> g_playsets10;
-static std::vector<std::string> g_missionPrefix10;
-static std::mutex g_playsets10Lock;
-// currency10: inventoryFilter -> the 1.0 playset's currency (gameplay::currencies10). 3.0 answers INV_SPARKS in three
-// places, all redirected to it:
-// - "currency of the zone's inventory filter" FUN_00e21850 (thiscall, filter, CString* out; ret 8): every filter. Its
-//   callers pass the zone's filter: the coin cache that banks Spark-type pickups (FUN_00e27ba0 / FUN_00e27c90),
-//   currency drops, legacy reward groups.
-// - UI_GetPlaysetCurrency FUN_00b54b50 (thiscall(L), ret 4): the Toy Store's currencyName (balance, price icon;
-//   catalog.lua) and player_hud_info.lua's. It reads the zone's filter, then asks FUN_00e21850 for LVL_RUMPUSROOM's;
-//   1.0's FUN_00b40a40 asked with the zone's filter, as this does again (lua_pushstring FUN_0130d840).
-// - the HUD's currency FUN_00fbb420 (below). Prices need nothing: a 1.0 recipe card's PelletCost names its currency
-//   ('INV_NSA_BUCKS:1000') and catalog.lua charges that (UI_ChangePelletCount).
-static std::map<std::string, std::string> g_currency10;
-static std::mutex g_currency10Lock;
-static std::string currency10(const char* filter, const char* who)
-{
-    if (!filter || !*filter) return {};
-    std::lock_guard<std::mutex> l(g_currency10Lock);
-    auto it = g_currency10.find(filter);
-    if (it == g_currency10.end()) return {};
-    static core::LogOnce<std::string> told;
-    if (told.first(std::string(who) + filter))
-        logf("currency10: %s currency for %s -> %s", who, filter, it->second.c_str());
-    return it->second;
-}
-// The zone's: the zone manager's (*0x0225f548) string field inventoryFilter of its zone (+0x19c), read through
-// FUN_0139e0b0 (thiscall: key, zone, a3, default; ret 0x10) as FUN_00e27ba0 and FUN_00b54b50 read it.
-static std::string zoneCurrency10(const char* who)
-{
-    uint8_t* zm = *(uint8_t**)rt(0x0225F548);
-    uint32_t zone = zm ? *(uint32_t*)(zm + 0x19C) : 0;
-    if (!zone) return {};
-    typedef const char*(__fastcall* StrFn)(void*, void*, const char*, uint32_t, uint32_t, const char*);
-    return currency10(((StrFn)rt(0x0139E0B0))(zm, nullptr, "inventoryFilter", zone, 0, ""), who);
-}
-typedef void(__fastcall* ZoneCurrencyFn)(void* self, void* edx, const char* filter, void* out);
-static ZoneCurrencyFn g_zoneCurrency;
-static void __fastcall hkZoneCurrency(void* self, void*, const char* filter, void* out)
-{
-    std::string cur = currency10(filter, "zone");
-    if (cur.empty()) return g_zoneCurrency(self, nullptr, filter, out);
-    ((void(__fastcall*)(void*, void*, const char*))rt(0x0041A250))(out, nullptr, cur.c_str());   // CString = cur
-}
-typedef int(__fastcall* PlaysetCurrencyFn)(void* self, void* edx, void* L);
-static PlaysetCurrencyFn g_playsetCurrency;
-static int __fastcall hkPlaysetCurrency(void* self, void*, void* L)
-{
-    std::string cur = zoneCurrency10("Toy Store / UI_GetPlaysetCurrency");
-    if (cur.empty()) return g_playsetCurrency(self, nullptr, L);
-    ((void(__cdecl*)(void*, const char*))rt(0x0130D840))(L, cur.c_str());
-    return 1;
-}
-// The HUD's currency FUN_00fbb420 (thiscall(data), ret 4; FUN_00fc11b0's pick unless the HUD's playset is Empire,
-// InsideOut or PlaysetX, which have their own) shows INV_SPARKS with icon "SPARKS", both fixed. In a 1.0 playset's
-// zone this shows the playset's currency through the same steps: amount FUN_00e07f60 (inventory *0x02289734,
-// thiscall(name), ret 4); into the hud's (+0x5c) table PlayerInfo (FUN_0154c520) when its currencyAmt (FUN_004510b0,
-// lua_tointeger FUN_0130d530, release FUN_0130e4d0) differs or the hud forces it (+0x87): currencyIcon (FUN_00b3f0a0)
-// = the currency less "INV_" (the icon naming of 3.0's empire_currency / scrapcurrency / out_balloons, and of
-// catalog.lua's MangleIconName: ui/icons/nsa_bucks.mtb ...), dirty (FUN_00b3f060), PlayerCurrencyAmt (FUN_0154c100).
-struct ScriptRef { void* L; uint32_t idx; };
-typedef uint8_t(__fastcall* HudCurrencyFn)(uint8_t* hud, void* edx, void* data);
-static HudCurrencyFn g_hudCurrency;
-static uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
-{
-    std::string cur = zoneCurrency10("HUD");
-    if (cur.empty() || cur == "INV_SPARKS") return g_hudCurrency(hud, nullptr, data);
-    typedef void(__cdecl* ReleaseFn)(void*, uint32_t);
-    int amt = ((int(__fastcall*)(void*, void*, const char*))rt(0x00E07F60))(*(void**)rt(0x02289734), nullptr, cur.c_str());
-    ScriptRef info{nullptr, 0xFFE17B81u}, f{nullptr, 0};
-    ((void(__fastcall*)(void*, void*, const char*, ScriptRef*))rt(0x0154C520))(*(void**)(hud + 0x5C), nullptr, "PlayerInfo", &info);
-    ScriptRef* got = ((ScriptRef*(__fastcall*)(ScriptRef*, void*, ScriptRef*, const char*))rt(0x004510B0))(&info, nullptr, &f, "currencyAmt");
-    int shown = ((int(__cdecl*)(void*, uint32_t))rt(0x0130D530))(got->L, got->idx);
-    if (f.L) ((ReleaseFn)rt(0x0130E4D0))(f.L, f.idx);
-    uint8_t changed = 0;
-    if (shown != amt || hud[0x87]) {
-        std::string icon = cur.compare(0, 4, "INV_") ? cur : cur.substr(4);
-        const char* key = "currencyIcon";
-        const char* val = icon.c_str();
-        ((void(__fastcall*)(ScriptRef*, void*, const char**, const char**))rt(0x00B3F0A0))(&info, nullptr, &key, &val);
-        changed = 1;
-        key = "dirty";
-        ((void(__fastcall*)(ScriptRef*, void*, const char**, uint8_t*))rt(0x00B3F060))(&info, nullptr, &key, &changed);
-        ((void(__fastcall*)(void*, void*, const char*, int))rt(0x0154C100))(data, nullptr, "PlayerCurrencyAmt", amt);
-    }
-    if (info.L) ((ReleaseFn)rt(0x0130E4D0))(info.L, info.idx);
-    return changed;
-}
-
-// currency10's hooks (H1), all or none.
-static bool installCurrency(const di1::Config& c)
-{
-    if (!c.currency10) return true;
-    return installFeature("currency10", {
-        {"zone currency (currency10)", 0x00E21850, "8B4C240868????????E8", (void*)&hkZoneCurrency,
-         (void**)&g_zoneCurrency},
-        {"UI_GetPlaysetCurrency (currency10)", 0x00B54B50, "6AFF68????????64A100000000", (void*)&hkPlaysetCurrency,
-         (void**)&g_playsetCurrency},
-        {"HUD currency (currency10)", 0x00FBB420, "6AFF68????????64A100000000", (void*)&hkHudCurrency,
-         (void**)&g_hudCurrency},
-    });
-}
-static bool world10(const std::string& zone) { return di1::worldInstalled(g_cfg.install10, zone); }
-static int zones10(std::string& t, const char* p)
-{
-    if (norm(p) != "gamedb/core/zonelist.lua") return 0;
-    std::string c10;
-    if (!read10s("gamedb/core/zonelist.lua", c10)) { logf("zones10: no 1.0 zone list in the 1.0 install"); return 0; }
-    di1::Zones10Options o;
-    o.add = g_cfg.zones10;
-    o.currencies = g_cfg.currency10;
-    o.world = world10;
-    di1::Zones10 z;
-    try {
-        z = di1::zones10(t, c10, o);
-        if (g_cfg.currency10) {
-            std::string l;
-            for (auto& [f, c] : z.currencies) l += " " + f + "=" + c;
-            logf("currency10: 1.0 playset currencies:%s", l.c_str());
-            std::lock_guard<std::mutex> lk(g_currency10Lock);
-            g_currency10 = std::move(z.currencies);
-        }
-    } catch (std::exception& e) {
-        logf("zones10: 1.0 zone list not read (%s)", e.what());
-        return 0;
-    }
-    int added = 0;
-    std::vector<std::string> pre = di1::zonePrefixes(z.playsets);
-    for (auto& x : z.playsets) {
-        added += x.added;
-        if (x.added) logf("zones10: %s registered, PlaysetUniqueID %d, %u zones, start %s", x.name.c_str(), x.id, (unsigned)x.zones.size(), x.start.c_str());
-        else logf("zones10: %s already in the 3.0 zone list (start %s)", x.name.c_str(), x.start.c_str());
-    }
-    std::lock_guard<std::mutex> l(g_playsets10Lock);
-    g_playsets10 = z.playsets;
-    g_missionPrefix10 = pre;
-    return added;
-}
-static bool playsetMission10(const char* name)
-{
-    std::lock_guard<std::mutex> l(g_playsets10Lock);
-    for (auto& x : g_missionPrefix10) if (!_strnicmp(name, x.c_str(), x.size())) return true;
-    return false;
-}
-
 static RENDERDOC_API_1_1_2* g_rdoc;   // renderdoc10: RenderDoc loaded in-process, one frame captured once the world runs
 // renderdoc10: one frame captured renderdoc10 seconds after the first 1.0 playset mission's tick (missiontrace).
 static void armRenderDocCapture()
@@ -719,7 +574,7 @@ static trace::mission::Config missionTraceOf(const di1::Config& c)
 {
     trace::mission::Config m;
     m.on = c.missionTrace;
-    m.ownMission = playsetMission10;
+    m.ownMission = di1::playsets::ownMission;
     if (g_rdoc) m.ownMissionTick = armRenderDocCapture;
     return m;
 }
@@ -1007,11 +862,7 @@ static void destroyStream(int* r)
     ((DtorFn)(*(void***)r)[core::eng::kFileDestroy])(r, nullptr, core::eng::kDestroyFree);
 }
 
-constexpr uint32_t kZoneManager = 0x0225F548;   // *: the zone manager (FUN_0139e0b0's this)
-constexpr uint32_t kZoneByName = 0x01391150;    // FUN_01391150: thiscall (uint32_t* out, name), its zone by name
-
 // 3.0's tips (o.r, consumed) plus the 1.0 records it lacks; registered zones' keys stay 3.0's (FUN_01391150).
-typedef void(__fastcall* ZoneByNameFn)(void* self, void* edx, uint32_t* out, const char* name);
 static int* tips30(const Open& o)
 {
     std::string t30, t10;
@@ -1019,12 +870,9 @@ static int* tips30(const Open& o)
     if (t30.find("ZoneTipCategories") == std::string::npos) return memFile(t30.data(), t30.size());
     const bool got10 = read10s("data/tips.lua", t10);
     if (!got10) return memFile(t30.data(), t30.size());
-    void* zm = *(void**)rt(kZoneManager);
-    int k = ui::mergeTips(t30, t10, [&](const std::string& z) {
-        uint32_t id = 0;
-        if (zm) ((ZoneByNameFn)rt(kZoneByName))(zm, nullptr, &id, z.c_str());
-        return id != 0;
-    });
+    void* zm = engine::zones::manager();
+    int k = ui::mergeTips(t30, t10,
+                          [&](const std::string& z) { return zm && engine::zones::zoneRegistered(zm, z.c_str()); });
     logf("tips %s: %d 1.0 records added (zone manager %s)", o.path, k, zm ? "up" : "NOT up: zone keys unchecked");
     return memFile(t30.data(), t30.size());
 }
@@ -1062,11 +910,7 @@ static bool playsetMenuStage(Open& o, int*& out)
 {
     if (!o.edits() || !g_cfg.playsetMenu10) return false;
     if (!endsWith(o.p, "playsetlistwin32.lua") || norm(o.p) != "presentation/playsetlistwin32.lua") return false;
-    std::vector<std::pair<std::string, std::string>> ps;
-    {
-        std::lock_guard<std::mutex> l(g_playsets10Lock);
-        for (auto& x : g_playsets10) ps.push_back({x.name, x.start});
-    }
+    std::vector<std::pair<std::string, std::string>> ps = di1::playsets::starts();
     std::string t;
     const bool read = readStream(o.r, t);
     const bool chunk = !t.empty() && t[0] == kLuaChunk;
@@ -1102,7 +946,7 @@ static bool zoneListStage(Open& o, int*& out)
     destroyStream(o.r);
     int k = 0, kb = 0, ka = 0, kz = 0;
     if (full && !t.empty() && t[0] != kLuaChunk) {
-        if (zl10) kz = zones10(t, o.p);   // first: the steps below apply to the added records as to written ones
+        if (zl10) kz = di1::playsets::registerPlaysets(t, o.p, read10s);   // first: later steps see the added records
         if (zl && g_cfg.challenge10) {
             k = gameplay::zonelist30(t);
         } else if (cd) {
@@ -1877,6 +1721,19 @@ static void prepareShaders10(const di1::Config& c, const char* dir)
          (unsigned)g_vf10.size(), (unsigned)g_render.shaders10.globals.size(), g_shaderCache.c_str());
 }
 
+constexpr int kOpenFiles = 8192;   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
+
+// Before any hook, in this order: RenderDoc, the open-file limit, resident archives, tables, shaders10, playsets.
+static void prepare(const di1::Config& c, const char* dir)
+{
+    loadRenderDoc(c);
+    _setmaxstdio(kOpenFiles);
+    indexResident10(c);
+    loadTables(c, dir);
+    prepareShaders10(c, dir);
+    di1::playsets::install(c);
+}
+
 // The first-AV handler, then MinHook; false: no hook can be installed.
 static bool startHooks()
 {
@@ -1910,11 +1767,7 @@ extern "C" void __stdcall Pentane_Main()
     GetModuleFileNameA(self, dir, MAX_PATH);
     if (char* s = strrchr(dir, '\\')) *s = 0;
     di1::loadConfig(dir, g_cfg);
-    loadRenderDoc(g_cfg);
-    _setmaxstdio(8192);   // every 1.0 archive used stays open (miniz holds a FILE*); the CRT default is 512
-    indexResident10(g_cfg);
-    loadTables(g_cfg, dir);
-    prepareShaders10(g_cfg, dir);
+    prepare(g_cfg, dir);
 
     // the modules' hooks in install order (B3): a hook is live once enabled
     if (!startHooks()) return;
@@ -1922,7 +1775,7 @@ extern "C" void __stdcall Pentane_Main()
     di1::gamedb::install(g_cfg);
     installEcon(g_cfg);
     di1::expendables::install(g_cfg);
-    installCurrency(g_cfg);
+    di1::currency::install(g_cfg);
     di1::popin::install(g_cfg);
     installPlaysetSlot(g_cfg);
     trace::spawn::install({g_cfg.trace, g_cfg.hidePs});
