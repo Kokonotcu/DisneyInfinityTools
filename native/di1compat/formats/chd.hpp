@@ -26,7 +26,10 @@ struct V {
 
 // A Lua token and its group, as chd.py's _LUA regex numbers them.
 enum Group { kString = 1, kFloat = 3, kInt = 4, kName = 5, kSymbol = 6 };
-struct Tok { int g; std::string v; };
+struct Tok {
+    int g;
+    std::string v;
+};
 
 namespace detail {
 

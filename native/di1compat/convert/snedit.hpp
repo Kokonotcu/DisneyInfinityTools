@@ -24,7 +24,10 @@ struct SnEdit {
     size_t sn;
     long hsAt = -1, hsiAt = -1, hlAt = -1, dnPool = -1, pnPool = -1;   // HeaderStrings, -Indices, -Layout, pools
     std::vector<oct::Rec> addVg;
-    struct DN { int header = -1, basis = 0; std::string type; };
+    struct DN {
+        int header = -1, basis = 0;
+        std::string type;
+    };
     std::vector<DN> dns;
     int npn = 0;   // ProcessorNodes
     std::vector<std::string> hs;
@@ -39,7 +42,11 @@ struct SnEdit {
     const bool variantGroups;   // Options::variantGroups
 
     SnEdit(oct::File& file, size_t snRec, const Options& opt);
-    bool ok() const { return hsAt >= 0 && hsiAt >= 0 && hlAt >= 0 && dnPool >= 0; }
+    bool ok() const
+    {
+        const bool headers = hsAt >= 0 && hsiAt >= 0 && hlAt >= 0;
+        return headers && dnPool >= 0;
+    }
     // header h's name; a reference, since child() compares it for every sibling
     const std::string& name(int h) const
     {
@@ -77,7 +84,11 @@ private:
 
 namespace detail {
 // The level-3 records SnEdit reads: their positions, and the pools whose entries it reads.
-struct SnRecord { const char* name; long SnEdit::*at; SnPool pool; };
+struct SnRecord {
+    const char* name;
+    long SnEdit::*at;
+    SnPool pool;
+};
 inline constexpr SnRecord kSnRecords[] = {
     {"HeaderStrings", &SnEdit::hsAt, SnPool::Other},
     {"HeaderStringIndices", &SnEdit::hsiAt, SnPool::Other},

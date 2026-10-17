@@ -123,7 +123,12 @@ enum class Tallied {
     Behaviour, NodeType, Static, FamilyNames
 };
 // By level, enclosing level-3 record and name (nullptr: any). A level-3 record encloses itself. Rows never overlap.
-struct TallyRow { int level; const char* pool; const char* name; Tallied what; };
+struct TallyRow {
+    int level;
+    const char* pool;
+    const char* name;
+    Tallied what;
+};
 inline constexpr TallyRow kTallyRows[] = {
     {3, "DefaultData", nullptr, Tallied::DefaultData},
     {3, "DefaultDataIndices", nullptr, Tallied::DefaultIndices},
@@ -285,7 +290,10 @@ inline SnStats scan(const oct::File& f, size_t sn)
 }
 
 // The links' tally: count, additional size, and whether the SubNetwork has a link pool.
-struct LinkStats { int count = 0, extra = 0; bool pool = false; };
+struct LinkStats {
+    int count = 0, extra = 0;
+    bool pool = false;
+};
 // Converts every base link of the SubNetwork to 3.0 form, measuring each after (convertLink).
 inline LinkStats convertLinks(oct::File& f, size_t sn)
 {

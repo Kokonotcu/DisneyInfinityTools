@@ -15,7 +15,10 @@ namespace dct {
 // 3.0's Localize (FUN_006952d0 -> FUN_006932a0) probes every table with the main table's seed: all 3.0 tables use it.
 constexpr uint32_t SEED30 = 0x99fc0d82;   // all 3.0 tables but atvremote's
 
-struct Dict { uint32_t initval = 0; std::vector<std::pair<uint32_t, std::string>> keys; };   // table order
+struct Dict {
+    uint32_t initval = 0;
+    std::vector<std::pair<uint32_t, std::string>> keys;   // table order
+};
 
 namespace detail {
 // Header fields (FORMATS.md 9); a "rel" points at field offset + 1 + its value.
@@ -184,7 +187,8 @@ inline int supplement(std::string& raw, const std::string& raw10, const std::str
 {
     // 1.0 loaded lang/main for every playset; 3,154 of 9,467 named english keys are in no 3.0 table
     Dict d, s, ids;
-    if (!load(raw, d) || d.initval != SEED30 || !load(raw10, s) || !load(ids10, ids)) return -1;
+    if (!load(raw, d) || d.initval != SEED30) return -1;
+    if (!load(raw10, s) || !load(ids10, ids)) return -1;
     std::unordered_set<uint32_t> own;
     for (const auto& k : d.keys) own.insert(k.first);
     const auto names = detail::namesByHash(ids);

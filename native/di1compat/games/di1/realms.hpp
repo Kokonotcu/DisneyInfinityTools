@@ -332,7 +332,10 @@ inline void addRigUuids(oct::File& f, const std::string& seed)
 
 // How the realm-file rule moves a node reference: the RealmData node becomes node 1 (CO-22, three rules).
 enum class Shift { FromZero, Always, FromOne };
-struct ShiftRow { const char* name; Shift shift; };
+struct ShiftRow {
+    const char* name;
+    Shift shift;
+};
 inline constexpr ShiftRow kRefShifts[] = {
     {"ParentNodeReferences", Shift::FromZero},
     {"LinkedNodeRefs", Shift::FromZero},

@@ -34,7 +34,10 @@ constexpr uint16_t makeType(int shape, int keyed, int kind, int countWidth = 1, 
 // The narrowest element-count width, 1-3 bytes. Callers stay below 2^24 elements (CO-31).
 inline int countWidth(size_t n) { return n < 0x100 ? 1 : n < 0x10000 ? 2 : 3; }
 
-struct Spec { int shape, keyed, kind, cw, ew; bool ok; };
+struct Spec {
+    int shape, keyed, kind, cw, ew;
+    bool ok;
+};
 
 // type -> its bit fields (shape, keyed, kind, count width, element width); ok=false if they do not form a type.
 inline Spec spec(int t)

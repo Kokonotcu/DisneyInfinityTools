@@ -7,7 +7,10 @@ namespace datamap {
 
 namespace detail {
 // The Kinds whose 3.0 handler appends the extension itself (FUN_0070c090; a path with it was doubled).
-struct KindExt { const char* kind; const char* ext; };
+struct KindExt {
+    const char* kind;
+    const char* ext;
+};
 inline constexpr KindExt kExtensions[] = {{"DNA", ".dnax"},           {"AnimTreeProject", ".animtreeproject"},
                                           {"BehaviorMap", ".bmx"},     {"Script", ".sx"},
                                           {"MaterialBundle", ".mtb"},  {"APFile", ".ap"}};
