@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include "../sys.hpp"
 
@@ -69,8 +70,8 @@ inline void safeCopy(char* out, size_t cap, const char* src)
         for (; src && i + 1 < cap && src[i]; ++i) out[i] = src[i];
         out[i] = 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // strcpy_s kept (N21): a cap under 13 fail-fasts, where snprintf would cut; callers' caps are not all checked
-        strcpy_s(out, cap, "<unreadable>");
+        // a cap under 13 cuts it (N21)
+        snprintf(out, cap, "%s", "<unreadable>");
     }
 }
 

@@ -1,4 +1,4 @@
-// The plugin log (di1compat.log) and LogOnce. Windows, std, base/format. Any thread, VEHs too; its lock is last (L2).
+// The plugin log (di1compat.log) and LogOnce. Windows, std. Any thread, VEHs too; its lock is last (L2).
 #pragma once
 #include <windows.h>
 #include <share.h>
@@ -9,7 +9,6 @@
 #include <mutex>
 #include <set>
 #include <string>
-#include "../base/format.hpp"
 #include "locks.hpp"
 
 namespace core {
@@ -36,7 +35,7 @@ inline std::string openExeLog(const char* name)
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
-    if (slash) format::fitOrFailFast(slash + 1, path + MAX_PATH - (slash + 1), "%s", name);
+    if (slash) snprintf(slash + 1, path + MAX_PATH - (slash + 1), "%s", name);
     std::string base(path, strlen(path) - (sizeof(".log") - 1));
     for (int i = 4; i >= 0; --i)
         MoveFileExA(i ? (base + "." + std::to_string(i) + ".log").c_str() : path,

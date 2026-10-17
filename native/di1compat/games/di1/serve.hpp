@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <set>
@@ -160,9 +161,8 @@ inline int* serveSession(const openstage::Open& o, const std::string& hit)
     int* r = core::memFile(hit.data(), hit.size());
     char pf[100] = "";
     if (o.prof)
-        format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, total %.2f ms]",
-                              GetCurrentThreadId(), trace::loadprof::frameNo(), o.t30,
-                              trace::loadprof::nowMs() - o.tIn);
+        snprintf(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, total %.2f ms]", GetCurrentThreadId(),
+                 trace::loadprof::frameNo(), o.t30, trace::loadprof::nowMs() - o.tIn);
     core::logf("served %s %u B from asset session -> %s%s", o.p, (unsigned)hit.size(), r ? "ok" : "FAILED", pf);
     return r;
 }
@@ -274,7 +274,7 @@ inline void noteServedUi(const std::string& np, const char* p)
 }
 
 // loadprof10: the engine stack of the first 3 served files per kind (15 in all), appended to pf.
-inline void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_t cap, int len)
+inline void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_t cap, size_t len)
 {
     State& s = g_state;
     for (size_t k = 0; k < sizeof(kStackKinds) / sizeof(kStackKinds[0]); ++k) {
@@ -283,7 +283,7 @@ inline void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_
         if (ofKind > kStacksPerKind) continue;
         const LONG all = ++s.stacks;
         if (all > kStacksAll) continue;
-        len += format::fitOrFailFast(pf + len, cap - len, " stack:");
+        len = format::appendCut(pf, cap, len, " stack:");
         core::stackOf(sp, pf, cap, len, kStackWords);
     }
 }
@@ -300,10 +300,10 @@ inline int* serveRead(const openstage::Open& o, const std::string& np, const std
     int* r = t.codec ? core::memFile(t.out.data(), t.out.size()) : core::memFile(rd.data, rd.n);
     char pf[600] = "";
     if (o.prof) {
-        int len = format::fitOrFailFast(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 read %.2f, "
-                                        "transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(),
-                                        trace::loadprof::frameNo(), o.t30, o.tRead, tTc,
-                                        trace::loadprof::nowMs() - tM, trace::loadprof::nowMs() - o.tIn);
+        const size_t len = format::appendCut(pf, sizeof(pf), 0, " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 read "
+                                             "%.2f, transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(),
+                                             trace::loadprof::frameNo(), o.t30, o.tRead, tTc,
+                                             trace::loadprof::nowMs() - tM, trace::loadprof::nowMs() - o.tIn);
         appendServedStack(o.p, o.sp, pf, sizeof(pf), len);
     }
     core::logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s%s", o.p, (unsigned)(t.codec ? t.out.size() : rd.n),

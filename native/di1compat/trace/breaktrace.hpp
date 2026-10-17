@@ -155,9 +155,9 @@ inline void reportClocks(ULONGLONG now)
     size_t at = 0;
     for (size_t i = 0; i < fresh.size() && i < kYoungestListed; ++i) {
         const Clock& clock = s.clocks[fresh[i].second];
-        // floats of any size: text that does not fit keeps sprintf_s's fail-fast (A-37)
-        at += format::fitOrFailFast(line + at, sizeof(line) - at, " %p born -%llu ms %.2f->%.2f (still %llu ms)",
-                                    fresh[i].second, now - clock.born, clock.first, clock.last, now - clock.changed);
+        // floats of any size: text that does not fit is cut (A-37)
+        at = format::appendCut(line, sizeof(line), at, " %p born -%llu ms %.2f->%.2f (still %llu ms)", fresh[i].second,
+                               now - clock.born, clock.first, clock.last, now - clock.changed);
     }
     if (!fresh.empty())
         core::logf("breaktrace clocks: %zu born in the last 60 s, %d moved; youngest:%s", fresh.size(), moving, line);
@@ -256,9 +256,9 @@ inline void attachmentList(const uint8_t* self, uint32_t n, const uint8_t* objs,
         char m0[40] = "", m1[40] = "";
         core::safeCopy(m0, sizeof(m0), *(const char* const*)a);
         core::safeCopy(m1, sizeof(m1), *(const char* const*)(a + eng::kAttachLayerName));
-        // up to 109 characters an entry: text that does not fit keeps sprintf_s's fail-fast (A-37)
-        at += format::fitOrFailFast(line + at, cap - at, " %u:%u%s'%s'/%u%s'%s'", k, b, objectMark(objs, b), m0, l,
-                                    objectMark(objs, l), m1);
+        // up to 109 characters an entry, more than kLineReserve: one that does not fit is cut, ending the list (A-37)
+        at = format::appendCut(line, cap, at, " %u:%u%s'%s'/%u%s'%s'", k, b, objectMark(objs, b), m0, l,
+                               objectMark(objs, l), m1);
         if (at > cap - kLineReserve) break;
     }
 }

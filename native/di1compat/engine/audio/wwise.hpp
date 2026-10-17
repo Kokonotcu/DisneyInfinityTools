@@ -3,12 +3,12 @@
 #include <windows.h>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "../../base/format.hpp"
 #include "../../base/hash.hpp"
 #include "../../base/text.hpp"
 #include "../../core/hooks.hpp"
@@ -301,7 +301,7 @@ inline std::string categoryChain(void* ev)
         f.EventCategory_GetInfo(cat, nullptr, &cn);
         f.EventCategory_GetVolume(cat, &cv);
         char one[80];
-        format::fitOrFailFast(one, sizeof one, "%s%s %.3f", chain.empty() ? "" : " < ", cn ? cn : "?", cv);
+        snprintf(one, sizeof one, "%s%s %.3f", chain.empty() ? "" : " < ", cn ? cn : "?", cv);
         chain += one;
     });
     return chain;

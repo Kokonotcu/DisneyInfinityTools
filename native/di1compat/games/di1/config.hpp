@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <cstddef>
 #include <cstdio>
+#include <string>
 #include "../../core/config.hpp"
 #include "../../core/log.hpp"
 
@@ -245,12 +246,11 @@ inline void logConfig(const Config& c)
 // Reads <dir>\di1compat.cfg into cfg; without the file cfg keeps its defaults and one line says so.
 inline void loadConfig(const char* dir, Config& cfg)
 {
-    char path[MAX_PATH];
-    // sprintf_s kept (N21): a plugin dir of 246+ characters fail-fasts, where snprintf would cut the path (A-08)
-    sprintf_s(path, "%s\\di1compat.cfg", dir);
+    // a whole path, never a cut one that could name another file: too long fails to open (N21, A-08)
+    const std::string path = std::string(dir) + "\\di1compat.cfg";
     FILE* f = nullptr;
-    if (fopen_s(&f, path, "r") || !f) {
-        core::logf("no %s: defaults (serve10 off)", path);
+    if (fopen_s(&f, path.c_str(), "r") || !f) {
+        core::logf("no %s: defaults (serve10 off)", path.c_str());
         return;
     }
     core::readConfig(f, cfg, kConfigKeys);

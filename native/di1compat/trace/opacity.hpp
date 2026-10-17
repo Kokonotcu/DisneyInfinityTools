@@ -1,4 +1,4 @@
-// opacitylog10 probe: the primitives the opacity test drops. Uses core, base. Render-path threads, one lock.
+// opacitylog10 probe: the primitives the opacity test drops. Uses core. Render-path threads, one lock.
 #pragma once
 #include <windows.h>
 #include <cstdint>
@@ -6,7 +6,6 @@
 #include <mutex>
 #include <set>
 #include <string>
-#include "../base/format.hpp"
 #include "../core/hooks.hpp"
 #include "../core/log.hpp"
 
@@ -80,7 +79,7 @@ inline void dumpSkipped(uint32_t prim, const uint8_t* shd, const float* inst)
     std::string f, pr;
     for (int k = 0; k < eng::kDumpWords; ++k) {
         char e[16];
-        format::fitOrFailFast(e, sizeof(e), " %.3f", inst[k]);
+        snprintf(e, sizeof(e), " %.3f", inst[k]);
         f += e;
     }
     for (int k = 0; k < eng::kDumpWords; ++k) {
@@ -120,7 +119,7 @@ inline void logMask(uint32_t n, float fade, uint32_t r, uint32_t prims, uint32_t
         uint32_t w = shd ? *(uint32_t*)(shd + eng::kShdOpacityWord) : 0;
         float v = opacityValue(w, insts, i);
         char key[160];
-        format::fitOrFailFast(key, sizeof(key), "%s %08x %.3f %.3f %u", nm ? nm : "(null)", w, v, fade, (r >> i) & 1);
+        snprintf(key, sizeof(key), "%s %08x %.3f %.3f %u", nm ? nm : "(null)", w, v, fade, (r >> i) & 1);
         std::lock_guard<std::mutex> lock(s.mx);
         const bool first = s.seen.size() < kLinesLogged && s.seen.insert(key).second;
         if (first)
