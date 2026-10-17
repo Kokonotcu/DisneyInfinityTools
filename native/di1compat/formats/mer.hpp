@@ -158,6 +158,8 @@ struct Link {
 };
 inline constexpr int kFromPinShift = 10;
 inline constexpr uint16_t kBelowFromPin = 0x3ff;
+inline constexpr int kToPinShift = 4;   // the to pin: code bits 4-9
+inline constexpr int kPinMask = 0x3f;
 
 // A LinksBuffer Data record's payload in the older form; nullopt when shorter than its 5-byte head
 inline std::optional<IndexLinks> indexLinks(const oct::Rec& r)

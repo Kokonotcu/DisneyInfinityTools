@@ -7,11 +7,13 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include "octx.hpp"
 #include "luachunk.hpp"
 #include "base/bytes.hpp"
+#include "formats/mer.hpp"
 
 namespace gameplay {
 
@@ -507,158 +509,287 @@ inline const std::vector<ActClass>& actClasses()
     };
     return m;
 }
-inline const ActClass* actClass(const std::string& t, bool eval)
+// The class whose 1.0 task type is t, or null.
+inline const ActClass* taskClass(const std::string& t)
 {
-    for (auto& c : actClasses()) if (t == (eval ? c.eval10 : c.cls10)) return &c;
+    for (auto& c : actClasses()) if (t == c.cls10) return &c;
+    return nullptr;
+}
+// The class whose 1.0 eval type is t, or null.
+inline const ActClass* evalClass(const std::string& t)
+{
+    for (auto& c : actClasses()) if (t == c.eval10) return &c;
     return nullptr;
 }
 
-// 1.0 activity graph (.mer, before mer::transcode) -> 3.0 Challenge classes, when every activity class in it has a
-// counterpart and the file is one namespace (all 35 activity graphs). Returns the nodes converted (0: unchanged).
-inline int activityGraph30(oct::File& f, int* rerouted = nullptr, int* dropped = nullptr)
+namespace detail {
+
+using Pin = std::pair<std::string, std::string>;   // 1.0 pin -> 3.0 pin ("" none, "*" the participant list)
+
+// One graph node: its record range and the name of its first Type field.
+struct ActNode {
+    size_t at, end;
+    std::string type;
+};
+
+// activityGraph30's work: the graph's pools and nodes, its pin tables, the link edits and their counts.
+struct ActGraph {
+    oct::File& f;
+    long pool = -1, lpool = -1;                                 // MeridianNodePool, MeridianLinkPool
+    uint16_t nl = 0, fl = 0;                                    // node and field record levels
+    std::vector<ActNode> nodes;
+    std::map<std::string, std::map<std::string, int>> pinIdx;   // task class -> pin name -> index
+    size_t newIdx = 0;                                          // the AvatarList's index: NameSpaceEnd's
+    std::map<size_t, int> dIn, dOut;                            // links dropped, per node
+    int nRe = 0, nDrop = 0;                                     // links rerouted to the AvatarList; dropped
+    std::string smUuid;                                         // the state machine's Uuid payload
+};
+
+inline void collectNodes(ActGraph& g)
 {
-    long pool = f.pool("MeridianNodePool"), lpool = f.pool("MeridianLinkPool");
-    if (pool < 0 || lpool < 0) return 0;
-    uint16_t nl = (uint16_t)(f.recs[pool].level + 1), fl = (uint16_t)(nl + 1);
-    struct N { size_t at, end; std::string type; };
-    std::vector<N> nodes;
-    for (size_t i = pool + 1, e = f.blockEnd(pool); i < e; i = f.blockEnd(i)) {
-        if (f.recs[i].level != nl) continue;
-        N n{i, f.blockEnd(i), ""};
+    oct::File& f = g.f;
+    for (size_t i = g.pool + 1, e = f.blockEnd(g.pool); i < e; i = f.blockEnd(i)) {
+        if (f.recs[i].level != g.nl) continue;
+        ActNode n{i, f.blockEnd(i), ""};
         for (size_t j = i + 1; j < n.end; ++j) {
-            if (f.recs[j].level != fl || f.name(f.recs[j]) != "Type") continue;
-            n.type = detail::firstName(f, f.recs[j]);
+            if (f.recs[j].level != g.fl || f.name(f.recs[j]) != "Type") continue;
+            n.type = firstName(f, f.recs[j]);
             break;
         }
-        nodes.push_back(n);
+        g.nodes.push_back(n);
     }
+}
+
+// The activity task nodes; 0 when one has no 3.0 class or the graph is not exactly one namespace.
+inline int mappedNodes(const ActGraph& g)
+{
     int begins = 0, mapped = 0;
-    for (auto& n : nodes) {
+    for (auto& n : g.nodes) {
         begins += n.type == "NameSpaceBegin";
-        if (n.type.rfind("MissionTask_Activity", 0) == 0) { if (!actClass(n.type, false)) return 0; ++mapped; }
+        if (n.type.rfind("MissionTask_Activity", 0) != 0) continue;
+        if (!taskClass(n.type)) return 0;
+        ++mapped;
     }
-    if (!mapped || begins != 1 || nodes.back().type != "NameSpaceEnd") return 0;
-    auto isInt = [&](const oct::Rec& r) { oct::Spec s = oct::spec(r.type); return s.shape == oct::SCALAR && s.kind == oct::INT && !s.keyed; };
-    // per class: pin name -> index (the first instance listing it; 1.0 writes a class's table once per layout)
-    std::map<std::string, std::map<std::string, int>> pinIdx;
-    for (auto& n : nodes)
-        if (const ActClass* c = actClass(n.type, false))
-            for (size_t j = n.at + 1; j < n.end; ++j)
-                for (auto& p : c->pins)
-                    if (f.recs[j].level == fl && isInt(f.recs[j]) && f.name(f.recs[j]) == p.first) pinIdx[n.type].emplace(p.first, f.ints(f.recs[j])[0]);
-    auto pinOf = [&](const std::string& cls, int idx) -> const std::pair<std::string, std::string>* {
-        const ActClass* c = actClass(cls, false);
-        for (auto& p : c->pins) { auto it = pinIdx[cls].find(p.first); if (it != pinIdx[cls].end() && it->second == idx) return &p; }
-        return nullptr;
-    };
-    // links: drop the ones on pins without a counterpart, reroute Participants to the new AvatarList node
-    size_t newIdx = nodes.size() - 1;   // takes NameSpaceEnd's index; End moves up one
-    std::map<size_t, int> dIn, dOut;
-    int nRe = 0, nDrop = 0;
-    for (size_t i = lpool + 1; i < f.blockEnd(lpool); ++i) {
-        oct::Rec& r = f.recs[i];
-        if (f.name(r) != "Data") continue;
-        bool isBuf = false;
-        for (size_t j = i; j-- > (size_t)lpool + 1 && f.recs[j].level >= r.level;) {
-            if (f.recs[j].level != r.level || f.name(f.recs[j]) != "Type") continue;
-            isBuf = detail::firstName(f, f.recs[j]) == "LinksBuffer";
-            break;
-        }
-        if (!isBuf) continue;
-        oct::Spec sp = oct::spec(r.type);
-        std::string d = r.pay.substr(sp.cw);
-        if (d.size() < 5 || d[4]) continue;   // the global-index form (all 1.0 graphs, linkcodec.py)
-        uint32_t n = oct::u((const uint8_t*)d.data(), 4);
-        if (d.size() != 5 + 6ull * n) continue;
-        std::vector<uint16_t> code(n), a(n), z(n);
-        for (uint32_t k = 0; k < n; ++k) {
-            code[k] = (uint16_t)oct::u((const uint8_t*)d.data() + 5 + 2 * k, 2);
-            a[k] = (uint16_t)oct::u((const uint8_t*)d.data() + 5 + 2 * n + 4 * k, 2);
-            z[k] = (uint16_t)oct::u((const uint8_t*)d.data() + 5 + 2 * n + 4 * k + 2, 2);
-        }
-        std::vector<uint16_t> c2, a2, z2;
-        for (uint32_t k = 0; k < n; ++k) {
-            int fromPin = code[k] >> 10, toPin = (code[k] >> 4) & 63;
-            const std::pair<std::string, std::string>* pa = a[k] < nodes.size() && actClass(nodes[a[k]].type, false) ? pinOf(nodes[a[k]].type, fromPin) : nullptr;
-            const std::pair<std::string, std::string>* pz = z[k] < nodes.size() && actClass(nodes[z[k]].type, false) ? pinOf(nodes[z[k]].type, toPin) : nullptr;
-            if ((pa && pa->second.empty()) || (pz && (pz->second.empty() || pz->second == "*"))) { ++dOut[a[k]]; ++dIn[z[k]]; ++nDrop; continue; }
-            if (pa && pa->second == "*") {
-                ++dOut[a[k]];
-                c2.push_back((uint16_t)(code[k] & 0x3ff));   // from pin 0 = AvatarList.List
-                a2.push_back((uint16_t)newIdx);
-                z2.push_back(z[k]);
-                ++nRe;
-                continue;
-            }
-            c2.push_back(code[k]); a2.push_back(a[k]); z2.push_back(z[k]);
-        }
-        if (c2.size() == n && !nRe) continue;
-        std::string o((const char*)&(n = (uint32_t)c2.size()), 4);
-        o.push_back('\0');
-        for (uint16_t v : c2) o.append((const char*)&v, 2);
-        for (size_t k = 0; k < c2.size(); ++k) { o.append((const char*)&a2[k], 2); o.append((const char*)&z2[k], 2); }
-        r.pay.clear();
-        int cw = o.size() < 0x100 ? 1 : o.size() < 0x10000 ? 2 : 3;
-        r.type = (uint16_t)(oct::SCALAR | oct::BYTE << 3 | (cw - 1) << 6);
-        oct::File::put(r.pay, (uint32_t)o.size(), cw);
-        r.pay += o;
+    if (!mapped || begins != 1 || g.nodes.back().type != "NameSpaceEnd") return 0;
+    return mapped;
+}
+
+inline bool isIntScalar(const oct::Rec& r)
+{
+    oct::Spec s = oct::spec(r.type);
+    return s.shape == oct::SCALAR && s.kind == oct::INT && !s.keyed;
+}
+
+// The pin indices node n of class c lists; a class's first instance wins (1.0 writes one table per layout).
+inline void notePins(ActGraph& g, const ActNode& n, const ActClass& c)
+{
+    for (size_t j = n.at + 1; j < n.end; ++j) {
+        const oct::Rec& r = g.f.recs[j];
+        if (r.level != g.fl || !isIntScalar(r)) continue;
+        for (auto& p : c.pins)
+            if (g.f.name(r) == p.first) g.pinIdx[n.type].emplace(p.first, g.f.ints(r)[0]);
     }
-    // node records: class / eval type / pins / parameters; NumIn/OutLinks less the dropped links
-    auto setName = [&](oct::Rec& r, const std::string& v) { r.pay.clear(); oct::File::put(r.pay, f.addName(v), 2); };   // scalar name / MNode key
-    std::vector<oct::Rec> out(f.recs.begin(), f.recs.begin() + pool + 1);
-    std::string smUuid;
-    for (size_t k = 0; k < nodes.size(); ++k) {
-        const N& n = nodes[k];
-        const ActClass* c = actClass(n.type, false);
-        if (k == newIdx && nRe) {   // the Participants list: AvatarList (ParticipantsOnly) before NameSpaceEnd
-            oct::Rec hdr = f.recs[n.at];
-            setName(hdr, std::to_string(k));
-            out.push_back(hdr);
-            out.push_back(f.nameScalar(fl, f.addName("Type"), "AvatarList"));
-            if (!smUuid.empty()) {
-                oct::Rec u{fl, (uint16_t)(oct::SCALAR | oct::BYTE << 3), f.addName("Uuid"), smUuid};
-                u.pay.back() = (char)(u.pay.back() ^ 0x5a);   // unique beside the state machine it stands for
-                out.push_back(u);
-            }
-            out.push_back(f.intScalar(fl, "List", 0));
-            out.push_back(f.intScalar(fl, "NetSyncType", 2));
-            out.push_back(f.intScalar(fl, "LocalsOnly", 0));
-            out.push_back(f.intScalar(fl, "SpectatorsOnly", 0));
-            out.push_back(f.intScalar(fl, "ParticipantsOnly", 1));
-            out.push_back(f.intScalar(fl, "IsRootObject", 1));
-            out.push_back(f.nameScalar(fl, f.addName("AuthoredName"), "Activity: Participants"));
-            out.push_back(f.intScalar(fl, "NumOutLinks", nRe));
-            oct::Rec end = f.recs[n.at];
-            setName(end, std::to_string(k + 1));
-            out.push_back(end);
-            for (size_t j = n.at + 1; j < n.end; ++j) out.push_back(f.recs[j]);
+}
+
+inline const Pin* pinOf(ActGraph& g, const std::string& cls, int idx)
+{
+    const ActClass* c = taskClass(cls);
+    for (auto& p : c->pins) {
+        auto it = g.pinIdx[cls].find(p.first);
+        if (it != g.pinIdx[cls].end() && it->second == idx) return &p;
+    }
+    return nullptr;
+}
+
+// The pin at index idx of a link end's node; null unless that node is an activity task.
+inline const Pin* endPin(ActGraph& g, size_t node, int idx)
+{
+    if (node >= g.nodes.size() || !taskClass(g.nodes[node].type)) return nullptr;
+    return pinOf(g, g.nodes[node].type, idx);
+}
+
+// Whether link pool record i is a LinksBuffer's Data: the nearest Type above it at its level says so.
+inline bool inLinksBuffer(const ActGraph& g, size_t i)
+{
+    const oct::File& f = g.f;
+    const uint16_t level = f.recs[i].level;
+    for (size_t j = i; j-- > (size_t)g.lpool + 1 && f.recs[j].level >= level;) {
+        if (f.recs[j].level != level || f.name(f.recs[j]) != "Type") continue;
+        return firstName(f, f.recs[j]) == "LinksBuffer";
+    }
+    return false;
+}
+
+// Links in the index form: u32 count, u8 0, the u16 codes, then u16 from / to pairs (FORMATS.md 5.3).
+struct LinkRows {
+    std::vector<uint16_t> code, from, to;
+};
+
+// Record r's Data as the index form: count and rows, the count width by the byte size.
+inline void writeLinks(oct::Rec& r, const LinkRows& rows)
+{
+    const uint32_t count = (uint32_t)rows.code.size();
+    std::string o((const char*)&count, 4);
+    o.push_back('\0');
+    for (uint16_t v : rows.code) o.append((const char*)&v, 2);
+    for (size_t k = 0; k < count; ++k) {
+        o.append((const char*)&rows.from[k], 2);
+        o.append((const char*)&rows.to[k], 2);
+    }
+    r.pay.clear();
+    const int cw = oct::countWidth(o.size());
+    r.type = oct::makeType(oct::SCALAR, 0, oct::BYTE, cw);
+    oct::File::put(r.pay, (uint32_t)o.size(), cw);
+    r.pay += o;
+}
+
+// A LinksBuffer without the links on pins 3.0 lacks; Participants links leave the new AvatarList's List.
+inline void rewriteLinkBuffer(ActGraph& g, oct::Rec& r)
+{
+    const std::optional<mer::IndexLinks> b = mer::indexLinks(r);
+    if (!b || b->uu || !mer::sizeMatches(*b)) return;   // the index form: all 1.0 graphs (linkcodec.py)
+    const std::map<std::string, size_t> noUuids;   // the index form names nodes by index
+    LinkRows kept;
+    for (uint32_t k = 0; k < b->n; ++k) {
+        const mer::Link L = *mer::linkAt(*b, k, noUuids);
+        const uint16_t from = (uint16_t)L.from, to = (uint16_t)L.to;
+        const Pin* pa = endPin(g, from, L.code >> mer::kFromPinShift);
+        const Pin* pz = endPin(g, to, (L.code >> mer::kToPinShift) & mer::kPinMask);
+        const bool fromNone = pa && pa->second.empty();
+        const bool toNone = pz && pz->second.empty();
+        const bool toList = pz && pz->second == "*";
+        if (fromNone || toNone || toList) {
+            ++g.dOut[from];
+            ++g.dIn[to];
+            ++g.nDrop;
             continue;
         }
-        out.push_back(f.recs[n.at]);
-        bool firstType = true;
-        for (size_t j = n.at + 1; j < n.end; ++j) {
-            oct::Rec r = f.recs[j];
-            const std::string nm = r.level == fl ? f.name(r) : std::string();
-            if (r.level == fl && nm == "NumInLinks" && dIn.count(k)) f.setInt(r, detail::firstInt(f, r) - dIn[k]);
-            if (r.level == fl && nm == "NumOutLinks" && dOut.count(k)) f.setInt(r, detail::firstInt(f, r) - dOut[k]);
-            if (c && r.level == fl) {
-                if (nm == "Type") { setName(r, firstType ? c->cls30 : c->eval30); firstType = false; }
-                else if (nm == "Uuid" && smUuid.empty() && std::string(c->cls10) == "MissionTask_ActivityStateMachine") smUuid = r.pay;
-                bool drop = false;
-                for (auto& p : c->pins)
-                    if (nm == p.first && isInt(r)) { if (p.second.empty() || p.second == "*") drop = true; else r.name = f.addName(p.second); }
-                for (auto& p : c->params) if (nm == p.first) r.name = f.addName(p.second);
-                if (drop) continue;
-            }
-            out.push_back(r);
-        }
-        if (c && std::string(c->cls30) == "MissionTask_ChallengeStateMachine")
-            out.push_back(f.nameScalar(fl, f.addName("ChallengeZone"), "NONE"));   // 53/61 shipped graphs
+        const bool fromList = pa && pa->second == "*";
+        if (fromList) ++g.dOut[from];
+        if (fromList) ++g.nRe;
+        kept.code.push_back(fromList ? (uint16_t)(L.code & mer::kBelowFromPin) : L.code);   // from pin 0: List
+        kept.from.push_back(fromList ? (uint16_t)g.newIdx : from);
+        kept.to.push_back(to);
     }
-    for (size_t i = f.blockEnd(pool); i < f.recs.size(); ++i) out.push_back(f.recs[i]);
+    // nRe counts every buffer so far: after the first reroute each later buffer is rewritten (GP-24)
+    if (kept.code.size() == b->n && !g.nRe) return;
+    writeLinks(r, kept);
+}
+
+inline void rewriteLinks(ActGraph& g)
+{
+    oct::File& f = g.f;
+    for (size_t i = g.lpool + 1; i < f.blockEnd(g.lpool); ++i) {
+        if (f.name(f.recs[i]) != "Data" || !inLinksBuffer(g, i)) continue;
+        rewriteLinkBuffer(g, f.recs[i]);
+    }
+}
+
+// A scalar name record's (or an MNode key's) value set to v.
+inline void setNameValue(oct::File& f, oct::Rec& r, const std::string& v)
+{
+    r.pay.clear();
+    oct::File::put(r.pay, f.addName(v), 2);
+}
+
+// The Participants list: an AvatarList (ParticipantsOnly) at NameSpaceEnd's index, then NameSpaceEnd one up.
+inline void emitAvatarList(ActGraph& g, size_t k, std::vector<oct::Rec>& out)
+{
+    oct::File& f = g.f;
+    const uint16_t fl = g.fl;
+    const ActNode& n = g.nodes[k];
+    oct::Rec hdr = f.recs[n.at];
+    setNameValue(f, hdr, std::to_string(k));
+    out.push_back(hdr);
+    out.push_back(f.nameScalar(fl, f.addName("Type"), "AvatarList"));
+    if (!g.smUuid.empty()) {
+        oct::Rec u{fl, oct::makeType(oct::SCALAR, 0, oct::BYTE), f.addName("Uuid"), g.smUuid};
+        u.pay.back() = (char)(u.pay.back() ^ 0x5a);   // unique beside the state machine it stands for
+        out.push_back(u);
+    }
+    out.push_back(f.intScalar(fl, "List", 0));
+    out.push_back(f.intScalar(fl, "NetSyncType", 2));
+    out.push_back(f.intScalar(fl, "LocalsOnly", 0));
+    out.push_back(f.intScalar(fl, "SpectatorsOnly", 0));
+    out.push_back(f.intScalar(fl, "ParticipantsOnly", 1));
+    out.push_back(f.intScalar(fl, "IsRootObject", 1));
+    out.push_back(f.nameScalar(fl, f.addName("AuthoredName"), "Activity: Participants"));
+    out.push_back(f.intScalar(fl, "NumOutLinks", g.nRe));
+    oct::Rec end = f.recs[n.at];
+    setNameValue(f, end, std::to_string(k + 1));
+    out.push_back(end);
+    for (size_t j = n.at + 1; j < n.end; ++j) out.push_back(f.recs[j]);
+}
+
+// Field r of a class-c node in 3.0 form: Type / eval type, pins, parameters renamed. false: drop it.
+inline bool renameField(ActGraph& g, const ActClass& c, oct::Rec& r, const std::string& nm, bool& firstType)
+{
+    oct::File& f = g.f;
+    if (nm == "Type") {
+        setNameValue(f, r, firstType ? c.cls30 : c.eval30);
+        firstType = false;
+    } else if (nm == "Uuid" && g.smUuid.empty() && std::string(c.cls10) == "MissionTask_ActivityStateMachine") {
+        g.smUuid = r.pay;
+    }
+    bool drop = false;
+    for (auto& p : c.pins) {
+        if (nm != p.first || !isIntScalar(r)) continue;
+        if (p.second.empty() || p.second == "*") drop = true;
+        else r.name = f.addName(p.second);
+    }
+    for (auto& p : c.params)
+        if (nm == p.first) r.name = f.addName(p.second);
+    return !drop;
+}
+
+// Node k's records: NumIn/OutLinks less the dropped links; an activity task's fields in 3.0 form.
+inline void rewriteNode(ActGraph& g, size_t k, std::vector<oct::Rec>& out)
+{
+    oct::File& f = g.f;
+    const ActNode& n = g.nodes[k];
+    const ActClass* c = taskClass(n.type);
+    out.push_back(f.recs[n.at]);
+    bool firstType = true;
+    for (size_t j = n.at + 1; j < n.end; ++j) {
+        oct::Rec r = f.recs[j];
+        const bool field = r.level == g.fl;
+        const std::string nm = field ? f.name(r) : std::string();
+        if (field && nm == "NumInLinks" && g.dIn.count(k)) f.setInt(r, firstInt(f, r) - g.dIn[k]);
+        if (field && nm == "NumOutLinks" && g.dOut.count(k)) f.setInt(r, firstInt(f, r) - g.dOut[k]);
+        if (c && field && !renameField(g, *c, r, nm, firstType)) continue;
+        out.push_back(r);
+    }
+    if (c && std::string(c->cls30) == "MissionTask_ChallengeStateMachine")
+        out.push_back(f.nameScalar(g.fl, f.addName("ChallengeZone"), "NONE"));   // 53/61 shipped graphs
+}
+
+}  // namespace detail
+
+// A one-namespace 1.0 activity graph (.mer, before mer::transcode) in 3.0 Challenge classes. -> tasks, 0: unchanged
+inline int activityGraph30(oct::File& f, int* rerouted = nullptr, int* dropped = nullptr)
+{
+    detail::ActGraph g{f};
+    g.pool = f.pool("MeridianNodePool");
+    g.lpool = f.pool("MeridianLinkPool");
+    if (g.pool < 0 || g.lpool < 0) return 0;
+    g.nl = (uint16_t)(f.recs[g.pool].level + 1);
+    g.fl = (uint16_t)(g.nl + 1);
+    detail::collectNodes(g);
+    const int mapped = detail::mappedNodes(g);
+    if (!mapped) return 0;
+    for (auto& n : g.nodes)
+        if (const ActClass* c = taskClass(n.type)) detail::notePins(g, n, *c);
+    g.newIdx = g.nodes.size() - 1;   // NameSpaceEnd moves up one
+    detail::rewriteLinks(g);
+    std::vector<oct::Rec> out(f.recs.begin(), f.recs.begin() + g.pool + 1);
+    for (size_t k = 0; k < g.nodes.size(); ++k) {
+        if (k == g.newIdx && g.nRe) detail::emitAvatarList(g, k, out);
+        else detail::rewriteNode(g, k, out);
+    }
+    for (size_t i = f.blockEnd(g.pool); i < f.recs.size(); ++i) out.push_back(f.recs[i]);
     f.recs = std::move(out);
-    if (rerouted) *rerouted = nRe;
-    if (dropped) *dropped = nDrop;
+    if (rerouted) *rerouted = g.nRe;
+    if (dropped) *dropped = g.nDrop;
     return mapped;
 }
 
@@ -677,7 +808,7 @@ inline int activityTasks30(std::string& lua)
         if (e == std::string::npos || lua.find_first_not_of(" \t=", toks[k].at + 4) != q) continue;
         std::string t = lua.substr(q + 1, e - q - 1);
         if (t.rfind("Eval_Activity", 0)) continue;
-        const ActClass* c = actClass(t, true);
+        const ActClass* c = evalClass(t);
         if (!c) return 0;
         edits.push_back({q + 1, t.size(), c->eval30});
         int d = toks[k].depth;
