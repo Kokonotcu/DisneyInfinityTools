@@ -13,7 +13,7 @@
 #pragma once
 #include <algorithm>
 #include <map>
-#include "oct.hpp"
+#include "formats/oct.hpp"
 
 namespace bent {
 

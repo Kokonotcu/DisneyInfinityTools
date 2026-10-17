@@ -2,11 +2,12 @@
 // Each one is checked against the shipped 3.0 corpus by octtest.exe (strip the 3.0 records, regenerate, compare).
 #pragma once
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
-#include "oct.hpp"
+#include "formats/oct.hpp"
 
 namespace octx {
 
