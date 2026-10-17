@@ -36,6 +36,7 @@
 #include "core/zip.hpp"
 #include "engine/assets.hpp"
 #include "engine/crt.hpp"
+#include "engine/playsetslot.hpp"
 #include "engine/shaderlinks.hpp"
 #include "engine/shaders.hpp"
 #include "engine/zones.hpp"
@@ -447,31 +448,6 @@ static bool memtestMatch(const char* p)
     for (char* t = strtok_s(list, ",", &ctx); t; t = strtok_s(nullptr, ",", &ctx))
         if (*t && strstr(p, t)) return true;
     return false;
-}
-
-// The PC virtual reader's remembered character per playset (FUN_00b7f910(key "IGP_PLAYSET_<playset>", sku), thiscall,
-// ret 8) has slots for 3.0's four playsets only (Empire, InsideOut, TheCloneWars, PlaysetX) and is false for any other;
-// FUN_00b83b90 then resets the current character to none every frame on such a playset world (watchpoint on the
-// reader tag's toy id, 2026-10-12: written to -1 from there during the IN_City load), the playset flow finds no figure,
-// keeps the proxy avatar and shows "Missing Disney Infinity Figure". A playset without a slot keeps the selected
-// character; whether that figure may play here stays the playset flow's own check (Gateway[sku].playset, FUN_00ddae30).
-typedef uint8_t(__fastcall* PlaysetCharFn)(void* self, void* edx, const char* key, int sku);
-static PlaysetCharFn g_playsetChar;
-static uint8_t __fastcall hkPlaysetChar(void* self, void*, const char* key, int sku)
-{
-    static const char* const slots[] = {"IGP_PLAYSET_Empire", "IGP_PLAYSET_InsideOut", "IGP_PLAYSET_TheCloneWars", "IGP_PLAYSET_PlaysetX"};
-    char k[100];
-    safeCopy(k, sizeof(k), key);
-    for (auto s : slots)
-        if (!_stricmp(k, s)) return g_playsetChar(self, nullptr, key, sku);
-    return 1;
-}
-
-// The playset slot's hook (H1): always on, it has no cfg key (B-20).
-static bool installPlaysetSlot(const di1::Config&)
-{
-    return hook("VR playset character slot", 0x00B7F910, "6AFF68????????64A100000000", (void*)&hkPlaysetChar,
-                (void**)&g_playsetChar);
 }
 
 // FUN_01449390, thiscall on a choreography instance (+0x38 its path, +0x1b4 flags: 0x20 audio sync): its start.
@@ -1341,7 +1317,7 @@ extern "C" void __stdcall Pentane_Main()
     di1::expendables::install(g_cfg);
     di1::currency::install(g_cfg);
     di1::popin::install(g_cfg);
-    installPlaysetSlot(g_cfg);
+    engine::playsetslot::install({});   // always on: no cfg key (B-20)
     trace::spawn::install({g_cfg.trace, g_cfg.hidePs});
     installShaders(g_cfg, compiler);
     trace::mission::install(missionTraceOf(g_cfg));
