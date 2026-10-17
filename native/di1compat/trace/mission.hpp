@@ -20,7 +20,7 @@ struct Config {
     std::function<void()> ownMissionTick;               // run on each such mission's tick, before its line
 };
 
-// Installs the probes when c asks for them, all or none (H1, H2); false when they were refused.
+// Installs the probes when c.on asks for them, all or none (H1, H2), else the tick alone for ownMissionTick.
 inline bool install(const Config& c);
 
 namespace detail {
@@ -116,6 +116,7 @@ struct State {
     FpPinFn g_fpNodeUpdate = nullptr;
     FpThisFn g_fpApply = nullptr, g_fpScan = nullptr;
     ActorOfFn g_actorOf = nullptr;
+    bool on = false;                                      // set once in install(); false: the tick only arms
     std::function<bool(const char*)> ownMission;          // set once in install()
     std::function<void()> ownMissionTick;                 // set once in install()
     std::unordered_map<uint8_t*, std::string> tickLast;   // unguarded as before; the tick's thread is unverified (B-48)
@@ -154,6 +155,7 @@ inline void __fastcall hkMissionTick(uint8_t* self, void*, float dt)
     const char* name = *(const char**)(self + eng::kCtxName);
     if (!name || !s.ownMission(name)) return;
     if (s.ownMissionTick) s.ownMissionTick();
+    if (!s.on) return;
     uint32_t state = *(uint32_t*)(self + eng::kCtxState), m = *(uint32_t*)(self + eng::kCtxMission);
     char sn[48], pn[48], sig[320];
     // never cut: at most 266 characters
@@ -301,10 +303,15 @@ inline void __fastcall hkFpScan(uint8_t* fp, void*)
 
 inline bool install(const Config& c)
 {
-    if (!c.on) return true;
     detail::State& s = detail::g_state;
+    s.on = c.on;
     s.ownMission = c.ownMission;
     s.ownMissionTick = c.ownMissionTick;
+    const bool armOnly = !c.on && c.ownMissionTick;
+    if (armOnly)
+        return core::hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000",
+                          (void*)&detail::hkMissionTick, (void**)&s.g_missionTick);
+    if (!c.on) return true;
     return core::installFeature("missiontrace", {
         {"MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&detail::hkMissionTick,
          (void**)&s.g_missionTick},

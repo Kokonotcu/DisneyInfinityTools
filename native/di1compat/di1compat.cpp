@@ -48,6 +48,7 @@
 #include "games/di1/econ.hpp"
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
+#include "games/di1/hideps.hpp"
 #include "games/di1/meridian.hpp"
 #include "games/di1/octsteps.hpp"
 #include "games/di1/options.hpp"
@@ -463,7 +464,8 @@ static bool installChoStart(const di1::Config& c)
     return engine::choreography::install(cho);
 }
 
-// missiontrace's config: a 1.0 playset's missions by zones10's prefixes; renderdoc10 arms on the first one's tick.
+// missiontrace's config: 1.0 playset missions by zones10's prefixes; renderdoc10 arms on the first one's tick,
+// missiontrace or not.
 static trace::mission::Config missionTraceOf(const di1::Config& c)
 {
     trace::mission::Config m;
@@ -1187,6 +1189,7 @@ extern "C" void __stdcall Pentane_Main()
     di1::popin::install(g_cfg);
     engine::playsetslot::install({});   // always on: no cfg key (B-20)
     trace::spawn::install({g_cfg.trace, g_cfg.hidePs});
+    di1::hideps::install(g_cfg);
     installShaders(g_cfg, compiler);
     trace::mission::install(missionTraceOf(g_cfg));
     installChoStart(g_cfg);

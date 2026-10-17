@@ -11,7 +11,7 @@ namespace di1 {
 struct Config {
     char install10[MAX_PATH] = "";   // the 1.0 install (its assets\ holds plain zips)
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
-    bool trace = false;              // diagnostic: log every open, 26 probe hooks (incl. hkInst, hide_ps, DR0 watch)
+    bool trace = false;              // diagnostic: log every open, 26 probe hooks (incl. hkInst, DR0 watch)
     bool missionTrace = false;       // log 1.0 playset mission context state changes (one cheap hook)
     bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
     bool breakTrace = false;         // probe: clip evaluation clocks, exploder hits and explodes (log only)
@@ -29,7 +29,7 @@ struct Config {
     bool fpsLog10 = false;           // test: each second, frame time and the main thread's wait on rendering
     bool loadProf10 = false;         // diagnostic: per-open timings + a sampling profile of the busiest threads
     char memtest[600] = "";          // comma list of path substrings served from a memory copy
-    bool hidePs = false;             // experiment (trace): actor registry denies <name>_PS, so avatars fall back
+    bool hidePs = false;             // experiment: actor registry denies <name>_PS, so avatars fall back
     char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
     bool progress10 = true;          // mission .lua: 1.0's generated objective line -> ProgressString "<default>"
