@@ -83,16 +83,19 @@ static __declspec(thread) int t_inCust, t_base, t_spark, t_keep;
 // a definition from a 1.0 package: popin10's stamp
 static bool def10(const uint8_t* def)
 {
-    return def && sys::readable(def + 0x9c, 4) && *(const float*)(def + 0x9c) == sys::kPopin10 * sys::kPopin10;
+    return def && core::readable(def + 0x9c, 4) && *(const float*)(def + 0x9c) == sys::kPopin10 * sys::kPopin10;
 }
 static void defText(const uint8_t* def, char* data, char* model)
 {
     data[0] = model[0] = 0;
-    if (!def || !sys::readable(def + 0xc, 8)) return;
+    if (!def || !core::readable(def + 0xc, 8)) return;
     safeCopy(data, 96, *(const char**)(def + 0xc));
     safeCopy(model, 96, *(const char**)(def + 0x10));
 }
-static const char* mode(const uint8_t* params) { return !sys::readable(params + 0x1c, 1) ? "?" : params[0x1c] ? "async" : "sync"; }
+static const char* mode(const uint8_t* params)
+{
+    return !core::readable(params + 0x1c, 1) ? "?" : params[0x1c] ? "async" : "sync";
+}
 
 // ---- shutdown10 ----
 static std::mutex g_keepLock;
@@ -142,10 +145,10 @@ static void __cdecl hkDone(uint32_t handle, uint8_t* record)
     uint8_t* mgr = *(uint8_t**)rt(0x0228AA40);
     uint8_t* def = nullptr;
     bool killed = record && record[0x80];
-    if (mgr && record && sys::readable(mgr + 0x1c, 4)) {
+    if (mgr && record && core::readable(mgr + 0x1c, 4)) {
         uint8_t** table = *(uint8_t***)(mgr + 0x1c);
         uint32_t idx = *(uint32_t*)record;
-        if (table && sys::readable(table + idx, 4)) def = table[idx];
+        if (table && core::readable(table + idx, 4)) def = table[idx];
     }
     bool is10 = def10(def);
     g_done(handle, record);   // frees the record
@@ -172,15 +175,15 @@ static NodeFn g_node;
 static void __cdecl hkNode(void** call, uint8_t* data)
 {
     char n[96] = "";
-    uint8_t* node = sys::readable(call, 8) ? (uint8_t*)call[1] : nullptr;
-    if (node && sys::readable(node + 0x88, 4)) safeCopy(n, sizeof(n), *(const char**)(node + 0x88));
+    uint8_t* node = core::readable(call, 8) ? (uint8_t*)call[1] : nullptr;
+    if (node && core::readable(node + 0x88, 4)) safeCopy(n, sizeof(n), *(const char**)(node + 0x88));
     if (firstFew(std::string("node ").append(n).c_str(), 2)) logf("capsuletrace10: SpawnExpendable '%s' fired", n);
     g_node(call, data);
 }
 static uint32_t __fastcall hkReq(void* self, void*, uint8_t* req, uint32_t a2)
 {
     char n[96] = "";
-    if (sys::readable(req, 0x40)) safeCopy(n, sizeof(n), *(const char**)req);
+    if (core::readable(req, 0x40)) safeCopy(n, sizeof(n), *(const char**)req);
     if (firstFew(std::string("req ").append(n).c_str(), 8)) {
         const float* t = (const float*)(req + 4);
         logf("capsuletrace10: spawn request '%s' at (%.1f, %.1f, %.1f)", n, t[4], t[5], t[6]);

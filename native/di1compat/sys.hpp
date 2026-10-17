@@ -18,6 +18,7 @@
 #include <vector>
 #include "luachunk.hpp"
 #include "base/bytes.hpp"
+#include "core/memcheck.hpp"
 
 namespace sys {
 
@@ -171,31 +172,6 @@ inline bool dbTrigger10(const char* path, const char* file)
     return dbTriggers10().count(p) != 0;
 }
 
-// p .. p + n can be read now: every page committed, not PAGE_NOACCESS / PAGE_GUARD. The one pointer check of the
-// plugin (safeCopy, cstr, the probes). Each page is asked of the working set first (QueryWorkingSetEx, constant time;
-// a resident page with a protection is readable: no-access and guard pages are never resident); only a page that is
-// not resident goes to VirtualQuery. VirtualQuery alone walks every touched page from p to the end of p's region to
-// size it (offline vqbench.cpp: 0.19 ms at the start of a touched 64 MB region, 5.1 ms at 768 MB; 0.4 us either way
-// for QueryWorkingSetEx), and the engine's strings sit in its big arena: in-game 2026-10-14 (run 15:02, loadprof10)
-// these checks were 85% of the main thread in play (7 fps) and ~100 ms of each served .oct's transcode.
-inline bool readable(const void* p, size_t n)
-{
-    uintptr_t a = (uintptr_t)p, end = a + (n ? n : 1);
-    if (a < 0x10000 || end < a) return false;
-    for (uintptr_t pg = a & ~(uintptr_t)0xfff; pg < end;) {
-        PSAPI_WORKING_SET_EX_INFORMATION ws{};
-        ws.VirtualAddress = (void*)pg;
-        DWORD prot = K32QueryWorkingSetEx(GetCurrentProcess(), &ws, sizeof(ws)) && ws.VirtualAttributes.Valid
-                         ? (DWORD)ws.VirtualAttributes.Win32Protection : 0;
-        if (prot && !(prot & (PAGE_NOACCESS | PAGE_GUARD))) { pg += 0x1000; continue; }
-        MEMORY_BASIC_INFORMATION m;
-        if (!VirtualQuery((void*)pg, &m, sizeof(m)) || m.State != MEM_COMMIT || !m.Protect || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-            return false;
-        pg = (uintptr_t)m.BaseAddress + m.RegionSize;   // the rest of that region is readable too
-    }
-    return true;
-}
-
 // UIDs of every record a GameDB set loader's sets hold: loader +0xc sets[], +0x10 count (FUN_01612fa0 walks them to
 // merge a file by DBName); set +0x30 its record pool (FUN_01611a30 creates it); pool +0x30 UID[], +0x34 count
 // (FUN_0149f900 stores each record's UID at its index; FUN_01611cb0 sizes the array). Unreadable parts are skipped.
@@ -203,18 +179,18 @@ inline std::set<uint32_t> loaderUids(const void* loader)
 {
     std::set<uint32_t> u;
     const uint8_t* L = (const uint8_t*)loader;
-    if (!readable(L + 0xc, 8)) return u;
+    if (!core::readable(L + 0xc, 8)) return u;
     void* const* sets = *(void* const**)(L + 0xc);
     int ns = *(const int*)(L + 0x10);
-    if (ns <= 0 || ns > 64 || !readable(sets, ns * 4)) return u;
+    if (ns <= 0 || ns > 64 || !core::readable(sets, ns * 4)) return u;
     for (int s = 0; s < ns; ++s) {
         const uint8_t* set = (const uint8_t*)sets[s];
-        if (!readable(set + 0x30, 4)) continue;
+        if (!core::readable(set + 0x30, 4)) continue;
         const uint8_t* pool = *(const uint8_t* const*)(set + 0x30);
-        if (!readable(pool + 0x30, 8)) continue;
+        if (!core::readable(pool + 0x30, 8)) continue;
         const uint32_t* ids = *(const uint32_t* const*)(pool + 0x30);
         int n = *(const int*)(pool + 0x34);
-        if (n <= 0 || n > 200000 || !readable(ids, n * 4)) continue;
+        if (n <= 0 || n > 200000 || !core::readable(ids, n * 4)) continue;
         u.insert(ids, ids + n);
     }
     return u;
@@ -611,23 +587,23 @@ inline bool snapshotPerc30(const uint8_t* pi)
     std::set<std::string> names;
     std::map<std::string, std::string> groups;
     auto cstr = [](const void* p, std::string& s) {
-        if (!readable(p, 1)) return false;
+        if (!core::readable(p, 1)) return false;
         const char* c = (const char*)p;
         size_t k = 0;
-        while (k < 256 && readable(c + k, 1) && c[k]) ++k;
+        while (k < 256 && core::readable(c + k, 1) && c[k]) ++k;
         s.assign(c, k);
         return k < 256;
     };
     for (int sec = 0; sec < 2; ++sec) {
         size_t at = sec ? 0xe0 : 0x100;
-        if (!readable(pi + at, 8)) return false;
+        if (!core::readable(pi + at, 8)) return false;
         void* const* arr = *(void* const**)(pi + at);
         int cnt = *(const int*)(pi + at + 4);
-        if (cnt < 0 || cnt > 100000 || (cnt && !readable(arr, cnt * 4))) return false;
+        if (cnt < 0 || cnt > 100000 || (cnt && !core::readable(arr, cnt * 4))) return false;
         for (int i = 0; i < cnt; ++i) {
             const uint8_t* r = (const uint8_t*)arr[i];
             std::string a, g;
-            if (!readable(r, 12) || !cstr(*(void* const*)r, a)) continue;
+            if (!core::readable(r, 12) || !cstr(*(void* const*)r, a)) continue;
             if (!sec) names.insert(a);
             else if (cstr(*(void* const*)(r + 8), g)) groups.emplace(g, a);
         }
