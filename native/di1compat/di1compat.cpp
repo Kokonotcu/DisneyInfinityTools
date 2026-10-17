@@ -47,6 +47,7 @@
 #include "games/di1/playsets.hpp"
 #include "games/di1/popin.hpp"
 #include "games/di1/renderio.hpp"
+#include "games/di1/screens.hpp"
 #include "games/di1/transcode.hpp"
 #include "games/di1/zones.hpp"
 #include "trace/breaktrace.hpp"
@@ -697,125 +698,6 @@ static int* sysServe(const char* p)
          (unsigned)have.size(), ok ? "" : " -- layout not found, not served");
     return ok ? memFile(out.data(), out.size()) : nullptr;
 }
-// ---- ui (ui.hpp) ----
-// 3.0's zone string getter FUN_0139e0b0 (thiscall on the zone manager *0x0225f548: key, zone, a3, default; ret 0x10).
-// Its only "LoadingScreens" reader is the loading-screen choice FUN_00b78c70; a zone whose record carries 1.0's
-// LoadingScreen key (11 1.0 records, 0 of 3.0's: zonelist30) gets 1.0's choice (ui::loadingScreen10) instead of
-// zonereg's LoadingScreens (in-game 2026-10-13: flash/loadingscreen/in/loadingscreen_inc.gfx MISSING).
-typedef const char*(__fastcall* ZoneStrFn)(void* self, void* edx, const char* key, uint32_t zone, uint32_t a3, const char* def);
-static ZoneStrFn g_zoneStr;
-static const char* __fastcall hkZoneStr(void* self, void*, const char* key, uint32_t zone, uint32_t a3, const char* def)
-{
-    if (key && key[0] == 'L' && !strcmp(key, "LoadingScreens")) {
-        const char* k10 = g_zoneStr(self, nullptr, "LoadingScreen", zone, a3, nullptr);
-        if (k10 && *k10) {
-            static std::mutex mx;
-            static int counter;   // 1.0's profile stat LastLoadingScreen; ponytail: per session, 1.0 kept it in the profile
-            static std::string pick;
-            std::lock_guard<std::mutex> lock(mx);
-            pick = ui::loadingScreen10(k10, counter);
-            logf("loading screen: zone %X has 1.0 LoadingScreen=%s -> %s (1.0 rule)", zone, k10, pick.c_str());
-            return pick.c_str();
-        }
-    }
-    return g_zoneStr(self, nullptr, key, zone, a3, def);
-}
-
-// 3.0's FMV path resolver FUN_0067e460 (thiscall: out, size, name; ret 0xc): "FMV\%s.bik" through the asset open ->
-// path length, or 0; FUN_0067e9a0 then BinkOpen()s that path by name. A clip 3.0 lacks resolves to the 1.0 install's
-// loose assets\fmv\PC1\<clip>.bik, opened in place (ui::fmvClip). bink2w32 accepts Bink 1: it compares the header
-// with 'BIKf'..'BIKi' as well as 'KB2f'..'KB2j' (byte search of bink2w32_orig.dll); the 1.0 clips are 'BIKi', and
-// FUN_0067f260 skips 3.0's de-obfuscation for a 'BIK' header.
-typedef int(__fastcall* FmvPathFn)(void* self, void* edx, char* out, uint32_t size, const char* name);
-static FmvPathFn g_fmvPath;
-static int __fastcall hkFmvPath(void* self, void*, char* out, uint32_t size, const char* name)
-{
-    int n = g_fmvPath(self, nullptr, out, size, name);
-    if (n || !g_cfg.install10[0] || !out) return n;
-    std::string clip = ui::fmvClip(name);
-    if (clip.empty()) return n;
-    std::string p = std::string(g_cfg.install10) + "\\assets\\fmv\\PC1\\" + clip + ".bik";
-    if (p.size() >= size || GetFileAttributesA(p.c_str()) == INVALID_FILE_ATTRIBUTES) return n;
-    strcpy_s(out, size, p.c_str());
-    logf("FMV %s: 3.0 has none -> 1.0 %s", clip.c_str(), p.c_str());
-    return (int)p.size();
-}
-
-// Tutorial element 61 (Mission_Tutorial's first task, "Press Tab to access the Mission Log"): both exes' evaluate
-// (1.0 FUN_00ba3950, 3.0 FUN_00de3a60) test that a screen named "SelectMenu" is open. That was 1.0's playset ribbon
-// (UI_GetRibbonName, 1.0 FUN_00c32cf0: "SelectMenu" in a playset); 3.0's ribbon (FUN_00b42540, thiscall, ecx and
-// args unused, ret 8) opens "MissionLog" in a playset instead (Tab -> TOY_STORE -> ShowRibbonUI,
-// avatar_controls_win32.xldb), so 61 never completed. The literal 0x01D19CDC has one reference in the exe (the
-// case-0x3d push at 0x00DE4C5B), so only that lookup is redirected: it also answers for 3.0's ribbon. 62 is already
-// 3.0's MissionLog and 63 3.0's Mission_MissionActivated event (FUN_00b67560 -> FUN_00dae4e0).
-typedef void*(__fastcall* FindScreenFn)(void* self, void* edx, const char* name, int player, char last);
-static FindScreenFn g_findScreen;
-static void* __fastcall hkFindScreen(void* self, void*, const char* name, int player, char last)
-{
-    void* s = g_findScreen(self, nullptr, name, player, last);
-    if (s || name != (const char*)rt(0x01D19CDC)) return s;
-    typedef const char*(__fastcall* RibbonFn)(void*, void*, int, int);
-    const char* rib = ((RibbonFn)rt(0x00B42540))(nullptr, nullptr, player, 0);
-    if (!rib || !_stricmp(rib, name)) return s;
-    if ((s = g_findScreen(self, nullptr, rib, player, last))) logf("tutorial element 61: %s open (3.0's ribbon) stands for SelectMenu", rib);
-    return s;
-}
-
-// ControllerContextNode list parse FUN_01224880 (thiscall on the node, no args): ContextName is the engine string at
-// +0x98 (copied to +0xa8 and split on ','; +0xa4 = UseAsPrefix). A 1.0 list gets the 3.0 contexts that gate the
-// same action as one it keeps enabled (ui::contextList10); the string is reassigned with the engine's own
-// assign (FUN_0041a250, thiscall (const char*), ret 4) before the parse. No shipped 3.0 graph negates
-// TUT_DISABLE_SELECT_ITEM (its exclusions: -TUT_DISABLE_CAM, -UI_TUT_DISABLE_GEN_CANCEL/_OK), so only 1.0 lists change.
-typedef void(__fastcall* CtxParseFn)(void* self, void* edx);
-static CtxParseFn g_ctxParse;
-static void __fastcall hkCtxParse(void* self, void*)
-{
-    char** name = (char**)((char*)self + 0x98);
-    if (*name) {
-        std::string s = ui::contextList10(*name);
-        if (!s.empty()) {
-            typedef void*(__fastcall* StrAssignFn)(void* str, void* edx, const char* v);
-            ((StrAssignFn)rt(0x0041A250))(name, nullptr, s.c_str());
-            logf("controller context %s (3.0 gates of the actions 1.0 kept)", *name);
-        }
-    }
-    g_ctxParse(self, nullptr);
-}
-
-// tutorial10 keys on the case-0x3d push (68 <imm32> at 0x00DE4C5A, relocated) of the literal "SelectMenu".
-static bool selectMenuPushFound()
-{
-    const uint8_t* push = (const uint8_t*)rt(0x00DE4C5A);
-    const bool pushes = push[0] == 0x68 && *(const uint32_t*)(push + 1) == (uint32_t)rt(0x01D19CDC);
-    return pushes && !strcmp((const char*)rt(0x01D19CDC), "SelectMenu");
-}
-
-// The ui hooks (H1), each with serve10; the ui keys are logged first.
-static bool installUi(const di1::Config& c)
-{
-    logf("ui: loadscreen10=%d uiscope10=%d fmv10=%d text10=%d tips10=%d tutorial10=%d context10=%d", c.loadScreen10,
-         c.uiScope10, c.fmv10, c.text10, c.tips10, c.tutorial10, c.context10);
-    if (!c.serve10) return true;
-    bool ok = true;
-    if (c.loadScreen10)
-        ok &= hook("zone string field (ui: 1.0 loading screen)", 0x0139E0B0, "83EC08568BF180BEE403000000",
-                   (void*)&hkZoneStr, (void**)&g_zoneStr);
-    if (c.fmv10)
-        ok &= hook("FMV path (ui: 1.0 clips)", 0x0067E460, "81EC0401000053568BB42418010000", (void*)&hkFmvPath,
-                   (void**)&g_fmvPath);
-    if (c.tutorial10 && selectMenuPushFound()) {
-        ok &= hook("screen by name (ui: tutorial element 61)", 0x0154FF90, "837C2404007505", (void*)&hkFindScreen,
-                   (void**)&g_findScreen);
-    } else if (c.tutorial10) {
-        logf("tutorial10: the element-61 push of \"SelectMenu\" is not where it was analysed: not hooked");
-        ok = false;
-    }
-    if (c.context10)
-        ok &= hook("controller context list (ui: 1.0 tutorial contexts)", 0x01224880, "5153558BE98A85A4000000",
-                   (void*)&hkCtxParse, (void**)&g_ctxParse);
-    return ok;
-}
-
 static std::string mergeVtxf(const std::string& t30, const std::string& t10);
 
 // ---- AssetOpen: every engine file open goes through hkOpen's stages ----
@@ -1793,7 +1675,7 @@ extern "C" void __stdcall Pentane_Main()
     engine::crt::install({});
     installSx(g_cfg);
     npcrt::install(g_cfg);
-    installUi(g_cfg);
+    di1::screens::install(g_cfg);
     installAudio(g_cfg);
     vfxrt::install(g_cfg);
     gprt::install(g_cfg);
