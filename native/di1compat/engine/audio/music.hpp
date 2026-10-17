@@ -70,6 +70,7 @@ struct State {
     StackTickFn oStackTick = nullptr;     // set once by hook()
     MusicOnceFn oMusicOnce = nullptr;     // set once by hook()
     std::string playset;   // system's lock; the playset whose music project is loaded
+    uint32_t startEvent = 0, stopEvent = 0;   // system's lock; 'StartMusic_' / 'StopMusic_' + playset ids (AU-17)
     std::string file;      // system's lock
     std::atomic<void*> prompt{nullptr};   // system's lock for changes; hkStackTick peeks first (1.0 keeps one prompt)
     bool seenActive = false;   // system's lock
@@ -250,6 +251,8 @@ inline bool ensure(const std::string& playset)
     if (!p) return false;
     s.file = want;
     s.playset = playset;
+    s.startEvent = hash::fnv1Lower("StartMusic_" + playset);   // 3.0 FUN_0073eb30 starts a playset's music so
+    s.stopEvent = hash::fnv1Lower("StopMusic_" + playset);
     return true;
 }
 
@@ -276,12 +279,12 @@ inline bool isPlaysetUnlocked(const std::string& playset)
 inline std::optional<uint32_t> onPost(const host::Post& p)
 {
     detail::State& s = detail::g_state;
-    if (s.playset.empty()) return std::nullopt;
-    if (p.eventId == hash::fnv1Lower("StartMusic_" + s.playset)) {   // 3.0 FUN_0073eb30 starts its playset's music
+    if (s.playset.empty()) return std::nullopt;   // the cached ids hold only while a playset is set
+    if (p.eventId == s.startEvent) {
         if (!s.startId) s.startId = host::standIn(p);
         return s.startId;
     }
-    if (p.eventId != hash::fnv1Lower("StopMusic_" + s.playset)) return std::nullopt;
+    if (p.eventId != s.stopEvent) return std::nullopt;
     endPrompt();   // 1.0 resets the MusicSystem before it switches (FUN_00715650)
     system::api().MusicSystem_Reset(system::musicSystem());
     if (s.startId) {
