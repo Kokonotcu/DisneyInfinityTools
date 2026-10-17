@@ -9,9 +9,9 @@ reads the source files on its own:
        what 3.0's own file gives.
  NAME: every NAME line of octtest (3.0-layout bank resolved by 3.0's reader) vs the .name read by 1.0 FUN_01132360."""
 import argparse, struct, os, glob, collections
-def h131(s):
+def h131(s):   # bytes sign-extended, as the engines' FUN_0040bac0 / FUN_0040bb50 (movsx)
     h = 0
-    for c in s: h = (h * 131 + c) & 0xffffffff
+    for c in s: h = (h * 131 + (c - 256 if c >= 0x80 else c)) & 0xffffffff
     return h
 bad = collections.Counter(); ok = collections.Counter()
 def evok(s, ev): return h131(s) == ev or s == b'%08x' % ev   # unresolved: in no 1.0 FEV, kept as hex

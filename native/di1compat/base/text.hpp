@@ -20,6 +20,13 @@ inline std::string lower(std::string s)
     return s;
 }
 
+// True when s is a non-empty stem followed by suffix, ignoring ASCII case.
+inline bool endsWithPastStem(const std::string& s, const char* suffix)
+{
+    const size_t n = strlen(suffix);
+    return s.size() > n && _stricmp(s.c_str() + s.size() - n, suffix) == 0;
+}
+
 // An engine path as a lookup key: '\' -> '/', lower case, one leading "assets/" removed (not idempotent, A-22).
 inline std::string norm(const char* path)
 {

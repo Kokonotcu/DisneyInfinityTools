@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace bytes {
 
@@ -18,6 +19,18 @@ inline uint32_t u32OrZero(const std::string& b, size_t off)
     return v;
 }
 inline uint16_t u16OrZero(const std::string& b, size_t off)
+{
+    uint16_t v = 0;
+    if (fits(b.size(), off, sizeof v)) memcpy(&v, b.data() + off, sizeof v);
+    return v;
+}
+inline uint32_t u32OrZero(const std::vector<uint8_t>& b, size_t off)
+{
+    uint32_t v = 0;
+    if (fits(b.size(), off, sizeof v)) memcpy(&v, b.data() + off, sizeof v);
+    return v;
+}
+inline uint16_t u16OrZero(const std::vector<uint8_t>& b, size_t off)
 {
     uint16_t v = 0;
     if (fits(b.size(), off, sizeof v)) memcpy(&v, b.data() + off, sizeof v);
@@ -41,6 +54,8 @@ inline uint16_t u16At(const uint8_t* p)
 // v little-endian at off in s, which already holds those bytes
 inline void put32(std::string& s, size_t off, uint32_t v) { memcpy(&s[off], &v, sizeof v); }
 inline void put16(std::string& s, size_t off, uint16_t v) { memcpy(&s[off], &v, sizeof v); }
+inline void put32(std::vector<uint8_t>& b, size_t off, uint32_t v) { memcpy(&b[off], &v, sizeof v); }
+inline void put16(std::vector<uint8_t>& b, size_t off, uint16_t v) { memcpy(&b[off], &v, sizeof v); }
 
 // x rounded up to a multiple of a, a power of two
 inline size_t alignUp(size_t x, size_t a) { return (x + a - 1) & ~(a - 1); }

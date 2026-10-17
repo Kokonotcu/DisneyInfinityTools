@@ -4,9 +4,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
-#include "../audio.hpp"
+#include "../games/di1/audio.hpp"
 
 namespace octtest {
+
+namespace ea = engine::audio;   // the audio modules, as octtest's audio modes call them
 
 // FMOD_EVENTPROPERTY indices (fmod_event.h, FMOD Ex 4.44.14) octtest reads.
 namespace fmodprop {
@@ -16,13 +18,13 @@ constexpr int kMinDistance = 17, kMaxDistance = 18, kPosition3d = 19;
 constexpr int kEventValue = 0, kInstanceValue = 1;    // Event_GetPropertyByIndex: the event's or this instance's
 constexpr unsigned kEventDefault = 0, kInfoOnly = 4;   // FMOD_EVENT_DEFAULT, FMOD_EVENT_INFOONLY
 
-// Wwise ids as the plugin's host delivers them (audio.hpp, 3.0 LAB_01830120).
+// Wwise ids as the plugin's host delivers them (engine/audio/wwise.hpp, 3.0 LAB_01830120).
 constexpr uint32_t kAkEndOfEvent = 1, kAkDuration = 8;   // callback types, also the post flags that ask for them
 constexpr uint32_t kAkStop = 0;                          // AkActionOnEventType_Stop
 constexpr size_t kAkPlayingIdAt = 2;                     // u32 index in AkEventCallbackInfo
 constexpr size_t kAkDurationAt = 4;                      // float index of fDuration in AkDurationCallbackInfo
 constexpr uint32_t kTestObject = 7;                      // the game object octtest posts on
-constexpr LONG kHostUp = 1;                              // audio::hostState once the host runs
+constexpr LONG kHostUp = 1;                              // system's ready() latch once the host runs
 
 constexpr int kTickMs = 16;     // the plugin's host tick period
 constexpr int kChainDepth = 8;  // categories followed up a chain
@@ -39,7 +41,7 @@ struct MusicIterator {
     const char* filter;
 };
 
-// audio::logfn for octtest: each line to stdout.
+// The audio log sink for octtest: each line to stdout.
 inline void stdoutLog(const char* fmt, ...)
 {
     va_list a;
@@ -49,28 +51,50 @@ inline void stdoutLog(const char* fmt, ...)
     printf("\n");
 }
 
+// The audio modules' state, as the offline audio modes look into it (docs/audit AU-04).
+inline ea::system::detail::State& g_sys = ea::system::detail::g_state;
+inline ea::host::detail::State& g_host = ea::host::detail::g_state;
+inline ea::dialogue::detail::State& g_vo = ea::dialogue::detail::g_state;
+
+// The plugin's audio config on a 1.0 install with FMOD's no-sound output, for the modes that run the host here.
+inline ea::wwise::Config offlineAudio(const std::string& inst10)
+{
+    di1::audio::Cfg c;
+    c.install10 = inst10;
+    c.log = stdoutLog;
+    ea::wwise::Config w = di1::audio::config(c);
+    w.systemCfg.nosound = true;
+    return w;
+}
+
+// Every audio module configured, then FMOD up on this thread (no hook, no host thread).
+inline bool offlineHost(const ea::wwise::Config& w)
+{
+    ea::wwise::configure(w);
+    return ea::system::init();
+}
+
 // The host tick and callback delivery for ms, on this thread (the plugin runs them on its tick thread).
 inline void tickFor(int ms)
 {
     for (int t = 0; t < ms; t += kTickMs) {
         Sleep(kTickMs);
-        audio::tickAndDeliver();
+        ea::wwise::tick();
     }
 }
 
 // The hooks' Wwise originals as stand-ins (octtest has no Wwise), the listener at the origin facing +z.
 inline void listenerAtOrigin()
 {
-    audio::oListener = [](const float*, uint32_t) { return 1; };
-    audio::oSetPos = [](uint32_t, const float*) { return 1; };
+    ea::wwise::setOriginals([](const float*, uint32_t) { return 1; }, [](uint32_t, const float*) { return 1; });
     const float lis[9] = {0, 0, 1, 0, 1, 0, 0, 0, 0};
-    audio::hkListener(lis, 0);
+    ea::wwise::hkListener(lis, 0);
 }
 
 // probe.cpp: what --fmod runs only on request (FMOD_CAPS, CUE_RUN, EV_RUN).
 int probeFmodCaps(const char* install10);
 void probeCueRun(const char* spec);
-void probeEvRun(const char* events, audio::AkCallback cb);
+void probeEvRun(const char* events, ea::wwise::detail::AkCallback cb);
 
 // A category's label in a chain, from its name and the category.
 using CategoryLabel = std::string (*)(const char* name, void* cat);
@@ -81,10 +105,10 @@ inline std::string categoryChain(void* c, int depth, CategoryLabel label)
     std::string chain;
     for (int d = 0; c && d < depth; ++d) {
         char* cn = nullptr;
-        audio::g.f.EventCategory_GetInfo(c, nullptr, &cn);
+        g_sys.f.EventCategory_GetInfo(c, nullptr, &cn);
         chain += std::string(chain.empty() ? "" : " < ") + label(cn ? cn : "?", c);
         void* parent = nullptr;
-        if (audio::g.f.EventCategory_GetParentCategory(c, &parent)) break;
+        if (g_sys.f.EventCategory_GetParentCategory(c, &parent)) break;
         c = parent;
     }
     return chain;

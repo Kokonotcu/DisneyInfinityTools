@@ -7,7 +7,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
-#include "../audio.hpp"
+#include "../games/di1/audio.hpp"
 #include "../base/text.hpp"
 #include "../games/di1/archives.hpp"
 #include "../third_party/miniz/miniz.h"
@@ -58,15 +58,15 @@ void loadFevList(const std::string& list)
 {
     for (std::string l = list; !l.empty();) {
         size_t c = l.find(',');
-        std::string n = audio::g.name10(l.substr(0, c));
+        std::string n = ea::system::installedName(l.substr(0, c));
         if (n.empty()) printf("NOFILE %s\n", l.substr(0, c).c_str());
-        else audio::g.loadTree(n, nullptr);
+        else ea::host::loadTree(n, nullptr);
         l = c == std::string::npos ? "" : l.substr(c + 1);
     }
 }
 
 // The bank's first subsound whose name starts with line, or -1.
-int findLine(audio::DlgBank* b, const char* line)
+int findLine(ea::dialogue::DlgBank* b, const char* line)
 {
     for (uint32_t i = 0; i < b->idx().subs(); ++i)
         if (!_strnicmp(b->idx().subName(i), line, strlen(line))) return (int)i;
@@ -77,18 +77,18 @@ int findLine(audio::DlgBank* b, const char* line)
 void placeSpeaker(const Args& a)
 {
     float lp[3] = {0, 0, 0}, fwd[3] = {0, 0, 1}, up[3] = {0, 1, 0};
-    audio::g.f.EventSystem_Set3DListenerAttributes(audio::g.es, 0, lp, nullptr, fwd, up);
+    g_sys.f.EventSystem_Set3DListenerAttributes(g_sys.es, 0, lp, nullptr, fwd, up);
     if (a.argc <= 9) return;
-    audio::V3 p;
+    ea::positions::V3 p;
     for (int k = 0; k < 3; ++k) p.v[k] = (float)atof(a.argv[7 + k]);
-    std::lock_guard<std::mutex> l(audio::g.posMx);
-    audio::g.pos[kTestObject] = p;
+    std::lock_guard<std::mutex> l(ea::positions::detail::g_state.mx);
+    ea::positions::detail::g_state.pos[kTestObject] = p;
 }
 
 std::string volumeLabel3(const char* name, void* cat)
 {
     float cv = -1;
-    audio::g.f.EventCategory_GetVolume(cat, &cv);
+    g_sys.f.EventCategory_GetVolume(cat, &cv);
     char v[32];
     snprintf(v, sizeof v, " %.3f", cv);
     return name + std::string(v);
@@ -97,7 +97,7 @@ std::string volumeLabel3(const char* name, void* cat)
 // The event's playback limit, mode, volume, 3D range and category chain.
 void printEventProps(void* ev)
 {
-    auto& f = audio::g.f;
+    auto& f = g_sys.f;
     unsigned mode = 0;
     float vol = -1, mn = -1, mx = -1;
     int pos3d = -1, pri = -1, maxpb = -1, beh = -1;
@@ -123,8 +123,8 @@ void printSubsoundLength(uint32_t id)
 {
     unsigned subMs = 0;   // getSubSound on a streamed bank would seek it and end the line playing
     {
-        std::lock_guard<std::mutex> d(audio::g.doneMx);
-        for (auto& x : audio::g.durs)
+        std::lock_guard<std::mutex> d(ea::finished::detail::g_state.mx);
+        for (auto& x : ea::finished::detail::g_state.durs)
             if (x.first == id) subMs = (unsigned)x.second;
     }
     printf("SUBSOUND length %u ms (the event ends with it when the subsound is what plays)\n", subMs);
@@ -137,14 +137,14 @@ void printPlayback(uint32_t id, void* ev)
         uint8_t info[kEventInfoBytes] = {};
         bool live;
         {
-            std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-            live = audio::g.plays.count(id) && audio::g.plays[id].ev;
+            std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+            live = g_host.plays.count(id) && g_host.plays[id].ev;
         }
         if (!live) {
             printf("INFO t %d ended\n", t);
             break;
         }
-        audio::g.f.Event_GetInfo(ev, nullptr, nullptr, info);
+        g_sys.f.Event_GetInfo(ev, nullptr, nullptr, info);
         printf("INFO t %d pos %d len %d channels %d instances %d audibility %.3f\n", t, infoInt(info, kInfoPositionAt),
                infoInt(info, kInfoLengthAt), infoInt(info, kInfoChannelsAt), infoInt(info, kInfoInstancesAt),
                infoFloat(info, kInfoAudibilityAt));
@@ -161,8 +161,8 @@ constexpr int kLoadCount = 70, kLoadMs = 500, kEvWindowMs = 3000, kEvSampleMs = 
 constexpr int kWaveSamples = 512, kWaveChannels = 8;      // System::getWaveData per channel
 constexpr float kLoud = 0.01f;
 constexpr unsigned kNoState = 0xffffffff;
-using StateFn = audio::FR(__stdcall*)(void*, unsigned*);
-using WaveFn = audio::FR(__stdcall*)(void*, float*, int, int);
+using StateFn = ea::fmod::Result(__stdcall*)(void*, unsigned*);
+using WaveFn = ea::fmod::Result(__stdcall*)(void*, float*, int, int);
 
 // EV_GEOM=lx,ly,lz,fx,fy,fz,ux,uy,uz,sx,sy,sz: listener and source in engine space, as audiotrace10 logs them.
 void evGeometry(const char* gm)
@@ -171,11 +171,12 @@ void evGeometry(const char* gm)
     if (sscanf_s(gm, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f", v, v + 1, v + 2, v + 3, v + 4, v + 5, v + 6, v + 7, v + 8,
                  v + 9, v + 10, v + 11) != 12)
         return;
-    std::lock_guard<std::mutex> p(audio::g.posMx);
-    memcpy(audio::g.lpos, v, sizeof audio::g.lpos);
-    memcpy(audio::g.lfwd, v + 3, sizeof audio::g.lfwd);
-    memcpy(audio::g.lup, v + 6, sizeof audio::g.lup);
-    memcpy(audio::g.pos[kEvObject].v, v + 9, sizeof audio::g.pos[kEvObject].v);
+    std::lock_guard<std::mutex> p(ea::positions::detail::g_state.mx);
+    memcpy(ea::positions::detail::g_state.lpos, v, sizeof ea::positions::detail::g_state.lpos);
+    memcpy(ea::positions::detail::g_state.lfwd, v + 3, sizeof ea::positions::detail::g_state.lfwd);
+    memcpy(ea::positions::detail::g_state.lup, v + 6, sizeof ea::positions::detail::g_state.lup);
+    ea::positions::V3& at = ea::positions::detail::g_state.pos[kEvObject];
+    memcpy(at.v, v + 9, sizeof at.v);
 }
 
 // EV_LOAD=<event>:<count>: that many instances of a loop playing 300 units away first, as in-game traffic does.
@@ -185,14 +186,14 @@ void evLoad(const std::string& s)
     int cnt = c == std::string::npos ? kLoadCount : atoi(s.c_str() + c + 1), got = 0;
     const float away[6] = {0, 0, -300, 0, 0, 1};
     for (int i = 0; i < cnt; ++i) {
-        audio::hkSetPos(kLoadFirst + i, away);
-        got += audio::g.play(audio::fnv1(s.substr(0, c)), kLoadFirst + i, 0, nullptr, nullptr) != 0;
+        ea::wwise::hkSetPos(kLoadFirst + i, away);
+        got += ea::host::play({hash::fnv1Lower(s.substr(0, c)), kLoadFirst + i, 0, nullptr, nullptr}) != 0;
     }
     tickFor(kLoadMs);
     int playing = -1;
-    typedef audio::FR(__stdcall * ChFn)(void*, int*);
+    typedef ea::fmod::Result(__stdcall * ChFn)(void*, int*);
     if (auto ch = (ChFn)GetProcAddress(GetModuleHandleA("fmodex.dll"), "FMOD_System_GetChannelsPlaying"))
-        ch(audio::g.sys, &playing);
+        ch(g_sys.sys, &playing);
     printf("EVLOAD %s: %d of %d started at 300 units; FMOD channels playing %d\n", s.substr(0, c).c_str(), got, cnt,
            playing);
 }
@@ -200,7 +201,7 @@ void evLoad(const std::string& s)
 std::string volumeLabel4(const char* name, void* cat)
 {
     float cv = -1;
-    audio::g.f.EventCategory_GetVolume(cat, &cv);
+    g_sys.f.EventCategory_GetVolume(cat, &cv);
     return std::string(name) + " " + std::to_string(cv).substr(0, 4);
 }
 
@@ -212,16 +213,16 @@ void* evProperties(uint32_t id, const std::string& n)
     float vol = -1, dmin = -1, dmax = -1;
     int prio = -1;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        auto it = audio::g.plays.find(id);
-        if (it != audio::g.plays.end()) ev = it->second.ev;
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        auto it = g_host.plays.find(id);
+        if (it != g_host.plays.end()) ev = it->second.ev;
         if (ev) {
-            audio::g.f.Event_GetPropertyByIndex(ev, fmodprop::kVolume, &vol, kInstanceValue);
-            audio::g.f.Event_GetPropertyByIndex(ev, fmodprop::kMinDistance, &dmin, kInstanceValue);
-            audio::g.f.Event_GetPropertyByIndex(ev, fmodprop::kMaxDistance, &dmax, kInstanceValue);
-            audio::g.f.Event_GetPropertyByIndex(ev, fmodprop::kPriority, &prio, kInstanceValue);
+            g_sys.f.Event_GetPropertyByIndex(ev, fmodprop::kVolume, &vol, kInstanceValue);
+            g_sys.f.Event_GetPropertyByIndex(ev, fmodprop::kMinDistance, &dmin, kInstanceValue);
+            g_sys.f.Event_GetPropertyByIndex(ev, fmodprop::kMaxDistance, &dmax, kInstanceValue);
+            g_sys.f.Event_GetPropertyByIndex(ev, fmodprop::kPriority, &prio, kInstanceValue);
             void* c = nullptr;
-            audio::g.f.Event_GetCategory(ev, &c);
+            g_sys.f.Event_GetCategory(ev, &c);
             chain = categoryChain(c, kChainDepth, volumeLabel4);
         }
     }
@@ -233,18 +234,18 @@ void* evProperties(uint32_t id, const std::string& n)
 // The event's parameters: one whose default sits where a volume curve is 0 plays in silence.
 void evParams(void* ev, const std::string& n)
 {
-    typedef audio::FR(__stdcall * NumFn)(void*, int*);
-    typedef audio::FR(__stdcall * ByIdxFn)(void*, int, void**);
-    typedef audio::FR(__stdcall * InfoFn)(void*, int*, char**);
-    typedef audio::FR(__stdcall * ValFn)(void*, float*);
-    typedef audio::FR(__stdcall * RangeFn)(void*, float*, float*);
+    typedef ea::fmod::Result(__stdcall * NumFn)(void*, int*);
+    typedef ea::fmod::Result(__stdcall * ByIdxFn)(void*, int, void**);
+    typedef ea::fmod::Result(__stdcall * InfoFn)(void*, int*, char**);
+    typedef ea::fmod::Result(__stdcall * ValFn)(void*, float*);
+    typedef ea::fmod::Result(__stdcall * RangeFn)(void*, float*, float*);
     HMODULE em = GetModuleHandleA("fmod_event.dll");
     auto num = (NumFn)GetProcAddress(em, "FMOD_Event_GetNumParameters");
     auto byIdx = (ByIdxFn)GetProcAddress(em, "FMOD_Event_GetParameterByIndex");
     auto info = (InfoFn)GetProcAddress(em, "FMOD_EventParameter_GetInfo");
     auto val = (ValFn)GetProcAddress(em, "FMOD_EventParameter_GetValue");
     auto range = (RangeFn)GetProcAddress(em, "FMOD_EventParameter_GetRange");
-    std::lock_guard<std::recursive_mutex> l(audio::g.mx);
+    std::lock_guard<std::recursive_mutex> l(g_sys.mx);
     int np = 0;
     const bool lists = num && byIdx, reads = info && val && range;
     const bool ready = ev && lists && reads;
@@ -273,13 +274,13 @@ struct EvRun {
 // One sample of the event; false once its play has ended.
 bool sampleEvent(EvRun& r, unsigned& st)
 {
-    std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-    auto it = audio::g.plays.find(r.id);
-    if (it == audio::g.plays.end() || !it->second.ev) return false;
+    std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+    auto it = g_host.plays.find(r.id);
+    if (it == g_host.plays.end() || !it->second.ev) return false;
     if (r.getState) r.getState(r.ev, &st);
     float buf[kWaveSamples];
     for (int c = 0; c < kWaveChannels && r.wave; ++c) {
-        if (r.wave(audio::g.sys, buf, kWaveSamples, c)) continue;
+        if (r.wave(g_sys.sys, buf, kWaveSamples, c)) continue;
         for (float s : buf) {
             r.ch[c] = (std::max)(r.ch[c], fabsf(s));
             r.peak = (std::max)(r.peak, fabsf(s));
@@ -312,9 +313,9 @@ void evPeaks(EvRun& r, const std::string& n)
            r.ch[3], r.ch[4], r.ch[5], r.ch[6], r.ch[7]);
 }
 
-void evRunOne(const std::string& n, audio::AkCallback cb, StateFn getState)
+void evRunOne(const std::string& n, ea::wwise::detail::AkCallback cb, StateFn getState)
 {
-    EvRun r{audio::g.play(audio::fnv1(n), kEvObject, kAkEndOfEvent, (void*)cb, nullptr), nullptr, getState,
+    EvRun r{ea::host::play({hash::fnv1Lower(n), kEvObject, kAkEndOfEvent, (void*)cb, nullptr}), nullptr, getState,
             nullptr};
     r.ev = evProperties(r.id, n);
     evParams(r.ev, n);
@@ -364,35 +365,34 @@ int probeRead10(const Args& a)
 // One dialog line through the plugin's playLine with no sound device: whether it is mixed.
 int probeVoPlay(const Args& a)
 {
-    audio::logfn = stdoutLog;
+    ea::setLog(stdoutLog);
     std::string inst = a.argv[2];
-    if (!audio::g.init(inst, true)) return 1;
-    audio::g.loadTree("Initialize.fev", "Permanent");
+    if (!offlineHost(offlineAudio(inst))) return 1;
+    ea::host::loadTree("Initialize.fev", "Permanent");
     loadFevList(a.argv[3]);
-    audio::vo.root10 = inst + kDialog10;
-    audio::vo.pickLanguage();
-    if (!audio::vo.load(a.argv[5])) {
+    ea::dialogue::pickLanguage();
+    if (!ea::dialogue::load(a.argv[5])) {
         printf("NOBANK %s\n", a.argv[5]);
         return 1;
     }
-    audio::DlgBank* b = audio::vo.banks[audio::lower(a.argv[5])].get();
+    ea::dialogue::DlgBank* b = ea::dialogue::bank(a.argv[5]);
     const int sub = findLine(b, a.argv[6]);
     if (sub < 0) {
         printf("NOLINE %s\n", a.argv[6]);
         return 1;
     }
     placeSpeaker(a);
-    uint32_t evId = audio::fnv1(a.argv[4]);
-    auto it = audio::g.byId.find(evId);
-    if (it == audio::g.byId.end()) {
+    uint32_t evId = hash::fnv1Lower(a.argv[4]);
+    auto it = g_host.byId.find(evId);
+    if (it == g_host.byId.end()) {
         printf("NOEVENT %s\n", a.argv[4]);
         return 1;
     }
-    uint32_t id = audio::g.playLine(evId, kTestObject, 0, nullptr, nullptr, b->snd, sub);
+    uint32_t id = ea::host::playLine({evId, kTestObject, 0, nullptr, nullptr}, b->snd, sub);
     void* ev = nullptr;
     {
-        std::lock_guard<std::recursive_mutex> l(audio::g.mx);
-        if (audio::g.plays.count(id)) ev = audio::g.plays[id].ev;
+        std::lock_guard<std::recursive_mutex> l(g_sys.mx);
+        if (g_host.plays.count(id)) ev = g_host.plays[id].ev;
     }
     printf("PLAYLINE %s %s (sub %d) event %s flags %u -> id %u ev %p\n", a.argv[5], b->idx().subName(sub), sub,
            a.argv[4], it->second.flags, id, ev);
@@ -406,7 +406,7 @@ int probeVoPlay(const Args& a)
 // FMOD_CAPS: the default device's speaker mode as the plugin's init reads it, before init (nothing plays).
 int probeFmodCaps(const char* install10)
 {
-    audio::Api& f = audio::g.f;
+    ea::fmod::Api& f = g_sys.f;
     void *es = nullptr, *sys = nullptr;
     unsigned caps = 0;
     int mode = -1;
@@ -426,9 +426,9 @@ void probeCueRun(const char* spec)
         secs = atoi(c.c_str() + colon + 1);
         c.resize(colon);
     }
-    audio::music.endPrompt();
-    audio::g.f.MusicSystem_Reset(audio::g.ms);
-    if (!audio::music.ensure(kPlayset10) || !audio::music.begin(c.c_str())) {
+    ea::music::endPrompt();
+    g_sys.f.MusicSystem_Reset(g_sys.ms);
+    if (!ea::music::ensure(kPlayset10) || !ea::music::begin(c.c_str())) {
         printf("CUERUN %s: no prompt\n", c.c_str());
         return;
     }
@@ -436,7 +436,7 @@ void probeCueRun(const char* spec)
     for (int t = 0; t <= secs * kMsPerSec; t += kCueSampleMs) {
         tickFor(kCueSampleMs);
         int active = -1;
-        audio::g.f.MusicPrompt_IsActive(audio::music.prompt, &active);
+        g_sys.f.MusicPrompt_IsActive(ea::music::prompt(), &active);
         if (active == was) continue;
         printf("CUERUN %s at %.2f s: active %d\n", c.c_str(), t / (double)kMsPerSec, active);
         was = active;
@@ -445,12 +445,12 @@ void probeCueRun(const char* spec)
 }
 
 // EV_RUN=<event>[,<event>...]: each played 15 units in front of the listener, as the dock cutscene's blasts are.
-void probeEvRun(const char* events, audio::AkCallback cb)
+void probeEvRun(const char* events, ea::wwise::detail::AkCallback cb)
 {
     StateFn getState = (StateFn)GetProcAddress(GetModuleHandleA("fmod_event.dll"), "FMOD_Event_GetState");
     listenerAtOrigin();
     const float at[6] = {0, 0, -15, 0, 0, 1};   // Wwise z = -engine z
-    audio::hkSetPos(kEvObject, at);
+    ea::wwise::hkSetPos(kEvObject, at);
     if (const char* gm = env("EV_GEOM")) evGeometry(gm);
     if (const char* ld = env("EV_LOAD")) evLoad(ld);
     std::string all = events;

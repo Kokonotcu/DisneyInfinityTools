@@ -45,7 +45,7 @@ constexpr ModeRow kModes[] = {
     {"--banm", 1, octtest::testBanm, Job::Test, "<pairs.txt>: banm30 against the 3.0 text twins"},
     {"--fmod", 2, octtest::testFmod, Job::Test, "<1.0 install> <names.tsv> <fev>...: AUD-2 on the FMOD host"},
     {"--vo", 2, octtest::testVo, Job::Test, "<1.0 install> <out dir> [3.0 scripts dir]: vo10 acceptance"},
-    {"--host", 1, octtest::testHost, Job::Test, "<1.0 install>: audio::install under the loader lock"},
+    {"--host", 1, octtest::testHost, Job::Test, "<1.0 install>: di1::audio::install under the loader lock"},
     {"--readable", 0, octtest::testReadable, Job::Test, "(no arguments): sys::readable on every kind of page"},
     {"--ui", 3, octtest::testUi, Job::Test, "<1.0 extract> <3.0 extract> <out dir> [zone names]: ui.hpp checks"},
     {"--gen30", 3, octtest::testGen30, Job::Test, "<render table> <1.0 extract> <gen30.py dump dir>: gen30 port"},
