@@ -483,8 +483,8 @@ inline TimeScan scanTime(const oct::File& f, size_t sn)
     return s;
 }
 
-// MinTime / MaxTime into one SubNetwork with clips or events; false if it gets none
-inline bool timeSubNetwork(oct::File& f, size_t sn)
+// The MinTime / MaxTime insert of one SubNetwork with clips or events; false if it gets none
+inline bool timeSubNetwork(oct::File& f, size_t sn, std::vector<octx::RangeEdit>& edits)
 {
     const size_t end = f.blockEnd(sn);
     TimeScan s = scanTime(f, sn);
@@ -497,8 +497,7 @@ inline bool timeSubNetwork(oct::File& f, size_t sn)
     for (uint32_t off : s.evOffs) eachEventTime(s.nb, off, widen);
     if (!s.any) return false;
     size_t at = (size_t)(s.vgEnd >= 0 ? s.vgEnd : s.lbAt >= 0 ? s.lbAt : (long)end);   // where 3.0 writes them
-    std::vector<oct::Rec> t = {octx::floatRec(f, 3, "MinTime", s.mn), octx::floatRec(f, 3, "MaxTime", s.mx)};
-    f.recs.insert(f.recs.begin() + at, t.begin(), t.end());
+    edits.push_back({at, 0, {octx::floatRec(f, 3, "MinTime", s.mn), octx::floatRec(f, 3, "MaxTime", s.mx)}});
     return true;
 }
 
@@ -510,9 +509,11 @@ inline int time30(oct::File& f)
     long pool = f.pool("SubNetworkPool");
     if (pool < 0) return 0;
     const std::vector<size_t> sns = detail::subNetworks(f, pool);
+    std::vector<octx::RangeEdit> edits;
     int n = 0;
-    for (auto it = sns.rbegin(); it != sns.rend(); ++it)   // last first: insertions keep earlier indices
-        n += detail::timeSubNetwork(f, *it);
+    for (auto it = sns.rbegin(); it != sns.rend(); ++it)   // last first: the order names were added in
+        n += detail::timeSubNetwork(f, *it, edits);
+    octx::applyEdits(f, edits);
     return n;
 }
 
@@ -632,8 +633,8 @@ inline void setHeaderString(oct::File& f, long hs, int32_t s, uint16_t a)
     memcpy(&f.recs[hs].pay[ss.cw + 2 * (size_t)s], &a, 2);
 }
 
-// One SubNetwork's time input in 3.0's form; the DataNodes converted
-inline int animSubNetwork(oct::File& f, size_t sn)
+// One SubNetwork's time input in 3.0's form, its DataNode edits into edits; the DataNodes converted
+inline int animSubNetwork(oct::File& f, size_t sn, std::vector<octx::RangeEdit>& edits)
 {
     AnimScan s;
     for (size_t i = sn + 1, end = f.blockEnd(sn); i < end; ++i)
@@ -648,21 +649,15 @@ inline int animSubNetwork(oct::File& f, size_t sn)
     std::vector<size_t> dns;
     for (size_t i = s.dp + 1, e = f.blockEnd(s.dp); i < e; ++i)
         if (f.recs[i].level == 4) dns.push_back(i);
-    std::vector<std::vector<oct::Rec>> rep(dns.size());   // per DataNode: its children to be, built before any edit
-    int here = 0;
+    std::vector<octx::RangeEdit> mine;   // a DataNode's children replaced; all built before any edit
     for (size_t d = 0; d < dns.size(); ++d) {
-        rep[d] = animNode(f, s, dns, d, th->h);
-        here += !rep[d].empty();
+        std::vector<oct::Rec> rep = animNode(f, s, dns, d, th->h);
+        if (!rep.empty()) mine.push_back({dns[d] + 1, f.blockEnd(dns[d]) - dns[d] - 1, std::move(rep)});
     }
-    if (!here) return 0;
-    setHeaderString(f, s.hs, th->s, f.addName("AnimState"));   // before the edits: they shift a later hs (GR-N1)
-    for (size_t d = dns.size(); d-- > 0;) {   // last first: edits keep earlier indices
-        if (rep[d].empty()) continue;
-        size_t i = dns[d];
-        f.recs.erase(f.recs.begin() + i + 1, f.recs.begin() + f.blockEnd(i));
-        f.recs.insert(f.recs.begin() + i + 1, rep[d].begin(), rep[d].end());
-    }
-    return here;
+    if (mine.empty()) return 0;
+    setHeaderString(f, s.hs, th->s, f.addName("AnimState"));   // in place: no record moves (GR-N1)
+    for (octx::RangeEdit& e : mine) edits.push_back(std::move(e));
+    return (int)mine.size();
 }
 
 }  // namespace detail
@@ -674,12 +669,14 @@ inline int anim30(oct::File& f, int* subnets = nullptr)
     long pool = f.pool("SubNetworkPool");
     if (pool < 0) return 0;
     const std::vector<size_t> sns = detail::subNetworks(f, pool);
+    std::vector<octx::RangeEdit> edits;
     int n = 0, touched = 0;
-    for (auto it = sns.rbegin(); it != sns.rend(); ++it) {   // last first: edits keep earlier indices
-        const int here = detail::animSubNetwork(f, *it);
+    for (auto it = sns.rbegin(); it != sns.rend(); ++it) {   // last first: the order names were added in
+        const int here = detail::animSubNetwork(f, *it, edits);
         n += here;
         touched += here > 0;
     }
+    octx::applyEdits(f, edits);
     if (subnets) *subnets = touched;
     return n;
 }
@@ -1029,9 +1026,9 @@ inline ConstLayout numberHeaders(const HeaderTree& t, const ConstTrie& c, const 
     return L;
 }
 
-// The header records rewritten to the new numbering, strings appended as needed; then ConstantHeaderCount
-inline void rewriteHeaders(oct::File& f, ConstScan& s, const HeaderTree& t, const ConstTrie& c,
-                           const ConstLayout& L)
+// The header records rewritten to the new numbering, strings appended as needed; returns ConstantHeaderCount
+inline oct::Rec rewriteHeaders(oct::File& f, ConstScan& s, const HeaderTree& t, const ConstTrie& c,
+                               const ConstLayout& L)
 {
     std::vector<std::string>& strs = s.strs;
     std::vector<int32_t> newIdx;
@@ -1056,7 +1053,7 @@ inline void rewriteHeaders(oct::File& f, ConstScan& s, const HeaderTree& t, cons
         int h = headerOf(f, t, r);
         if (h >= 0) f.setInt(f.recs[r], L.vnum[h]);
     }
-    f.recs.insert(f.recs.begin() + s.after + 1, f.intScalar(3, "ConstantHeaderCount", L.chc));
+    return f.intScalar(3, "ConstantHeaderCount", L.chc);
 }
 
 // The constant header paths, 'ConstantA/b'
@@ -1071,8 +1068,9 @@ inline std::set<std::string> constantPaths(const ConstTrie& c)
     return paths;
 }
 
-// One SubNetwork's Static nodes under constant headers: its constant paths, nullopt if it stays as it is
-inline std::optional<std::set<std::string>> constSubNetwork(oct::File& f, size_t sn, const std::set<std::string>* named)
+// One SubNetwork's Static nodes under constant headers (its insert into edits): its constant paths, nullopt if none
+inline std::optional<std::set<std::string>> constSubNetwork(oct::File& f, size_t sn, const std::set<std::string>* named,
+                                                           std::vector<octx::RangeEdit>& edits)
 {
     ConstScan s = scanConst(f, sn);
     const bool headers = s.hs >= 0 && s.hsi >= 0 && s.hl >= 0;
@@ -1094,7 +1092,7 @@ inline std::optional<std::set<std::string>> constSubNetwork(oct::File& f, size_t
     if (moving.empty()) return std::nullopt;
     const std::vector<bool> dropped = droppedHeaders(*t, moving, used);
     const ConstTrie c = constantTrie(*t, moving);
-    rewriteHeaders(f, s, *t, c, numberHeaders(*t, c, dropped));
+    edits.push_back({(size_t)s.after + 1, 0, {rewriteHeaders(f, s, *t, c, numberHeaders(*t, c, dropped))}});
     return constantPaths(c);
 }
 
@@ -1141,7 +1139,8 @@ inline constexpr FieldRule<AltScan> kAltFields[] = {
 };
 
 // AltNodeName on each Transform Association whose 'Constant'+NodeName header exists (FORMATS.md 4.10)
-inline void addAltNodeNames(oct::File& f, const std::map<int, std::set<std::string>>& constPaths)
+inline void addAltNodeNames(oct::File& f, const std::map<int, std::set<std::string>>& constPaths,
+                            std::vector<octx::RangeEdit>& edits)
 {
     long ap = f.pool("AssociationPool");
     if (ap < 0) return;
@@ -1156,9 +1155,9 @@ inline void addAltNodeNames(oct::File& f, const std::map<int, std::set<std::stri
         const bool has = paths != constPaths.end() && paths->second.count(want);
         if (a.type == "Transform" && !a.alt && has) adds.push_back({f.blockEnd(i), "Constant" + a.node});
     }
-    for (auto it = adds.rbegin(); it != adds.rend(); ++it) {
+    for (auto it = adds.rbegin(); it != adds.rend(); ++it) {   // last first: the order names were added in
         const uint16_t key = f.addName("AltNodeName");
-        f.recs.insert(f.recs.begin() + it->first, f.nameScalar(3, key, it->second));
+        edits.push_back({it->first, 0, {f.nameScalar(3, key, it->second)}});
     }
 }
 
@@ -1173,15 +1172,17 @@ inline int const30(oct::File& f)
     int done = 0;
     std::map<int, std::set<std::string>> constPaths;   // SubNetwork ordinal -> its constant header paths
     const std::map<int, std::set<std::string>> named = detail::boundPaths(f);
-    for (size_t q = sns.size(); q-- > 0;) {   // last first: the one inserted record keeps earlier indices
+    std::vector<octx::RangeEdit> edits;
+    for (size_t q = sns.size(); q-- > 0;) {   // last first: the order names were added in
         auto bound = named.find((int)q);
         const std::set<std::string>* paths = bound == named.end() ? nullptr : &bound->second;
-        std::optional<std::set<std::string>> made = detail::constSubNetwork(f, sns[q], paths);
+        std::optional<std::set<std::string>> made = detail::constSubNetwork(f, sns[q], paths, edits);
         if (!made) continue;
         constPaths[(int)q] = std::move(*made);
         ++done;
     }
-    if (done) detail::addAltNodeNames(f, constPaths);
+    if (done) detail::addAltNodeNames(f, constPaths, edits);
+    octx::applyEdits(f, edits);
     return done;
 }
 
@@ -1208,14 +1209,17 @@ inline int scene30(oct::File& f)
     std::map<std::string, int> tr;   // 'Transform' Association NodeName -> its scene node (first wins)
     for (auto& a : as)
         if (a.type == "Transform" && a.scene != -2) tr.emplace(a.name, a.scene);
+    std::vector<octx::RangeEdit> edits;
     int n = 0;
-    for (auto it = as.rbegin(); it != as.rend(); ++it) {   // last first: insertions keep earlier indices
+    for (auto it = as.rbegin(); it != as.rend(); ++it) {   // last first: the order names were added in
         if (it->type != "PlacementNode" || it->scene != -2) continue;
         size_t bar = it->name.rfind('|');
         auto t = bar == std::string::npos ? tr.end() : tr.find(it->name.substr(0, bar));
-        f.recs.insert(f.recs.begin() + it->typeAt + 1, f.intScalar(3, "SceneTreeNodeRef", t == tr.end() ? -1 : t->second));
+        const int scene = t == tr.end() ? -1 : t->second;
+        edits.push_back({(size_t)it->typeAt + 1, 0, {f.intScalar(3, "SceneTreeNodeRef", scene)}});
         ++n;
     }
+    octx::applyEdits(f, edits);
     return n;
 }
 
@@ -1443,20 +1447,15 @@ inline std::vector<oct::Rec> placementNodes(oct::File& f, long pp, const std::ve
     return pl;
 }
 
-// Each (pool, records) pair's pool replaced, later pools first so earlier indices hold
-inline void replacePools(oct::File& f, std::vector<std::pair<long, std::vector<oct::Rec>*>> rep)
+// The pool at 'at' (if any) replaced by recs, as an edit
+inline void replacePool(const oct::File& f, long at, std::vector<oct::Rec>& recs, std::vector<octx::RangeEdit>& edits)
 {
-    std::sort(rep.begin(), rep.end(), [](auto& a, auto& b) { return a.first > b.first; });
-    for (auto& [at, recs] : rep) {
-        if (at < 0) continue;
-        size_t e = f.blockEnd(at);
-        f.recs.erase(f.recs.begin() + at, f.recs.begin() + e);
-        f.recs.insert(f.recs.begin() + at, recs->begin(), recs->end());
-    }
+    if (at < 0) return;
+    edits.push_back({(size_t)at, f.blockEnd(at) - (size_t)at, std::move(recs)});
 }
 
-// One Layout's ContextNodes as InstanceNodes: the instances written, -1 without a ContextNodePool
-inline int layoutOne(oct::File& f, size_t L)
+// One Layout's ContextNodes as InstanceNodes, its pools' edits into edits: the instances, -1 without ContextNodePool
+inline int layoutOne(oct::File& f, size_t L, std::vector<octx::RangeEdit>& edits)
 {
     long pp = -1, cp = -1, ap = -1;
     for (size_t i = L + 1, e = f.blockEnd(L); i < e; ++i) {
@@ -1474,7 +1473,9 @@ inline int layoutOne(oct::File& f, size_t L)
     std::vector<oct::Rec> att = attachments(f, ap, atts, remap);
     std::vector<oct::Rec> inst = instanceNodes(f, ctx, remap);
     std::vector<oct::Rec> pl = placementNodes(f, pp, pls, ctx);
-    replacePools(f, {{pp, &pl}, {cp, &inst}, {ap, &att}});
+    replacePool(f, pp, pl, edits);
+    replacePool(f, cp, inst, edits);
+    replacePool(f, ap, att, edits);
     return (int)remap.size();
 }
 
@@ -1489,13 +1490,15 @@ inline int layout30(oct::File& f, int* instances = nullptr)
     std::vector<size_t> layouts;
     for (size_t i = lp + 1, e = f.blockEnd(lp); i < e; ++i)
         if (f.recs[i].level == 2 && f.name(f.recs[i]) == "Layout") layouts.push_back(i);
+    std::vector<octx::RangeEdit> edits;
     int converted = 0, written = 0;
-    for (auto lt = layouts.rbegin(); lt != layouts.rend(); ++lt) {
-        const int n = detail::layoutOne(f, *lt);
+    for (auto lt = layouts.rbegin(); lt != layouts.rend(); ++lt) {   // last first: the order names were added in
+        const int n = detail::layoutOne(f, *lt, edits);
         if (n < 0) continue;
         written += n;
         ++converted;
     }
+    octx::applyEdits(f, edits);
     if (instances) *instances = written;
     return converted;
 }

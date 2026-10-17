@@ -1,5 +1,6 @@
 // Record builders and pool edits for tuple files in 3.0's form (formats/oct.hpp). Data in, data out; any thread.
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -129,6 +130,37 @@ inline void editPoolChildren(oct::File& f, long pool, const std::vector<size_t>&
     detail::moveAppend(out, f.recs, at, poolEnd);
     detail::moveAppend(out, f.recs, poolEnd, f.recs.size());
     f.recs.swap(out);
+}
+
+// Records [at, at + erase) replaced by recs; at indexes the records as they were before the batch.
+struct RangeEdit {
+    size_t at;
+    size_t erase;
+    std::vector<oct::Rec> recs;
+};
+
+// A batch of non-overlapping edits applied in one pass, so no edit moves another's indices (C8). Empties edits.
+inline void applyEdits(oct::File& f, std::vector<RangeEdit>& edits)
+{
+    if (edits.empty()) return;
+    // stable: two inserts at one position keep their batch order
+    std::stable_sort(edits.begin(), edits.end(), [](const RangeEdit& a, const RangeEdit& b) { return a.at < b.at; });
+    size_t grown = 0;
+    for (const RangeEdit& e : edits) grown += e.recs.size();
+    // the records before the first edit stay where they are; only the rest is rebuilt
+    const size_t first = edits.front().at;
+    std::vector<oct::Rec> rest;
+    rest.reserve(f.recs.size() - first + grown);
+    size_t from = first;
+    for (RangeEdit& e : edits) {
+        detail::moveAppend(rest, f.recs, from, e.at);
+        detail::moveAppend(rest, e.recs, 0, e.recs.size());
+        from = e.at + e.erase;
+    }
+    detail::moveAppend(rest, f.recs, from, f.recs.size());
+    f.recs.erase(f.recs.begin() + first, f.recs.end());
+    detail::moveAppend(f.recs, rest, 0, rest.size());
+    edits.clear();
 }
 
 // A pool entry field for readEntryFields: a name (name0) into text, an int (int0) into number, or just seen.
