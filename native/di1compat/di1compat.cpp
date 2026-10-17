@@ -31,6 +31,7 @@
 #include "games/di1/inputtrace.hpp"
 #include "games/di1/meridian.hpp"
 #include "games/di1/missiontrace.hpp"
+#include "games/di1/particles.hpp"
 #include "games/di1/movies.hpp"
 #include "games/di1/playsets.hpp"
 #include "games/di1/popin.hpp"
@@ -55,8 +56,8 @@
 #include "trace/spawn.hpp"
 #include "trace/spawntrace.hpp"
 #include "trace/teardown.hpp"
+#include "trace/vfx.hpp"
 #include "npcrt.hpp"
-#include "vfxrt.hpp"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -125,7 +126,8 @@ extern "C" void __stdcall Pentane_Main()
     npcrt::install(cfg);
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
-    vfxrt::install(cfg);
+    di1::particles::install(cfg);
+    trace::vfx::install({cfg.vfxTrace});
     di1::inputtrace::install(cfg);
     di1::accept::install(cfg);
     di1::tools::install(cfg);
