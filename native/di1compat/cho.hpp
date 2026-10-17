@@ -1282,122 +1282,220 @@ inline oct::Rec keyed(oct::File& f, uint16_t level, const std::string& n, int ke
     return r;
 }
 
-// Returns the Layouts converted (0: no ContextNodePool); *instances = InstanceNodes written.
+namespace detail {
+
+// A pool entry's fields by name: record index, the last one of a repeated name
+using Entry = std::map<std::string, long>;
+
+inline Entry entryFields(const oct::File& f, size_t e)
+{
+    Entry m;
+    for (size_t j = e + 1, x = f.blockEnd(e); j < x; ++j)
+        if (f.recs[j].level == f.recs[e].level + 1) m[f.name(f.recs[j])] = (long)j;
+    return m;
+}
+
+// The level-4 entries of a pool, none for pool < 0
+inline std::vector<Entry> poolEntries(const oct::File& f, long pool)
+{
+    std::vector<Entry> v;
+    if (pool < 0) return v;
+    for (size_t j = pool + 1, x = f.blockEnd(pool); j < x; ++j)
+        if (f.recs[j].level == 4) v.push_back(entryFields(f, j));
+    return v;
+}
+
+// An entry's int field k, def when absent or holding no int
+inline int entryInt(const oct::File& f, const Entry& m, const char* k, int def)
+{
+    auto it = m.find(k);
+    return it == m.end() ? def : first(f, f.recs[it->second], def);
+}
+
+inline oct::Rec atLevel(const oct::File& f, long rec, uint16_t level)
+{
+    oct::Rec r = f.recs[rec];
+    r.level = level;
+    return r;
+}
+
+// Layout flag bits (FORMATS.md 4.10): 1.0 FUN_0075d630 ContextNode, 3.0 FUN_00787e30 InstanceNode
+inline constexpr int kCtxPlaced = 0x1;         // has a PlacementNodeRef
+inline constexpr int kCtxFlag4 = 0x4;          // -> kInstFlag4
+inline constexpr int kCtxAttachable = 0x8;     // instanced when an Attachment uses it
+inline constexpr int kCtxBounded = 0x10;       // has a BoundingSceneNodeName
+inline constexpr int kInstFilePath = 0x8;
+inline constexpr int kInstFlag4 = 0x10;
+inline constexpr int kInstBounded = 0x20;
+inline constexpr int kInstAttachable = 0x40;
+// PlacementNode flag bits, 1.0 -> 3.0 (FORMATS.md 4.10)
+inline constexpr int kPlaceKept = 0xf;         // kept as they are
+inline constexpr int kPlaceFlag10 = 0x10;      // -> kPlaceFlag30
+inline constexpr int kPlaceFlag30 = 0x200;
+inline constexpr int kPlaceAxes = 0x1e0;       // per-axis bits, one bit lower in 3.0
+inline constexpr int kPlaceLayout = 0x100;     // named 'Layout'
+inline constexpr int kPlaceCtxPlaced = 0x400;  // its context is kCtxPlaced
+
+// The contexts that become InstanceNodes, numbered from 0: a FilePath name, or attachable and attached
+inline std::map<int, int> instanceNumbers(const oct::File& f, std::vector<Entry>& ctx, const std::vector<Entry>& atts)
+{
+    std::set<int> used;
+    for (auto& a : atts) {
+        used.insert(entryInt(f, a, "BaseContextRef", -1));
+        used.insert(entryInt(f, a, "LayerContextRef", -1));
+    }
+    std::map<int, int> remap;
+    for (size_t i = 0; i < ctx.size(); ++i) {
+        int fl = entryInt(f, ctx[i], "Flags", 0);
+        auto fp = ctx[i].find("FilePath");
+        if (fp != ctx[i].end() && f.nameValues(f.recs[fp->second]).empty()) ctx[i].erase(fp);   // not a name
+        const bool attached = (fl & kCtxAttachable) && used.count((int)i);
+        if (!ctx[i].count("FilePath") && !attached) continue;
+        const int next = (int)remap.size();   // GR-23: no reliance on the order C++17 gives '='
+        remap[(int)i] = next;
+    }
+    return remap;
+}
+
+// The InstanceNode of a 1.0 context ref field k10, -1 for none
+inline int instanceRef(const oct::File& f, const Entry& a, const std::map<int, int>& remap, const char* k10)
+{
+    auto m = remap.find(entryInt(f, a, k10, -1));
+    return m == remap.end() ? -1 : m->second;
+}
+
+// The AttachmentPool rebuilt: Base/LayerContextRef become Base/LayerInstanceRef
+inline std::vector<oct::Rec> attachments(oct::File& f, long ap, const std::vector<Entry>& atts,
+                                         const std::map<int, int>& remap)
+{
+    std::vector<oct::Rec> att;
+    if (ap < 0) return att;
+    att.push_back(f.recs[ap]);
+    size_t k = 0;
+    for (size_t j = ap + 1, x = f.blockEnd(ap); j < x; ++j) {
+        if (f.recs[j].level != 4) continue;
+        const Entry& a = atts[k++];
+        att.push_back(f.recs[j]);
+        att.push_back(f.intScalar(5, "BaseInstanceRef", instanceRef(f, a, remap, "BaseContextRef")));
+        if (a.count("BaseConnectionMap")) att.push_back(atLevel(f, a.at("BaseConnectionMap"), 5));
+        att.push_back(f.intScalar(5, "LayerInstanceRef", instanceRef(f, a, remap, "LayerContextRef")));
+        if (a.count("LayerConnectionMap")) att.push_back(atLevel(f, a.at("LayerConnectionMap"), 5));
+        if (a.count("AnimLayerName")) att.push_back(atLevel(f, a.at("AnimLayerName"), 5));
+    }
+    return att;
+}
+
+// A FilePath record with its path in lower case
+inline oct::Rec lowerFilePath(oct::File& f, long rec)
+{
+    std::string p = f.nameValues(f.recs[rec])[0];
+    for (char& ch : p) ch = (char)tolower((unsigned char)ch);
+    return f.nameScalar(5, f.recs[rec].name, p);
+}
+
+// The InstanceNodePool: an InstanceNode per numbered context, in number order
+inline std::vector<oct::Rec> instanceNodes(oct::File& f, const std::vector<Entry>& ctx, const std::map<int, int>& remap)
+{
+    std::vector<oct::Rec> inst = {f.node(3, "InstanceNodePool")};
+    for (auto& [old, k] : remap) {
+        const Entry& c = ctx[old];
+        int fl = entryInt(f, c, "Flags", 0), nf = 0;
+        inst.push_back(keyed(f, 4, "InstanceNode", k));
+        if (c.count("Name")) inst.push_back(atLevel(f, c.at("Name"), 5));
+        if (c.count("PlacementNodeRef"))
+            inst.push_back(f.intScalar(5, "PlacementNodeRef", entryInt(f, c, "PlacementNodeRef", -1)));
+        if (c.count("BoundingSceneNodeName")) inst.push_back(atLevel(f, c.at("BoundingSceneNodeName"), 5));
+        if (c.count("FilePath")) {
+            inst.push_back(lowerFilePath(f, c.at("FilePath")));
+            nf |= kInstFilePath | (fl & kCtxFlag4 ? kInstFlag4 : 0);
+        }
+        if (fl & kCtxBounded) nf |= kInstBounded;
+        if (fl & kCtxAttachable) nf |= kInstAttachable;
+        inst.push_back(f.intScalar(5, "Flags", nf));
+    }
+    return inst;
+}
+
+// The PlacementNodePool rebuilt: Name = its context's, ContextNodeRef dropped, Flags in 3.0 bits
+inline std::vector<oct::Rec> placementNodes(oct::File& f, long pp, const std::vector<Entry>& pls,
+                                            const std::vector<Entry>& ctx)
+{
+    std::vector<oct::Rec> pl;
+    if (pp < 0) return pl;
+    pl.push_back(f.recs[pp]);
+    size_t k = 0;
+    for (size_t j = pp + 1, x = f.blockEnd(pp); j < x; ++j) {
+        if (f.recs[j].level != 4) continue;
+        const Entry& p = pls[k++];
+        int fl = entryInt(f, p, "Flags", 0);
+        int nf = (fl & kPlaceKept) | (fl & kPlaceFlag10 ? kPlaceFlag30 : 0) | (fl & kPlaceAxes) >> 1;
+        long nameRec = p.count("Name") ? p.at("Name") : -1;
+        int cref = entryInt(f, p, "ContextNodeRef", -1);
+        if (cref >= 0 && cref < (int)ctx.size()) {
+            if (ctx[cref].count("Name")) nameRec = ctx[cref].at("Name");
+            if (entryInt(f, ctx[cref], "Flags", 0) & kCtxPlaced) nf |= kPlaceCtxPlaced;
+        }
+        pl.push_back(f.recs[j]);
+        if (nameRec >= 0) {
+            pl.push_back(atLevel(f, nameRec, 5));
+            if (f.nameValues(f.recs[nameRec]) == std::vector<std::string>{"Layout"}) nf |= kPlaceLayout;
+        }
+        pl.push_back(f.intScalar(5, "Flags", nf));
+    }
+    return pl;
+}
+
+// Each (pool, records) pair's pool replaced, later pools first so earlier indices hold
+inline void replacePools(oct::File& f, std::vector<std::pair<long, std::vector<oct::Rec>*>> rep)
+{
+    std::sort(rep.begin(), rep.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    for (auto& [at, recs] : rep) {
+        if (at < 0) continue;
+        size_t e = f.blockEnd(at);
+        f.recs.erase(f.recs.begin() + at, f.recs.begin() + e);
+        f.recs.insert(f.recs.begin() + at, recs->begin(), recs->end());
+    }
+}
+
+// One Layout's ContextNodes as InstanceNodes: the instances written, -1 without a ContextNodePool
+inline int layoutOne(oct::File& f, size_t L)
+{
+    long pp = -1, cp = -1, ap = -1;
+    for (size_t i = L + 1, e = f.blockEnd(L); i < e; ++i) {
+        if (f.recs[i].level != 3) continue;
+        const std::string& n = f.name(f.recs[i]);
+        if (n == "PlacementNodePool") pp = (long)i;
+        else if (n == "ContextNodePool") cp = (long)i;
+        else if (n == "AttachmentPool") ap = (long)i;
+    }
+    if (cp < 0) return -1;
+    std::vector<Entry> ctx = poolEntries(f, cp);
+    const std::vector<Entry> pls = poolEntries(f, pp), atts = poolEntries(f, ap);
+    const std::map<int, int> remap = instanceNumbers(f, ctx, atts);
+    // built in this order: it is the order their names enter the name table (rule 1)
+    std::vector<oct::Rec> att = attachments(f, ap, atts, remap);
+    std::vector<oct::Rec> inst = instanceNodes(f, ctx, remap);
+    std::vector<oct::Rec> pl = placementNodes(f, pp, pls, ctx);
+    replacePools(f, {{pp, &pl}, {cp, &inst}, {ap, &att}});
+    return (int)remap.size();
+}
+
+}  // namespace detail
+
+// layout30 (cholayout10): ContextNodes become InstanceNodes (FORMATS.md 4.10). Returns the Layouts converted
+// (0: no ContextNodePool); *instances = InstanceNodes written.
 inline int layout30(oct::File& f, int* instances = nullptr)
 {
     long lp = f.pool("LayoutPool");
     if (lp < 0) return 0;
-    int converted = 0;
     std::vector<size_t> layouts;
     for (size_t i = lp + 1, e = f.blockEnd(lp); i < e; ++i)
         if (f.recs[i].level == 2 && f.name(f.recs[i]) == "Layout") layouts.push_back(i);
-    int written = 0;
+    int converted = 0, written = 0;
     for (auto lt = layouts.rbegin(); lt != layouts.rend(); ++lt) {
-        size_t L = *lt;
-        long pp = -1, cp = -1, ap = -1;
-        for (size_t i = L + 1, e = f.blockEnd(L); i < e; ++i) {
-            if (f.recs[i].level != 3) continue;
-            const std::string& n = f.name(f.recs[i]);
-            if (n == "PlacementNodePool") pp = (long)i;
-            else if (n == "ContextNodePool") cp = (long)i;
-            else if (n == "AttachmentPool") ap = (long)i;
-        }
-        if (cp < 0) continue;
-        // children of an entry by name (level 5 record index), -1 if absent
-        auto kids = [&](size_t e) {
-            std::map<std::string, long> m;
-            for (size_t j = e + 1, x = f.blockEnd(e); j < x; ++j)
-                if (f.recs[j].level == f.recs[e].level + 1) m[f.name(f.recs[j])] = (long)j;
-            return m;
-        };
-        auto entries = [&](long pool) {
-            std::vector<std::map<std::string, long>> v;
-            if (pool < 0) return v;
-            for (size_t j = pool + 1, x = f.blockEnd(pool); j < x; ++j)
-                if (f.recs[j].level == 4) v.push_back(kids(j));
-            return v;
-        };
-        auto ival = [&](const std::map<std::string, long>& m, const char* k, int def) {
-            auto it = m.find(k);
-            return it == m.end() ? def : first(f, f.recs[it->second], def);
-        };
-        auto ctx = entries(cp), pls = entries(pp), atts = entries(ap);
-        std::set<int> used;
-        for (auto& a : atts) { used.insert(ival(a, "BaseContextRef", -1)); used.insert(ival(a, "LayerContextRef", -1)); }
-        std::map<int, int> remap;
-        for (size_t i = 0; i < ctx.size(); ++i) {
-            int fl = ival(ctx[i], "Flags", 0);
-            if (ctx[i].count("FilePath") && f.nameValues(f.recs[ctx[i]["FilePath"]]).empty()) ctx[i].erase("FilePath");   // not a name
-            if (ctx[i].count("FilePath") || ((fl & 8) && used.count((int)i))) remap[(int)i] = (int)remap.size();
-        }
-        auto copyAt = [&](long rec, uint16_t level) { oct::Rec r = f.recs[rec]; r.level = level; return r; };
-
-        std::vector<oct::Rec> att;   // AttachmentPool
-        if (ap >= 0) {
-            att.push_back(f.recs[ap]);
-            size_t k = 0;
-            for (size_t j = ap + 1, x = f.blockEnd(ap); j < x; ++j) {
-                if (f.recs[j].level != 4) continue;
-                auto& a = atts[k++];
-                att.push_back(f.recs[j]);
-                auto ref = [&](const char* k10) { auto m = remap.find(ival(a, k10, -1)); return m == remap.end() ? -1 : m->second; };
-                att.push_back(f.intScalar(5, "BaseInstanceRef", ref("BaseContextRef")));
-                if (a.count("BaseConnectionMap")) att.push_back(copyAt(a["BaseConnectionMap"], 5));
-                att.push_back(f.intScalar(5, "LayerInstanceRef", ref("LayerContextRef")));
-                if (a.count("LayerConnectionMap")) att.push_back(copyAt(a["LayerConnectionMap"], 5));
-                if (a.count("AnimLayerName")) att.push_back(copyAt(a["AnimLayerName"], 5));
-            }
-        }
-        std::vector<oct::Rec> inst = {f.node(3, "InstanceNodePool")};
-        for (auto& [old, k] : remap) {
-            auto& c = ctx[old];
-            int fl = ival(c, "Flags", 0), nf = 0;
-            inst.push_back(keyed(f, 4, "InstanceNode", k));
-            if (c.count("Name")) inst.push_back(copyAt(c["Name"], 5));
-            if (c.count("PlacementNodeRef")) inst.push_back(f.intScalar(5, "PlacementNodeRef", ival(c, "PlacementNodeRef", -1)));
-            if (c.count("BoundingSceneNodeName")) inst.push_back(copyAt(c["BoundingSceneNodeName"], 5));
-            if (c.count("FilePath")) {
-                std::string p = f.nameValues(f.recs[c["FilePath"]])[0];
-                for (char& ch : p) ch = (char)tolower((unsigned char)ch);
-                inst.push_back(f.nameScalar(5, f.recs[c["FilePath"]].name, p));
-                nf |= 8 | (fl & 4 ? 0x10 : 0);
-            }
-            if (fl & 0x10) nf |= 0x20;
-            if (fl & 8) nf |= 0x40;
-            inst.push_back(f.intScalar(5, "Flags", nf));
-        }
-        std::vector<oct::Rec> pl;
-        if (pp >= 0) {
-            pl.push_back(f.recs[pp]);
-            size_t k = 0;
-            for (size_t j = pp + 1, x = f.blockEnd(pp); j < x; ++j) {
-                if (f.recs[j].level != 4) continue;
-                auto& p = pls[k++];
-                int fl = ival(p, "Flags", 0), nf = (fl & 0xf) | (fl & 0x10 ? 0x200 : 0) | (fl & 0x1e0) >> 1;
-                long nameRec = p.count("Name") ? p["Name"] : -1;
-                int cref = ival(p, "ContextNodeRef", -1);
-                if (cref >= 0 && cref < (int)ctx.size()) {
-                    if (ctx[cref].count("Name")) nameRec = ctx[cref]["Name"];
-                    if (ival(ctx[cref], "Flags", 0) & 1) nf |= 0x400;
-                }
-                pl.push_back(f.recs[j]);
-                if (nameRec >= 0) {
-                    pl.push_back(copyAt(nameRec, 5));
-                    if (f.nameValues(f.recs[nameRec]) == std::vector<std::string>{"Layout"}) nf |= 0x100;
-                }
-                pl.push_back(f.intScalar(5, "Flags", nf));
-            }
-        }
-        // replace the pools, later ones first
-        std::vector<std::pair<long, std::vector<oct::Rec>*>> rep = {{pp, &pl}, {cp, &inst}, {ap, &att}};
-        std::sort(rep.begin(), rep.end(), [](auto& a, auto& b) { return a.first > b.first; });
-        for (auto& [at, recs] : rep) {
-            if (at < 0) continue;
-            size_t e = f.blockEnd(at);
-            f.recs.erase(f.recs.begin() + at, f.recs.begin() + e);
-            f.recs.insert(f.recs.begin() + at, recs->begin(), recs->end());
-        }
-        written += (int)remap.size();
+        const int n = detail::layoutOne(f, *lt);
+        if (n < 0) continue;
+        written += n;
         ++converted;
     }
     if (instances) *instances = written;
