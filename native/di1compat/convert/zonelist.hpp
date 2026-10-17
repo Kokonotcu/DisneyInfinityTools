@@ -30,6 +30,7 @@ struct Additions {
     std::string zones, playsets, ordered;
 };
 
+namespace detail {
 // The direct entry names of Records table `table` (none when the text has no such table).
 inline std::set<std::string> names(const std::string& t, const std::vector<lualex::Tok>& toks, const Text& z,
                                    const char* table)
@@ -39,6 +40,7 @@ inline std::set<std::string> names(const std::string& t, const std::vector<luale
     for (auto& e : lualex::tableEntries(t, toks, z.recs.at(table))) s.insert(e.first);
     return s;
 }
+}  // namespace detail
 
 // The zone list text t; nullopt without a ZoneList table.
 inline std::optional<Text> scan(const std::string& t)
@@ -52,8 +54,8 @@ inline std::optional<Text> scan(const std::string& t)
         for (auto& r : lualex::tableEntries(t, toks, t.find('{', e.second.first)))
             z.recs[r.first] = t.find('{', r.second.first);
     }
-    z.playsets = names(t, toks, z, "PlaysetProperties");
-    z.zones = names(t, toks, z, "Zones");
+    z.playsets = detail::names(t, toks, z, "PlaysetProperties");
+    z.zones = detail::names(t, toks, z, "Zones");
     for (auto& k : toks)
         if (k.kind == 'i' && !t.compare(k.at, k.len, "PlaysetUniqueID") && lualex::assignedAt(t, k.at + k.len))
             z.used.insert(atoi(t.c_str() + t.find('=', k.at) + 1));
@@ -110,7 +112,10 @@ inline size_t orderedAfter(const Text& z, const std::vector<std::string>& listed
 // The additions on the line after each table's '{' (OrderedPlaysets: after opAt), the last first.
 inline void insert(std::string& t, Text& z, const Additions& a, size_t opAt)
 {
-    auto lineAfter = [&](size_t at) { size_t nl = t.find('\n', at); return nl == std::string::npos ? at + 1 : nl + 1; };
+    auto lineAfter = [&](size_t at) {
+        size_t nl = t.find('\n', at);
+        return nl == std::string::npos ? at + 1 : nl + 1;
+    };
     std::vector<std::pair<size_t, std::string>> ed;
     if (!a.zones.empty()) ed.push_back({lineAfter(z.recs["Zones"]), a.zones});
     if (!a.playsets.empty()) ed.push_back({lineAfter(z.recs["PlaysetProperties"]), a.playsets});

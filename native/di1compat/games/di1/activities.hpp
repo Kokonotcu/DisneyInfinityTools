@@ -43,6 +43,7 @@ inline int apGivers30(std::string& ap, const std::set<std::string>* only = nullp
 // A 1.0 DNA chunk's MissionGiverActivity gadget as 3.0's MissionGiverChallenge. -> constants renamed
 inline int dnaGadgets30(const std::string& in, std::string& out);
 
+namespace detail {
 // The classes (pins30.py: 3.0 pin tables identical in all shipped graphs). CombatTimeTrial and Collector have none.
 inline const std::vector<ActClass>& actClasses()
 {
@@ -63,16 +64,17 @@ inline const std::vector<ActClass>& actClasses()
     };
     return m;
 }
+}  // namespace detail
 
 inline const ActClass* taskClass(const std::string& t)
 {
-    for (auto& c : actClasses()) if (t == c.cls10) return &c;
+    for (auto& c : detail::actClasses()) if (t == c.cls10) return &c;
     return nullptr;
 }
 
 inline const ActClass* evalClass(const std::string& t)
 {
-    for (auto& c : actClasses()) if (t == c.eval10) return &c;
+    for (auto& c : detail::actClasses()) if (t == c.eval10) return &c;
     return nullptr;
 }
 
