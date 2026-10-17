@@ -15,6 +15,7 @@
 #include "engine/crt.hpp"
 #include "engine/langkeys.hpp"
 #include "engine/playsetslot.hpp"
+#include "games/di1/accept.hpp"
 #include "games/di1/assetdefs.hpp"
 #include "games/di1/assetopen.hpp"
 #include "games/di1/audio10.hpp"
@@ -26,16 +27,20 @@
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
 #include "games/di1/hideps.hpp"
+#include "games/di1/inputtrace.hpp"
 #include "games/di1/meridian.hpp"
 #include "games/di1/missiontrace.hpp"
+#include "games/di1/movies.hpp"
 #include "games/di1/playsets.hpp"
 #include "games/di1/popin.hpp"
 #include "games/di1/render10.hpp"
 #include "games/di1/screens.hpp"
+#include "games/di1/selectmenu.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/shaders10.hpp"
 #include "games/di1/sxnatives.hpp"
 #include "games/di1/tables.hpp"
+#include "games/di1/tools.hpp"
 #include "games/di1/transcodeio.hpp"
 #include "games/di1/vfs.hpp"
 #include "trace/breaktrace.hpp"
@@ -49,7 +54,6 @@
 #include "trace/teardown.hpp"
 #include "npcrt.hpp"
 #include "vfxrt.hpp"
-#include "gprt.hpp"
 #include "bldrt.hpp"
 #include "caprt.hpp"
 
@@ -121,7 +125,11 @@ extern "C" void __stdcall Pentane_Main()
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
     vfxrt::install(cfg);
-    gprt::install(cfg);
+    di1::inputtrace::install(cfg);
+    di1::accept::install(cfg);
+    di1::tools::install(cfg);
+    di1::selectmenu::install(cfg);
+    di1::movies::install(cfg);
     bldrt::install(cfg);
     caprt::install(cfg);
     trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});

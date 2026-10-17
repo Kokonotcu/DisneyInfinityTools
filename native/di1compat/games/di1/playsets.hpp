@@ -1,4 +1,4 @@
-// zones10 (PS-1): 1.0's playsets registered as 3.0's zone list loads; names, starts, zone prefixes. core. Open threads.
+// zones10 (PS-1): 1.0's playsets registered as 3.0's zone list loads; names, starts, zones. core. Open threads.
 #pragma once
 #include <windows.h>
 #include <exception>
@@ -9,6 +9,7 @@
 #include <vector>
 #include "../../base/text.hpp"
 #include "../../core/log.hpp"
+#include "../../engine/zones.hpp"
 #include "config.hpp"
 #include "currency.hpp"
 #include "zones.hpp"
@@ -25,6 +26,8 @@ inline int registerPlaysets(std::string& t, const char* path, const Read10& read
 inline std::vector<std::pair<std::string, std::string>> starts();
 // Whether a mission name starts with a registered playset's zone prefix ("IN_", "MU_" ...).
 inline bool ownMission(const char* name);
+// Whether the current zone is a 1.0 playset's, by 1.0's own test (FUN_00c32cf0). Main thread.
+inline bool currentZone10();
 
 namespace detail {
 
@@ -106,6 +109,13 @@ inline bool ownMission(const char* name)
     for (auto& x : s.prefixes)
         if (!_strnicmp(name, x.c_str(), x.size())) return true;
     return false;
+}
+
+inline bool currentZone10()
+{
+    // 1.0 zone records spell the key worldIsPlayset (47 in 1.0's zone list), 3.0's WorldIsPlayset (none so)
+    void* zm = engine::zones::manager();
+    return zm && engine::zones::zoneFlag(zm, "worldIsPlayset", engine::zones::currentZone(zm));
 }
 
 inline bool install(const Config& c)
