@@ -72,19 +72,18 @@ struct Aes {
     }
     Aes(const Aes&) = delete;
     Aes& operator=(const Aes&) = delete;
-    // XOR b with the keystream from position at: big-endian block counter from 0.
+    // XOR b with the keystream from position at: a big-endian block counter from 0, all blocks in one ECB call.
     void x(uint8_t* b, size_t n, size_t at) const
     {
-        uint8_t ctr[16], ks[16];
+        if (!n) return;
+        const uint64_t first = at / 16;
+        const size_t blocks = (size_t)((at + n - 1) / 16 - first + 1);
+        std::vector<uint8_t> ctr(16 * blocks), ks(16 * blocks);
+        for (size_t k = 0; k < blocks; ++k)
+            for (int j = 0; j < 8; ++j) ctr[16 * k + 15 - j] = (uint8_t)((first + k) >> (8 * j));
         ULONG got;
-        for (size_t i = 0; i < n;) {
-            const uint64_t blk = (at + i) / 16;
-            size_t off = (at + i) % 16;
-            memset(ctr, 0, 8);
-            for (int j = 0; j < 8; ++j) ctr[15 - j] = (uint8_t)(blk >> (8 * j));
-            BCryptEncrypt(key, ctr, 16, nullptr, nullptr, 0, ks, 16, &got, 0);
-            for (; off < 16 && i < n; ++off, ++i) b[i] ^= ks[off];
-        }
+        BCryptEncrypt(key, ctr.data(), (ULONG)ctr.size(), nullptr, nullptr, 0, ks.data(), (ULONG)ks.size(), &got, 0);
+        for (size_t i = 0; i < n; ++i) b[i] ^= ks[at % 16 + i];
     }
 };
 
