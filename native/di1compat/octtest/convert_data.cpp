@@ -133,10 +133,10 @@ bool dataMapOf(const char* path, npc::DataMap& m) { return npc::dataMap(slurp(pa
 
 }  // namespace
 
-// sys::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>.
+// sys::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A package it throws on fails (OT-04).
 int convertGroups30(const Args& a)
 {
-    int groups = 0, over = 0, files = 0, sparks = 0;
+    int groups = 0, over = 0, files = 0, sparks = 0, failed = 0;
     const char* dnaRoot = env("GROUPS30_DNA");
     std::function<bool(const std::string&)> isSpark;
     if (dnaRoot) isSpark = [dnaRoot](const std::string& d) { return paysSparksIn(dnaRoot, d); };
@@ -146,6 +146,7 @@ int convertGroups30(const Args& a)
         try {
             k = sys::groups30(slurp(a.argv[i]), out, &over, isSpark, &s);
         } catch (std::exception& e) {
+            ++failed;
             printf("%s: %s\n", a.argv[i], e.what());
         }
         if (!k) continue;
@@ -156,7 +157,7 @@ int convertGroups30(const Args& a)
     }
     printf("%d packages with 1.0 groups, %d groups given 3.0 keys, %d spawns past the 4th, %d spark pickups paying "
            "INV_SPARKS\n", files, groups, over, sparks);
-    return 0;
+    return failed ? 1 : 0;
 }
 
 int convertCurrency10(const Args& a)

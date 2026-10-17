@@ -551,16 +551,20 @@ void banmPair(const std::string& line, BanmTally& t)
 
 }  // namespace
 
+// A pair whose twins do not parse is reported and fails the run (OT-04).
 int testChoClips(const Args& a)
 {
     ClipTally t;
+    size_t unread = 0;
     for (const std::string& line : pairLines(a.argv[2])) {
         size_t bar = line.find('|');
         std::vector<std::string> A, B;
         try {
             A = clipBlocks(line.substr(0, bar));
             B = clipBlocks(line.substr(bar + 1));
-        } catch (...) {
+        } catch (std::exception& x) {
+            ++unread;
+            printf("FAIL %s: %s\n", line.c_str(), x.what());
             continue;
         }
         ++t.files;
@@ -570,27 +574,31 @@ int testChoClips(const Args& a)
            "inexact: header+descriptor area identical %zu, same shape (heads + comp codes) %zu; any twin block: exact "
            "%zu, same shape %zu\n", t.files, t.exact, t.sameLen, t.other, t.failed, t.areaSame, t.shapeSame, t.anyExact,
            t.anyShape);
-    return 0;
+    return unread ? 1 : 0;
 }
 
+// A pair whose twins do not parse is reported and fails the run (OT-04).
 int testClipIds(const Args& a)
 {
     Tally c;
+    size_t unread = 0;
     for (const std::string& line : pairLines(a.argv[2])) {
         size_t bar = line.find('|');
-        std::string ba, bb;
+        std::string ba = slurp(line.substr(0, bar)), bb = slurp(line.substr(bar + 1));
+        if (ba.size() < kMagicBytes || bb.size() < kMagicBytes) continue;
+        oct::File A, B;
         try {
-            ba = slurp(line.substr(0, bar));
-            bb = slurp(line.substr(bar + 1));
-        } catch (...) {
+            A = parse(ba);
+            B = parse(bb);
+        } catch (std::exception& x) {
+            ++unread;
+            printf("FAIL %s: %s\n", line.c_str(), x.what());
             continue;
         }
-        if (ba.size() < kMagicBytes || bb.size() < kMagicBytes) continue;
-        oct::File A = parse(ba), B = parse(bb);
         clipIdsFile(A, B, c);
     }
     printTally(c, 8);
-    return c.count("  NOT CONVERTED") ? 1 : 0;
+    return c.count("  NOT CONVERTED") || unread ? 1 : 0;
 }
 
 int testChoFile(const Args& a)

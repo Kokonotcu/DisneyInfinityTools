@@ -209,10 +209,10 @@ int testKeep(const Args& a)
     return bad || !counted;
 }
 
-// Every .chd under the root with its .lua beside it, compiled: must equal the shipped .chd.
+// Every .chd under the root with its .lua beside it, compiled: must equal the shipped .chd. A throw fails (OT-04).
 int testChd(const Args& a)
 {
-    size_t ok = 0, bad = 0;
+    size_t ok = 0, bad = 0, failed = 0;
     for (auto& e : fs::recursive_directory_iterator(a.argv[2])) {
         if (e.path().extension() != ".chd") continue;
         fs::path src = e.path();
@@ -222,6 +222,7 @@ int testChd(const Args& a)
         try {
             got = chd::compile(chd::lua(slurp(src)));
         } catch (std::exception& x) {
+            ++failed;
             printf("FAIL %s: %s\n", src.string().c_str(), x.what());
         }
         if (got == slurp(e.path())) {
@@ -232,7 +233,7 @@ int testChd(const Args& a)
         printf("MISMATCH %s (%zu vs %zu B)\n", e.path().string().c_str(), got.size(), (size_t)fs::file_size(e.path()));
     }
     printf("chd compiled exact: %zu, mismatch %zu\n", ok, bad);
-    return 0;
+    return failed ? 1 : 0;
 }
 
 // A 1.0 table round trip, its re-seed for 3.0, and the engine's probe for one key.
@@ -275,7 +276,7 @@ int testMissionChain(const Args& a)
     return bad ? 1 : 0;
 }
 
-// Every gp load-time transform over every 1.0 archive member it would see: no parse may throw.
+// Every gp load-time transform over every 1.0 archive member it would see: no parse may throw (OT-04).
 int testGpScan(const Args& a)
 {
     GpScan s;
@@ -290,7 +291,9 @@ int testGpScan(const Args& a)
     }
     for (auto& [k, c] : s.seen)
         printf("summary %-4s seen %d changed %d failed %d\n", k.c_str(), c, s.changed[k], s.failed[k]);
-    return 0;
+    bool failed = false;
+    for (auto& [k, n] : s.failed) failed |= n > 0;
+    return failed ? 1 : 0;
 }
 
 }  // namespace octtest

@@ -74,6 +74,7 @@ constexpr size_t kShownMismatches = 10, kShownFields = 3;
 
 struct CountsRun {
     size_t ok = 0, bad = 0, skip = 0;
+    size_t failed = 0;   // files a parse or edit threw on (OT-04)
     std::map<std::string, std::pair<size_t, size_t>> fieldTally;   // per field of the inexact graphs: hits, misses
     std::map<std::string, size_t> skipWhy;
     octx::Options octx;
@@ -369,7 +370,8 @@ int testCounts(const Args& a)
         if (ext != ".oct") return;
         try {
             countsFile(b, p.string(), run);
-        } catch (std::exception& x) {
+        } catch (std::exception& x) {   // reported and failing the run (OT-04)
+            ++run.failed;
             printf("FAIL %s: %s\n", p.string().c_str(), x.what());
         }
     });
@@ -377,9 +379,10 @@ int testCounts(const Args& a)
     for (auto& [k, n] : run.skipWhy) printf("  skipped: %-40s %zu\n", k.c_str(), n);
     for (auto& [k, t] : run.fieldTally)
         printf("  per-field (processor / constant graphs) %-32s %zu ok %zu miss\n", k.c_str(), t.first, t.second);
+    if (run.failed) printf("%zu files failed\n", run.failed);
     const bool none = run.ok + run.bad + run.skip == 0;
     if (none) fprintf(stderr, "octtest: no SubNetwork under the roots\n");
-    return run.bad || none ? 1 : 0;
+    return run.bad || run.failed || none ? 1 : 0;
 }
 
 // The served vformat.vtxf (vtxf::merge of 3.0's and 1.0's) stays within the engine's limits, as 3.0's does.
