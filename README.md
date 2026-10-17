@@ -63,15 +63,15 @@ the translated result to the engine as an in-memory file. The translations by fo
 
 | 1.0 data | Translation | Source |
 |---|---|---|
-| Scene and processor graphs (`.oct`) | Pool counts, header layouts and constants in 3.0's form | `octx.hpp`, `oct.hpp` |
+| Scene and processor graphs (`.oct`) | Pool counts, header layouts and constants in 3.0's form | `formats/oct.hpp`, `convert/`, `games/di1/octsteps.hpp` |
 | Choreographies | Clip blocks re-packed; motion-clip output ids renumbered to 3.0's skeleton ports; play ranges and layout attachments | `games/di1/cho.hpp`, `choconst.hpp`, `cholayout.hpp`, `ports10.hpp`, `convert/clips.hpp` |
 | Meridian graphs (`.mer`, `.mtc`) | Parameter tables, pin tables, links; 1.0-only node classes registered natively | `formats/mer.hpp`, `games/di1/mer.hpp`, `engine/mernode.hpp` |
-| Materials and shaders (`.mtb`, `.shd`) | Resolved to identical 3.0 materials, or 1.0 shaders translated at load (compiled once, then cached) | `render.hpp`, `gen30.hpp`, `sm3.hpp` |
-| Entities (`.bent`) | Rewritten in 3.0's 4.1 layout | `bent.hpp` |
-| Game database (DataMap Lua, `.chd`, zone list) | Paths and records in 3.0's form; CHD compiled from Lua | `datamap.hpp`, `chd.hpp`, `gameplay.hpp` |
-| Scripts and AI (Slang, behaviour maps and trees, navmeshes) | 3.0 containers, with natives bound to their 1.0 semantics | `sx.hpp`, `npc.hpp`, `npcrt.hpp` |
-| Missions and UI | Event enums, beacons, loading screens, menus | `games/di1/mission.hpp`, `ui.hpp` |
-| Collision (`.btd`), localisation (`.dct`) | 3.0 block layout; 1.0 dictionaries | `btd.hpp`, `dct.hpp` |
+| Materials and shaders (`.mtb`, `.shd`) | Resolved to identical 3.0 materials, or 1.0 shaders translated at load (compiled once, then cached) | `games/di1/render*.hpp`, `gen30.hpp`, `formats/sm3.hpp`, `engine/shaders.hpp` |
+| Entities (`.bent`) | Rewritten in 3.0's 4.1 layout | `games/di1/bent.hpp` |
+| Game database (DataMap Lua, `.chd`, zone list) | Paths and records in 3.0's form; CHD compiled from Lua | `formats/datamap.hpp`, `formats/chd.hpp`, `convert/zonelist.hpp`, `games/di1/zones.hpp`, `gamedb30.hpp` |
+| Scripts and AI (Slang, behaviour maps and trees, navmeshes) | 3.0 containers, with natives bound to their 1.0 semantics | `formats/slang.hpp`, `engine/slangvm.hpp`, `games/di1/sxnatives.hpp`, `aitables.hpp`, `navmesh.hpp` |
+| Missions and UI | Event enums, beacons, loading screens, menus | `games/di1/mission.hpp`, `ui.hpp`, `engine/ui.hpp` |
+| Collision (`.btd`), localisation (`.dct`) | 3.0 block layout; 1.0 dictionaries | `formats/btd.hpp`, `games/di1/btd.hpp`, `formats/dct.hpp` |
 | Audio (FMOD Ex events, music, dialogue) | A 1.0 FMOD event system runs beside 3.0's Wwise. Posts for 1.0 events, music cues and dialogue lines are routed to it | `engine/audio/`, `games/di1/audio.hpp`, `dlg.hpp`, `mixer.hpp` |
 
 Every translation has a configuration switch, on by default, so a problem can be narrowed down one subsystem at a
@@ -145,8 +145,8 @@ Diagnostics, all off by default and log-only:
 | `capsuletrace10` | SpawnExpendable nodes firing, their spawn requests, which branch each 1.0 expendable's spawn took, the async completions, and the actors `shutdown10` keeps drawn |
 | `renderdoc10` | Captures one frame with RenderDoc that many seconds into the world |
 
-The full list, including the per-subsystem switches, is the `Cfg` structure at the top of
-`native/di1compat/di1compat.cpp`.
+The full list, including the per-subsystem switches, is `di1::Config` and its key table `kConfigKeys` in
+`native/di1compat/games/di1/config.hpp`.
 
 ## Testing
 
@@ -170,7 +170,16 @@ Game data cannot be published, so the data tests run locally against your own ex
   ```
 
   `--quick` runs the fast subset; `python golden.py list` names the cases. The roots a baseline was recorded with are
-  stored with it, so `check` needs no `--ext10`/`--ext30`/`--game`/`--inst10`.
+  stored with it, so `check` needs no `--ext10`/`--ext30`/`--game`/`--inst10`. `--golden` defaults to `DI_GOLDEN`,
+  and `check` compares with the newest baseline unless `--baseline <label>` names one.
+- `python rulecheck.py <repo> <base rev> [--all] [--tests]` checks the [CLAUDE.md](CLAUDE.md) rules a script can see
+  (comment and line length, function length, late includes, raw new/delete, sprintf_s, TODOs without an audit ID,
+  macros, header comments) on the C++ lines changed since `<base rev>`. `--all` lists every finding in the changed
+  files, `--tests` adds octtest. It exits 1 on any finding. It is the floor of a review, not the review:
+
+  ```powershell
+  python rulecheck.py . master --tests
+  ```
 - `python selftest.py` runs the toolkit's self-tests against the configured extracts.
 - [CI](.github/workflows/check.yml) checks everything that needs no game data: lint, that every module imports with
   no roots set, that every tool answers `--help`, and that both native targets build (Win32 Release, on a Windows
@@ -298,6 +307,26 @@ crabe/               CrabeLoader mod and the patch the test harness uses
 third_party/pentane/ Pentane plugin loader (Disney Infinity 3.0 build)
 .github/workflows/   CI
 ```
+
+### Plugin sources
+
+`native/di1compat` holds the plugin, headers included by its one source file `di1compat.cpp`, and the offline test
+driver (`octtest.cpp` and `octtest/`). Everything outside `games/` works for any source game, so a later port can
+reuse it; only what exists because of how 1.0 data looks goes in `games/di1`. The rules for this code, including which
+folder may include which, are in [CLAUDE.md](CLAUDE.md).
+
+| Folder | Holds |
+|---|---|
+| `di1compat.cpp` | The Pentane entry: exports and `Pentane_Main`, which starts core and calls each module's `install()` |
+| `base/` | Small helpers with no engine code: bounds checks and little-endian access, hashes, text and path helpers, the Lua lexer |
+| `formats/` | One header per file format, read and written byte for byte |
+| `convert/` | Steps that only need 3.0's form: record builders and editors, the counts and layouts 3.0 expects |
+| `core/` | Log, config table, hook table and `hook()`, engine address helpers, memory checks, serving files, the zip reader |
+| `engine/` | 3.0 engine features any source game uses, one module each (`engine/audio` is one feature in several files) |
+| `games/di1/` | Everything specific to 1.0: its rules and tables, install layout, transcode dispatch, runtime features, config keys |
+| `trace/` | Log-only diagnostic hooks behind their switches, built like engine modules |
+| `octtest/` | The octtest modes by job (tests, converters, probes) and their helpers |
+| `minhook/`, `third_party/`, `renderdoc_app.h` | Third-party code, kept as published |
 
 ## Third-party code
 
