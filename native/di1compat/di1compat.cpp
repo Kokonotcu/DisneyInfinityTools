@@ -45,7 +45,7 @@
 #include "formats/mer.hpp"
 #include "games/di1/mer.hpp"
 #include "mission.hpp"
-#include "mernode.hpp"
+#include "engine/mernode.hpp"
 #include "render.hpp"
 #include "formats/arc30.hpp"
 #include "convert/datamap.hpp"

@@ -1,48 +1,20 @@
-// Native Meridian node classes inside 3.0's Meridian (plan SYS-1 registration helpers, the base of MER-6 and of the
-// sys/npc 1.0-only classes: ScourgeWave, SpawnFromActorNode, SpawnManaNode, DeliveryNode, Activate/SpawnDecoration
-// Sockets, IntroChoGroup). Included by di1compat.cpp after rt()/logf(). The 3.0 ABI, read from MessageSender
-// (template FUN_0177f290), ToggleSpline (FUN_017b7c30), SpawnExpendable (FUN_017c0a90) and the Meridian core:
-//   register    FUN_006bc220(factory, "MNode::<name>", node size, 4) [cdecl]; definition id = FUN_018261f0
-//               ("Meridian::<name>NodeDefinition"); FUN_013cc1f0(id) finds, FUN_006eaa00(id, &creator) adds a
-//               definition creator [thiscall on the creator map 0x02202C80] (FUN_0177a8b0)
-//   factory     cdecl(p1, p2, p3): FUN_006c8be0(node creator, id, p2, p3) [cdecl]; *p1 = 0; return p1 (FUN_01810640)
-//   creator     cdecl(): node = FUN_006abff0(4, size); ctor(node, most derived) (FUN_0180d030)
-//   node        +0 vftable (20 slots: 0 size, 12 LoadParameters(arg), 14 CreateInstance(arg) = fresh instance,
-//               FUN_01804bc0), +4 vbptr {-4, vbase - 4}, +8..+0x13 Node base (FUN_006aeb40(node, 0) after
-//               ContainedBase FUN_006abc80 at vbase), state, then the virtual base ContainedBase (vftable +
-//               namespace, 8 B) whose slot 0 is the deleting destructor: FUN_006aeba0 on node + 0x14, vftable
-//               0x01B3F800, free (FUN_017a8d30). Base vftables 0x01B3FE6C (20) / 0x01B3FE5C (3)
-//   definition  0x28 B base (FUN_006ae840) + pin members: impulse in 0xc (FUN_006a7c60, handler at +8), impulse out 8
-//               (FUN_006a7d20), data 8 (FUN_006a7d60), data with a constant 0x1c (FUN_006a8d90); vftable
-//               {FUN_017c46d0 deleting dtor, describe(record), FUN_006ab890 equality, FUN_015e89d0};
-//               describe binds each pin from the record's field of that name (pin index): in FUN_006c7ef0 (+handler),
-//               out/data FUN_006c7ff0, data with constant FUN_006c7f80 (also describes the '<pin>' parameter)
-//   impulse     handler cdecl(ctx, payload), node = *(ctx + 4) (MessageSender stub 0x01813220)
-//   fire        FUN_006b4720(&def pin, node, payload, -1) [thiscall, ret 0xc]; def = *(FUN_006abca0(node) + 0x10)
-//   parameter   FUN_006a9740(def, hash) -> slot, FUN_006a9770(def, slot) -> description (+4 type: 0 bool, 1 int,
-//               2 float, 3 string); FUN_006b2080(desc, node) reads bool/int/float, FUN_006b6990(desc, node, &ok)
-//               strings (FUN_006b2700 / FUN_006f05d0 without their node+0x10 parameter registration)
-//   data input  typed list fetches of the engine on the pin member, e.g. FUN_010f3780(&def pin, node, list) for
-//               transforms (SpawnExpendable LocatorList) and FUN_0115d4e0 for splines (ToggleSpline Splines); list
-//               ctor FUN_01573b00 / dtor FUN_006a9f50
-// Not modelled yet (no class here needs them): surge pins (FUN_006c7f10, implicit begin/end pins at index+1/+2) and
-// data outputs, which are the impulse-in member + FUN_006c7ef0 with a getter instead of a handler (the fetch template
-// FUN_0115d4e0 calls the source pin's +8 function for the DataElement: SpawnExpendable ExpendableHandle / Collector,
-// 1.0 DeliveryNode OutLocatorIndex 0x8cbe1da6).
+// Native Meridian node classes inside 3.0 (FORMATS.md 5.9). formats/mer; registered at boot, thunks on engine threads.
 #pragma once
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
-#include "formats/mer.hpp"
+#include "../formats/mer.hpp"
 
 namespace mernode {
 
 static_assert(sizeof(void*) == 4, "the engine ABI below is 32-bit x86");
 
-// The 3.0 exe (static VAs): the functions native classes call, their vtables and data (header comment)
+// The 3.0 exe (static VAs): the functions native classes call, their vtables and data (FORMATS.md 5.9)
 namespace eng {
 constexpr uint32_t kAlloc = 0x00406E80;         // operator new
 constexpr uint32_t kFree = 0x00409DF0;          // operator delete
@@ -76,7 +48,7 @@ constexpr uint32_t kDefReg = 0x02202C80;        // data: the definition creator 
 constexpr uint32_t kCbVft = 0x01B3F800;         // data: ContainedBase vftable
 constexpr uint32_t kNodeVt = 0x01B3FE6C;        // data: Node base vftable, 20 slots
 constexpr uint32_t kCbVt = 0x01B3FE5C;          // data: ContainedBase vftable, 3 slots
-// object layout (header comment)
+// object layout (FORMATS.md 5.9)
 constexpr uint32_t kStateAt = 0x14;             // Node base size: a native class's state starts here
 constexpr uint32_t kDtorThis = 0x14;            // the Node base destructor's this, from the node
 constexpr uint32_t kDefOfSlot = 0x10;           // the definition pointer inside a node's slot
@@ -85,28 +57,41 @@ constexpr int kCreateInstanceSlot = 14;         // Node vftable slot CreateInsta
 }  // namespace eng
 
 enum Kind : uint8_t { In, Out, Data, DataV };   // (windows.h defines IN / OUT)
-struct Pin { const char* name; Kind kind; };
-struct Param { const char* name; int type; };                 // mer::T_*: the transcoder describes it so
-typedef void (*Impulse)(uint8_t* node, int pin, void* payload);
-struct Spec { const char* name; std::vector<Pin> pins; std::vector<Param> params; uint32_t state; Impulse impulse; };
+struct Pin {
+    const char* name;
+    Kind kind;
+};
+struct Param {
+    const char* name;
+    int type;   // mer::T_*: the transcoder describes it so
+};
+using Impulse = void (*)(uint8_t* node, int pin, void* payload);
+// A native class: its pins, the parameters it reads, its state size, its impulse handler
+struct Spec {
+    const char* name;
+    std::vector<Pin> pins;
+    std::vector<Param> params;
+    uint32_t state;
+    Impulse impulse;
+};
 
 constexpr int kMax = 8, kMaxIn = 16;
+// A class's runtime record: the engine keeps pointers to its vtables, vbt and names
 struct Rt {
     Spec spec;
-    std::string cls, def;                                      // kept: the registries may hold the char*
+    std::string cls, def;
     uint32_t defId = 0, defSize = 0, nodeSize = 0, vbase = 0;
-    std::vector<uint32_t> off;                                 // pin member offset in the definition
-    std::vector<int> inPin;                                    // handler k -> pin index
+    std::vector<uint32_t> off;   // pin member offset in the definition
+    std::vector<int> inPin;      // handler k -> pin index
     int32_t vbt[2] = {};
     void* defVt[4] = {};
     void* mainVt[20] = {};
     void* cbVt[3] = {};
 };
-inline std::array<Rt, kMax>& rts() { static std::array<Rt, kMax> a; return a; }
-inline int& count() { static int n = 0; return n; }
 
 using CtorFn = void(__fastcall*)(void*, void*);
 using BindFn = void(__fastcall*)(void*, void*, void*, uint32_t);
+// The engine functions, at their runtime addresses
 struct Engine {
     void*(__cdecl* alloc)(uint32_t);
     void(__cdecl* free)(void*);
@@ -117,7 +102,7 @@ struct Engine {
     void*(__fastcall* defAdd)(void*, void*, uint32_t, void**);
     void(__cdecl* nodeLoad)(void*, uint32_t, void*, void*);
     CtorFn defCtor;
-    CtorFn pinCtor[4];                                         // by Kind
+    CtorFn pinCtor[4];   // by Kind
     void(__fastcall* bindIn)(void*, void*, void*, uint32_t, void*);
     BindFn bind;
     BindFn bindV;
@@ -133,69 +118,73 @@ struct Engine {
     void* defReg;
     void* cbVft;
 };
-inline Engine E;
 
-inline uint8_t* defOf(uint8_t* node) { return *(uint8_t**)(E.slot(node, nullptr) + eng::kDefOfSlot); }
+// The module state (S1)
+struct State {
+    std::array<Rt, kMax> rts;   // filled by add() and registerAll() on the boot thread; then read by thunks
+    int count = 0;              // classes added; boot thread only
+    Engine engine{};            // set once by registerAll(), before the first class is registered
+};
+namespace detail {
+// S5: the engine points into rts, so the state is built once at load and never freed or moved
+alignas(State) inline unsigned char g_storage[sizeof(State)];
+}  // namespace detail
+inline State& g_state = *::new (detail::g_storage) State();
+
+// The classes added so far
+inline int count() { return g_state.count; }
+
+inline uint8_t* defOf(uint8_t* node)
+{
+    return *(uint8_t**)(g_state.engine.slot(node, nullptr) + eng::kDefOfSlot);
+}
 
 // Output pin 'pin' of a native node; payload = the one the impulse handler got (or nullptr outside a handler).
-inline void fire(uint8_t* node, int c, int pin, void* payload) { E.fire(defOf(node) + rts()[c].off[pin], nullptr, node, payload, -1); }
-
-// A described parameter of the node's record (the transcoder writes it per Spec::params); false = absent or another
-// type, the caller keeps its default.
-inline bool param(uint8_t* node, const char* name, int type, uint32_t* raw, std::string* s = nullptr)
+inline void fire(uint8_t* node, int c, int pin, void* payload)
 {
-    uint8_t* def = defOf(node);
-    uint8_t* d = E.desc(def, nullptr, E.descIdx(def, nullptr, E.hash(name)) & 0xff);
-    if (!d || d[4] != type) return false;
-    if (type != mer::T_STRING) { *raw = E.raw(d, nullptr, node); return true; }
-    bool ok = true;
-    const char* v = E.str(d, nullptr, node, &ok);
-    if (!ok || !v || !s) return false;
-    *s = v;
-    return true;
+    g_state.engine.fire(defOf(node) + g_state.rts[c].off[pin], nullptr, node, payload, -1);
 }
-inline uint8_t* state(uint8_t* node) { return node + eng::kStateAt; }
 
 template <int C> void construct(uint8_t* n)
 {
-    Rt& c = rts()[C];
+    Rt& c = g_state.rts[C];
     *(int32_t**)(n + 4) = c.vbt;
-    E.cbCtor(n + c.vbase, nullptr);
-    E.nodeCtor(n, nullptr, 0);
+    g_state.engine.cbCtor(n + c.vbase, nullptr);
+    g_state.engine.nodeCtor(n, nullptr, 0);
     *(void***)n = c.mainVt;
     *(void***)(n + c.vbase) = c.cbVt;
     memset(n + eng::kStateAt, 0, c.vbase - eng::kStateAt);
 }
-template <int C> uint32_t __fastcall getSize(void*, void*) { return rts()[C].nodeSize; }
+template <int C> uint32_t __fastcall getSize(void*, void*) { return g_state.rts[C].nodeSize; }
 template <int C> void* __fastcall createInstance(void*, void*, void*)
 {
-    uint8_t* n = (uint8_t*)E.alloc(rts()[C].nodeSize);
+    uint8_t* n = (uint8_t*)g_state.engine.alloc(g_state.rts[C].nodeSize);
     if (n) construct<C>(n);
     return n;
 }
 template <int C> void* __fastcall cbDelete(uint8_t* vb, void*, uint32_t flags)
 {
-    uint8_t* n = vb - rts()[C].vbase;
-    E.nodeDtor(n + eng::kDtorThis, nullptr);
-    *(void**)vb = E.cbVft;
-    if (flags & 1) E.free(n);
+    uint8_t* n = vb - g_state.rts[C].vbase;
+    g_state.engine.nodeDtor(n + eng::kDtorThis, nullptr);
+    *(void**)vb = g_state.engine.cbVft;
+    if (flags & 1) g_state.engine.free(n);
     return n;
 }
 template <int C> void* __cdecl nodeCreate()
 {
-    uint8_t* n = (uint8_t*)E.nodeAlloc(4, rts()[C].nodeSize);
+    uint8_t* n = (uint8_t*)g_state.engine.nodeAlloc(4, g_state.rts[C].nodeSize);
     if (n) construct<C>(n);
     return n;
 }
 template <int C> void* __cdecl factory(void* p1, void* p2, void* p3)
 {
-    E.nodeLoad((void*)&nodeCreate<C>, rts()[C].defId, p2, p3);
+    g_state.engine.nodeLoad((void*)&nodeCreate<C>, g_state.rts[C].defId, p2, p3);
     *(uint32_t*)p1 = 0;
     return p1;
 }
 template <int C, int K> void __cdecl handler(uint8_t* ctx, void* payload)
 {
-    Rt& c = rts()[C];
+    Rt& c = g_state.rts[C];
     if (K < (int)c.inPin.size() && c.spec.impulse) c.spec.impulse(*(uint8_t**)(ctx + 4), c.inPin[K], payload);
 }
 template <int C, int... K> void* handlerAt(int k, std::integer_sequence<int, K...>)
@@ -205,30 +194,41 @@ template <int C, int... K> void* handlerAt(int k, std::integer_sequence<int, K..
 }
 template <int C> void __fastcall describe(uint8_t* def, void*, void* rec)
 {
-    Rt& c = rts()[C];
+    Rt& c = g_state.rts[C];
+    const Engine& e = g_state.engine;
     for (size_t i = 0, k = 0; i < c.spec.pins.size(); ++i) {
         const Pin& p = c.spec.pins[i];
-        uint32_t h = E.hash(p.name);
-        if (p.kind == In) E.bindIn(def + c.off[i], nullptr, rec, h, handlerAt<C>((int)k++, std::make_integer_sequence<int, kMaxIn>()));
-        else if (p.kind == DataV) E.bindV(def + c.off[i], nullptr, rec, h);
-        else E.bind(def + c.off[i], nullptr, rec, h);
+        uint32_t h = e.hash(p.name);
+        if (p.kind == In) {
+            void* handlerK = handlerAt<C>((int)k++, std::make_integer_sequence<int, kMaxIn>());
+            e.bindIn(def + c.off[i], nullptr, rec, h, handlerK);
+        } else if (p.kind == DataV) e.bindV(def + c.off[i], nullptr, rec, h);
+        else e.bind(def + c.off[i], nullptr, rec, h);
     }
 }
 template <int C> void* __cdecl defCreate()
 {
-    Rt& c = rts()[C];
-    uint8_t* d = (uint8_t*)E.alloc(c.defSize);
+    Rt& c = g_state.rts[C];
+    uint8_t* d = (uint8_t*)g_state.engine.alloc(c.defSize);
     if (!d) return nullptr;
-    E.defCtor(d, nullptr);
+    g_state.engine.defCtor(d, nullptr);
     *(void***)d = c.defVt;
-    for (size_t i = 0; i < c.spec.pins.size(); ++i) E.pinCtor[c.spec.pins[i].kind](d + c.off[i], nullptr);
+    for (size_t i = 0; i < c.spec.pins.size(); ++i) g_state.engine.pinCtor[c.spec.pins[i].kind](d + c.off[i], nullptr);
     return d;
 }
 
-struct Thunks { void *defCreate, *describe, *factory, *getSize, *create, *cbDelete; };
+struct Thunks {
+    void* defCreate;
+    void* describe;
+    void* factory;
+    void* getSize;
+    void* create;
+    void* cbDelete;
+};
 template <int C> Thunks thunksOf()
 {
-    return {(void*)&defCreate<C>, (void*)&describe<C>, (void*)&factory<C>, (void*)&getSize<C>, (void*)&createInstance<C>, (void*)&cbDelete<C>};
+    return {(void*)&defCreate<C>, (void*)&describe<C>,      (void*)&factory<C>,
+            (void*)&getSize<C>,   (void*)&createInstance<C>, (void*)&cbDelete<C>};
 }
 template <int... C> Thunks thunksAt(int c, std::integer_sequence<int, C...>)
 {
@@ -237,7 +237,10 @@ template <int... C> Thunks thunksAt(int c, std::integer_sequence<int, C...>)
 }
 
 // Prologues the calls were read from ('??' relocated); all match or nothing registers; the first mismatch is logged
-struct Check { uint32_t va; const char* bytes; };
+struct Check {
+    uint32_t va;
+    const char* bytes;
+};
 inline constexpr Check kChecks[] = {
     {eng::kAlloc, "8B4424046A026A006A00506A"},       {eng::kFree, "8B4424046A0250E8"},
     {eng::kNodeAlloc, "8B4424088B4C24045051E8"},     {eng::kRegFactory, "8B442404568B74240C575650"},
@@ -255,6 +258,7 @@ inline constexpr Check kChecks[] = {
     {eng::kDefEquals, "5153558B6C2410568BF18B5E"},   {eng::kDefFalse, "32C0C3"},
 };
 
+// True when the bytes at 'at' are hex's ('??' skips a byte); same rule as core's prologue check (X-06)
 inline bool bytesMatch(uintptr_t at, const char* hex)
 {
     for (size_t i = 0; hex && hex[2 * i]; ++i) {
@@ -312,7 +316,7 @@ template <class RtFn> Engine bindEngine(RtFn rt)
 // The definition's pin members: offsets after the base, and which pins are impulse inputs
 inline void layoutPins(Rt& c)
 {
-    static const uint32_t pinSize[4] = {0xc, 8, 8, 0x1c};   // by Kind (header comment)
+    static const uint32_t pinSize[4] = {0xc, 8, 8, 0x1c};   // by Kind (FORMATS.md 5.9)
     c.defSize = eng::kDefBase;
     c.off.clear();
     c.inPin.clear();
@@ -344,33 +348,39 @@ template <class RtFn> void layoutNode(Rt& c, const Thunks& t, RtFn rt)
 // Registers the node factory and, unless one exists, the definition creator; true when the creator is found
 template <class LogFn> bool registerClass(Rt& c, const Thunks& t, LogFn log)
 {
+    const Engine& e = g_state.engine;
     c.cls = std::string("MNode::") + c.spec.name;
     c.def = std::string("Meridian::") + c.spec.name + "NodeDefinition";
-    E.regFactory(t.factory, c.cls.c_str(), c.nodeSize, 4);
-    c.defId = E.hash(c.def.c_str());
-    if (!E.defFind(E.defReg, nullptr, c.defId)) {
+    e.regFactory(t.factory, c.cls.c_str(), c.nodeSize, 4);
+    c.defId = e.hash(c.def.c_str());
+    if (!e.defFind(e.defReg, nullptr, c.defId)) {
         void* cr = t.defCreate;
-        E.defAdd(E.defReg, nullptr, c.defId, &cr);
+        e.defAdd(e.defReg, nullptr, c.defId, &cr);
     }
-    bool found = E.defFind(E.defReg, nullptr, c.defId) != nullptr;
+    bool found = e.defFind(e.defReg, nullptr, c.defId) != nullptr;
     log("meridian native: %s registered (node %u B, definition %u B, %u pins; definition creator %s)", c.cls.c_str(),
         c.nodeSize, c.defSize, (unsigned)c.spec.pins.size(), found ? "found" : "MISSING");
     return found;
 }
 
-// Lays out and registers every added class (after FUN_0178e330 built 3.0's registry; rt = static VA -> runtime) and
-// adds each registered one to the transcoder table. Returns the classes registered.
+// Registers every added class once FUN_0178e330 built 3.0's registry, each into T too; returns the count
 template <class RtFn, class LogFn> int registerAll(RtFn rt, LogFn log, mer::Table& T)
 {
-    for (const Check& k : kChecks)
-        if (!bytesMatch(rt(k.va), k.bytes)) { log("meridian native: %08X differs from the analysed bytes; no native class registered", k.va); return 0; }
-    E = bindEngine(rt);
+    for (const Check& k : kChecks) {
+        if (bytesMatch(rt(k.va), k.bytes)) continue;
+        log("meridian native: %08X differs from the analysed bytes; no native class registered", k.va);
+        return 0;
+    }
+    g_state.engine = bindEngine(rt);
     int done = 0;
-    for (int ci = 0; ci < count(); ++ci) {
-        Rt& c = rts()[ci];
+    for (int ci = 0; ci < g_state.count; ++ci) {
+        Rt& c = g_state.rts[ci];
         Thunks t = thunksAt(ci, std::make_integer_sequence<int, kMax>());
         layoutPins(c);
-        if ((int)c.inPin.size() > kMaxIn) { log("meridian native: %s has more than %d impulse inputs; skipped", c.spec.name, kMaxIn); continue; }
+        if ((int)c.inPin.size() > kMaxIn) {
+            log("meridian native: %s has more than %d impulse inputs; skipped", c.spec.name, kMaxIn);
+            continue;
+        }
         layoutNode(c, t, rt);
         if (!registerClass(c, t, log)) continue;
         addToTable(T, c.spec);
@@ -379,11 +389,12 @@ template <class RtFn, class LogFn> int registerAll(RtFn rt, LogFn log, mer::Tabl
     return done;
 }
 
+// Adds a class before registerAll; its index, -1 when kMax classes are added already
 inline int add(const Spec& s)
 {
-    if (count() >= kMax) return -1;
-    rts()[count()].spec = s;
-    return count()++;
+    if (g_state.count >= kMax) return -1;
+    g_state.rts[g_state.count].spec = s;
+    return g_state.count++;
 }
 
 }  // namespace mernode
