@@ -621,10 +621,13 @@ def config_keys():
                 continue
             kind = 'str' if at == 3 else 'bool' if '!=' in stmt else 'int' if 'atoi' in stmt else '?'
             chains.setdefault(stmt[at - 1], []).append((literal([toks[i + 4]]), kind, stmt[at + 1]))
-    if not chains:
-        raise SystemExit('static/config: no config key found under %s' % SRC)
-    obj, keys = max(chains.items(), key=lambda x: len(x[1]))
-    body, members = struct_of(files, obj), {}
+    if chains:
+        obj, keys = max(chains.items(), key=lambda x: len(x[1]))
+        body = struct_of(files, obj)
+    else:
+        obj, keys = config_table(files)
+        body = struct_named(files, obj)
+    members = {}
     for k in range(len(body) - 3):   # type name [N] = value ;
         if body[k][0] == 'id' and body[k + 1][0] == 'id':
             j, size = k + 2, ''
@@ -640,6 +643,37 @@ def config_keys():
         val = {'false': '0', 'true': '1'}.get(val, val)
         out.append('%s\t%s\t%s' % (key, kind + ('[%s]' % size if size else ''), val))
     return '\n'.join(sorted(out))
+
+
+def config_table(files):
+    """Rows {"key", ...ConfigKind::Kind, offsetof(Type, field) ...} -> (Type, [(key, kind, field)])."""
+    kinds, found = {'Flag': 'bool', 'Int': 'int', 'Text': 'str'}, {}
+    for toks in files:
+        for i in range(len(toks) - 5):
+            if toks[i][1] != 'offsetof' or toks[i + 1][1] != '(' or toks[i + 3][1] != ',':
+                continue
+            k = i - 1
+            while k > 0 and toks[k][1] != '{':
+                k -= 1
+            row = toks[k + 1:i]
+            key = [t for t in row if t[0] == 'str']
+            at = [j for j, t in enumerate(row) if t[1] == 'ConfigKind']
+            kind = [t[1] for t in row[at[-1] + 1:] if t[0] == 'id'] if at else []
+            if key and kind:
+                found.setdefault(toks[i + 2][1], []).append((literal(key[:1]), kinds.get(kind[0], '?'),
+                                                             toks[i + 4][1]))
+    if not found:
+        raise SystemExit('static/config: no config key found under %s' % SRC)
+    return max(found.items(), key=lambda x: len(x[1]))
+
+
+def struct_named(files, typ):
+    """Tokens of struct typ { .. }."""
+    for t in files:
+        for j in range(len(t) - 2):
+            if t[j][1] in ('struct', 'class') and t[j + 1][1] == typ and t[j + 2][1] == '{':
+                return t[j + 2:close(t, j + 2) + 1]
+    raise SystemExit('static/config: no struct found for %s' % typ)
 
 
 def struct_of(files, obj):
