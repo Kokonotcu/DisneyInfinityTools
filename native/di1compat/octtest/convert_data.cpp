@@ -147,27 +147,27 @@ bool dataMapOf(const char* path, datamap::DataMap& m) { return datamap::parse(sl
 // di1::groups::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A throw fails it (OT-04).
 int convertGroups30(const Args& a)
 {
-    int groups = 0, over = 0, files = 0, sparks = 0, failed = 0;
+    int groups = 0, over = 0, files = 0, coins = 0, failed = 0;
     const char* dnaRoot = env("GROUPS30_DNA");
     std::function<bool(const std::string&)> isSpark;
     if (dnaRoot) isSpark = [dnaRoot](const std::string& d) { return paysSparksIn(dnaRoot, d); };
     for (int i = 3; i < a.argc; ++i) {
         std::string out;
-        int k = 0, s = 0;
+        int k = 0, c = 0;
         try {
-            k = di1::groups::groups30(slurp(a.argv[i]), out, &over, isSpark, &s);
+            k = di1::groups::groups30(slurp(a.argv[i]), out, &over, isSpark, &c);
         } catch (std::exception& e) {
             ++failed;
             printf("%s: %s\n", a.argv[i], e.what());
         }
         if (!k) continue;
         ++files;
-        groups += k - s;
-        sparks += s;
+        groups += k - c;
+        coins += c;
         writeFile(fs::path(a.argv[2]) / fs::path(a.argv[i]).filename(), out);
     }
-    printf("%d packages with 1.0 groups, %d groups given 3.0 keys, %d spawns past the 4th, %d spark pickups paying "
-           "INV_SPARKS\n", files, groups, over, sparks);
+    printf("%d packages served, %d groups given 3.0 keys, %d spawns past the 4th, %d coin pickups typed 'Playset'\n",
+           files, groups, over, coins);
     return failed ? 1 : 0;
 }
 
