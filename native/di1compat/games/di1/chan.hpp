@@ -88,6 +88,7 @@ inline std::vector<char> shaderRoles(const Read& read, const std::string& guid, 
         auto it = cache.find(key);
         if (it != cache.end()) return it->second;
     }
+    // computed unlocked: two threads may both compute a key and store the same roles; misses stay cached
     std::vector<char> r;
     std::string desc, prog;
     const std::string dir = game.dir;

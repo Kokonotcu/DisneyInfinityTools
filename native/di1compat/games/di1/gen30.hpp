@@ -187,7 +187,7 @@ inline constexpr const char* kIdentityRows[] = {"float4(1, 0, 0, 0)", "float4(0,
                                                "float4(0, 0, 0, 1)"};
 constexpr int kBoneRows = 4;
 
-// sm3::toHlsl's binding for a 1.0 program in 3.0
+// sm3::toHlsl's binding for a 1.0 program in 3.0. Its text is frozen: it keys the shader cache (RE-02)
 struct Binding30 {
     const rentable::ShaderRules& rules;
     const Layout& blocks;

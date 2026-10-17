@@ -66,7 +66,8 @@ struct Result {
     std::set<int> translated;           // materials on their real (translated) 1.0 shader
     int skinned = 0;                    // primitives written in their target's 'skin' layout (io.skinLayout)
     int sceneSettings = 0;              // SSET blocks re-laid into 3.0's format (io.ssf10/ssf30)
-    std::vector<std::pair<std::string, std::string>> shaders;   // per 1.0 material: (its 1.0 shader, the shader served)
+    // one per 1.0 material, in index order (transcode.hpp reads shaders[mat]): its 1.0 shader, the one served
+    std::vector<std::pair<std::string, std::string>> shaders;
 };
 
 }  // namespace render

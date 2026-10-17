@@ -105,6 +105,7 @@ inline void channels30(const std::string& a, const std::vector<int>* chans, uint
         return;
     }
     o[particledata::kChannelCount] = (char)chans->size();
+    // mapChannels gives -1 .. n-1: transcode appends the constant key exactly when some c < 0 (RE-40)
     for (int c : *chans) {
         uint16_t k = c >= 0 && c < n ? rd16(a, kEmitter10 + 2 * (size_t)c) : constKeyIndex;
         o.append((const char*)&k, sizeof k);
@@ -128,6 +129,7 @@ inline std::string emitter30(const std::string& a, const std::vector<int>* chans
         const uint16_t v = rd16(a, detail::kColourRandoms10 + 2 * i);
         bytes::put16(o, detail::kColourRandoms30 + 2 * i, (uint16_t)(detail::kColourRandomBias + v / 2));
     }
+    // case kept, up to 8 chars; p3dAlias hashes a lower-cased name under 8: capitals would miss (RE-34)
     const uint32_t mesh = a[kMeshName10] ? hash::h131Signed(a.data() + kMeshName10, detail::kMeshNameBytes) : 0;
     bytes::put32(o, detail::kMeshHash30, mesh);
     detail::channels30(a, chans, constKeyIndex, o);
