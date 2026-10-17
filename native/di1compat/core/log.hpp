@@ -1,12 +1,15 @@
-// The plugin log (di1compat.log) and LogOnce. Windows and std only. Any thread, VEHs too; its lock is last (L2).
+// The plugin log (di1compat.log) and LogOnce. Windows, std, base/format. Any thread, VEHs too; its lock is last (L2).
 #pragma once
 #include <windows.h>
 #include <share.h>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <set>
+#include <string>
+#include "../base/format.hpp"
 #include "locks.hpp"
 
 namespace core {
@@ -24,6 +27,22 @@ inline void openLog(const char* path)
 {
     InitializeCriticalSection(&detail::g_logState.lock);
     detail::g_logState.file = _fsopen(path, "w", _SH_DENYNO);
+}
+
+// Opens <exe folder>\name (a .log), keeping the last 5 runs' logs as name.1.log (newest) .. name.5.log.
+// -> the exe's folder.
+inline std::string openExeLog(const char* name)
+{
+    char path[MAX_PATH];
+    GetModuleFileNameA(nullptr, path, MAX_PATH);
+    char* slash = strrchr(path, '\\');
+    if (slash) format::fitOrFailFast(slash + 1, path + MAX_PATH - (slash + 1), "%s", name);
+    std::string base(path, strlen(path) - (sizeof(".log") - 1));
+    for (int i = 4; i >= 0; --i)
+        MoveFileExA(i ? (base + "." + std::to_string(i) + ".log").c_str() : path,
+                    (base + "." + std::to_string(i + 1) + ".log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    openLog(path);
+    return std::string(path, slash ? slash - path : 0);
 }
 
 // One line: "[hh:mm:ss.mmm] " and the text, flushed (crash evidence). Allocates nothing after the first line (VEHs).

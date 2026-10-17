@@ -1,4 +1,4 @@
-// The vectored exception handlers: first access violation, trace DR0 watchpoint. Never fault or allocate (H9).
+// Vectored exception handlers (first AV, trace DR0 watchpoint) that never fault or allocate (H9); the hooks' start.
 #pragma once
 #include <windows.h>
 #include <tlhelp32.h>
@@ -110,6 +110,15 @@ inline void watch(uintptr_t addr)
     if (!h) return;
     WaitForSingleObject(h, detail::kArmWaitMs);
     CloseHandle(h);
+}
+
+// avHandler first in the handler chain, then MinHook; false: no hook can be installed. Before any hook.
+inline bool startHooks()
+{
+    AddVectoredExceptionHandler(1, avHandler);
+    if (MH_Initialize() == MH_OK) return true;
+    logf("MinHook init failed; no hooks");
+    return false;
 }
 
 }  // namespace core

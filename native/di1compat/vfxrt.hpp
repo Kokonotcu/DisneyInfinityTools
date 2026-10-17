@@ -1,13 +1,39 @@
-// vfxrt.hpp: the vfx track's engine hooks. Included by di1compat.cpp after its hook()/logf()/rt()/safeCopy() helpers;
-// the data side (packages, meshes) is vfx.hpp.
+// vfx runtime: the universal10 package hook, vfx_trace probes; data side games/di1/vfx.hpp. core, games/di1.
+// Engine threads.
 #pragma once
+#include <windows.h>
 #include <intrin.h>
+#include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+#include "base/hash.hpp"
+#include "core/hooks.hpp"
+#include "core/log.hpp"
+#include "core/memcheck.hpp"
+#include "engine/assets.hpp"
+#include "games/di1/config.hpp"
+#include "games/di1/session.hpp"
+#include "sys.hpp"
 
 namespace vfxrt {
 
-inline uint32_t retVa(void* ra) { return (uint32_t)((uintptr_t)ra - g_base + 0x400000u); }
+// core's services this file calls by their short names (declarations: N26 forbids only using namespace)
+using core::hook;
+using core::installFeature;
+using core::logf;
+using core::safeCopy;
+
+struct State {
+    di1::Config cfg;   // the keys its hooks read: set once in install(), before them
+};
+inline State g_state;
+
+inline uint32_t retVa(void* ra) { return (uint32_t)((uintptr_t)ra - core::g_base + 0x400000u); }
 
 // ---- 1.0's universal particle package beside 3.0's (cfg vfx_universal10) ----
 // 1.0 loads 'particles/universal' for every zone but the frontend (FUN_00cc16a0) before the zone's own package
@@ -30,8 +56,8 @@ static std::mutex g_uniLock;   // the engine's list lookup + insert is not atomi
 
 static bool only10(const char* leaf)   // particles/<leaf>.zip in the 1.0 install and not in 3.0's
 {
-    std::string a = std::string(g_cfg.install10) + "\\assets\\particles\\" + leaf + ".zip";
-    std::string b = g_gameDir + "\\assets\\particles\\" + leaf + ".zip";
+    std::string a = std::string(g_state.cfg.install10) + "\\assets\\particles\\" + leaf + ".zip";
+    std::string b = engine::assets::gameDir() + "\\assets\\particles\\" + leaf + ".zip";
     return GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES && GetFileAttributesA(b.c_str()) == INVALID_FILE_ATTRIBUTES;
 }
 
@@ -126,13 +152,14 @@ static void* __cdecl hkAttached(const char* name, uint8_t* xf, uint8_t* xf2, voi
 // The vfx runtime's hooks (H1); the universal10 alias is in the overlay before the package hook can ask for it.
 inline bool install(const di1::Config& c)
 {
+    g_state.cfg = c;
     bool ok = true;
     if (c.vfx10 && c.vfxUniversal10) {
-        std::unique_lock<std::mutex> lock(g_sessLock);   // AssetOpen is live already
+        di1::session::Files alias;
         for (const char* e : {".particledata", ".mtb"})   // the alias hkPkg loads -> 1.0 particles/universal.zip
-            g_over10.emplace(std::string("particles/universal10") + e,
-                             std::string("particles/universal/universal") + e);
-        lock.unlock();
+            alias.push_back({std::string("particles/universal10") + e,
+                             std::string("particles/universal/universal") + e});
+        di1::session::addOverlay(alias);   // AssetOpen is live already
         ok &= hook("particle package load (vfx)", 0x00672620, "6AFF68????????64A100000000", (void*)&hkPkg,
                    (void**)&g_pkg);
     }
