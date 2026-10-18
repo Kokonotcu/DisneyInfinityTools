@@ -51,7 +51,8 @@ struct TranscodeOptions {
     bool sx = false;          // sx10
     bool bmx = false;         // bmx10
     bool btx = false;         // btx10
-    mer::Rules merRules;      // .mer: events10, portrefs10, ports10, pins10, gate10, toggletype10
+    bool accept = false;      // accept10
+    mer::Rules merRules;     // .mer: events10, portrefs10, ports10, pins10, gate10, toggletype10
 };
 
 using Shaders = std::vector<std::pair<std::string, std::string>>;   // per material: (1.0 shader, served shader)
@@ -309,7 +310,8 @@ inline Verdict missionGraph(Request& r)
 
 inline bool missionMatches(const Request& r)
 {
-    const bool wanted = r.o.events || r.o.progress || !r.actLua.empty();
+    const bool edits = r.o.events || r.o.progress || r.o.accept;
+    const bool wanted = edits || !r.actLua.empty();
     const bool lua = ends(r, ".lua") && luaSource(r);
     const bool mission = r.np.rfind("mission_data/", 0) == 0 && !strstr(r.path, "__");
     return wanted && lua && mission;
@@ -326,7 +328,9 @@ inline Verdict missionTable(Request& r)
     if (pr) r.note += "+progress(objective line <MissionName>_Desc) ";
     int tl = r.o.progress && m ? mission::taskLines30(t) : 0;
     if (tl) r.note += "+tasklines(" + std::to_string(tl) + " 1.0 eval lines as ProgressString) ";
-    const bool changed = k || pr || tl;
+    int ap = r.o.accept && m ? mission::anyPlayer30(t) : 0;
+    if (ap) r.note += "+tutorial(" + std::to_string(ap) + " elements take any local player's event) ";
+    const bool changed = k + pr + tl + ap > 0;
     if (!changed && r.actLua.empty()) return kRaw;
     r.out.swap(t);
     return changed ? "mission" : "activitytasks";
