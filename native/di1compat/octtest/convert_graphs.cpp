@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include "../games/di1/cho.hpp"
+#include "../convert/assets.hpp"
 #include "../formats/btd.hpp"
 #include "../games/di1/activities.hpp"
 #include "../games/di1/challenges.hpp"
@@ -194,6 +195,21 @@ int convertOct(const Args& a)
     printf("%s %s\n%zu B, %.1f ms\n", changed ? "changed" : "unchanged", note.c_str(), o.size(),
            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     writeFile(a.argv[3], o);
+    return 0;
+}
+
+// octx::rootTakesGraph (rootgraph10) on 3.0 .oct files: those in 1.0's older exploder form, edited into <out dir>.
+int convertRootGraph(const Args& a)
+{
+    int edited = 0;
+    for (int i = 3; i < a.argc; ++i) {
+        oct::File f = parse(slurp(a.argv[i]));
+        if (!octx::rootTakesGraph(f)) continue;
+        writeFile(fs::path(a.argv[2]) / fs::path(a.argv[i]).filename(), f.write());
+        printf("edited %s\n", a.argv[i]);
+        ++edited;
+    }
+    printf("%d of %d files in the older form\n", edited, a.argc - 3);
     return 0;
 }
 

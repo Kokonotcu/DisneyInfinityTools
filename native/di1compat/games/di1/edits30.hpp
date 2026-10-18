@@ -11,9 +11,11 @@
 #include "../../core/engine_file.hpp"
 #include "../../core/log.hpp"
 #include "../../core/stack.hpp"
+#include "../../convert/assets.hpp"
 #include "../../engine/gamedb.hpp"
 #include "../../engine/zones.hpp"
 #include "../../formats/chd.hpp"
+#include "../../formats/oct.hpp"
 #include "challenges.hpp"
 #include "ui.hpp"
 #include "config.hpp"
@@ -41,6 +43,8 @@ inline bool bitmasksStack(openstage::Open& o, int*& out);
 inline bool chdStage(openstage::Open& o, int*& out);
 // memtest: a listed path is served from a memory copy of 3.0's stream (consumed).
 inline bool memtestStage(openstage::Open& o, int*& out);
+// rootgraph10: a 3.0-shipped model still in 1.0's older exploder form gets Root its graph. Destroys r; edit or reopen.
+inline bool rootGraphStage(openstage::Open& o, int*& out);
 
 namespace detail {
 
@@ -80,6 +84,17 @@ inline int* chdForLua(const char* p, int* r)
     } catch (std::exception& e) {
         core::logf("CHD compile of %s failed: %s; served as it is", p, e.what());
         return core::memFile(src.data(), src.size());
+    }
+}
+
+// The model t with Root given its lone graph (octx::rootTakesGraph); "" when not that form or unreadable.
+inline std::string rootGraph(const std::string& t)
+{
+    try {
+        oct::File f = oct::File::parse(t.data(), t.size());
+        return octx::rootTakesGraph(f) ? f.write() : std::string();
+    } catch (std::exception&) {
+        return {};
     }
 }
 
@@ -226,6 +241,25 @@ inline bool memtestStage(openstage::Open& o, int*& out)
     size_t n = 0;
     out = core::copyToMemFile(o.r, &n);
     core::logf("memtest %s %u B -> %s", o.p, (unsigned)n, out ? "MemFile" : "FAILED");
+    return true;
+}
+
+inline bool rootGraphStage(openstage::Open& o, int*& out)
+{
+    if (!o.edits() || !o.cfg->rootGraph10 || !text::endsWith(o.p, ".oct")) return false;
+    const std::string np = text::norm(o.p);
+    // ponytail: only object and exploder models are read (one parse per open); widen if another folder ships the form
+    const bool model = np.rfind("objects/", 0) == 0 || np.rfind("exploders/", 0) == 0;
+    if (!model) return false;
+    std::string t, edited;
+    if (openstage::readKeep(o.r, t)) edited = detail::rootGraph(t);
+    openstage::destroyStream(o.r);
+    if (edited.empty()) {
+        out = openstage::reopen(o);
+        return true;
+    }
+    core::logf("rootgraph10: %s: Root takes its lone graph (1.0's older exploder form in a 3.0 file)", o.p);
+    out = core::memFile(edited.data(), edited.size());
     return true;
 }
 

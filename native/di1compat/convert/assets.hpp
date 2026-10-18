@@ -169,6 +169,46 @@ struct AggregatePool {
 };
 }  // namespace detail
 
+namespace detail {
+
+// One AssetPool entry: its block and its SubNetworkRef / AggregateCount records (-1: absent).
+struct PoolAsset {
+    size_t at = 0, end = 0;
+    long sn = -1, agg = -1;
+};
+inline std::vector<PoolAsset> poolAssets(const oct::File& f, long asp)
+{
+    std::vector<PoolAsset> as;
+    for (size_t i = asp + 1, end = f.blockEnd(asp); i < end; i = f.blockEnd(i)) {
+        PoolAsset a{i, f.blockEnd(i)};
+        for (size_t j = i + 1; j < a.end; ++j) {
+            const std::string& n = f.name(f.recs[j]);
+            if (n == "SubNetworkRef") a.sn = (long)j;
+            else if (n == "AggregateCount") a.agg = (long)j;
+        }
+        as.push_back(a);
+    }
+    return as;
+}
+}  // namespace detail
+
+// A shipped AssetPool in the older exploder form: Root takes the lone graph and its aggregates (rootTakesLoneGraph).
+inline bool rootTakesGraph(oct::File& f)
+{
+    const long asp = f.pool("AssetPool"), ap = f.pool("AssociationPool");
+    if (asp < 0 || ap < 0) return false;
+    const std::vector<detail::PoolAsset> as = detail::poolAssets(f, asp);
+    const bool pair = as.size() == 2 && as[0].sn >= 0 && as[1].sn >= 0;
+    if (!pair || f.int0(f.recs[as[0].sn]) >= 0 || f.int0(f.recs[as[1].sn]) < 0) return false;
+    f.setInt(f.recs[as[0].sn], f.int0(f.recs[as[1].sn]));
+    const bool aggs = as[0].agg >= 0 && as[1].agg >= 0;
+    if (aggs) f.setInt(f.recs[as[0].agg], (int64_t)f.int0(f.recs[as[0].agg]) + f.int0(f.recs[as[1].agg]));
+    for (size_t j = ap + 1, end = f.blockEnd(ap); j < end; ++j)
+        if (f.name(f.recs[j]) == "AssetIndex" && f.int0(f.recs[j]) == 1) f.setInt(f.recs[j], 0);
+    f.recs.erase(f.recs.begin() + as[1].at, f.recs.begin() + as[1].end);
+    return true;
+}
+
 // Collision aggregates, as on all 24,287 shipped 3.0 ones: one after each instance naming '...|Transform...'.
 inline int addCollisionAggregates(oct::File& f)
 {

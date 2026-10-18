@@ -67,6 +67,7 @@ constexpr ModeRow kModes[] = {
     {"--avperc", 3, octtest::convertAvPerc, Job::Convert, "<1.0 avatar.btx> <3.0 avatar.btx> <zone>: percAdds"},
     {"--gamedb", 2, octtest::convertGameDb, Job::Convert, "<1.0 DataMap> <3.0 ToyBox DataMap>: npc::gamedb30"},
     {"--psdna", 3, octtest::convertPsDna, Job::Convert, "<1.0 characters> <3.0 characters> <out dir>: psDna30"},
+    {"--rootgraph", 2, octtest::convertRootGraph, Job::Convert, "<out dir> <3.0 .oct>...: rootgraph10's edit"},
     {"--oct", 2, octtest::convertOct, Job::Convert, "<1.0 .oct> <out> [cho]: the plugin's .oct steps"},
     {"--mission", 2, octtest::convertByPlugin, Job::Convert, "<1.0 mission .lua> <out.lua>: the mission rules"},
     {"--missiongraph", 2, octtest::convertByPlugin, Job::Convert, "<1.0 __missiongraph.lua> <out.lua>"},

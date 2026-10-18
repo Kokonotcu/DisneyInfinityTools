@@ -44,6 +44,21 @@ constexpr size_t kCallNode = 1;                 // a Link_In call's node (call[1
 constexpr size_t kNodeExpendable = 0x88;        // the SpawnExpendable node's Expendable_Name
 constexpr size_t kRequestBytes = 0x40;          // a spawn request: +0 the name, +4 the transform
 constexpr size_t kRequestPlacement = 4;         // [4..6]: the position
+constexpr size_t kActorPos = 0x128;             // its position for the shutdown range test (FUN_00747b00)
+constexpr size_t kActorMode = 0x10E;            // shutdown mode: 1 by range, 2 always (FUN_007537d0)
+constexpr size_t kActorBytes = 0x140;           // the actor fields read here
+constexpr size_t kRenderNode = 0x14;            // the render component's scene node + kNodePart (FUN_0106d9d0)
+constexpr size_t kNodePart = 0x1A0;
+constexpr size_t kNodeBytes = 0x2A0;            // the node fields read here
+// FUN_018383e0's query 1 (drawn) refuses on +0x24 bit 0x40, +0x1d0 bit 1, +0x24d bit 0x80
+constexpr size_t kNodeOffA = 0x24, kNodeOffB = 0x1D0, kNodeHidden = 0x24D;
+constexpr size_t kNodeType = 6;                 // u16, low 10 bits: the node type (FUN_01604070)
+constexpr uint32_t kGeomType = 0x0228E4AC;      // u16: the type whose matrix is at +0x258, others +0x1c
+constexpr size_t kGeomMatrix = 0x258, kNodeMatrix = 0x1C, kMatrixPos = 0x30;
+constexpr uint32_t kTypeMask = 0x3FF;
+// checked in install() (H4)
+constexpr uint32_t kDrawQuery = 0x018383E0;     // FUN_018383e0: thiscall (query; ret 4) on a scene node
+constexpr const char* kDrawQueryPrologue = "8B442404568BF183F803";
 }  // namespace eng
 
 constexpr size_t kKeepPrune = 8192;   // kept handles before dead ones are pruned
@@ -61,6 +76,7 @@ typedef void(__cdecl* NodeFn)(void** call, uint8_t* data);
 typedef uint8_t*(__cdecl* ActorFn)(uint32_t handle);
 typedef void*(__cdecl* CompFn)(uint32_t handle, uint32_t type);
 typedef void(__fastcall* DestroyFn)(uint8_t* part, void* edx, float delay, int mode);
+typedef uint32_t(__fastcall* QueryFn)(const uint8_t* node, void* edx, uint32_t query);
 
 struct State {
     bool shutdown10 = false, capsuleTrace10 = false;   // set once in install()
@@ -73,6 +89,8 @@ struct State {
     RenderShutFn g_renderShut = nullptr;   // null while shutdown10 is off: keep() checks it
     NodeFn g_node = nullptr;
     DestroyFn g_destroy = nullptr;
+    ShutFn g_restore = nullptr;
+    bool drawQuery = false;                // FUN_018383e0's prologue matched; set once in install()
     std::mutex keepMx;                     // guards keep; held across actorOf while pruning
     std::unordered_set<uint32_t> keep;     // handles of actors made from 1.0 definitions
     core::LogCount<std::string> fewLines{8000};   // capsuletrace10 lines per name, for 8000 names
@@ -172,16 +190,65 @@ inline uint8_t* defAt(uint32_t idx)
 // The definition of a pending record (its +0 indexes the table); null when unreadable.
 inline uint8_t* pendingDef(const uint8_t* record) { return record ? defAt(*(const uint32_t*)record) : nullptr; }
 
-// The definition an actor was spawned from, through its Expendables component; null for every other actor.
+// The definition handle h's actor was spawned from, through its Expendables component; null for every other actor.
+inline uint8_t* handleDef(uint32_t h)
+{
+    const uint8_t* comp = (const uint8_t*)((CompFn)core::rt(eng::kComponentOf))(h, *(uint16_t*)core::rt(eng::kExpType));
+    if (!comp || !core::readable(comp + eng::kCompDef, 4)) return nullptr;
+    return defAt(*(const uint32_t*)(comp + eng::kCompDef));
+}
+
+// The same for FUN_0074da00's this (actor + 0x1c).
 inline uint8_t* actorDef(const uint8_t* part)
 {
     if (!core::readable(part + eng::kPartActor, 4)) return nullptr;
     const uint8_t* actor = *(uint8_t* const*)(part + eng::kPartActor);
     if (!actor || !core::readable(actor + eng::kActorHandle, 4)) return nullptr;
+    return handleDef(*(const uint32_t*)(actor + eng::kActorHandle));
+}
+
+// Handle h's render scene node (its component's +0x14 less 0x1a0); null when it has none.
+inline const uint8_t* renderNode(uint32_t h)
+{
+    const CompFn componentOf = (CompFn)core::rt(eng::kComponentOf);
+    const uint8_t* comp = (const uint8_t*)componentOf(h, *(uint16_t*)core::rt(eng::kRenderType));
+    if (!comp || !core::readable(comp + eng::kRenderNode, 4)) return nullptr;
+    const uintptr_t part = *(const uintptr_t*)(comp + eng::kRenderNode);
+    const uint8_t* n = part > eng::kNodePart ? (const uint8_t*)(part - eng::kNodePart) : nullptr;
+    return n && core::readable(n, eng::kNodeBytes) ? n : nullptr;
+}
+
+// A render node's world position: its matrix at +0x258 for the geometry type, else +0x1c (FUN_01604070).
+inline const float* nodePos(const uint8_t* n)
+{
+    const uint16_t type = *(const uint16_t*)(n + eng::kNodeType) & eng::kTypeMask;
+    const bool geom = type == *(const uint16_t*)core::rt(eng::kGeomType);
+    return (const float*)(n + (geom ? eng::kGeomMatrix : eng::kNodeMatrix) + eng::kMatrixPos);
+}
+
+// FUN_018383e0's query 1 on n, as the renderer asks it; -1 when it cannot be asked safely.
+inline int drawn(const uint8_t* n)
+{
+    const bool ask = g_state.drawQuery && core::readable(*(void* const*)(n + eng::kNodePart), 4);
+    return ask ? (int)((QueryFn)core::rt(eng::kDrawQuery))(n, nullptr, 1) : -1;
+}
+
+// capsuletrace10: where a 1.0 definition's actor is, its shutdown state and whether its render node is drawn.
+inline void logActor(const char* what, const uint8_t* actor)
+{
     const uint32_t h = *(const uint32_t*)(actor + eng::kActorHandle);
-    const uint8_t* comp = (const uint8_t*)((CompFn)core::rt(eng::kComponentOf))(h, *(uint16_t*)core::rt(eng::kExpType));
-    if (!comp || !core::readable(comp + eng::kCompDef, 4)) return nullptr;
-    return defAt(*(const uint32_t*)(comp + eng::kCompDef));
+    const uint8_t* def = handleDef(h);
+    if (!def10(def)) return;
+    char d[kNames], mo[kNames];
+    defText(def, d, mo);
+    if (!defLine(what, d)) return;
+    const float* p = (const float*)(actor + eng::kActorPos);
+    const uint8_t* n = renderNode(h);
+    const float* q = n ? nodePos(n) : p;
+    core::logf("capsuletrace10: actor %08X '%s' (%s) %s at (%.1f, %.1f, %.1f), flags %02X %02X mode %u; render node %p "
+               "at (%.1f, %.1f, %.1f), off bits %02X %02X %02X, drawn %d", h, d, mo, what, p[0], p[1], p[2],
+               actor[eng::kActorFlags], actor[eng::kActorFlags + 1], actor[eng::kActorMode], n, q[0], q[1], q[2],
+               n ? n[eng::kNodeOffA] : 0, n ? n[eng::kNodeOffB] : 0, n ? n[eng::kNodeHidden] : 0, n ? drawn(n) : -1);
 }
 
 // 0x0160A270, cdecl (handle, record), per async spawn completion of any expendable; it frees the record.
@@ -198,6 +265,21 @@ inline void __cdecl hkDone(uint32_t handle, uint8_t* record)
         core::logf("capsuletrace10: async spawn of '%s' (%s) done: handle %08X -> actor %p%s", d, mo, handle,
                    ((ActorFn)core::rt(eng::kActorOf))(handle), killed ? ", killed (pending record cancelled)" : "");
     if (is10 && !killed && s.shutdown10) keep(handle, def);
+    const uint8_t* a = is10 && !killed && s.capsuleTrace10 ? ((ActorFn)core::rt(eng::kActorOf))(handle) : nullptr;
+    try {
+        if (a && core::readable(a, eng::kActorBytes)) logActor("made", a);
+    } catch (std::exception&) {
+    }
+}
+
+// FUN_007535b0, thiscall on the shutdown manager (actor; ret 4), per restore: a camera or avatar came within range.
+inline void __fastcall hkRestore(void* mgr, void*, uint8_t* actor)
+{
+    g_state.g_restore(mgr, nullptr, actor);
+    try {
+        if (actor && core::readable(actor, eng::kActorBytes)) logActor("restored", actor);
+    } catch (std::exception&) {
+    }
 }
 
 // ---- capsuletrace10 ----
@@ -329,7 +411,11 @@ inline bool install(const Config& c)
          (void*)&detail::hkByName, (void**)&s.g_byName},
         {"actor destroy (capsuletrace10)", 0x0074DA00, "83EC08803D????????0053568BF1", (void*)&detail::hkDestroy,
          (void**)&s.g_destroy},
+        {"actor shutdown restore (capsuletrace10)", 0x007535B0, "568B7424088B4604578BF90FB70D????????",
+         (void*)&detail::hkRestore, (void**)&s.g_restore},
     });
+    s.drawQuery = core::prologueMatches(detail::eng::kDrawQuery, detail::eng::kDrawQueryPrologue);
+    if (!s.drawQuery) core::logf("capsuletrace10: FUN_018383e0's prologue differs; 'drawn' is logged as -1");
     return ok;
 }
 

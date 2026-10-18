@@ -72,6 +72,7 @@ int convertPsDna(const Args& a);
 
 // convert_graphs.cpp
 int convertOct(const Args& a);
+int convertRootGraph(const Args& a);
 int convertByPlugin(const Args& a);
 int convertMer(const Args& a);
 int convertActivity(const Args& a);
