@@ -56,6 +56,11 @@ constexpr size_t kNodeType = 6;                 // u16, low 10 bits: the node ty
 constexpr uint32_t kGeomType = 0x0228E4AC;      // u16: the type whose matrix is at +0x258, others +0x1c
 constexpr size_t kGeomMatrix = 0x258, kNodeMatrix = 0x1C, kMatrixPos = 0x30;
 constexpr uint32_t kTypeMask = 0x3FF;
+constexpr uint32_t kModelType = 0x0228E648;     // u16: the model component's type id (FUN_007470a0, FUN_007567c0)
+constexpr size_t kModelFlags = 8, kModelNode = 0xC, kModelBytes = 0x10;
+constexpr size_t kSceneFlags = 0x28, kSceneChild = 0x14, kSceneNext = 0x18, kSceneBytes = 0x2C;   // FUN_00469390
+constexpr uint32_t kSceneHidden = 3;
+constexpr int kChildCap = 64;
 // checked in install() (H4)
 constexpr uint32_t kDrawQuery = 0x018383E0;     // FUN_018383e0: thiscall (query; ret 4) on a scene node
 constexpr const char* kDrawQueryPrologue = "8B442404568BF183F803";
@@ -233,7 +238,35 @@ inline int drawn(const uint8_t* n)
     return ask ? (int)((QueryFn)core::rt(eng::kDrawQuery))(n, nullptr, 1) : -1;
 }
 
-// capsuletrace10: where a 1.0 definition's actor is, its shutdown state and whether its render node is drawn.
+// The actor's model component (FUN_007470a0, ActorHide's): +8 bit 0 shown, +0xc the model's scene node.
+struct ModelState {
+    const uint8_t* comp = nullptr;
+    unsigned show = 0;
+    const uint8_t* node = nullptr;
+    unsigned hidden = 0;   // the node's +0x28 bits 0 (itself) and 1 (a parent) hidden (FUN_00469390)
+    int children = -1;     // child nodes under node, -1 when unreadable
+};
+
+inline ModelState modelState(uint32_t h)
+{
+    ModelState m;
+    const CompFn componentOf = (CompFn)core::rt(eng::kComponentOf);
+    m.comp = (const uint8_t*)componentOf(h, *(uint16_t*)core::rt(eng::kModelType));
+    if (!m.comp || !core::readable(m.comp, eng::kModelBytes)) return m;
+    m.show = m.comp[eng::kModelFlags] & 1;
+    m.node = *(const uint8_t* const*)(m.comp + eng::kModelNode);
+    if (!m.node || !core::readable(m.node, eng::kSceneBytes)) return m;
+    m.hidden = *(const uint32_t*)(m.node + eng::kSceneFlags) & eng::kSceneHidden;
+    m.children = 0;
+    const uint8_t* c = *(const uint8_t* const*)(m.node + eng::kSceneChild);
+    while (c && m.children < eng::kChildCap && core::readable(c, eng::kSceneBytes)) {
+        ++m.children;
+        c = *(const uint8_t* const*)(c + eng::kSceneNext);
+    }
+    return m;
+}
+
+// capsuletrace10: where a 1.0 definition's actor is, its shutdown state and whether its model is there and shown.
 inline void logActor(const char* what, const uint8_t* actor)
 {
     const uint32_t h = *(const uint32_t*)(actor + eng::kActorHandle);
@@ -243,12 +276,10 @@ inline void logActor(const char* what, const uint8_t* actor)
     defText(def, d, mo);
     if (!defLine(what, d)) return;
     const float* p = (const float*)(actor + eng::kActorPos);
-    const uint8_t* n = renderNode(h);
-    const float* q = n ? nodePos(n) : p;
-    core::logf("capsuletrace10: actor %08X '%s' (%s) %s at (%.1f, %.1f, %.1f), flags %02X %02X mode %u; render node %p "
-               "at (%.1f, %.1f, %.1f), off bits %02X %02X %02X, drawn %d", h, d, mo, what, p[0], p[1], p[2],
-               actor[eng::kActorFlags], actor[eng::kActorFlags + 1], actor[eng::kActorMode], n, q[0], q[1], q[2],
-               n ? n[eng::kNodeOffA] : 0, n ? n[eng::kNodeOffB] : 0, n ? n[eng::kNodeHidden] : 0, n ? drawn(n) : -1);
+    const ModelState m = modelState(h);
+    core::logf("capsuletrace10: actor %08X '%s' (%s) %s at (%.1f, %.1f, %.1f), flags %02X %02X mode %u; model comp %p "
+               "show %u node %p hidden bits %X children %d", h, d, mo, what, p[0], p[1], p[2], actor[eng::kActorFlags],
+               actor[eng::kActorFlags + 1], actor[eng::kActorMode], m.comp, m.show, m.node, m.hidden, m.children);
 }
 
 // 0x0160A270, cdecl (handle, record), per async spawn completion of any expendable; it frees the record.

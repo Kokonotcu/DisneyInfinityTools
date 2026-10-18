@@ -36,6 +36,8 @@ constexpr int kOpenFiles = 8192;   // every 1.0 archive used stays open (miniz h
 // Chosen, not measured: a transient failure (a scanner holding the zip) gets kOpenRetries more tries, kRetryMs apart.
 constexpr int kOpenRetries = 3;
 constexpr ULONGLONG kRetryMs = 1000;
+constexpr char kExplodersDir[] = "exploders/", kObjectsDir[] = "objects/";
+constexpr size_t kExplodersDirLen = sizeof(kExplodersDir) - 1;
 
 // One archive name the search asked for.
 struct Archive {
@@ -115,6 +117,12 @@ inline void* read10z(const std::string& p, size_t* size, std::string* where)
     return nullptr;
 }
 
+// rewards10 names 1.0 objects/ actor models under exploders/ (groups.hpp): such a path reads its objects/ file.
+inline std::string objectsModel(const std::string& p)
+{
+    return p.rfind(kExplodersDir, 0) == 0 ? kObjectsDir + p.substr(kExplodersDirLen) : std::string();
+}
+
 }  // namespace detail
 
 inline void* read10(const char* enginePath, size_t* size, std::string* where)
@@ -122,6 +130,7 @@ inline void* read10(const char* enginePath, size_t* size, std::string* where)
     std::string p = text::norm(enginePath);
     void* d = detail::read10z(p, size, where);
     std::string a = d ? "" : choalias::resolve(p);
+    if (!d && a.empty()) a = detail::objectsModel(p);
     return a.empty() ? d : detail::read10z(a, size, where);
 }
 

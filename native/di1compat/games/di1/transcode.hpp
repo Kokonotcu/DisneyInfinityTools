@@ -578,12 +578,13 @@ inline bool groupsMatches(const Request& r)
 // An expendables package: its 1.0 groups in the keys 3.0's group reader takes (groups::groups30); none: passed on.
 inline Verdict groups(Request& r)
 {
-    int over = 0, coins = 0;
-    int k = groups::groups30(std::string((const char*)r.data, r.n), r.out, &over, r.io.coinDna, &coins);
+    groups::Counts c;
+    int k = groups::groups30(std::string((const char*)r.data, r.n), r.out, &c, r.io.coinDna);
     if (!k) return dispatch::kNext;
-    std::string dropped = over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "";
-    std::string paying = coins ? ", " + std::to_string(coins) + " coin pickups paying the zone's currency" : "";
-    r.note += "+groups30(" + std::to_string(k - coins) + " groups" + dropped + paying + ") ";
+    std::string dropped = c.over ? ", " + std::to_string(c.over) + " spawns past the 4th dropped" : "";
+    std::string paying = c.coins ? ", " + std::to_string(c.coins) + " coin pickups paying the zone's currency" : "";
+    std::string moved = c.models ? ", " + std::to_string(c.models) + " objects/ models named under Exploders/" : "";
+    r.note += "+groups30(" + std::to_string(k - c.coins - c.models) + " groups" + dropped + paying + moved + ") ";
     return "expgroups";
 }
 

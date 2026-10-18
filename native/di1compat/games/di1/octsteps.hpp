@@ -95,6 +95,79 @@ inline bool choSteps(oct::File& f, const OctSteps& o, std::string& note)
     return changed;
 }
 
+// Where each scene node lacking ParentNodeReferences gets it: before its LocalToParentMatrix, else at its block end.
+inline std::vector<size_t> orphanSlots(const oct::File& f, long sp)
+{
+    std::vector<size_t> at;
+    bool root = true;
+    for (size_t i = sp + 1, end = f.blockEnd(sp); i < end; i = f.blockEnd(i)) {
+        if (root) {   // node 0, the Scene, has no parent
+            root = false;
+            continue;
+        }
+        const size_t be = f.blockEnd(i);
+        size_t slot = be;
+        bool has = false;
+        for (size_t j = i + 1; j < be; ++j) {
+            const std::string& n = f.name(f.recs[j]);
+            has |= n == "ParentNodeReferences";
+            if (n == "LocalToParentMatrix" && slot == be) slot = j;
+        }
+        if (!has) at.push_back(slot);
+    }
+    return at;
+}
+
+// 1.0 omits a root child's ParentNodeReferences; 3.0 exploders carry it (7948 of 7971 nodes). -> nodes given parent 0
+inline int rootParents(const std::string& path, oct::File& f)
+{
+    const long sp = f.pool("SceneTreeNodePool");
+    if (path.rfind("exploders/", 0) != 0 || sp < 0) return 0;
+    const std::vector<size_t> at = orphanSlots(f, sp);
+    if (at.empty()) return 0;
+    std::vector<oct::Rec> recs;
+    recs.reserve(f.recs.size() + at.size());
+    size_t k = 0;
+    for (size_t i = 0; i < f.recs.size(); ++i) {
+        for (; k < at.size() && at[k] == i; ++k) recs.push_back(f.intList(3, "ParentNodeReferences", {0}));
+        recs.push_back(std::move(f.recs[i]));
+    }
+    for (; k < at.size(); ++k) recs.push_back(f.intList(3, "ParentNodeReferences", {0}));
+    f.recs = std::move(recs);
+    return (int)at.size();
+}
+
+// Whether a SubNetwork of f is named n.
+inline bool hasGraphNamed(const oct::File& f, const std::string& n)
+{
+    for (size_t i = 0; i + 1 < f.recs.size(); ++i) {
+        const bool graph = f.name(f.recs[i]) == "SubNetwork" && f.name(f.recs[i + 1]) == "Name";
+        if (graph && f.nameValues(f.recs[i + 1]) == std::vector<std::string>{n}) return true;
+    }
+    return false;
+}
+
+// 1.0 capsule graphs are named 'Exploder' (their entries' AssetName); they take the model's name, as crates have.
+inline int exploderGraphName(const std::string& path, oct::File& f)
+{
+    constexpr char kGraph[] = "Exploder";
+    constexpr size_t kGraphLen = sizeof(kGraph) - 1;
+    const size_t slash = path.rfind('/'), dot = path.rfind('.');
+    const bool stemmed = slash != std::string::npos && dot != std::string::npos && dot > slash + 1;
+    if (!stemmed || !hasGraphNamed(f, kGraph)) return 0;
+    const std::string stem = path.substr(slash + 1, dot - slash - 1);
+    int n = 0;
+    for (std::string& s : f.names) {
+        if (s.compare(0, kGraphLen, kGraph) != 0) continue;
+        const std::string rest = s.substr(kGraphLen);
+        if (!rest.empty() && rest[0] != '|' && rest != "Shape") continue;
+        s = stem + rest;
+        ++n;
+    }
+    f.nameIndexed = 0;   // names changed outside addName: its index is rebuilt
+    return n;
+}
+
 // NavMeshPool into 3.0's layout: 3.0's parser FUN_01909fb0 trusts it (raw in_city.oct faulted at 0x190A4A7).
 inline bool navSteps(oct::File& f, const OctSteps& o, std::string& note)
 {
@@ -119,6 +192,8 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
     // a raw 1.0 .mtb names 1.0 shaders: int3 in Shader_LookupCrc
     bool changed = o.render && o.render(path, f, note);
     changed |= detail::navSteps(f, o, note);
+    changed |= detail::noted(note, detail::exploderGraphName(path, f), "+graphname(", " names) ");
+    changed |= detail::noted(note, detail::rootParents(path, f), "+parents(", " nodes) ");
     if (octx::addAssetPool(f)) {
         note += "+AssetPool ";
         changed = true;

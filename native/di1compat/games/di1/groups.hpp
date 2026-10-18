@@ -15,15 +15,22 @@ struct CoinDna {
 };
 using CoinDnaOf = std::function<CoinDna(const std::string& dnaFile)>;
 
+// What groups30 changed: spawns past the 4th dropped, coin pickups typed, actor models moved to exploders/.
+struct Counts {
+    int over = 0, coins = 0, models = 0;
+};
+
 // A package's groups with 3.0's flat spawn keys (FUN_01603b10); coins fixed with coinDna (currency10). 0: unchanged.
-inline int groups30(const std::string& chunk, std::string& out, int* over = nullptr,
-                    const CoinDnaOf& coinDna = nullptr, int* coins = nullptr);
+inline int groups30(const std::string& chunk, std::string& out, Counts* counts = nullptr,
+                    const CoinDnaOf& coinDna = nullptr);
 
 namespace detail {
 
 using luachunk::Value;
 
 constexpr int kSpawnKeys = 4;   // Expendables.1 .. .4: a 5th spawn has no 3.0 key and counts in *over
+constexpr char kObjects[] = "objects/", kExploders[] = "Exploders/";
+constexpr size_t kObjectsLen = sizeof(kObjects) - 1;
 // 1.0 {ExpendableName, Min, Max, Chance} -> 3.0 "Expendables.<i>.<key>" (defaults 1, 1, 100)
 inline constexpr std::pair<const char*, const char*> kSpawnFields[] = {
     {"ExpendableName", "Expendable"}, {"Min", "Min"}, {"Max", "Max"}, {"Chance", "Chance"}};
@@ -54,6 +61,21 @@ inline int coinPickups(Value& ents, const CoinDnaOf& coinDna, int* coins)
     return n;
 }
 
+// 3.0 instances no actor model named under objects/ (capsules got no scene node); exploders/ works. vfs reads it back.
+inline int actorModelsToExploders(Value& ents)
+{
+    int n = 0;
+    for (auto& [k, e] : *ents.tab) {
+        if (e.t != Value::TAB || !_stricmp(e.str("RewardType").c_str(), "FastCurrency")) continue;
+        Value* m = e.get("Model");
+        const bool objects = m && m->t == Value::STR && !_strnicmp(m->s.c_str(), kObjects, kObjectsLen);
+        if (!objects) continue;
+        *m = str(kExploders + m->s.substr(kObjectsLen));
+        ++n;
+    }
+    return n;
+}
+
 // A group's ExpendablesSpawned rows as 3.0's flat keys, appended to the group.
 inline void spawnKeys(Value& g, const Value& spawned, int* over)
 {
@@ -77,23 +99,28 @@ inline void spawnKeys(Value& g, const Value& spawned, int* over)
 }  // namespace detail
 
 // 1.0 rows ExpendablesSpawned = {{ExpendableName, Min, Max, Chance}, ..}, which 3.0 ignores: crates gave no coins.
-inline int groups30(const std::string& chunk, std::string& out, int* over, const CoinDnaOf& coinDna, int* coins)
+inline int groups30(const std::string& chunk, std::string& out, Counts* counts, const CoinDnaOf& coinDna)
 {
     using luachunk::Value;
     auto G = luachunk::eval(chunk);
     auto pkg = G.find("ExpendablesPackage");
     if (pkg == G.end()) return 0;
+    Counts c;
     int n = 0;
     Value* ents = pkg->second.get("Expendables");
-    if (coinDna && ents && ents->t == Value::TAB) n += detail::coinPickups(*ents, coinDna, coins);
+    const bool table = ents && ents->t == Value::TAB;
+    if (table) c.models = detail::actorModelsToExploders(*ents);
+    if (coinDna && table) n += detail::coinPickups(*ents, coinDna, &c.coins);
     Value* groups = pkg->second.get("Groups");
     if (groups && groups->t == Value::TAB)
         for (auto& [k, g] : *groups->tab) {
             const Value* found = g.get("ExpendablesSpawned");
             if (g.t != Value::TAB || !found || found->t != Value::TAB) continue;
-            detail::spawnKeys(g, *found, over);
+            detail::spawnKeys(g, *found, &c.over);
             ++n;
         }
+    if (counts) *counts = c;
+    n += c.models;
     if (!n) return 0;
     out.clear();
     for (auto& [name, v] : G) out += name + " = " + luachunk::text(v) + "\n";
