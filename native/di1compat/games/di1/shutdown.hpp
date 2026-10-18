@@ -2,9 +2,10 @@
 // Spawn threads.
 #pragma once
 #include <windows.h>
-#include <atomic>
+#include <intrin.h>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <iterator>
 #include <mutex>
 #include <string>
@@ -27,6 +28,9 @@ namespace eng {
 constexpr uint32_t kActorOf = 0x0074B200;       // FUN_0074b200: cdecl (handle) -> actor, null when dead
 constexpr uint32_t kComponentOf = 0x0069ECD0;   // FUN_0069ecd0: cdecl (handle, type) -> component
 constexpr uint32_t kRenderType = 0x0228E56C;    // u16: the render component's type id
+constexpr uint32_t kExpType = 0x02289AF8;       // u16: the Expendables component's type id (FUN_01232de0)
+constexpr size_t kCompDef = 0xC;                // that component's definition index (FUN_01604070)
+constexpr size_t kPartActor = 4;                // FUN_0074da00's this (actor + 0x1c): +4 its actor
 constexpr uint32_t kExpManager = 0x0228AA40;    // *: the expendables manager
 constexpr size_t kManagerDefs = 0x1C;           // its definition table; a pending record's +0 indexes it
 constexpr size_t kRecordKilled = 0x80;          // a pending record's cancel flag: the completion kills the actor
@@ -43,7 +47,7 @@ constexpr size_t kRequestPlacement = 4;         // [4..6]: the position
 }  // namespace eng
 
 constexpr size_t kKeepPrune = 8192;   // kept handles before dead ones are pruned
-constexpr long kProbeLines = 300;     // per probe budget, never reset
+constexpr int kLinesPerDef = 4;       // probe lines per (kind, definition): 300 sockets once starved every capsule
 constexpr size_t kNames = 96;         // definition name buffers
 
 typedef uint32_t(__fastcall* ReqFn)(void* self, void* edx, uint8_t* req, uint32_t a2);
@@ -56,6 +60,7 @@ typedef void(__fastcall* RenderShutFn)(void* comp, void* edx, uint8_t on);
 typedef void(__cdecl* NodeFn)(void** call, uint8_t* data);
 typedef uint8_t*(__cdecl* ActorFn)(uint32_t handle);
 typedef void*(__cdecl* CompFn)(uint32_t handle, uint32_t type);
+typedef void(__fastcall* DestroyFn)(uint8_t* part, void* edx, float delay, int mode);
 
 struct State {
     bool shutdown10 = false, capsuleTrace10 = false;   // set once in install()
@@ -67,10 +72,10 @@ struct State {
     ShutFn g_shut = nullptr;
     RenderShutFn g_renderShut = nullptr;   // null while shutdown10 is off: keep() checks it
     NodeFn g_node = nullptr;
-    std::atomic<long> spawnLogged{0}, doneLogged{0}, keptLogged{0};   // probe budgets; any thread
+    DestroyFn g_destroy = nullptr;
     std::mutex keepMx;                     // guards keep; held across actorOf while pruning
     std::unordered_set<uint32_t> keep;     // handles of actors made from 1.0 definitions
-    core::LogCount<std::string> fewLines{2000};   // capsuletrace10 lines per name, for 2000 names
+    core::LogCount<std::string> fewLines{8000};   // capsuletrace10 lines per name, for 8000 names
 };
 inline State g_state;
 
@@ -89,6 +94,12 @@ inline void defText(const uint8_t* def, char (&data)[kNames], char (&model)[kNam
     if (!def || !core::readable(def + eng::kDefData, 8)) return;
     core::safeCopy(data, kNames, *(const char**)(def + eng::kDefData));
     core::safeCopy(model, kNames, *(const char**)(def + eng::kDefModel));
+}
+
+// A probe line of this kind for this definition (data name) is still within its own budget.
+inline bool defLine(const char* kind, const char* data)
+{
+    return g_state.fewLines.first(std::string(kind).append(data), kLinesPerDef);
 }
 
 inline const char* mode(const uint8_t* params)
@@ -126,9 +137,10 @@ inline void keep(uint32_t h, const uint8_t* def)
         void* comp = ((CompFn)core::rt(eng::kComponentOf))(h, *(uint16_t*)core::rt(eng::kRenderType));
         if (comp && s.g_renderShut) s.g_renderShut(comp, nullptr, 0);
     }
-    if (!s.capsuleTrace10 || ++s.keptLogged > kProbeLines) return;
+    if (!s.capsuleTrace10) return;
     char d[kNames], mo[kNames];
     defText(def, d, mo);
+    if (!defLine("kept ", d)) return;
     core::logf("shutdown10: actor %08X '%s' (%s) drawn while shut down%s", h, d, mo,
                a && (a[eng::kActorFlags] & eng::kShutDown) ? " (was shut down: shown)" : "");
 }
@@ -148,14 +160,28 @@ inline void __fastcall hkRenderShut(void* comp, void*, uint8_t on)
     g_state.g_renderShut(comp, nullptr, on);
 }
 
-// The definition of a pending record, read through the manager's table; null when unreadable.
-inline uint8_t* pendingDef(const uint8_t* record)
+// Definition idx of the manager's table; null when unreadable.
+inline uint8_t* defAt(uint32_t idx)
 {
     uint8_t* mgr = *(uint8_t**)core::rt(eng::kExpManager);
-    if (!mgr || !record || !core::readable(mgr + eng::kManagerDefs, 4)) return nullptr;
+    if (!mgr || !core::readable(mgr + eng::kManagerDefs, 4)) return nullptr;
     uint8_t** table = *(uint8_t***)(mgr + eng::kManagerDefs);
-    uint32_t idx = *(const uint32_t*)record;
     return table && core::readable(table + idx, 4) ? table[idx] : nullptr;
+}
+
+// The definition of a pending record (its +0 indexes the table); null when unreadable.
+inline uint8_t* pendingDef(const uint8_t* record) { return record ? defAt(*(const uint32_t*)record) : nullptr; }
+
+// The definition an actor was spawned from, through its Expendables component; null for every other actor.
+inline uint8_t* actorDef(const uint8_t* part)
+{
+    if (!core::readable(part + eng::kPartActor, 4)) return nullptr;
+    const uint8_t* actor = *(uint8_t* const*)(part + eng::kPartActor);
+    if (!actor || !core::readable(actor + eng::kActorHandle, 4)) return nullptr;
+    const uint32_t h = *(const uint32_t*)(actor + eng::kActorHandle);
+    const uint8_t* comp = (const uint8_t*)((CompFn)core::rt(eng::kComponentOf))(h, *(uint16_t*)core::rt(eng::kExpType));
+    if (!comp || !core::readable(comp + eng::kCompDef, 4)) return nullptr;
+    return defAt(*(const uint32_t*)(comp + eng::kCompDef));
 }
 
 // 0x0160A270, cdecl (handle, record), per async spawn completion of any expendable; it frees the record.
@@ -166,13 +192,11 @@ inline void __cdecl hkDone(uint32_t handle, uint8_t* record)
     uint8_t* def = pendingDef(record);
     bool is10 = def10(def);
     s.g_done(handle, record);
-    const bool logDone = is10 && s.capsuleTrace10;
-    if (logDone && ++s.doneLogged <= kProbeLines) {
-        char d[kNames], mo[kNames];
-        defText(def, d, mo);
+    char d[kNames] = "", mo[kNames] = "";
+    if (s.capsuleTrace10) defText(def, d, mo);
+    if (is10 && s.capsuleTrace10 && defLine("done ", d))
         core::logf("capsuletrace10: async spawn of '%s' (%s) done: handle %08X -> actor %p%s", d, mo, handle,
                    ((ActorFn)core::rt(eng::kActorOf))(handle), killed ? ", killed (pending record cancelled)" : "");
-    }
     if (is10 && !killed && s.shutdown10) keep(handle, def);
 }
 
@@ -210,9 +234,9 @@ inline uint32_t* __fastcall hkCust(uint8_t* def, void*, uint32_t* out, const flo
     t_base = t_spark = 0;
     uint32_t* r = s.g_cust(def, nullptr, out, t, params);
     --t_inCust;
-    if (++s.spawnLogged <= kProbeLines) {
-        char d[kNames], mo[kNames];
-        defText(def, d, mo);
+    char d[kNames], mo[kNames];
+    defText(def, d, mo);
+    if (defLine("cust ", d)) {
         const char* how = t_spark  ? "lock not found: Spark_Capsule instead"
                           : t_base ? "lock locked: base spawn"
                                    : "lock already unlocked: nothing";
@@ -229,9 +253,9 @@ inline uint32_t* __fastcall hkBase(uint8_t* def, void*, uint32_t* out, const flo
     uint32_t* r = s.g_base(def, nullptr, out, t, params);
     if (!def10(def)) return r;
     uint32_t h = out ? *out : 0;   // 0: queued (async), the completion marks it
-    if (s.capsuleTrace10 && ++s.spawnLogged <= kProbeLines) {
-        char d[kNames], mo[kNames];
-        defText(def, d, mo);
+    char d[kNames] = "", mo[kNames] = "";
+    if (s.capsuleTrace10) defText(def, d, mo);
+    if (s.capsuleTrace10 && defLine("base ", d)) {
         core::logf("capsuletrace10: base spawn '%s' model '%s' at (%.1f, %.1f, %.1f), %s -> handle %08X", d, mo,
                    t ? t[4] : 0.f, t ? t[5] : 0.f, t ? t[6] : 0.f, mode(params), h);
     }
@@ -244,6 +268,29 @@ inline uint32_t __fastcall hkByName(void* self, void*, const char* name, const f
 {
     if (t_inCust) t_spark = 1;
     return g_state.g_byName(self, nullptr, name, t, a3, a4);
+}
+
+// An actor from a 1.0 definition is destroyed: which, and by whom (despawns: FUN_015f7520, FUN_015f4430).
+inline void logDestroyed(const uint8_t* part, float delay, int how, void* ret)
+{
+    const uint8_t* def = actorDef(part);
+    if (!def10(def)) return;
+    char d[kNames], mo[kNames];
+    defText(def, d, mo);
+    if (!defLine("dead ", d)) return;
+    const uint8_t* actor = *(uint8_t* const*)(part + eng::kPartActor);
+    core::logf("capsuletrace10: actor %08X '%s' (%s) destroyed (delay %.1f, mode %d) by %08X",
+               *(const uint32_t*)(actor + eng::kActorHandle), d, mo, delay, how, core::toStaticVa((uintptr_t)ret));
+}
+
+// FUN_0074da00, thiscall on actor + 0x1c (delay, mode; ret 8), per actor destruction, any thread.
+inline void __fastcall hkDestroy(uint8_t* part, void*, float delay, int how)
+{
+    try {
+        logDestroyed(part, delay, how, _ReturnAddress());
+    } catch (std::exception&) {
+    }
+    g_state.g_destroy(part, nullptr, delay, how);
 }
 
 }  // namespace detail
@@ -280,6 +327,8 @@ inline bool install(const Config& c)
          (void*)&detail::hkCust, (void**)&s.g_cust},
         {"expendable spawn by name (capsuletrace10)", 0x0160F370, "6AFF68????????64A100000000",
          (void*)&detail::hkByName, (void**)&s.g_byName},
+        {"actor destroy (capsuletrace10)", 0x0074DA00, "83EC08803D????????0053568BF1", (void*)&detail::hkDestroy,
+         (void**)&s.g_destroy},
     });
     return ok;
 }
