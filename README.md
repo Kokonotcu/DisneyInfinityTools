@@ -143,7 +143,7 @@ Diagnostics, all off by default and log-only:
 | `breaktrace` | Choreography clocks, clip setup, layout attachments and destructible hits |
 | `missiontrace` | Mission context state changes |
 | `spawntrace10` | Building lots registered, SpawnBuilding nodes firing, lot spawns, the player start lookups |
-| `capsuletrace10` | SpawnExpendable nodes firing, their spawn requests, which branch each 1.0 expendable's spawn took, the async completions, and the actors `shutdown10` keeps drawn |
+| `capsuletrace10` | SpawnExpendable nodes firing, their spawn requests, which branch each 1.0 expendable's spawn took, the async completions, the actors `shutdown10` keeps drawn, and their destruction (with the caller); up to 4 lines of each kind per definition |
 | `currencytrace10` | Each currency payout (source, inventory key, amount, balance after), each pickup award by kind, mission StatEvent grants, and the currency balances the HUD and the store read |
 | `renderdoc10` | Captures one frame with RenderDoc that many seconds into the world |
 
