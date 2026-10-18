@@ -1,9 +1,8 @@
-// 1.0 expendables never shut down: active and drawn at any range (shutdown10); capsuletrace10's spawn probes.
-// core, popin. Spawn threads.
+// 1.0 expendables drawn while shut down, as in 1.0 (shutdown10); capsuletrace10's spawn probes. core, popin.
+// Spawn threads.
 #pragma once
 #include <windows.h>
 #include <intrin.h>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -19,7 +18,7 @@
 
 namespace di1::shutdown {
 
-// Installs shutdown10's three hooks and capsuletrace10's probes, as c switches them on (H1, H2).
+// Installs shutdown10's four hooks and capsuletrace10's probes, as c switches them on (H1, H2).
 inline bool install(const Config& c);
 
 namespace detail {
@@ -60,8 +59,6 @@ constexpr uint32_t kTypeMask = 0x3FF;
 // checked in install() (H4)
 constexpr uint32_t kDrawQuery = 0x018383E0;     // FUN_018383e0: thiscall (query; ret 4) on a scene node
 constexpr const char* kDrawQueryPrologue = "8B442404568BF183F803";
-constexpr uint32_t kRestore = 0x007535B0;       // FUN_007535b0: thiscall on the shutdown manager (actor; ret 4)
-constexpr const char* kRestorePrologue = "568B7424088B4604578BF90FB70D";
 }  // namespace eng
 
 constexpr size_t kKeepPrune = 8192;   // kept handles before dead ones are pruned
@@ -74,6 +71,7 @@ typedef uint32_t(__fastcall* ByNameFn)(void* self, void* edx, const char* name, 
                                        uint32_t a4);
 typedef void(__cdecl* DoneFn)(uint32_t handle, uint8_t* record);
 typedef void(__fastcall* ShutFn)(void* mgr, void* edx, uint8_t* actor);
+typedef void(__fastcall* RenderShutFn)(void* comp, void* edx, uint8_t on);
 typedef void(__cdecl* NodeFn)(void** call, uint8_t* data);
 typedef uint8_t*(__cdecl* ActorFn)(uint32_t handle);
 typedef void*(__cdecl* CompFn)(uint32_t handle, uint32_t type);
@@ -88,20 +86,19 @@ struct State {
     ByNameFn g_byName = nullptr;
     DoneFn g_done = nullptr;
     ShutFn g_shut = nullptr;
+    RenderShutFn g_renderShut = nullptr;   // null while shutdown10 is off: keep() checks it
     NodeFn g_node = nullptr;
     DestroyFn g_destroy = nullptr;
     ShutFn g_restore = nullptr;
     bool drawQuery = false;                // FUN_018383e0's prologue matched; set once in install()
-    bool restore = false;                  // FUN_007535b0's prologue matched; set once in install()
-    std::atomic<void*> mgr{nullptr};       // the shutdown manager, as hkShut last saw it; any thread
-    std::mutex keepMx;                    // guards keep; held across actorOf while pruning
+    std::mutex keepMx;                     // guards keep; held across actorOf while pruning
     std::unordered_set<uint32_t> keep;     // handles of actors made from 1.0 definitions
     core::LogCount<std::string> fewLines{8000};   // capsuletrace10 lines per name, for 8000 names
 };
 inline State g_state;
 
 // Per spawn call on its thread: set around one engine call, cleared after it.
-inline thread_local int t_inCust, t_base, t_spark;
+inline thread_local int t_inCust, t_base, t_spark, t_keep;
 
 // A definition from a 1.0 package: popin10 stamped it (1.0 entries never carry PopinDistance).
 inline bool def10(const uint8_t* def)
@@ -138,7 +135,7 @@ inline bool kept(uint32_t h)
     return s.keep.count(h) != 0;
 }
 
-// Handle h's actor is never shut down; one made shut down is restored at once, as an approaching player would.
+// Handle h's actor stays drawn while shut down; one already shut down is shown again, as its restore does.
 inline void keep(uint32_t h, const uint8_t* def)
 {
     State& s = g_state;
@@ -154,24 +151,31 @@ inline void keep(uint32_t h, const uint8_t* def)
     }
     uint8_t* a = actorOf(h);
     const bool shutDown = a && (a[eng::kActorFlags] & eng::kShutDown);
-    void* mgr = s.mgr.load();
-    const bool restore = shutDown && mgr && s.restore;
-    if (restore) ((ShutFn)core::rt(eng::kRestore))(mgr, nullptr, a);
+    if (shutDown) {
+        void* comp = ((CompFn)core::rt(eng::kComponentOf))(h, *(uint16_t*)core::rt(eng::kRenderType));
+        if (comp && s.g_renderShut) s.g_renderShut(comp, nullptr, 0);
+    }
     if (!s.capsuleTrace10) return;
     char d[kNames], mo[kNames];
     defText(def, d, mo);
     if (!defLine("kept ", d)) return;
-    const bool still = a && (a[eng::kActorFlags] & eng::kShutDown);
-    core::logf("shutdown10: actor %08X '%s' (%s) never shut down%s%s", h, d, mo,
-               restore ? " (made shut down: restored)" : "", still ? ", STILL shut down" : "");
+    core::logf("shutdown10: actor %08X '%s' (%s) drawn while shut down%s", h, d, mo,
+               a && (a[eng::kActorFlags] & eng::kShutDown) ? " (was shut down: shown)" : "");
 }
 
-// FUN_007534c0, thiscall on the manager (actor; ret 4), per shutdown apply: a 1.0 actor skips it (no range rule).
+// FUN_007534c0, thiscall on the manager (actor; ret 4), per shutdown apply: shutdown is the same code in both games.
 inline void __fastcall hkShut(void* mgr, void*, uint8_t* actor)
 {
-    g_state.mgr.store(mgr);
-    if (actor && kept(*(uint32_t*)(actor + eng::kActorHandle))) return;
+    t_keep = actor && kept(*(uint32_t*)(actor + eng::kActorHandle));
     g_state.g_shut(mgr, nullptr, actor);
+    t_keep = 0;
+}
+
+// FUN_01860b40, thiscall (on; ret 4), per render shutdown: 3.0 hides the model, 1.0's call (0x00D59680) was `ret 4`.
+inline void __fastcall hkRenderShut(void* comp, void*, uint8_t on)
+{
+    if (on && t_keep) return;
+    g_state.g_renderShut(comp, nullptr, on);
 }
 
 // Definition idx of the manager's table; null when unreadable.
@@ -387,12 +391,12 @@ inline bool install(const Config& c)
     const bool spawnsHooked = keep10 && core::installFeature("shutdown10", {
         {"actor shutdown apply (shutdown10)", 0x007534C0, "568B7424088B4604578BF9", (void*)&detail::hkShut,
          (void**)&s.g_shut},
+        {"render component shutdown (shutdown10)", 0x01860B40, "83EC08E8????????85C0745C",
+         (void*)&detail::hkRenderShut, (void**)&s.g_renderShut},
         spawn,
         done,
     });
     bool ok = spawnsHooked || !keep10;
-    s.restore = core::prologueMatches(detail::eng::kRestore, detail::eng::kRestorePrologue);
-    if (spawnsHooked && !s.restore) core::logf("shutdown10: FUN_007535b0's prologue differs; no restore at spawn");
     if (!c.capsuleTrace10) return ok;
     // capsuletrace10 hooks the two spawns itself when shutdown10 did not
     if (!spawnsHooked) ok = core::installFeature("capsuletrace10 spawns", {spawn, done}) && ok;
