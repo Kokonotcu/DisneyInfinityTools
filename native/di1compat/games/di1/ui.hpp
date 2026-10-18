@@ -30,6 +30,8 @@ inline int mergeTips(std::string& t30, const std::string& t10, IsZone zone);
 // presentation/playsetlistwin32.lua as Lua text: 3.0's chunk unchanged plus an entry per {name, start zone}.
 inline std::string playsetMenu10(const std::string& chunk,
                                  const std::vector<std::pair<std::string, std::string>>& playsets);
+// presentation/player_hud_combined.lua as Lua text: 3.0's chunk unchanged, a 1.0 currency icon resting and counted.
+inline std::string hudCurrency10(const std::string& chunk);
 
 namespace detail {
 
@@ -205,6 +207,32 @@ C.SelectItem = function(self, ...)
   local vr = h ~= UI.INVALID_UI_HANDLE and UI.GetScreenFromScreenHandle(h)
   if vr and vr.launchLevelInfo then vr.launchLevelInfo.saveTarget = "world" end
   self:SetFocus(false)
+end
+return C
+)LUA";
+    return s;
+}
+
+// The HUD knows 4 icons: GetPlayerData('currency') gives nil for others, CloseEconomy rests on defaultCurrency.
+inline std::string hudCurrency10(const std::string& chunk)
+{
+    std::string s = "-- di1compat currency10: 3.0's Player_HUD_Combined (embedded unchanged) + 1.0 zone currencies\n";
+    s += "local C = assert(loadstring(\"";
+    s.reserve(chunk.size() * 3 + 1000);   // speed only: an escaped byte takes up to 4 (GP-32)
+    detail::appendQuotedChunk(s, chunk);
+    s += R"LUA(", "=Player_HUD_Combined"))()
+local known = { SPARKS = true, ScrapCurrency = true, OUT_Balloons = true, Empire_Currency = true }
+local get, changed = C.GetPlayerData, C.PlayerDataChanged
+local function own(icon) return icon ~= nil and icon ~= "" and not known[icon] end
+C.GetPlayerData = function(self, key, ...)
+  local info = self.PlayerData.PlayerInfo
+  if key == "currency" and own(info.currencyIcon) and info.currencyAmt >= 0 then return info.currencyAmt end
+  return get(self, key, ...)
+end
+C.PlayerDataChanged = function(self, ...)
+  changed(self, ...)
+  local icon = self.PlayerData.PlayerInfo.currencyIcon
+  if own(icon) then self.defaultCurrency = icon end
 end
 return C
 )LUA";

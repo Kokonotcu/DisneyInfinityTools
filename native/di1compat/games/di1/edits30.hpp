@@ -31,6 +31,8 @@ inline bool vtxfStage(openstage::Open& o, int*& out);
 inline bool tipsStage(openstage::Open& o, int*& out);
 // playsetmenu10: the Play Sets list gets the registered 1.0 playsets. Consumes r; answers the menu or a fresh open.
 inline bool playsetMenuStage(openstage::Open& o, int*& out);
+// currency10: the player HUD script rests on and counts a 1.0 zone's currency. Consumes r; answers text or reopens.
+inline bool hudCurrencyStage(openstage::Open& o, int*& out);
 // zonelist.lua (zones10, challenge10, beacon10), ChallengeData.lua (challenge10). Destroys r; answers text or reopens.
 inline bool zoneListStage(openstage::Open& o, int*& out);
 // trace: who opens a GameDB package's bitmasks.lua (any playset's, 1.0 or 3.0), with the stack. Always passes on.
@@ -140,6 +142,26 @@ inline bool playsetMenuStage(openstage::Open& o, int*& out)
     }
     core::logf("%s: %s (%u B): unchanged", o.p, ps.empty() ? "no 1.0 playset registered" : "not the 3.0 chunk",
                (unsigned)t.size());
+    out = openstage::reopen(o);
+    return true;
+}
+
+inline bool hudCurrencyStage(openstage::Open& o, int*& out)
+{
+    if (!o.edits() || !o.cfg->currency10) return false;
+    const bool hud = text::endsWith(o.p, "player_hud_combined.lua");
+    if (!hud || text::norm(o.p) != "presentation/player_hud_combined.lua") return false;
+    std::string t;
+    const bool read = core::readStream(o.r, t);
+    const bool chunk = !t.empty() && t[0] == openstage::kLuaChunk;
+    if (read && chunk) {
+        std::string s = ui::hudCurrency10(t);
+        core::logf("currency10: %s wrapped: a 1.0 currency rests on the HUD (%u B 3.0 chunk -> %u B Lua)", o.p,
+                   (unsigned)t.size(), (unsigned)s.size());
+        out = core::memFile(s.data(), s.size());
+        return true;
+    }
+    core::logf("currency10: %s: not the 3.0 chunk (%u B): unchanged", o.p, (unsigned)t.size());
     out = openstage::reopen(o);
     return true;
 }

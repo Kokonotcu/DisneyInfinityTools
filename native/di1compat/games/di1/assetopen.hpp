@@ -32,8 +32,8 @@ inline State g_state;
 
 // First answer wins, in this order (B3, C3); bitmasksStack, blockStage and a serveStage miss pass on.
 inline constexpr openstage::Stage kStages[] = {
-    edits30::vtxfStage, edits30::tipsStage, edits30::playsetMenuStage, edits30::zoneListStage,
-    edits30::bitmasksStack, edits30::chdStage, serve::sysStage, edits30::memtestStage,
+    edits30::vtxfStage, edits30::tipsStage, edits30::playsetMenuStage, edits30::hudCurrencyStage,
+    edits30::zoneListStage, edits30::bitmasksStack, edits30::chdStage, serve::sysStage, edits30::memtestStage,
     serve::blockStage, serve::serveStage};
 
 // Misses always (rare and cheap: what an unexplained fallback asks for), hits only when tracing.
