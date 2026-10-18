@@ -357,6 +357,24 @@ inline int progress30(std::string& t)
     return 1;
 }
 
+// anyPlayer30 (accept10): Eval_TutorialElement gets UseMissionActivator = false; 1.0's FUN_00b54620 takes any player.
+// Returns the count.
+inline int anyPlayer30(std::string& t)
+{
+    static constexpr char kKey[] = "Type = \"Eval_TutorialElement\",";
+    int n = 0;
+    for (size_t p = t.find(kKey); p != std::string::npos; p = t.find(kKey, p + 1)) {
+        size_t ls = t.rfind('\n', p);
+        ls = ls == std::string::npos ? 0 : ls + 1;
+        if (t.find_first_not_of(" \t", ls) != p) continue;   // the key opens its line
+        const std::string line = t.substr(ls, p - ls) + "UseMissionActivator = false,\n";
+        t.insert(ls, line);
+        p += line.size();
+        ++n;
+    }
+    return n;
+}
+
 // taskLines30 (progress10): 3.0 ProgressString lines for a mission without the generated line (FORMATS.md 10.3).
 // Returns the evals changed.
 inline int taskLines30(std::string& t)

@@ -1,4 +1,4 @@
-// uitrace10 probe: every pause the game loop applies or lifts, with its player and kind. core. Main thread.
+// uitrace10 probes: pauses the game loop applies or lifts; MissionAccepted reaching tutorial elements. Main thread.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@ struct Config {
     bool on = false;   // uitrace10
 };
 
-// Installs both probes when c asks for them, or neither (H1, H2); false when they were refused.
+// Installs the probes when c asks for them, or none (H1, H2); false when they were refused.
 inline bool install(const Config& c);
 
 namespace detail {
@@ -23,12 +23,20 @@ constexpr size_t kMsgKind = 0;
 constexpr size_t kMsgPauseMenu = 0xa;
 constexpr size_t kMsgMissionScreen = 0xb;
 constexpr size_t kMsgPlayer = 0x10;
+// a tutorial element as FUN_00dae4e0 reads it: type, done bit, UseMissionActivator bit (FUN_00de37c0)
+constexpr size_t kElementType = 0xC0;
+constexpr size_t kElementDone = 0xC5;
+constexpr uint8_t kDoneBit = 0x20;
+constexpr size_t kElementUse = 0xC6;
+constexpr uint8_t kActivatorBit = 0x04;
 }  // namespace eng
 
 typedef void(__fastcall* LoopPauseFn)(void* loop, void* edx, const uint8_t* msg);
+typedef void(__cdecl* ElementAcceptedFn)(uint32_t target, uint32_t a2, uint32_t a3, uint8_t* element);
 
 struct State {
     LoopPauseFn g_pauseOn = nullptr, g_pauseOff = nullptr;   // set once by installFeature in install()
+    ElementAcceptedFn g_elementAccepted = nullptr;           // set once by installFeature in install()
 };
 inline State g_state;
 
@@ -56,6 +64,17 @@ inline void __fastcall hkPauseOff(void* loop, void* edx, const uint8_t* msg)
     if (msg) logPause("off", msg);
 }
 
+// FUN_00dae4e0, cdecl (target, a2, a3, element), main thread, per MissionLog_MissionAccepted an element hears.
+inline void __cdecl hkElementAccepted(uint32_t target, uint32_t a2, uint32_t a3, uint8_t* element)
+{
+    g_state.g_elementAccepted(target, a2, a3, element);
+    if (!element) return;
+    const bool done = (element[eng::kElementDone] & eng::kDoneBit) != 0;
+    const bool activator = (element[eng::kElementUse] & eng::kActivatorBit) != 0;
+    core::logf("uitrace10: tutorial element %d heard MissionAccepted for %08X: done %d, activator check %d",
+               *(const int32_t*)(element + eng::kElementType), target, done, activator);
+}
+
 }  // namespace detail
 
 inline bool install(const Config& c)
@@ -67,6 +86,8 @@ inline bool install(const Config& c)
          (void**)&s.g_pauseOn},
         {"game loop unpause (uitrace10)", 0x01385BB0, "56578BF1E8????????8B7C240C", (void*)&detail::hkPauseOff,
          (void**)&s.g_pauseOff},
+        {"tutorial element mission accepted (uitrace10)", 0x00DAE4E0, "568B74241485F6",
+         (void*)&detail::hkElementAccepted, (void**)&s.g_elementAccepted},
     });
 }
 
