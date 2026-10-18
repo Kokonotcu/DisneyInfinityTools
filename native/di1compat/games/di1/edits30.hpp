@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,13 +45,40 @@ inline bool bitmasksStack(openstage::Open& o, int*& out);
 inline bool chdStage(openstage::Open& o, int*& out);
 // memtest: a listed path is served from a memory copy of 3.0's stream (consumed).
 inline bool memtestStage(openstage::Open& o, int*& out);
-// rootgraph10: a 3.0-shipped model still in 1.0's older exploder form gets Root its graph. Destroys r; edit or reopen.
+// rootgraph10: a 3.0 model in 1.0's older exploder form: 1.0's own is served, else Root gets its graph. Destroys r.
 inline bool rootGraphStage(openstage::Open& o, int*& out);
+// rootgraph10: the .mtb and buffers of a model rootGraphStage passed to 1.0 go to 1.0 too. Destroys r.
+inline bool olderCompanionStage(openstage::Open& o, int*& out);
 
 namespace detail {
 
 constexpr size_t kGameDbDir = sizeof("gamedb/") - 1;
 constexpr int kStackWords = 24;   // the exe addresses a bitmasks open's line lists
+constexpr size_t kExtLen = sizeof(".oct") - 1;   // .oct and .mtb alike
+
+struct State {
+    std::mutex mx;                 // guards older
+    std::set<std::string> older;   // rootgraph10: stems of models served from 1.0 over 3.0's copy; never cleared
+};
+inline State g_state;
+
+// A model file's stem: "objects/x" for objects/x.oct, x.mtb, x_0.vbuf, x_0.ibuf; "" for anything else.
+inline std::string modelStem(const std::string& np)
+{
+    const bool whole = text::endsWith(np.c_str(), ".oct") || text::endsWith(np.c_str(), ".mtb");
+    if (whole) return np.substr(0, np.size() - kExtLen);
+    const bool buffer = text::endsWith(np.c_str(), ".vbuf") || text::endsWith(np.c_str(), ".ibuf");
+    const size_t u = np.rfind('_');
+    return buffer && u != std::string::npos ? np.substr(0, u) : "";
+}
+
+// r dropped: the open goes on as a 3.0 miss, so serveStage answers it from 1.0 or the session.
+inline void passTo10(openstage::Open& o, const char* why)
+{
+    openstage::destroyStream(o.r);
+    o.r = nullptr;
+    o.missWhy = why;
+}
 
 // 3.0's tips (o.r, consumed) plus the 1.0 records it lacks; registered zones' keys stay 3.0's (FUN_01391150).
 inline int* tips30(const openstage::Open& o)
@@ -251,16 +280,41 @@ inline bool rootGraphStage(openstage::Open& o, int*& out)
     // ponytail: only object and exploder models are read (one parse per open); widen if another folder ships the form
     const bool model = np.rfind("objects/", 0) == 0 || np.rfind("exploders/", 0) == 0;
     if (!model) return false;
-    std::string t, edited;
-    if (openstage::readKeep(o.r, t)) edited = detail::rootGraph(t);
-    openstage::destroyStream(o.r);
+    std::string t, edited, t10;
+    const bool read = openstage::readKeep(o.r, t);
+    if (read) edited = detail::rootGraph(t);
     if (edited.empty()) {
-        out = openstage::reopen(o);
+        openstage::destroyStream(o.r);
+        out = read ? core::memFile(t.data(), t.size()) : openstage::reopen(o);
         return true;
     }
+    // the 3.0 copy is another export (BasisConversion, no transform node): 1.0's own goes through the .oct steps
+    if (vfs::read10s(np, t10)) {
+        {
+            std::lock_guard<std::mutex> lock(detail::g_state.mx);
+            detail::g_state.older.insert(detail::modelStem(np));
+        }
+        core::logf("rootgraph10: %s: 3.0's copy is 1.0's older form; 1.0's own model is served", o.p);
+        detail::passTo10(o, " (3.0's copy is the older form: served from 1.0)");
+        return false;
+    }
+    openstage::destroyStream(o.r);
     core::logf("rootgraph10: %s: Root takes its lone graph (1.0's older exploder form in a 3.0 file)", o.p);
     out = core::memFile(edited.data(), edited.size());
     return true;
+}
+
+inline bool olderCompanionStage(openstage::Open& o, int*&)
+{
+    if (!o.edits() || !o.cfg->rootGraph10 || text::endsWith(o.p, ".oct")) return false;
+    const std::string stem = detail::modelStem(text::norm(o.p));
+    if (stem.empty()) return false;
+    {
+        std::lock_guard<std::mutex> lock(detail::g_state.mx);
+        if (!detail::g_state.older.count(stem)) return false;
+    }
+    detail::passTo10(o, " (its model was served from 1.0)");
+    return false;
 }
 
 }  // namespace di1::edits30
