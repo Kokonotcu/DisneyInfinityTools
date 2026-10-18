@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iterator>
 #include <map>
@@ -33,6 +34,7 @@ constexpr uint32_t kAmount = 0x00E07F60;          // FUN_00e07f60: thiscall (nam
 constexpr uint32_t kScriptTable = 0x0154C520;     // FUN_0154c520: thiscall (name, ScriptRef* out) on a script
 constexpr uint32_t kRefField = 0x004510B0;        // FUN_004510b0: thiscall (ScriptRef* out, key) on a ScriptRef
 constexpr uint32_t kLuaToInteger = 0x0130D530;    // FUN_0130d530: cdecl (L, idx)
+constexpr uint32_t kLuaToString = 0x0130D5A0;     // FUN_0130d5a0: cdecl (L, idx, len*) -> const char*, null if nil
 constexpr uint32_t kLuaRelease = 0x0130E4D0;      // FUN_0130e4d0: cdecl (L, idx)
 constexpr uint32_t kSetString = 0x00B3F0A0;       // FUN_00b3f0a0: thiscall (const char** key, const char** value)
 constexpr uint32_t kSetBool = 0x00B3F060;         // FUN_00b3f060: thiscall (const char** key, uint8_t* value)
@@ -134,12 +136,27 @@ inline int shownAmount(ScriptRef& info)
     return shown;
 }
 
-// currencyIcon (the currency less "INV_"), dirty, PlayerCurrencyAmt: the HUD's own update steps.
+// A currency's HUD icon: its name less "INV_", as ui/icons/nsa_bucks names it (3.0's own: "SPARKS").
+inline const char* iconName(const std::string& cur) { return cur.c_str() + (cur.compare(0, 4, "INV_") ? 0 : 4); }
+
+// Does the HUD's PlayerInfo table show icon? Its default is 3.0's "SPARKS", kept until an amount change.
+inline bool iconShown(ScriptRef& info, const char* icon)
+{
+    typedef ScriptRef*(__fastcall * FieldFn)(ScriptRef* ref, void* edx, ScriptRef* out, const char* key);
+    typedef const char*(__cdecl * ToStringFn)(void* L, uint32_t idx, size_t* len);
+    ScriptRef f{nullptr, 0};
+    ScriptRef* got = ((FieldFn)core::rt(eng::kRefField))(&info, nullptr, &f, "currencyIcon");
+    const char* shown = ((ToStringFn)core::rt(eng::kLuaToString))(got->L, got->idx, nullptr);
+    const bool same = shown && !strcmp(shown, icon);
+    if (f.L) ((void(__cdecl*)(void*, uint32_t))core::rt(eng::kLuaRelease))(f.L, f.idx);
+    return same;
+}
+
+// currencyIcon, dirty, PlayerCurrencyAmt: the HUD's own update steps.
 inline void showCurrency(ScriptRef& info, void* data, const std::string& cur, int amt, uint8_t* changed)
 {
-    std::string icon = cur.compare(0, 4, "INV_") ? cur : cur.substr(4);
     const char* key = "currencyIcon";
-    const char* val = icon.c_str();
+    const char* val = iconName(cur);
     ((void(__fastcall*)(ScriptRef*, void*, const char**, const char**))core::rt(eng::kSetString))(&info, nullptr, &key,
                                                                                                  &val);
     *changed = 1;
@@ -162,7 +179,8 @@ inline uint8_t __fastcall hkHudCurrency(uint8_t* hud, void*, void* data)
     ((TableFn)core::rt(eng::kScriptTable))(*(void**)(hud + eng::kHudScript), nullptr, "PlayerInfo", &info);
     int shown = shownAmount(info);
     uint8_t changed = 0;
-    if (shown != amt || hud[eng::kHudForce]) showCurrency(info, data, cur, amt, &changed);
+    const bool stale = shown != amt || hud[eng::kHudForce] || !iconShown(info, iconName(cur));
+    if (stale) showCurrency(info, data, cur, amt, &changed);
     if (info.L) ((void(__cdecl*)(void*, uint32_t))core::rt(eng::kLuaRelease))(info.L, info.idx);
     return changed;
 }

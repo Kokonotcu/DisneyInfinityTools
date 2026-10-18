@@ -44,14 +44,14 @@ constexpr int kTriggerEventTypes = 14;   // TriggerEvent's type map: 1..14 (sxch
 constexpr char kPsDna[] = "_ps.dnax";
 constexpr size_t kPsDnaLen = sizeof kPsDna - 1;
 
-// GROUPS30_DNA=<1.0 extract assets dir>: currency10 too, the plugin's rule (dnaPath, paysSparks).
-bool paysSparksIn(const char* dnaRoot, const std::string& d)
+// GROUPS30_DNA=<1.0 extract assets dir>: currency10 too, the plugin's rule (dnaPath, parseCoinDna).
+di1::groups::CoinDna coinDnaIn(const char* dnaRoot, const std::string& d)
 {
     std::string p = di1::dnaPath(d);
-    if (p.empty()) return false;
+    if (p.empty()) return {};
     const std::string dnaDir = "expendables_data/dna/";   // the extract unpacks dna/dna.zip one folder deeper
     if (p.rfind(dnaDir, 0) == 0) p.insert(dnaDir.size(), "dna/");
-    return di1::paysSparks(slurp(fs::path(dnaRoot) / p));
+    return di1::parseCoinDna(slurp(fs::path(dnaRoot) / p));
 }
 
 // One line of table sizes: each section of c and its entry count.
@@ -149,13 +149,13 @@ int convertGroups30(const Args& a)
 {
     int groups = 0, over = 0, files = 0, coins = 0, failed = 0;
     const char* dnaRoot = env("GROUPS30_DNA");
-    std::function<bool(const std::string&)> isSpark;
-    if (dnaRoot) isSpark = [dnaRoot](const std::string& d) { return paysSparksIn(dnaRoot, d); };
+    di1::groups::CoinDnaOf coinDna;
+    if (dnaRoot) coinDna = [dnaRoot](const std::string& d) { return coinDnaIn(dnaRoot, d); };
     for (int i = 3; i < a.argc; ++i) {
         std::string out;
         int k = 0, c = 0;
         try {
-            k = di1::groups::groups30(slurp(a.argv[i]), out, &over, isSpark, &c);
+            k = di1::groups::groups30(slurp(a.argv[i]), out, &over, coinDna, &c);
         } catch (std::exception& e) {
             ++failed;
             printf("%s: %s\n", a.argv[i], e.what());

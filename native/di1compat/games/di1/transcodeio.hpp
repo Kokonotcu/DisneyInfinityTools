@@ -11,6 +11,7 @@
 #include "choalias.hpp"
 #include "config.hpp"
 #include "gamedb.hpp"
+#include "groups.hpp"
 #include "octsteps.hpp"
 #include "options.hpp"
 #include "render10.hpp"
@@ -32,8 +33,8 @@ namespace detail {
 
 struct State {
     Config cfg;                          // set once in install()
-    std::mutex sparkMx;                  // guards spark; not held across the read
-    std::map<std::string, bool> spark;   // currency10: DNA path -> pays sparks; never cleared
+    std::mutex coinMx;                             // guards coin; not held across the read
+    std::map<std::string, groups::CoinDna> coin;   // currency10: DNA path -> its FastCoin; never cleared
     chan::Roles roles;                   // vfxchan10: shader roles, guarded by its own mx; never cleared
 };
 inline State g_state;
@@ -49,21 +50,21 @@ inline OctSteps octSteps10()
     return o;
 }
 
-// currency10: does a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path) carry FastCoin.IsSpark? Memoised.
-inline bool isSpark10(const std::string& dnaFile)
+// currency10: a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path) as its FastCoin. Memoised.
+inline groups::CoinDna coinDna10(const std::string& dnaFile)
 {
     State& s = g_state;
     std::string p = dnaPath(dnaFile);
-    if (p.empty()) return false;
+    if (p.empty()) return {};
     {
-        std::lock_guard<std::mutex> lock(s.sparkMx);
-        if (auto it = s.spark.find(p); it != s.spark.end()) return it->second;
+        std::lock_guard<std::mutex> lock(s.coinMx);
+        if (auto it = s.coin.find(p); it != s.coin.end()) return it->second;
     }
-    bool spark = false;
+    groups::CoinDna coin;
     std::string b;
-    if (vfs::read10s(p, b)) spark = paysSparks(b);
-    std::lock_guard<std::mutex> lock(s.sparkMx);
-    return s.spark[p] = spark;
+    if (vfs::read10s(p, b)) coin = parseCoinDna(b);
+    std::lock_guard<std::mutex> lock(s.coinMx);
+    return s.coin[p] = coin;
 }
 
 inline void keepBundle(const std::string& path, const std::string& bytes) { session::keep({{path, bytes}}); }
@@ -98,7 +99,7 @@ inline TranscodeIO io()
         t.particleShaders = render10::particleShaders;
         t.roles = &detail::g_state.roles;
     }
-    if (c.currency10) t.isSpark = detail::isSpark10;
+    if (c.currency10) t.coinDna = detail::coinDna10;
     t.dataMapEntry = detail::dataMapEntry10;
     return t;
 }

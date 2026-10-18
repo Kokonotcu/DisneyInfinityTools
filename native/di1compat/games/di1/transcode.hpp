@@ -69,7 +69,7 @@ struct TranscodeIO {
     std::function<void(const std::string& path, const std::string& problem)> renderProblem;   // logged per problem
     std::function<Shaders(const std::string& path, std::string& note)> particleShaders;   // vfxchan10
     chan::Roles* roles = nullptr;   // vfxchan10: the shader roles found so far, kept by the caller
-    std::function<bool(const std::string& dnaFile)> isSpark;   // currency10: does a 1.0 DNA pay sparks?
+    groups::CoinDnaOf coinDna;   // currency10: a 1.0 DNA's FastCoin (pays sparks, model)
     std::function<void(const std::string& entry)> dataMapEntry;   // each DataMap entry before it is normalised
 };
 
@@ -84,21 +84,22 @@ inline std::string dnaPath(const std::string& dnaFile)
     return p;
 }
 
-// currency10: does a 1.0 DNA's FastCoin set IsSpark or IsSparkUnmetered (FUN_00b157d0)? Unevaluable: no.
-inline bool paysSparks(const std::string& dnaChunk)
+// currency10: a 1.0 DNA's FastCoin (FUN_00b157d0): IsSpark or IsSparkUnmetered, and its model. Unevaluable: neither.
+inline groups::CoinDna parseCoinDna(const std::string& dnaChunk)
 {
     try {
         auto G = luachunk::eval(dnaChunk);
         const luachunk::Value* d = G.count("DNA") ? &G["DNA"] : nullptr;
         const luachunk::Value* ag = d ? d->get("AgentGadgets") : nullptr;
         const luachunk::Value* fc = ag ? ag->get("FastCoin") : nullptr;
+        const luachunk::Value* entity = fc ? ag->get("EntityInstance") : nullptr;
         const auto set = [fc](const char* key) {
             const luachunk::Value* v = fc ? fc->get(key) : nullptr;
             return v && v->t == luachunk::Value::BOOL && v->b;
         };
-        return set("IsSpark") || set("IsSparkUnmetered");
+        return {set("IsSpark") || set("IsSparkUnmetered"), entity ? entity->str("ModelName") : ""};
     } catch (std::exception&) {
-        return false;
+        return {};
     }
 }
 
@@ -574,7 +575,7 @@ inline bool groupsMatches(const Request& r)
 inline Verdict groups(Request& r)
 {
     int over = 0, coins = 0;
-    int k = groups::groups30(std::string((const char*)r.data, r.n), r.out, &over, r.io.isSpark, &coins);
+    int k = groups::groups30(std::string((const char*)r.data, r.n), r.out, &over, r.io.coinDna, &coins);
     if (!k) return dispatch::kNext;
     std::string dropped = over ? ", " + std::to_string(over) + " spawns past the 4th dropped" : "";
     std::string paying = coins ? ", " + std::to_string(coins) + " coin pickups paying the zone's currency" : "";

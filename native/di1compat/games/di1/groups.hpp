@@ -8,9 +8,16 @@
 
 namespace di1::groups {
 
-// A package's groups with 3.0's flat spawn keys (FUN_01603b10); coins typed with isSpark (currency10). 0: unchanged.
+// A 1.0 DNA's FastCoin gadget: pays sparks or not, and EntityInstance.ModelName ("" for none).
+struct CoinDna {
+    bool spark = false;
+    std::string model;
+};
+using CoinDnaOf = std::function<CoinDna(const std::string& dnaFile)>;
+
+// A package's groups with 3.0's flat spawn keys (FUN_01603b10); coins fixed with coinDna (currency10). 0: unchanged.
 inline int groups30(const std::string& chunk, std::string& out, int* over = nullptr,
-                    const std::function<bool(const std::string& dnaFile)>& isSpark = nullptr, int* coins = nullptr);
+                    const CoinDnaOf& coinDna = nullptr, int* coins = nullptr);
 
 namespace detail {
 
@@ -29,13 +36,17 @@ inline Value str(const std::string& s)
     return v;
 }
 
-// Type 'Playset' pays the zone's currency (FUN_00ba1270 -> 0, FUN_00e08300), as 1.0 coins did; sparks keep 'Spark'.
-inline int coinPickups(Value& ents, const std::function<bool(const std::string&)>& isSpark, int* coins)
+// 3.0 draws pickups from '_32' batch models (FUN_00bd2d00): the DNA's. 'Playset' pays the zone currency (FUN_00ba1270).
+inline int coinPickups(Value& ents, const CoinDnaOf& coinDna, int* coins)
 {
     int n = 0;
     for (auto& [k, e] : *ents.tab) {
         const bool currency = e.t == Value::TAB && !_stricmp(e.str("RewardType").c_str(), "FastCurrency");
-        if (!currency || e.get("FastCurrency.Type") || isSpark(e.str("DnaFile"))) continue;
+        if (!currency || e.get("FastCurrency.Type")) continue;
+        const CoinDna dna = coinDna(e.str("DnaFile"));
+        Value* model = e.get("Model");
+        if (model && !dna.model.empty()) *model = str(dna.model);
+        if (dna.spark) continue;
         e.tab->push_back({str("FastCurrency.Type"), str("Playset")});
         ++n;
         if (coins) ++*coins;
@@ -66,8 +77,7 @@ inline void spawnKeys(Value& g, const Value& spawned, int* over)
 }  // namespace detail
 
 // 1.0 rows ExpendablesSpawned = {{ExpendableName, Min, Max, Chance}, ..}, which 3.0 ignores: crates gave no coins.
-inline int groups30(const std::string& chunk, std::string& out, int* over,
-                    const std::function<bool(const std::string& dnaFile)>& isSpark, int* coins)
+inline int groups30(const std::string& chunk, std::string& out, int* over, const CoinDnaOf& coinDna, int* coins)
 {
     using luachunk::Value;
     auto G = luachunk::eval(chunk);
@@ -75,7 +85,7 @@ inline int groups30(const std::string& chunk, std::string& out, int* over,
     if (pkg == G.end()) return 0;
     int n = 0;
     Value* ents = pkg->second.get("Expendables");
-    if (isSpark && ents && ents->t == Value::TAB) n += detail::coinPickups(*ents, isSpark, coins);
+    if (coinDna && ents && ents->t == Value::TAB) n += detail::coinPickups(*ents, coinDna, coins);
     Value* groups = pkg->second.get("Groups");
     if (groups && groups->t == Value::TAB)
         for (auto& [k, g] : *groups->tab) {
