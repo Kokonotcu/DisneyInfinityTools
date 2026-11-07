@@ -56,19 +56,6 @@ inline bool has10(const std::string& model)
     return s.model10[p] = ok;
 }
 
-// rewards10: whether 1.0 model's asset sits on a hidden node (groups::wholeModels); per entry, at package load.
-inline bool hiddenAsset10(const std::string& model, const std::string& asset)
-{
-    std::string b;
-    if (!vfs::read10s(text::norm(model.c_str()) + ".oct", b)) return false;
-    try {
-        oct::File f = oct::File::parse(b.data(), b.size());
-        return hiddenAsset(f, asset);
-    } catch (std::exception&) {   // a damaged model keeps its AssetName (E1)
-        return false;
-    }
-}
-
 // The .oct steps: the cfg's, the world render, the 3.0 install and the engine's surface table.
 inline OctSteps octSteps10()
 {
@@ -132,7 +119,6 @@ inline TranscodeIO io()
     t.groupReaders.dna = detail::coinDna10;
     t.groupReaders.coins = c.currency10;
     t.groupReaders.has10 = detail::has10;
-    t.groupReaders.hidden = detail::hiddenAsset10;
     if (c.debris10) t.debrisDef = [](const groups::Debris& d) { shutdown::addDebris(d.def, d.model, d.dna); };
     t.dataMapEntry = detail::dataMapEntry10;
     return t;

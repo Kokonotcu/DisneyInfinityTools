@@ -40,6 +40,7 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
     o.text = c.text10;
     o.banm = c.banm10;
     o.psdna = c.psdna30;
+    o.dnaChos = c.dnaChos10;
     o.vfx = c.vfx10;
     o.rewards = c.rewards10;
     o.sx = c.sx10;

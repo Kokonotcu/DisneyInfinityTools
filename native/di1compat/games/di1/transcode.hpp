@@ -25,6 +25,7 @@
 #include "aitables.hpp"
 #include "mer.hpp"
 #include "mission.hpp"
+#include "dnachos.hpp"
 #include "psdna.hpp"
 #include "rendermtb.hpp"
 #include "../../formats/bndl.hpp"
@@ -46,6 +47,7 @@ struct TranscodeOptions {
     bool text = false;        // text10
     bool banm = false;        // banm10
     bool psdna = false;       // psdna30
+    bool dnaChos = false;     // dnachos10
     bool vfx = false;         // vfx10
     bool rewards = false;     // rewards10
     bool sx = false;          // sx10
@@ -543,6 +545,17 @@ inline Verdict playsetDna(Request& r)
     return "psdna30";
 }
 
+inline bool dnaChosMatches(const Request& r) { return r.o.dnaChos && ends(r, ".dnax") && startsLua(r); }
+
+// A 1.0 DNA whose choreography effects name their scene as 1.0 did (dnachos::chos30); none: passed on.
+inline Verdict dnaChos(Request& r)
+{
+    const int n = dnachos::chos30(std::string((const char*)r.data, r.n), r.out);
+    if (!n) return dispatch::kNext;
+    r.note += "+chos(" + std::to_string(n) + " choreography steps) ";
+    return "dnachos";
+}
+
 inline bool particlesMatches(const Request& r) { return r.o.vfx && ends(r, ".particledata"); }
 
 // A particle package, trailer v12 -> v47 (3.0 rejects 1.0's); vfxchan10 re-lays channels for each material's shader.
@@ -592,9 +605,8 @@ inline Verdict groups(Request& r)
     std::string paying = c.coins ? ", " + std::to_string(c.coins) + " coin pickups paying the zone's currency" : "";
     std::string moved = c.models ? ", " + std::to_string(c.models) + " objects/ models named under Exploders/" : "";
     std::string debris = c.debris ? ", " + std::to_string(c.debris) + " _Debris10 entries (1.0 DebrisModel)" : "";
-    std::string whole = c.wholeModels ? ", " + std::to_string(c.wholeModels) + " whole models (hidden AssetName)" : "";
-    const int groups = k - c.coins - c.models - c.debris - c.wholeModels;
-    r.note += "+groups30(" + std::to_string(groups) + " groups" + dropped + paying + moved + debris + whole + ") ";
+    const int groups = k - c.coins - c.models - c.debris;
+    r.note += "+groups30(" + std::to_string(groups) + " groups" + dropped + paying + moved + debris + ") ";
     return "expgroups";
 }
 
@@ -664,6 +676,7 @@ inline constexpr Rule kRules[] = {
     {banmMatches, blend},
     {mtbMatches, materialBundle},
     {psDnaMatches, playsetDna},
+    {dnaChosMatches, dnaChos},
     {particlesMatches, particles},
     {meshMatches, mesh},
     {groupsMatches, groups},

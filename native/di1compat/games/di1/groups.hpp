@@ -1,6 +1,5 @@
 // rewards10: 1.0 expendable groups in the keys 3.0's group reader takes; currency10's coin pickups. Any thread.
 #pragma once
-#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -20,15 +19,12 @@ struct CoinDna {
 using CoinDnaOf = std::function<CoinDna(const std::string& dnaFile)>;
 // Whether a 1.0 model ('exploders/x') exists; null: every one does.
 using Has10 = std::function<bool(const std::string& model)>;
-// Whether a 1.0 model's asset of that name sits on a hidden node; null: none does.
-using HiddenAsset = std::function<bool(const std::string& model, const std::string& asset)>;
 
 // What a package's entries are checked against.
 struct Readers {
     CoinDnaOf dna;        // a 1.0 DNA's gadgets; null: no coin pickups typed, the default debris DNA
     bool coins = false;   // currency10: coin pickups typed through dna
     Has10 has10;          // null: every 1.0 model exists
-    HiddenAsset hidden;   // null: every AssetName is kept
 };
 
 // debris10: entry def explodes into model with dna (its '<def>_Debris10' entry preloads them).
@@ -38,7 +34,7 @@ struct Debris {
 
 // What groups30 changed: spawns past the 4th dropped, coin pickups typed, models moved, debris entries added.
 struct Counts {
-    int over = 0, coins = 0, models = 0, debris = 0, wholeModels = 0;
+    int over = 0, coins = 0, models = 0, debris = 0;
     std::vector<Debris> debrisDefs;
 };
 
@@ -95,26 +91,6 @@ inline int actorModelsToExploders(Value& ents)
         const bool objects = m && m->t == Value::STR && !_strnicmp(m->s.c_str(), kObjects, kObjectsLen);
         if (!objects) continue;
         *m = str(kExploders + m->s.substr(kObjectsLen));
-        ++n;
-    }
-    return n;
-}
-
-inline bool isAssetName(const std::pair<Value, Value>& f)
-{
-    return f.first.t == Value::STR && f.first.s == "AssetName";
-}
-
-// 3.0 entries name no AssetName and draw the whole model (FUN_0187b580); a hidden one is dropped. -> how many
-inline int wholeModels(Value& ents, const HiddenAsset& hidden)
-{
-    int n = 0;
-    for (auto& [k, e] : *ents.tab) {
-        if (e.t != Value::TAB) continue;
-        const std::string model = e.str("Model"), asset = e.str("AssetName");
-        if (model.empty() || asset.empty() || !hidden(model, asset)) continue;
-        auto& fields = *e.tab;
-        fields.erase(std::remove_if(fields.begin(), fields.end(), isAssetName), fields.end());
         ++n;
     }
     return n;
@@ -198,7 +174,6 @@ inline int groups30(const std::string& chunk, std::string& out, Counts* counts, 
     if (table) c.models = detail::actorModelsToExploders(*ents);
     // after the move: a debris model keeps its 1.0 path, the one the zone loads
     if (table) c.debris = detail::debrisEntries(*ents, r, c);
-    if (table && r.hidden) c.wholeModels = detail::wholeModels(*ents, r.hidden);
     if (r.coins && r.dna && table) n += detail::coinPickups(*ents, r.dna, &c.coins);
     Value* groups = pkg->second.get("Groups");
     if (groups && groups->t == Value::TAB)
@@ -208,7 +183,7 @@ inline int groups30(const std::string& chunk, std::string& out, Counts* counts, 
             detail::spawnKeys(g, *found, &c.over);
             ++n;
         }
-    n += c.models + c.debris + c.wholeModels;
+    n += c.models + c.debris;
     if (counts) *counts = std::move(c);
     if (!n) return 0;
     out.clear();
