@@ -25,13 +25,16 @@ struct Changed {
 
 // A gadget field 3.0 reads only from a sub-table (every shipped 3.0 DNA nests it; dnachosall.py).
 struct Nested {
-    const char* gadget;
-    const char* sub;   // Chos or DNAs
+    const char* gadget;   // nullptr: AgentGadgets itself
+    const char* sub;      // Chos, DNAs, EntityInstance
     const char* key;
 };
 
 // The pairs 1.0 DNAs write flat. Parsers checked: 0x1517bf0 0x151a830 0x151c000 0xd4c4a0 0xd5ddf0 0x104ebe0 0xc1ca70.
+
+// FocusOffset: 1.0 0x11548c0 reads AgentGadgets', 3.0 0x1886600 AgentGadgets.EntityInstance's (3865 DNAs).
 inline constexpr Nested kNested[] = {
+    {nullptr, "EntityInstance", "FocusOffset"},
     {"BikeBeacon", "Chos", "Cho"},
     {"BombFlight", "Chos", "m_ExplosionChoName"},
     {"BombFlight", "Chos", "m_MuzzleFlashChoName"},
@@ -102,20 +105,20 @@ inline int effectTo30(Value& fx)
     return n;
 }
 
-// DNA.AgentGadgets.<name> as a table, or null.
+// DNA.AgentGadgets.<name> (name null: AgentGadgets) as a table, or null.
 inline Value* gadget(std::map<std::string, Value>& g, const char* name)
 {
     auto dna = g.find("DNA");
     Value* gadgets = dna != g.end() ? dna->second.get("AgentGadgets") : nullptr;
-    Value* v = gadgets ? gadgets->get(name) : nullptr;
+    Value* v = gadgets && name ? gadgets->get(name) : gadgets;
     return v && v->t == Value::TAB ? v : nullptr;
 }
 
-// t's string field n.key moves into t's sub-table n.sub, made when missing. -> 1 when moved
+// t's field n.key (a string, or FocusOffset's vector) moves into t's sub-table n.sub, made when missing. -> 1 moved
 inline int nest(Value& t, const Nested& n)
 {
     const Value* v = t.get(n.key);
-    if (!v || v->t != Value::STR) return 0;
+    if (!v || (v->t != Value::STR && v->t != Value::TAB)) return 0;
     const Value moved = *v;
     if (!t.get(n.sub)) t.tab->push_back({str(n.sub), table()});
     Value* sub = t.get(n.sub);
