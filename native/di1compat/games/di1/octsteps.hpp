@@ -241,8 +241,7 @@ inline int anchorLinks(oct::File& f, long ap, int anchor)
     return n;
 }
 
-// 3.0 draws the subtree of the entry's AssetName (FUN_0187b580). 1.0's rescue props name a hidden stand-in and
-// draw their pieces beside it: the stand-in becomes the Anchor the pieces hang under. -> root children moved
+// 3.0 draws the AssetName's subtree (FUN_0187b580); rescue props name a hidden stand-in. -> pieces hung under it
 inline int standInAnchor(const std::string& path, oct::File& f)
 {
     const long sp = f.pool("SceneTreeNodePool"), ap = f.pool("AssociationPool");
