@@ -7,6 +7,7 @@
 #include "../../core/hooks.hpp"
 #include "../../engine/slangvm.hpp"
 #include "config.hpp"
+#include "sxcombat.hpp"
 #include "sxkeys.hpp"
 
 namespace di1::sxnatives {
@@ -482,6 +483,8 @@ inline bool install(const Config& c)
     for (Native& n : g_natives) vm.natives.push_back(&n);
     if (c.sxPorts10)
         for (Native& n : g_ports) vm.natives.push_back(&n);
+    if (c.sxPorts10 && sxcombat::install())
+        for (Native& n : sxcombat::g_combatPorts) vm.natives.push_back(&n);
     if (c.sxPorts10 && c.sxBeh10) vm.onCallByName = detail::behaviorTypeTo10;
     return engine::slangvm::install(vm);
 }
