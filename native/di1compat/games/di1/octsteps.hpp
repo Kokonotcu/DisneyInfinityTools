@@ -166,8 +166,7 @@ inline std::map<int, std::vector<int>> lodChildren(oct::File& f, const std::vect
     return kids;
 }
 
-// ponytail: far buildings draw at full detail; switch levels instead once 3.0's cell path honours LodGroup.
-// 3.0 draws every LodGroup child its cells link (no 3.0 world has one); 1.0 drew one. -> lower levels hidden
+// 3.0 draws every LodGroup child its cells link; 1.0 drew one. -> lower levels hidden
 inline int lodLevels30(oct::File& f)
 {
     const long sp = f.pool("SceneTreeNodePool");
@@ -175,8 +174,10 @@ inline int lodLevels30(oct::File& f)
     std::vector<size_t> nodes;
     for (size_t i = sp + 1, end = f.blockEnd(sp); i < end; i = f.blockEnd(i)) nodes.push_back(i);
     int hidden = 0;
+    // ponytail: far buildings draw at full detail; switch levels if 3.0's cell path honours LodGroup
+    std::map<int, std::vector<int>> groups = lodChildren(f, nodes);
     // the first child is the nearest level (Distances[0], 120 of 120 in_city groups: building, then its _Lod)
-    for (auto& [group, kids] : lodChildren(f, nodes)) {
+    for (auto& [group, kids] : groups) {
         for (size_t c = 1; c < kids.size(); ++c) {
             oct::Rec* visible = fieldOf(f, nodes[kids[c]], "Visible");
             if (!visible || !f.int0(*visible)) continue;
