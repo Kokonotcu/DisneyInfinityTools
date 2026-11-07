@@ -48,6 +48,7 @@ struct TranscodeOptions {
     bool banm = false;        // banm10
     bool psdna = false;       // psdna30
     bool dnaChos = false;     // dnachos10
+    bool dnaExploder = false; // dnaexploder10
     bool vfx = false;         // vfx10
     bool rewards = false;     // rewards10
     bool sx = false;          // sx10
@@ -545,14 +546,19 @@ inline Verdict playsetDna(Request& r)
     return "psdna30";
 }
 
-inline bool dnaChosMatches(const Request& r) { return r.o.dnaChos && ends(r, ".dnax") && startsLua(r); }
+inline bool dnaChosMatches(const Request& r)
+{
+    return (r.o.dnaChos || r.o.dnaExploder) && ends(r, ".dnax") && startsLua(r);
+}
 
-// A 1.0 DNA whose choreography effects name their scene as 1.0 did (dnachos::chos30); none: passed on.
+// A 1.0 DNA with choreography effects or an exploder in 1.0's form (dnachos::dna30); none: passed on.
 inline Verdict dnaChos(Request& r)
 {
-    const int n = dnachos::chos30(std::string((const char*)r.data, r.n), r.out);
-    if (!n) return dispatch::kNext;
-    r.note += "+chos(" + std::to_string(n) + " choreography steps) ";
+    const dnachos::Steps s{r.o.dnaChos, r.o.dnaExploder};
+    const dnachos::Changed c = dnachos::dna30(std::string((const char*)r.data, r.n), s, r.out);
+    if (!c.chos && !c.exploder) return dispatch::kNext;
+    if (c.chos) r.note += "+chos(" + std::to_string(c.chos) + " choreography steps) ";
+    if (c.exploder) r.note += "+exploder(DNAs) ";
     return "dnachos";
 }
 
