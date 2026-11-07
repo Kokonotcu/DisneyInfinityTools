@@ -41,6 +41,9 @@ struct OctSteps {
     octx::Options transforms;   // arena slack and variant groups (CO-01): the plugin's are octStepsOf's
 };
 
+// Whether model f's Asset named asset sits on a hidden Geometry node (1.0 rescue props' stand-ins).
+inline bool hiddenAsset(oct::File& f, const std::string& asset);
+
 namespace detail {
 
 // A step's note "<head><n><tail>", appended when the step changed something (n != 0). Returns n != 0.
@@ -155,113 +158,34 @@ inline std::vector<size_t> sceneNodes(const oct::File& f, long sp)
     return at;
 }
 
-// The scene node the Asset association named after the model points at; -1 when there is none.
-inline int modelAssetNode(oct::File& f, long ap, const std::string& stem)
+// The scene node of the Asset association named name; -1 when there is none.
+inline int modelAssetNode(oct::File& f, long ap, const std::string& name)
 {
     for (size_t i = ap + 1, end = f.blockEnd(ap); i < end; i = f.blockEnd(i)) {
-        const oct::Rec* name = fieldOf(f, i, "NodeName");
+        const oct::Rec* named = fieldOf(f, i, "NodeName");
         const oct::Rec* type = fieldOf(f, i, "Type");
         const oct::Rec* ref = fieldOf(f, i, "SceneTreeNodeRef");
         const bool asset = type && ref && f.name0(*type) == "Asset";
-        if (asset && name && !_stricmp(f.name0(*name).c_str(), stem.c_str())) return f.int0(*ref);
+        if (asset && named && !_stricmp(f.name0(*named).c_str(), name.c_str())) return f.int0(*ref);
     }
     return -1;
 }
 
-constexpr size_t kMatrixFloats = 16;
-constexpr size_t kTranslation = 12;   // LocalToParentMatrix row 3: x, y, z
-constexpr float kIdentity3[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+}  // namespace detail
 
-// Node i's matrix translation when its rotation and scale are the identity (rescue stand-ins); false otherwise.
-inline bool pureTranslation(oct::File& f, size_t i, float (&t)[3])
-{
-    float m[kMatrixFloats];
-    if (!floatsOf(fieldOf(f, i, "LocalToParentMatrix"), kMatrixFloats, m)) return false;
-    if (memcmp(m, kIdentity3, sizeof(kIdentity3)) != 0) return false;
-    memcpy(t, m + kTranslation, sizeof(t));
-    return true;
-}
-
-// The root's other children hang under node `anchor` at translation t. -> how many moved
-inline int hangUnder(oct::File& f, const std::vector<size_t>& nodes, int anchor, const float (&t)[3])
-{
-    int moved = 0;
-    for (size_t k = 1; k < nodes.size(); ++k) {
-        oct::Rec* parent = fieldOf(f, nodes[k], "ParentNodeReferences");
-        oct::Rec* matrix = fieldOf(f, nodes[k], "LocalToParentMatrix");
-        float m[kMatrixFloats];
-        const bool rootChild = parent && f.ints(*parent) == std::vector<int32_t>{0};
-        if ((int)k == anchor || !rootChild || !floatsOf(matrix, kMatrixFloats, m)) continue;
-        for (int c = 0; c < 3; ++c) m[kTranslation + c] -= t[c];
-        memcpy(&matrix->pay[1], m, sizeof(m));   // the float list: u8 count, then the floats (floatsOf)
-        f.setInts(*parent, {anchor});
-        ++moved;
-    }
-    return moved;
-}
-
-// The fields of 3.0's Anchor, a Transform scene node (exploders/in/inc_electricbox node 1).
-inline constexpr const char* kTransformFields[] = {"NodeName", "Uuid", "DisplayLayer", "Type",
-                                                  "ParentNodeReferences", "LocalToParentMatrix"};
-
-inline bool transformField(const std::string& n)
-{
-    for (const char* k : kTransformFields)
-        if (n == k) return true;
-    return false;
-}
-
-// Node i in 3.0's Anchor form (Transform: name, uuid, layer, parent, matrix); its mesh and visibility records go.
-inline void toTransformNode(oct::File& f, size_t i)
-{
-    oct::Rec* type = fieldOf(f, i, "Type");
-    *type = f.nameScalar(type->level, type->name, "Transform");
-    std::vector<oct::Rec> recs;
-    recs.reserve(f.recs.size());
-    const size_t be = f.blockEnd(i);
-    // a dropped field's whole block goes with it (Primitives)
-    for (size_t j = 0; j < f.recs.size(); j = (j > i && j < be) ? f.blockEnd(j) : j + 1) {
-        const bool inNode = j > i && j < be;
-        if (!inNode || transformField(f.name(f.recs[j]))) recs.push_back(std::move(f.recs[j]));
-    }
-    f.recs = std::move(recs);
-}
-
-// The model's associations of node `anchor` typed Geometry become Transform, as 3.0's Anchor has. -> how many
-inline int anchorLinks(oct::File& f, long ap, int anchor)
-{
-    int n = 0;
-    for (size_t i = ap + 1, end = f.blockEnd(ap); i < end; i = f.blockEnd(i)) {
-        oct::Rec* type = fieldOf(f, i, "Type");
-        const oct::Rec* ref = fieldOf(f, i, "SceneTreeNodeRef");
-        if (!type || !ref || f.int0(*ref) != anchor || f.name0(*type) != "Geometry") continue;
-        *type = f.nameScalar(type->level, type->name, "Transform");
-        ++n;
-    }
-    return n;
-}
-
-// 3.0 draws the AssetName's subtree (FUN_0187b580); rescue props name a hidden stand-in. -> pieces hung under it
-inline int standInAnchor(const std::string& path, oct::File& f)
+inline bool hiddenAsset(oct::File& f, const std::string& asset)
 {
     const long sp = f.pool("SceneTreeNodePool"), ap = f.pool("AssociationPool");
-    const size_t slash = path.rfind('/'), dot = path.rfind('.');
-    const bool stemmed = slash != std::string::npos && dot != std::string::npos && dot > slash + 1;
-    if (path.rfind("exploders/", 0) != 0 || sp < 0 || ap < 0 || !stemmed) return 0;
-    const std::vector<size_t> nodes = sceneNodes(f, sp);
-    const int anchor = modelAssetNode(f, ap, path.substr(slash + 1, dot - slash - 1));
-    if (anchor <= 0 || anchor >= (int)nodes.size()) return 0;
-    const oct::Rec* type = fieldOf(f, nodes[anchor], "Type");
-    const oct::Rec* visible = fieldOf(f, nodes[anchor], "Visible");
-    float t[3];
-    const bool standIn = type && visible && f.name0(*type) == "Geometry" && f.int0(*visible) == 0;
-    if (!standIn || !pureTranslation(f, nodes[anchor], t)) return 0;
-    const int moved = hangUnder(f, nodes, anchor, t);
-    if (!moved) return 0;
-    anchorLinks(f, ap, anchor);
-    toTransformNode(f, nodes[anchor]);
-    return moved;
+    if (sp < 0 || ap < 0) return false;
+    const std::vector<size_t> nodes = detail::sceneNodes(f, sp);
+    const int node = detail::modelAssetNode(f, ap, asset);
+    if (node <= 0 || node >= (int)nodes.size()) return false;
+    const oct::Rec* type = detail::fieldOf(f, nodes[node], "Type");
+    const oct::Rec* visible = detail::fieldOf(f, nodes[node], "Visible");
+    return type && visible && f.name0(*type) == "Geometry" && f.int0(*visible) == 0;
 }
+
+namespace detail {
 
 // Whether a SubNetwork of f is named n.
 inline bool hasGraphNamed(const oct::File& f, const std::string& n)
@@ -320,7 +244,6 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
     changed |= detail::navSteps(f, o, note);
     changed |= detail::noted(note, detail::exploderGraphName(path, f), "+graphname(", " names) ");
     changed |= detail::noted(note, detail::rootParents(path, f), "+parents(", " nodes) ");
-    changed |= detail::noted(note, detail::standInAnchor(path, f), "+anchor(", " pieces) ");
     if (octx::addAssetPool(f)) {
         note += "+AssetPool ";
         changed = true;

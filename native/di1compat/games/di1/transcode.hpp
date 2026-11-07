@@ -592,8 +592,9 @@ inline Verdict groups(Request& r)
     std::string paying = c.coins ? ", " + std::to_string(c.coins) + " coin pickups paying the zone's currency" : "";
     std::string moved = c.models ? ", " + std::to_string(c.models) + " objects/ models named under Exploders/" : "";
     std::string debris = c.debris ? ", " + std::to_string(c.debris) + " _Debris10 entries (1.0 DebrisModel)" : "";
-    const int groups = k - c.coins - c.models - c.debris;
-    r.note += "+groups30(" + std::to_string(groups) + " groups" + dropped + paying + moved + debris + ") ";
+    std::string whole = c.wholeModels ? ", " + std::to_string(c.wholeModels) + " whole models (hidden AssetName)" : "";
+    const int groups = k - c.coins - c.models - c.debris - c.wholeModels;
+    r.note += "+groups30(" + std::to_string(groups) + " groups" + dropped + paying + moved + debris + whole + ") ";
     return "expgroups";
 }
 

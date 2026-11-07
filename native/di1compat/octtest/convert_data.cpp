@@ -54,6 +54,20 @@ di1::groups::CoinDna coinDnaIn(const char* dnaRoot, const std::string& d)
     return di1::parseCoinDna(slurp(fs::path(dnaRoot) / p));
 }
 
+// Whether the extract's 1.0 model (exploders/<xx>/<name>/<name>.oct) has asset on a hidden node.
+bool hiddenAssetIn(const char* assets, const std::string& model, const std::string& asset)
+{
+    const std::string name = fs::path(text::norm(model.c_str())).filename().string();
+    for (const auto& d : fs::directory_iterator(fs::path(assets) / "exploders")) {
+        const fs::path f = d.path() / name / (name + ".oct");
+        if (!fs::exists(f)) continue;
+        const std::string b = slurp(f);
+        oct::File o = oct::File::parse(b.data(), b.size());
+        return di1::hiddenAsset(o, asset);
+    }
+    return false;
+}
+
 // One line of table sizes: each section of c and its entry count.
 template <size_t N>
 void printSections(const chd::V* c, const char* const (&keys)[N])
@@ -147,9 +161,14 @@ bool dataMapOf(const char* path, datamap::DataMap& m) { return datamap::parse(sl
 // di1::groups::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A throw fails it (OT-04).
 int convertGroups30(const Args& a)
 {
-    int groups = 0, over = 0, files = 0, coins = 0, models = 0, debris = 0, failed = 0;
+    int groups = 0, over = 0, files = 0, coins = 0, models = 0, debris = 0, whole = 0, failed = 0;
     const char* dnaRoot = env("GROUPS30_DNA");
+    const char* modelRoot = env("GROUPS30_MODELS");
     di1::groups::Readers readers;
+    if (modelRoot)
+        readers.hidden = [modelRoot](const std::string& m, const std::string& n) {
+            return hiddenAssetIn(modelRoot, m, n);
+        };
     if (dnaRoot) {
         readers.dna = [dnaRoot](const std::string& d) { return coinDnaIn(dnaRoot, d); };
         readers.coins = true;
@@ -166,7 +185,8 @@ int convertGroups30(const Args& a)
         }
         if (!k) continue;
         ++files;
-        groups += k - c.coins - c.models - c.debris;
+        groups += k - c.coins - c.models - c.debris - c.wholeModels;
+        whole += c.wholeModels;
         over += c.over;
         coins += c.coins;
         models += c.models;
@@ -174,8 +194,8 @@ int convertGroups30(const Args& a)
         writeFile(fs::path(a.argv[2]) / fs::path(a.argv[i]).filename(), out);
     }
     printf("%d packages served, %d groups given 3.0 keys, %d spawns past the 4th, %d coin pickups typed 'Playset', "
-           "%d objects/ models named under Exploders/, %d _Debris10 entries\n", files, groups, over, coins, models,
-           debris);
+           "%d objects/ models named under Exploders/, %d _Debris10 entries, %d whole models\n", files, groups, over,
+           coins, models, debris, whole);
     return failed ? 1 : 0;
 }
 
