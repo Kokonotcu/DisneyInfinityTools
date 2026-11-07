@@ -116,6 +116,7 @@ struct Config {
     bool spawnTrace10 = false;       // probe: lots, SpawnBuilding firing, lot spawns, player start lookups (log only)
     bool capsuleTrace10 = false;     // probe: 1.0 expendable spawns, branches, completions (shutdown.hpp, log only)
     bool shutdown10 = true;          // a 1.0 expendable's actor stays drawn while shut down (shutdown; needs popin10)
+    bool debris10 = true;            // a 1.0 breakable explodes into its DebrisModel (shutdown; needs popin10)
     bool rootGraph10 = true;         // 3.0-shipped 1.0-era models: Root takes the lone graph (edits30, octx)
     bool pause10 = true;             // ui: a 1.0 screen's pause is released at its exit unless handed on (selectmenu)
     bool uiTrace10 = false;          // diagnostic: pauses on/off, screens' onEnter/onExit, focus changes (trace/pause)
@@ -229,6 +230,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"spawntrace10", core::ConfigKind::Flag, offsetof(Config, spawnTrace10)},
     {"capsuletrace10", core::ConfigKind::Flag, offsetof(Config, capsuleTrace10)},
     {"shutdown10", core::ConfigKind::Flag, offsetof(Config, shutdown10)},
+    {"debris10", core::ConfigKind::Flag, offsetof(Config, debris10)},
     {"rootgraph10", core::ConfigKind::Flag, offsetof(Config, rootGraph10)},
     {"pause10", core::ConfigKind::Flag, offsetof(Config, pause10)},
     {"uitrace10", core::ConfigKind::Flag, offsetof(Config, uiTrace10)},
@@ -245,8 +247,8 @@ inline void logConfig(const Config& c)
                c.clip10Motions, c.clip10Ids, c.choAlias10, c.banm10, c.variant10, c.camWorld10, c.teardownTrace,
                c.breakTrace);
     core::logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d spawntrace10=%d shutdown10=%d "
-               "capsuletrace10=%d", c.playsetMenu10, c.zones10, c.realmFile10, c.building10, c.spawnTrace10,
-               c.shutdown10, c.capsuleTrace10);
+               "debris10=%d capsuletrace10=%d", c.playsetMenu10, c.zones10, c.realmFile10, c.building10,
+               c.spawnTrace10, c.shutdown10, c.debris10, c.capsuleTrace10);
     core::logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", c.gate10, c.toggleType10, c.beacon10,
                c.lockTrace10);
 }

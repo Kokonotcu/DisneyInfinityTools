@@ -171,6 +171,10 @@ inline std::vector<Playset10> playsets10(std::string& t, const luachunk::Value& 
     for (auto& ps : out)
         if (!ps.added) listed.push_back(ps.name);
     zonelist::insert(t, *z, adds, zonelist::orderedAfter(*z, listed));
+    // PlaysetSelectMenu lists a playset's menu zones as its New Game buttons (UI_GetListPlayerIndx 'Levels')
+    for (auto& ps : out)
+        zonelist::addFields(t, "Zones", ps.start, {{"_ShowInMenu_", "true"}, {"availableInConsumerBuild", "true"},
+                                                   {"availableInShippingBuild", "true"}, {"listOrder", "1"}});
     return out;
 }
 

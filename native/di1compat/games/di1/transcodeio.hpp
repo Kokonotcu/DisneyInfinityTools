@@ -16,6 +16,7 @@
 #include "options.hpp"
 #include "render10.hpp"
 #include "session.hpp"
+#include "shutdown.hpp"
 #include "tables.hpp"
 #include "transcode.hpp"
 #include "vfs.hpp"
@@ -35,9 +36,25 @@ struct State {
     Config cfg;                          // set once in install()
     std::mutex coinMx;                             // guards coin; not held across the read
     std::map<std::string, groups::CoinDna> coin;   // currency10: DNA path -> its FastCoin; never cleared
+    std::map<std::string, bool> model10;   // rewards10: 1.0 model -> its .oct exists; guarded by coinMx
     chan::Roles roles;                   // vfxchan10: shader roles, guarded by its own mx; never cleared
 };
 inline State g_state;
+
+// debris10: whether 1.0 has a model ('exploders/x'); memoised. 1.0 data names 33 debris models it lacks.
+inline bool has10(const std::string& model)
+{
+    State& s = g_state;
+    const std::string p = text::norm(model.c_str()) + ".oct";
+    {
+        std::lock_guard<std::mutex> lock(s.coinMx);
+        if (auto it = s.model10.find(p); it != s.model10.end()) return it->second;
+    }
+    std::string b;
+    const bool ok = vfs::read10s(p, b);
+    std::lock_guard<std::mutex> lock(s.coinMx);
+    return s.model10[p] = ok;
+}
 
 // The .oct steps: the cfg's, the world render, the 3.0 install and the engine's surface table.
 inline OctSteps octSteps10()
@@ -50,7 +67,7 @@ inline OctSteps octSteps10()
     return o;
 }
 
-// currency10: a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path) as its FastCoin. Memoised.
+// A 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path): its FastCoin and debris DNA. Memoised.
 inline groups::CoinDna coinDna10(const std::string& dnaFile)
 {
     State& s = g_state;
@@ -99,7 +116,10 @@ inline TranscodeIO io()
         t.particleShaders = render10::particleShaders;
         t.roles = &detail::g_state.roles;
     }
-    if (c.currency10) t.coinDna = detail::coinDna10;
+    t.groupReaders.dna = detail::coinDna10;
+    t.groupReaders.coins = c.currency10;
+    t.groupReaders.has10 = detail::has10;
+    if (c.debris10) t.debrisDef = [](const groups::Debris& d) { shutdown::addDebris(d.def, d.model, d.dna); };
     t.dataMapEntry = detail::dataMapEntry10;
     return t;
 }

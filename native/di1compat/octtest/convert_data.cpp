@@ -147,30 +147,35 @@ bool dataMapOf(const char* path, datamap::DataMap& m) { return datamap::parse(sl
 // di1::groups::groups30 over 1.0 packages: their groups with 3.0 keys, into <out>. A throw fails it (OT-04).
 int convertGroups30(const Args& a)
 {
-    int groups = 0, over = 0, files = 0, coins = 0, models = 0, failed = 0;
+    int groups = 0, over = 0, files = 0, coins = 0, models = 0, debris = 0, failed = 0;
     const char* dnaRoot = env("GROUPS30_DNA");
-    di1::groups::CoinDnaOf coinDna;
-    if (dnaRoot) coinDna = [dnaRoot](const std::string& d) { return coinDnaIn(dnaRoot, d); };
+    di1::groups::Readers readers;
+    if (dnaRoot) {
+        readers.dna = [dnaRoot](const std::string& d) { return coinDnaIn(dnaRoot, d); };
+        readers.coins = true;
+    }
     for (int i = 3; i < a.argc; ++i) {
         std::string out;
         int k = 0;
         di1::groups::Counts c;
         try {
-            k = di1::groups::groups30(slurp(a.argv[i]), out, &c, coinDna);
+            k = di1::groups::groups30(slurp(a.argv[i]), out, &c, readers);
         } catch (std::exception& e) {
             ++failed;
             printf("%s: %s\n", a.argv[i], e.what());
         }
         if (!k) continue;
         ++files;
-        groups += k - c.coins - c.models;
+        groups += k - c.coins - c.models - c.debris;
         over += c.over;
         coins += c.coins;
         models += c.models;
+        debris += c.debris;
         writeFile(fs::path(a.argv[2]) / fs::path(a.argv[i]).filename(), out);
     }
     printf("%d packages served, %d groups given 3.0 keys, %d spawns past the 4th, %d coin pickups typed 'Playset', "
-           "%d objects/ models named under Exploders/\n", files, groups, over, coins, models);
+           "%d objects/ models named under Exploders/, %d _Debris10 entries\n", files, groups, over, coins, models,
+           debris);
     return failed ? 1 : 0;
 }
 

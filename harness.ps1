@@ -2,6 +2,7 @@
 #   powershell -File harness.ps1 [-Zone OUT_Intro2] [-Sku 1000206] [-Probe a.lua,b.lua] [-Keep] [-Attach]
 #                                [-MenuProbe m.lua] [-MenuOnly]   (probes in the main menu; MenuOnly stops there)
 #                                [-Out <dir>]   screenshots (default: $env:DI_HARNESS_OUT, else harness-shots\ here)
+#                                [-Continue <SaveGameKey>]   load that playset's save instead of a new game
 # Needs CrabeLoader 1.1.0 (dinput8.dll + CrabeLoader.asi next to the exe), built from tag v1.1.0 with
 # crabe\crabeloader-no-guards.patch (engine guards off): it runs
 # <game>\crabe_remote_cmd.txt in the game Lua state and logs the result to loader.log as '= ...' / '! ...'.
@@ -19,7 +20,7 @@
 param([string]$Zone = 'OUT_Intro2', [int]$Sku = 1000206, [string[]]$Probe = @(), [string[]]$MenuProbe = @(), [switch]$MenuOnly,
       [switch]$Keep, [switch]$Attach, [int]$BootTimeout = 300, [int]$LoadTimeout = 180, [int]$Settle = 3, [int]$AfterProbe = 0,
       [string]$Game = 'D:\SteamLibrary\steamapps\common\Disney Infinity 3.0 Gold Edition',
-      [string]$Out = '')
+      [string]$Out = '', [string]$Continue = '')
 $ErrorActionPreference = 'Stop'
 # Screenshots stay off %TEMP%: they filled the system drive there
 if (-not $Out) { $Out = if ($env:DI_HARNESS_OUT) { $env:DI_HARNESS_OUT } else { Join-Path $PSScriptRoot 'harness-shots' } }
@@ -103,6 +104,10 @@ $OPENVR = "Crabe.native('UI_LaunchLevel', 'harness')('$Zone', 'world', true, tru
 $VRUP = 'for k in pairs(_G) do if type(k) == "string" and k:match("^VirtualReaderPC_Loadout%d+$") then return "vr " .. k end end return "not yet"'
 $SETSKU = "VirtualReaderPC_SetCurrentCharacter($Sku); VirtualReaderPC_ActivateChanges(0, true); return 'sku ' .. tostring(VirtualReader_GetCurrentAvatarSku())"
 $LAUNCH = "Crabe.native('UI_LaunchLevel', 'harness')('$Zone', 'world', true, true, false, true); return 'launched'"
+if ($Continue) {   # the playset's save, as PlaysetSelectMenu's Load/Continue does (no new game, no overwrite)
+    $OPENVR = "Crabe.native('UI_ContinuePlayset', 'harness')('$Continue', ''); return 'vr'"
+    $LAUNCH = "Crabe.native('UI_ContinuePlayset', 'harness')('$Continue', '', true); return 'launched'"
+}
 $POS = 'local h = Game.GetAvatarHandle(); if not h or h == 0 then return "noavatar" end; local x, y, z = Game.ActorPosition(h); return string.format("avatar %s | %s | %.2f,%.2f,%.2f", tostring(Game.CurrentWorld()), tostring(Game.CurrentZone()), x, y, z)'
 
 Remove-Item $cmd -ErrorAction SilentlyContinue

@@ -337,7 +337,9 @@ int convertMenu(const Args& a)
         ok = !in.empty();
     }
     if (!ok) return 1;
-    std::string out = di1::ui::playsetMenu10(in, z.list);
+    const std::string name = a.argv[a.argc > 6 ? 6 : 5];
+    const bool select = text::endsWith(text::lower(name).c_str(), "playsetselectmenu.lua");
+    std::string out = select ? di1::ui::playsetSelect10(in, z.list) : di1::ui::playsetMenu10(in, z.list);
     printf("%zu B 3.0 chunk -> %zu B Lua\n", in.size(), out.size());
     writeFile(a.argv[2], out);
     return 0;

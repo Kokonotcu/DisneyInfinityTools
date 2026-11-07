@@ -1,6 +1,8 @@
 // The 1.0 .oct steps and their order (M7, M8); engine-bound steps are function objects (M2). Any thread.
 #pragma once
+#include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -137,6 +139,47 @@ inline int rootParents(const std::string& path, oct::File& f)
     return (int)at.size();
 }
 
+// Each scene node's Visible, in node order (-1 when it has none).
+inline std::vector<int> nodeVisibility(const oct::File& f, long sp)
+{
+    std::vector<int> vis;
+    for (size_t i = sp + 1, end = f.blockEnd(sp); i < end; i = f.blockEnd(i)) {
+        int v = -1;
+        for (size_t j = i + 1, be = f.blockEnd(i); j < be; ++j)
+            if (f.name(f.recs[j]) == "Visible") v = f.int0(f.recs[j]);
+        vis.push_back(v);
+    }
+    return vis;
+}
+
+// 3.0 instances the model-named asset only (FUN_0187b580); rescue props hide it, pieces draw them. -> 1: moved to Scene
+inline int hiddenAssetRoot(const std::string& path, oct::File& f)
+{
+    const long sp = f.pool("SceneTreeNodePool"), ap = f.pool("AssociationPool");
+    const size_t slash = path.rfind('/'), dot = path.rfind('.');
+    const bool stemmed = slash != std::string::npos && dot != std::string::npos && dot > slash + 1;
+    if (path.rfind("exploders/", 0) != 0 || sp < 0 || ap < 0 || !stemmed) return 0;
+    const std::string stem = path.substr(slash + 1, dot - slash - 1);
+    const std::vector<int> vis = nodeVisibility(f, sp);
+    if (std::find(vis.begin(), vis.end(), 1) == vis.end()) return 0;
+    for (size_t i = ap + 1, end = f.blockEnd(ap); i < end; i = f.blockEnd(i)) {
+        std::string name, type;
+        oct::Rec* ref = nullptr;
+        for (size_t j = i + 1, be = f.blockEnd(i); j < be; ++j) {
+            const std::string& n = f.name(f.recs[j]);
+            if (n == "NodeName") name = f.name0(f.recs[j]);
+            if (n == "Type") type = f.name0(f.recs[j]);
+            if (n == "SceneTreeNodeRef") ref = &f.recs[j];
+        }
+        if (type != "Asset" || !ref || _stricmp(name.c_str(), stem.c_str())) continue;
+        const int node = f.int0(*ref);
+        if (node <= 0 || node >= (int)vis.size() || vis[node] != 0) return 0;
+        f.setInt(*ref, 0);
+        return 1;
+    }
+    return 0;
+}
+
 // Whether a SubNetwork of f is named n.
 inline bool hasGraphNamed(const oct::File& f, const std::string& n)
 {
@@ -194,6 +237,7 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
     changed |= detail::navSteps(f, o, note);
     changed |= detail::noted(note, detail::exploderGraphName(path, f), "+graphname(", " names) ");
     changed |= detail::noted(note, detail::rootParents(path, f), "+parents(", " nodes) ");
+    changed |= detail::noted(note, detail::hiddenAssetRoot(path, f), "+assetroot(", ") ");
     if (octx::addAssetPool(f)) {
         note += "+AssetPool ";
         changed = true;

@@ -33,7 +33,7 @@ namespace di1::edits30 {
 inline bool vtxfStage(openstage::Open& o, int*& out);
 // tips10: the file named Tips.lua only (FUN_00b70da0's literal), not every *tips.lua. Consumes r.
 inline bool tipsStage(openstage::Open& o, int*& out);
-// playsetmenu10: the Play Sets list gets the registered 1.0 playsets. Consumes r; answers the menu or a fresh open.
+// playsetmenu10: the Play Sets list and PlaysetSelectMenu get the 1.0 playsets. Consumes r; answers or reopens.
 inline bool playsetMenuStage(openstage::Open& o, int*& out);
 // currency10: the player HUD script rests on and counts a 1.0 zone's currency. Consumes r; answers text or reopens.
 inline bool hudCurrencyStage(openstage::Open& o, int*& out);
@@ -170,14 +170,17 @@ inline bool tipsStage(openstage::Open& o, int*& out)
 inline bool playsetMenuStage(openstage::Open& o, int*& out)
 {
     if (!o.edits() || !o.cfg->playsetMenu10) return false;
-    const bool menu = text::endsWith(o.p, "playsetlistwin32.lua");
-    if (!menu || text::norm(o.p) != "presentation/playsetlistwin32.lua") return false;
+    const bool list = text::endsWith(o.p, "playsetlistwin32.lua");
+    const bool select = text::endsWith(o.p, "playsetselectmenu.lua");
+    if (!list && !select) return false;
+    const std::string np = text::norm(o.p);
+    if (np != "presentation/playsetlistwin32.lua" && np != "presentation/playsetselectmenu.lua") return false;
     std::vector<std::pair<std::string, std::string>> ps = playsets::starts();
     std::string t;
     const bool read = core::readStream(o.r, t);
     const bool chunk = !t.empty() && t[0] == openstage::kLuaChunk;
     if (read && chunk && !ps.empty()) {
-        std::string s = ui::playsetMenu10(t, ps), names;
+        std::string s = select ? ui::playsetSelect10(t, ps) : ui::playsetMenu10(t, ps), names;
         for (auto& x : ps) names += " " + x.first + "->" + x.second;
         core::logf("%s: %u 1.0 playset entries added:%s (%u B 3.0 chunk -> %u B Lua)", o.p, (unsigned)ps.size(),
                    names.c_str(), (unsigned)t.size(), (unsigned)s.size());

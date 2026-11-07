@@ -1,15 +1,20 @@
-// 1.0 expendables drawn while shut down, as in 1.0 (shutdown10); capsuletrace10's spawn probes. core, popin.
-// Spawn threads.
+// 1.0 expendables drawn while shut down (shutdown10), exploding into their DebrisModel (debris10); probes.
+// core, popin. Spawn threads.
 #pragma once
 #include <windows.h>
 #include <intrin.h>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iterator>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include "../../base/text.hpp"
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
@@ -18,8 +23,10 @@
 
 namespace di1::shutdown {
 
-// Installs shutdown10's four hooks and capsuletrace10's probes, as c switches them on (H1, H2).
+// Installs shutdown10's four hooks, debris10's and capsuletrace10's probes, as c switches them on (H1, H2).
 inline bool install(const Config& c);
+// debris10: entry `def` of a 1.0 package explodes into model with dna (groups::debrisEntries).
+inline void addDebris(const std::string& def, const std::string& model, const std::string& dna);
 
 namespace detail {
 
@@ -64,7 +71,22 @@ constexpr int kChildCap = 64;
 // checked in install() (H4)
 constexpr uint32_t kDrawQuery = 0x018383E0;     // FUN_018383e0: thiscall (query; ret 4) on a scene node
 constexpr const char* kDrawQueryPrologue = "8B442404568BF183F803";
+// debris10
+constexpr size_t kDefName = 4;                  // a definition's Name (FUN_0160a3e0's "name" param)
+constexpr uint32_t kXformOf = 0x006867E0;       // FUN_006867e0: thiscall on &node -> quaternion, position
+constexpr size_t kXformFloats = 8;
+constexpr uint32_t kFastDebris = 0x01645280;    // FUN_01645280: cdecl (params, transform, parent, model)
+constexpr uint32_t kParamSet = 0x00703850;      // FUN_00703850: thiscall on params (key, value, 0; ret 0xc)
+constexpr uint32_t kParamsFree = 0x00703840;    // FUN_00703840: thiscall on params
+constexpr size_t kParamsBytes = 0x10;           // FUN_019756f0 zeroes them
+// what FUN_0151dba0 does with the FastDebris next: thiscall (1 arg; ret 4) each
+constexpr uint32_t kDebrisSettings = 0x01645490;   // on it (ExploderData +0x9c): the exploder's FastDebris settings
+constexpr uint32_t kDebrisLaunch = 0x0150D9D0;     // on the Exploder (it): chunks launched, explosion velocity added
+constexpr size_t kDataDebrisSettings = 0x9C;
+constexpr size_t kDebrisChunks = 0x8C, kDebrisCount = 0x90, kChunkVelocity = 0x30;   // chunks: 0x9c bytes each
 }  // namespace eng
+
+constexpr int kDebrisLines = 12;                // debris10 lines logged
 
 constexpr size_t kKeepPrune = 8192;   // kept handles before dead ones are pruned
 constexpr int kLinesPerDef = 4;       // probe lines per (kind, definition): 300 sockets once starved every capsule
@@ -82,6 +104,13 @@ typedef uint8_t*(__cdecl* ActorFn)(uint32_t handle);
 typedef void*(__cdecl* CompFn)(uint32_t handle, uint32_t type);
 typedef void(__fastcall* DestroyFn)(uint8_t* part, void* edx, float delay, int mode);
 typedef uint32_t(__fastcall* QueryFn)(const uint8_t* node, void* edx, uint32_t query);
+typedef const float*(__fastcall* XformFn)(uint32_t* node, void* edx);
+typedef void*(__cdecl* FastDebrisFn)(uint8_t* params, const float* t, uint32_t parent, const char* model);
+typedef void(__fastcall* ParamSetFn)(uint8_t* params, void* edx, const char* key, const char* value, uint32_t interned);
+typedef void(__fastcall* ParamsFreeFn)(uint8_t* params, void* edx);
+typedef uint32_t(__fastcall* ThisArgFn)(void* self, void* edx, uintptr_t a1);
+typedef uint32_t(__fastcall* BoomFn)(uint8_t* data, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
+                                     uint32_t a5, uint32_t a6);
 
 struct State {
     bool shutdown10 = false, capsuleTrace10 = false;   // set once in install()
@@ -98,6 +127,10 @@ struct State {
     bool drawQuery = false;                // FUN_018383e0's prologue matched; set once in install()
     std::mutex keepMx;                     // guards keep; held across actorOf while pruning
     std::unordered_set<uint32_t> keep;     // handles of actors made from 1.0 definitions
+    BoomFn g_boom = nullptr;               // debris10's original; set once in install()
+    std::mutex debrisMx;                   // guards debris; a leaf
+    std::unordered_map<std::string, std::pair<std::string, std::string>> debris;   // lowercased entry: model, dna
+    std::atomic<int> debrisLines{0};
     core::LogCount<std::string> fewLines{8000};   // capsuletrace10 lines per name, for 8000 names
 };
 inline State g_state;
@@ -119,10 +152,10 @@ inline void defText(const uint8_t* def, char (&data)[kNames], char (&model)[kNam
     core::safeCopy(model, kNames, *(const char**)(def + eng::kDefModel));
 }
 
-// A probe line of this kind for this definition (data name) is still within its own budget.
-inline bool defLine(const char* kind, const char* data)
+// A probe line of this kind for this definition (data and model names) is still within its own budget.
+inline bool defLine(const char* kind, const char* data, const char* model)
 {
-    return g_state.fewLines.first(std::string(kind).append(data), kLinesPerDef);
+    return g_state.fewLines.first(std::string(kind).append(data).append(model), kLinesPerDef);
 }
 
 inline const char* mode(const uint8_t* params)
@@ -163,7 +196,7 @@ inline void keep(uint32_t h, const uint8_t* def)
     if (!s.capsuleTrace10) return;
     char d[kNames], mo[kNames];
     defText(def, d, mo);
-    if (!defLine("kept ", d)) return;
+    if (!defLine("kept ", d, mo)) return;
     core::logf("shutdown10: actor %08X '%s' (%s) drawn while shut down%s", h, d, mo,
                a && (a[eng::kActorFlags] & eng::kShutDown) ? " (was shut down: shown)" : "");
 }
@@ -245,7 +278,17 @@ struct ModelState {
     const uint8_t* node = nullptr;
     unsigned hidden = 0;   // the node's +0x28 bits 0 (itself) and 1 (a parent) hidden (FUN_00469390)
     int children = -1;     // child nodes under node, -1 when unreadable
+    std::string kids;      // per child: its hidden bits / its own child count
 };
+
+inline int childCount(const uint8_t* n)
+{
+    int k = 0;
+    const uint8_t* c = *(const uint8_t* const*)(n + eng::kSceneChild);
+    for (; c && k < eng::kChildCap && core::readable(c, eng::kSceneBytes); ++k)
+        c = *(const uint8_t* const*)(c + eng::kSceneNext);
+    return k;
+}
 
 inline ModelState modelState(uint32_t h)
 {
@@ -261,6 +304,8 @@ inline ModelState modelState(uint32_t h)
     const uint8_t* c = *(const uint8_t* const*)(m.node + eng::kSceneChild);
     while (c && m.children < eng::kChildCap && core::readable(c, eng::kSceneBytes)) {
         ++m.children;
+        m.kids += std::to_string(*(const uint32_t*)(c + eng::kSceneFlags) & eng::kSceneHidden) + "/" +
+                  std::to_string(childCount(c)) + " ";
         c = *(const uint8_t* const*)(c + eng::kSceneNext);
     }
     return m;
@@ -274,12 +319,13 @@ inline void logActor(const char* what, const uint8_t* actor)
     if (!def10(def)) return;
     char d[kNames], mo[kNames];
     defText(def, d, mo);
-    if (!defLine(what, d)) return;
+    if (!defLine(what, d, mo)) return;
     const float* p = (const float*)(actor + eng::kActorPos);
     const ModelState m = modelState(h);
     core::logf("capsuletrace10: actor %08X '%s' (%s) %s at (%.1f, %.1f, %.1f), flags %02X %02X mode %u; model comp %p "
-               "show %u node %p hidden bits %X children %d", h, d, mo, what, p[0], p[1], p[2], actor[eng::kActorFlags],
-               actor[eng::kActorFlags + 1], actor[eng::kActorMode], m.comp, m.show, m.node, m.hidden, m.children);
+               "show %u node %p hidden bits %X children %d [%s]", h, d, mo, what, p[0], p[1], p[2],
+               actor[eng::kActorFlags], actor[eng::kActorFlags + 1], actor[eng::kActorMode], m.comp, m.show, m.node,
+               m.hidden, m.children, m.kids.c_str());
 }
 
 // 0x0160A270, cdecl (handle, record), per async spawn completion of any expendable; it frees the record.
@@ -292,7 +338,7 @@ inline void __cdecl hkDone(uint32_t handle, uint8_t* record)
     s.g_done(handle, record);
     char d[kNames] = "", mo[kNames] = "";
     if (s.capsuleTrace10) defText(def, d, mo);
-    if (is10 && s.capsuleTrace10 && defLine("done ", d))
+    if (is10 && s.capsuleTrace10 && defLine("done ", d, mo))
         core::logf("capsuletrace10: async spawn of '%s' (%s) done: handle %08X -> actor %p%s", d, mo, handle,
                    ((ActorFn)core::rt(eng::kActorOf))(handle), killed ? ", killed (pending record cancelled)" : "");
     if (is10 && !killed && s.shutdown10) keep(handle, def);
@@ -349,7 +395,7 @@ inline uint32_t* __fastcall hkCust(uint8_t* def, void*, uint32_t* out, const flo
     --t_inCust;
     char d[kNames], mo[kNames];
     defText(def, d, mo);
-    if (defLine("cust ", d)) {
+    if (defLine("cust ", d, mo)) {
         const char* how = t_spark  ? "lock not found: Spark_Capsule instead"
                           : t_base ? "lock locked: base spawn"
                                    : "lock already unlocked: nothing";
@@ -368,7 +414,7 @@ inline uint32_t* __fastcall hkBase(uint8_t* def, void*, uint32_t* out, const flo
     uint32_t h = out ? *out : 0;   // 0: queued (async), the completion marks it
     char d[kNames] = "", mo[kNames] = "";
     if (s.capsuleTrace10) defText(def, d, mo);
-    if (s.capsuleTrace10 && defLine("base ", d)) {
+    if (s.capsuleTrace10 && defLine("base ", d, mo)) {
         core::logf("capsuletrace10: base spawn '%s' model '%s' at (%.1f, %.1f, %.1f), %s -> handle %08X", d, mo,
                    t ? t[4] : 0.f, t ? t[5] : 0.f, t ? t[6] : 0.f, mode(params), h);
     }
@@ -390,10 +436,83 @@ inline void logDestroyed(const uint8_t* part, float delay, int how, void* ret)
     if (!def10(def)) return;
     char d[kNames], mo[kNames];
     defText(def, d, mo);
-    if (!defLine("dead ", d)) return;
+    if (!defLine("dead ", d, mo)) return;
     const uint8_t* actor = *(uint8_t* const*)(part + eng::kPartActor);
     core::logf("capsuletrace10: actor %08X '%s' (%s) destroyed (delay %.1f, mode %d) by %08X",
                *(const uint32_t*)(actor + eng::kActorHandle), d, mo, delay, how, core::toStaticVa((uintptr_t)ret));
+}
+
+// ---- debris10 ----
+
+// The debris (model, dna) handle h's 1.0 definition explodes into; empty for none.
+inline std::pair<std::string, std::string> debrisOf(uint32_t h)
+{
+    State& s = g_state;
+    const uint8_t* def = handleDef(h);
+    if (!def10(def) || !core::readable(def + eng::kDefName, 4)) return {};
+    char name[kNames] = "";
+    core::safeCopy(name, sizeof(name), *(const char* const*)(def + eng::kDefName));
+    std::lock_guard<std::mutex> lock(s.debrisMx);
+    auto it = s.debris.find(text::lower(name));
+    return it == s.debris.end() ? std::pair<std::string, std::string>{} : it->second;
+}
+
+// The exploding node's transform as 3.0's explode reads it (FUN_006867e0): quaternion, position; false if odd.
+inline bool transformOf(uint32_t node, float (&t)[eng::kXformFloats])
+{
+    if (!node || !core::readable((const uint8_t*)(uintptr_t)node, eng::kGeomMatrix + sizeof(t))) return false;
+    memcpy(t, ((XformFn)core::rt(eng::kXformOf))(&node, nullptr), sizeof(t));
+    const float q = t[0] * t[0] + t[1] * t[1] + t[2] * t[2] + t[3] * t[3];
+    return q > 0.9f && q < 1.1f;
+}
+
+// 1.0's debris spawn (FUN_00f544f0: DNAFile, model, the exploder's handle) through 3.0's; its FastDebris or null.
+inline void* spawnDebris(const std::string& model, const std::string& dna, const float* t, uint32_t parent)
+{
+    uint8_t params[eng::kParamsBytes] = {};
+    ((ParamSetFn)core::rt(eng::kParamSet))(params, nullptr, "DNAFile", dna.c_str(), 0);
+    void* fd = ((FastDebrisFn)core::rt(eng::kFastDebris))(params, t, parent, model.c_str());
+    ((ParamsFreeFn)core::rt(eng::kParamsFree))(params, nullptr);
+    return fd;
+}
+
+// FUN_0151dba0, thiscall on the Exploder component (node, 5 more; ret 0x18), per explode: 1.0's also spawns debris
+// (FUN_00f544f0).
+inline uint32_t __fastcall hkBoom(uint8_t* data, void*, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
+                                  uint32_t a5, uint32_t a6)
+{
+    State& s = g_state;
+    const uint32_t h = data ? *(const uint32_t*)data : 0;
+    std::pair<std::string, std::string> debris;
+    float t[eng::kXformFloats] = {};
+    bool placed = false;
+    try {
+        if (h) debris = debrisOf(h);
+        placed = !debris.first.empty() && transformOf(a1, t);
+    } catch (std::exception&) {
+    }
+    const uint32_t r = s.g_boom(data, nullptr, a1, a2, a3, a4, a5, a6);
+    if (debris.first.empty()) return r;
+    uint8_t* fd = r && placed ? (uint8_t*)spawnDebris(debris.first, debris.second, t, h) : nullptr;
+    const uint8_t* xd = (const uint8_t*)(uintptr_t)a4;
+    const bool launch = fd && ((ActorFn)core::rt(eng::kActorOf))(h);
+    if (launch) {
+        const uintptr_t settings = core::readable(xd + eng::kDataDebrisSettings, 4)
+                                       ? *(const uintptr_t*)(xd + eng::kDataDebrisSettings) : 0;
+        ((ThisArgFn)core::rt(eng::kDebrisSettings))(fd, nullptr, settings);
+        ((ThisArgFn)core::rt(eng::kDebrisLaunch))(data, nullptr, (uintptr_t)fd);
+    }
+    if (++s.debrisLines > kDebrisLines) return r;
+    const uint32_t chunks = fd ? *(const uint32_t*)(fd + eng::kDebrisCount) : 0;
+    const uint8_t* c0 = chunks ? *(const uint8_t* const*)(fd + eng::kDebrisChunks) : nullptr;
+    const float* v = c0 && core::readable(c0 + eng::kChunkVelocity, 12) ? (const float*)(c0 + eng::kChunkVelocity)
+                                                                          : nullptr;
+    core::logf("debris10: actor %08X explodes (%u) into %s (%s) at (%.1f, %.1f, %.1f), q (%.2f %.2f %.2f %.2f) "
+               "-> FastDebris %p%s%s, %u chunks, chunk 0 velocity (%.2f, %.2f, %.2f)", h, r, debris.first.c_str(),
+               debris.second.c_str(), t[4], t[5], t[6], t[0], t[1], t[2], t[3], fd,
+               placed ? "" : " (no transform: not spawned)", fd && !launch ? " (exploder gone: not launched)" : "",
+               chunks, v ? v[0] : 0, v ? v[1] : 0, v ? v[2] : 0);
+    return r;
 }
 
 // FUN_0074da00, thiscall on actor + 0x1c (delay, mode; ret 8), per actor destruction, any thread.
@@ -428,6 +547,10 @@ inline bool install(const Config& c)
         done,
     });
     bool ok = spawnsHooked || !keep10;
+    if (c.debris10 && c.popin10)
+        ok = core::installFeature("debris10", {{"exploder explode, debris (debris10)", 0x0151DBA0,
+                                                "6AFF68????????64A100000000", (void*)&detail::hkBoom,
+                                                (void**)&s.g_boom}}) && ok;
     if (!c.capsuleTrace10) return ok;
     // capsuletrace10 hooks the two spawns itself when shutdown10 did not
     if (!spawnsHooked) ok = core::installFeature("capsuletrace10 spawns", {spawn, done}) && ok;
@@ -448,6 +571,13 @@ inline bool install(const Config& c)
     s.drawQuery = core::prologueMatches(detail::eng::kDrawQuery, detail::eng::kDrawQueryPrologue);
     if (!s.drawQuery) core::logf("capsuletrace10: FUN_018383e0's prologue differs; 'drawn' is logged as -1");
     return ok;
+}
+
+inline void addDebris(const std::string& def, const std::string& model, const std::string& dna)
+{
+    detail::State& s = detail::g_state;
+    std::lock_guard<std::mutex> lock(s.debrisMx);
+    s.debris[text::lower(def)] = {model, dna};
 }
 
 }  // namespace di1::shutdown

@@ -70,7 +70,8 @@ struct TranscodeIO {
     std::function<void(const std::string& path, const std::string& problem)> renderProblem;   // logged per problem
     std::function<Shaders(const std::string& path, std::string& note)> particleShaders;   // vfxchan10
     chan::Roles* roles = nullptr;   // vfxchan10: the shader roles found so far, kept by the caller
-    groups::CoinDnaOf coinDna;   // currency10: a 1.0 DNA's FastCoin (pays sparks, model)
+    groups::Readers groupReaders;   // rewards10: 1.0 DNAs (coin pickups with currency10, debris DNA), 1.0 models
+    std::function<void(const groups::Debris& d)> debrisDef;   // debris10: an entry given a '<Name>_Debris10' entry
     std::function<void(const std::string& entry)> dataMapEntry;   // each DataMap entry before it is normalised
 };
 
@@ -85,7 +86,7 @@ inline std::string dnaPath(const std::string& dnaFile)
     return p;
 }
 
-// currency10: a 1.0 DNA's FastCoin (FUN_00b157d0): IsSpark or IsSparkUnmetered, and its model. Unevaluable: neither.
+// A 1.0 DNA's FastCoin (FUN_00b157d0: sparks?, model) and Exploder DebrisDNAFile (3.0: under DNAs). Else none.
 inline groups::CoinDna parseCoinDna(const std::string& dnaChunk)
 {
     try {
@@ -94,11 +95,15 @@ inline groups::CoinDna parseCoinDna(const std::string& dnaChunk)
         const luachunk::Value* ag = d ? d->get("AgentGadgets") : nullptr;
         const luachunk::Value* fc = ag ? ag->get("FastCoin") : nullptr;
         const luachunk::Value* entity = fc ? ag->get("EntityInstance") : nullptr;
+        const luachunk::Value* ex = ag ? ag->get("Exploder") : nullptr;
+        const luachunk::Value* dnas = ex ? ex->get("DNAs") : nullptr;
         const auto set = [fc](const char* key) {
             const luachunk::Value* v = fc ? fc->get(key) : nullptr;
             return v && v->t == luachunk::Value::BOOL && v->b;
         };
-        return {set("IsSpark") || set("IsSparkUnmetered"), entity ? entity->str("ModelName") : ""};
+        std::string debris = ex ? ex->str("DebrisDNAFile") : "";
+        if (debris.empty() && dnas) debris = dnas->str("DebrisDNAFile");
+        return {set("IsSpark") || set("IsSparkUnmetered"), entity ? entity->str("ModelName") : "", debris};
     } catch (std::exception&) {
         return {};
     }
@@ -579,12 +584,16 @@ inline bool groupsMatches(const Request& r)
 inline Verdict groups(Request& r)
 {
     groups::Counts c;
-    int k = groups::groups30(std::string((const char*)r.data, r.n), r.out, &c, r.io.coinDna);
+    int k = groups::groups30(std::string((const char*)r.data, r.n), r.out, &c, r.io.groupReaders);
     if (!k) return dispatch::kNext;
+    if (r.io.debrisDef)
+        for (auto& d : c.debrisDefs) r.io.debrisDef(d);
     std::string dropped = c.over ? ", " + std::to_string(c.over) + " spawns past the 4th dropped" : "";
     std::string paying = c.coins ? ", " + std::to_string(c.coins) + " coin pickups paying the zone's currency" : "";
     std::string moved = c.models ? ", " + std::to_string(c.models) + " objects/ models named under Exploders/" : "";
-    r.note += "+groups30(" + std::to_string(k - c.coins - c.models) + " groups" + dropped + paying + moved + ") ";
+    std::string debris = c.debris ? ", " + std::to_string(c.debris) + " _Debris10 entries (1.0 DebrisModel)" : "";
+    const int groups = k - c.coins - c.models - c.debris;
+    r.note += "+groups30(" + std::to_string(groups) + " groups" + dropped + paying + moved + debris + ") ";
     return "expgroups";
 }
 

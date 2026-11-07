@@ -109,6 +109,23 @@ inline size_t orderedAfter(const Text& z, const std::vector<std::string>& listed
     return at;
 }
 
+// fields ("k = v, ") put first in Records.<table>.<name>, so the record's own keys still win. False: no such record.
+inline bool addFields(std::string& t, const std::string& table, const std::string& name,
+                      const std::map<std::string, std::string>& fields)
+{
+    std::optional<Text> z = scan(t);
+    if (!z || !z->recs.count(table)) return false;
+    const auto toks = lualex::tokens(t);
+    for (auto& e : lualex::tableEntries(t, toks, z->recs.at(table))) {
+        if (e.first != name) continue;
+        std::string s;
+        for (auto& [k, v] : fields) s += " " + k + " = " + v + ",";
+        t.insert(t.find('{', e.second.first) + 1, s);
+        return true;
+    }
+    return false;
+}
+
 // The additions on the line after each table's '{' (OrderedPlaysets: after opAt), the last first.
 inline void insert(std::string& t, Text& z, const Additions& a, size_t opAt)
 {
