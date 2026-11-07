@@ -12,7 +12,6 @@
 #include "../../base/text.hpp"
 #include "../../core/engine_file.hpp"
 #include "../../core/log.hpp"
-#include "../../core/stack.hpp"
 #include "../../convert/assets.hpp"
 #include "../../engine/gamedb.hpp"
 #include "../../engine/zones.hpp"
@@ -39,12 +38,8 @@ inline bool playsetMenuStage(openstage::Open& o, int*& out);
 inline bool hudCurrencyStage(openstage::Open& o, int*& out);
 // zonelist.lua (zones10, challenge10, beacon10), ChallengeData.lua (challenge10). Destroys r; answers text or reopens.
 inline bool zoneListStage(openstage::Open& o, int*& out);
-// trace: who opens a GameDB package's bitmasks.lua (any playset's, 1.0 or 3.0), with the stack. Always passes on.
-inline bool bitmasksStack(openstage::Open& o, int*& out);
 // A .lua the GameDB CHD callback loader is reading: its CHD compile. Consumes r (null or not).
 inline bool chdStage(openstage::Open& o, int*& out);
-// memtest: a listed path is served from a memory copy of 3.0's stream (consumed).
-inline bool memtestStage(openstage::Open& o, int*& out);
 // rootgraph10: a 3.0 model in 1.0's older exploder form: 1.0's own is served, else Root gets its graph. Destroys r.
 inline bool rootGraphStage(openstage::Open& o, int*& out);
 // rootgraph10: the .mtb and buffers of a model rootGraphStage passed to 1.0 go to 1.0 too. Destroys r.
@@ -52,8 +47,6 @@ inline bool olderCompanionStage(openstage::Open& o, int*& out);
 
 namespace detail {
 
-constexpr size_t kGameDbDir = sizeof("gamedb/") - 1;
-constexpr int kStackWords = 24;   // the exe addresses a bitmasks open's line lists
 constexpr size_t kExtLen = sizeof(".oct") - 1;   // .oct and .mtb alike
 
 struct State {
@@ -127,16 +120,6 @@ inline std::string rootGraph(const std::string& t)
     }
 }
 
-// memtest: whether p contains one of the cfg's comma-separated substrings.
-inline bool memtestMatch(const Config& c, const char* p)
-{
-    char list[sizeof(c.memtest)];
-    snprintf(list, sizeof(list), "%s", c.memtest);   // never cut: the same size
-    char* ctx = nullptr;
-    for (char* t = strtok_s(list, ",", &ctx); t; t = strtok_s(nullptr, ",", &ctx))
-        if (*t && strstr(p, t)) return true;
-    return false;
-}
 
 }  // namespace detail
 
@@ -219,7 +202,7 @@ inline bool zoneListStage(openstage::Open& o, int*& out)
     const bool zl = text::endsWith(o.p, "zonelist.lua");
     const bool cd = text::endsWith(o.p, "challengedata/challengedata.lua") ||
                     text::endsWith(o.p, "challengedata\\challengedata.lua");
-    const bool playsetKeys = c.zones10 || c.playsetMenu10 || c.missionTrace;   // zones10() runs for these
+    const bool playsetKeys = c.zones10 || c.playsetMenu10;   // zones10() runs for these
     const bool zl10 = zl && playsetKeys;
     const bool challengeFile = zl || cd;
     const bool challenge = c.challenge10 && challengeFile;
@@ -248,31 +231,10 @@ inline bool zoneListStage(openstage::Open& o, int*& out)
     return true;
 }
 
-inline bool bitmasksStack(openstage::Open& o, int*&)
-{
-    if (!o.cfg->trace) return false;
-    if (_strnicmp(o.p, "gamedb/", detail::kGameDbDir) || !text::endsWith(o.p, "/bitmasks.lua")) return false;
-    char line[600];
-    // never cut: at most 327 characters before the stack's 216
-    int len = snprintf(line, sizeof(line), "gamedb package open %s, stack:", o.p);
-    core::stackOf(o.sp, line, sizeof(line), len, detail::kStackWords);
-    core::logf("%s", line);
-    return false;
-}
-
 inline bool chdStage(openstage::Open& o, int*& out)
 {
     if (o.write || !text::endsWith(o.p, ".lua") || !engine::gamedb::isChdPath(o.p)) return false;
     out = detail::chdForLua(o.p, o.r);
-    return true;
-}
-
-inline bool memtestStage(openstage::Open& o, int*& out)
-{
-    if (!o.edits() || !o.cfg->memtest[0] || !detail::memtestMatch(*o.cfg, o.p)) return false;
-    size_t n = 0;
-    out = core::copyToMemFile(o.r, &n);
-    core::logf("memtest %s %u B -> %s", o.p, (unsigned)n, out ? "MemFile" : "FAILED");
     return true;
 }
 

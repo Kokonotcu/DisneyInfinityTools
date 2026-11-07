@@ -27,15 +27,8 @@ typedef void(__cdecl* VoidFn)();
 struct State {
     VoidFn g_merRegistry = nullptr;   // set once by hook() in install()
     Config cfg;                       // set once in install()
-    int probeClass = -1;              // set once by hkMerRegistry, at boot
 };
 inline State g_state;
-
-// SYS-1 probe: no graph names it, so its registration runs at boot and nothing instantiates it.
-inline void probeImpulse(uint8_t* node, int, void* payload)
-{
-    mernode::fire(node, g_state.probeClass, 1, payload);
-}
 
 // aliases10: each 1.0 class through its twin's template (H4 open: called without a prologue check, X-12).
 inline void registerAliases(mer::Table& mer)
@@ -48,13 +41,9 @@ inline void registerAliases(mer::Table& mer)
     mer::addAliases(mer);
 }
 
-// native10: the probe class once, then every native class added with mernode::add before this.
+// native10: every native class added with mernode::add before this.
 inline void registerNatives(mer::Table& mer)
 {
-    State& s = g_state;
-    if (s.probeClass < 0)
-        s.probeClass = mernode::add(
-            {"DI1NativeProbe", {{"Link_In", mernode::In}, {"Link_Out", mernode::Out}}, {}, 0, probeImpulse});
     const int n = mernode::registerAll(core::rt, static_cast<void (*)(const char*, ...)>(core::logf), mer);
     core::logf("meridian native: %d of %d classes registered", n, mernode::count());
 }

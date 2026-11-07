@@ -129,26 +129,43 @@ step does not copy it.
 | `install10` | (none) | Path of the 1.0 installation |
 | `serve10` | `0` | Serve the files 3.0 lacks from the 1.0 archives. Set to `1` |
 | `shaders10` | `0` | Translate the original 1.0 shaders instead of using 3.0 substitutes. Recommended: `1` |
-| `trace` | `0` | Log every file open (verbose) and install the playset-flow probes. It also enables the `hkInst` guard against a dead SubNetwork root and the `hide_ps` experiment |
-
-Diagnostics, all off by default and log-only:
-
-| Key | Logs |
-|---|---|
-| `locktrace10` | Control locks, controller contexts, choreography play and events, messages, mission monitors, load screens, compass, beacons, mission progress |
-| `uitrace10` | Every pause applied or lifted per player, each screen's onEnter and onExit (the screen lines need `pause10`), event screen requests, a 1.0 pause handed on or released, focus changes of 3.0 screens |
-| `fpslog10` | Frame time once a second, and how much of it the main thread waits on rendering |
-| `loadprof10` | Per-file load timings and a sampling profile of the busiest threads (`di1compat_prof.tsv`) |
-| `audiotrace10` | Each sound posted and the backend that played it, its position, its mix and its lifetime |
-| `breaktrace` | Choreography clocks, clip setup, layout attachments and destructible hits |
-| `missiontrace` | Mission context state changes |
-| `spawntrace10` | Building lots registered, SpawnBuilding nodes firing, lot spawns, the player start lookups |
-| `capsuletrace10` | SpawnExpendable nodes firing, their spawn requests, which branch each 1.0 expendable's spawn took, the async completions, the actors `shutdown10` keeps drawn, their destruction (with the caller), and where each is made and restored with its render node's state; up to 4 lines of each kind per definition |
-| `currencytrace10` | Each currency payout (source, inventory key, amount, balance after), each pickup award by kind, mission StatEvent grants, and the currency balances the HUD and the store read |
-| `renderdoc10` | Captures one frame with RenderDoc that many seconds into the world |
 
 The full list, including the per-subsystem switches, is `di1::Config` and its key table `kConfigKeys` in
 `native/di1compat/games/di1/config.hpp`.
+
+## di1debug: the optional debug plugin
+
+`di1debug.dll` is built from the same CMake project (`native/di1compat/debug/`). It only watches: it never changes an
+argument or a result, and `di1compat` does not know it exists. To use it, copy `di1debug.dll` into `Pentane\Plugins`
+and list it above `di1compat.dll` in `Pentane\config.toml`, because Pentane starts plugins bottom to top:
+
+    enabled_plugins = ["di1debug.dll", "di1compat.dll"]
+
+Delete the DLL to turn it off; the list entry can stay. If it runs before `di1compat` it installs nothing and says why in
+`di1debug.log`.
+
+It always writes `<game>\di1debug.txt` every 5 seconds: every asset open (from 3.0, served by `di1compat`, or missing),
+every Lua call into the game by function and calling chunk, every Lua error, every native call of a served 1.0 script
+by who answers it (3.0, a port, a stub, or nothing), and every Flash ExternalInterface call.
+
+`di1debug.cfg` next to it switches on the old log-only traces, all off by default. They write to `di1debug.log`:
+
+| Key | Logs |
+|---|---|
+| `trace` | Every file open, the playset figure flow, avatar spawn, SubNetwork instancing |
+| `locktrace10` | Control locks, controller contexts, choreography play and events, messages, mission monitors, load screens, compass, beacons, mission progress |
+| `uitrace10` | Every pause applied or lifted per player, tutorial MissionAccepted delivery |
+| `fpslog10` | Frame time once a second, and how much of it the main thread waits on rendering |
+| `loadprof10` | Per-oct load timings and a sampling profile of the busiest threads (`di1compat_prof.tsv`) |
+| `breaktrace` | Choreography starts and clocks, clip setup, layout attachments and destructible hits |
+| `missiontrace` | Mission context state changes (every playset's) |
+| `teardowntrace` | Layout destructor placements and frees |
+| `spawntrace10` | Building lots registered, SpawnBuilding nodes firing, the player start lookups |
+| `currencytrace10` | Each currency payout, each pickup award by kind, mission StatEvent grants, the balances read |
+| `vfx_trace` | Effect and emitter spawns with their placement |
+| `opacitylog10` | Primitives the opacity test drops |
+| `fadeprobe10` | Faded objects' fade inputs |
+| `renderdoc10` | Captures one frame with RenderDoc that many seconds after the first mission tick |
 
 ## Testing
 
@@ -326,7 +343,7 @@ folder may include which, are in [CLAUDE.md](CLAUDE.md).
 | `core/` | Log, config table, hook table and `hook()`, engine address helpers, memory checks, serving files, the zip reader |
 | `engine/` | 3.0 engine features any source game uses, one module each (`engine/audio` is one feature in several files) |
 | `games/di1/` | Everything specific to 1.0: its rules and tables, install layout, transcode dispatch, runtime features, config keys |
-| `trace/` | Log-only diagnostic hooks behind their switches, built like engine modules |
+| `debug/` | `di1debug.dll`: the watches, the hook chaining, and `debug/trace/`, the log-only traces behind `di1debug.cfg` |
 | `octtest/` | The octtest modes by job (tests, converters, probes) and their helpers |
 | `minhook/`, `third_party/`, `renderdoc_app.h` | Third-party code, kept as published |
 

@@ -28,10 +28,7 @@
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
 #include "games/di1/gamedb30.hpp"
-#include "games/di1/hideps.hpp"
-#include "games/di1/inputtrace.hpp"
 #include "games/di1/meridian.hpp"
-#include "games/di1/missiontrace.hpp"
 #include "games/di1/particles.hpp"
 #include "games/di1/movies.hpp"
 #include "games/di1/playsets.hpp"
@@ -49,18 +46,6 @@
 #include "games/di1/tools.hpp"
 #include "games/di1/transcodeio.hpp"
 #include "games/di1/vfs.hpp"
-#include "trace/breaktrace.hpp"
-#include "trace/buildings.hpp"
-#include "trace/fade.hpp"
-#include "trace/loadprof.hpp"
-#include "trace/locktrace.hpp"
-#include "trace/opacity.hpp"
-#include "trace/pause.hpp"
-#include "trace/renderdoc.hpp"
-#include "trace/spawn.hpp"
-#include "trace/spawntrace.hpp"
-#include "trace/teardown.hpp"
-#include "trace/vfx.hpp"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp; DI3G strings match) ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -81,7 +66,7 @@ extern "C" PluginInformation Pentane_PluginInformation = {
 extern "C" size_t Pentane_PluginDependencyCount = 0;
 
 // Every module's install() after the asset hook, in install order (B3): a hook is live once enabled.
-static void installModules(const di1::Config& cfg, const std::string& gameDir)
+static void installModules(const di1::Config& cfg)
 {
     di1::gamedb::install(cfg);
     di1::econ::install(cfg);
@@ -89,18 +74,9 @@ static void installModules(const di1::Config& cfg, const std::string& gameDir)
     di1::currency::install(cfg);
     di1::popin::install(cfg);
     engine::playsetslot::install({});   // always on: no cfg key (B-20)
-    trace::spawn::install({cfg.trace, cfg.hidePs});
-    di1::hideps::install(cfg);
     di1::shaders10::install(cfg);
-    di1::missiontrace::install(cfg);
     di1::chostart::install(cfg);
-    trace::breaktrace::install({cfg.breakTrace});
-    trace::teardown::install({cfg.teardownTrace});
     di1::meridian::install({cfg.aliases10, cfg.native10, di1::tables::mer()});
-    trace::locktrace::install({cfg.lockTrace10});
-    trace::opacity::install({cfg.opacityLog10});
-    trace::fade::install({cfg.fadeProbe10});
-    trace::loadprof::install({cfg.fpsLog10, cfg.loadProf10, gameDir});
     di1::assetdefs::install(cfg);
     engine::crt::install({});
     di1::sxkeys::install(cfg);
@@ -110,17 +86,12 @@ static void installModules(const di1::Config& cfg, const std::string& gameDir)
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
     di1::particles::install(cfg);
-    trace::vfx::install({cfg.vfxTrace});
-    di1::inputtrace::install(cfg);
     di1::accept::install(cfg);
     di1::tools::install(cfg);
     di1::selectmenu::install(cfg);
     di1::movies::install(cfg);
     di1::buildings::install(cfg);
-    trace::buildings::install({cfg.spawnTrace10});
     di1::shutdown::install(cfg);
-    trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});
-    trace::pause::install({cfg.uiTrace10});
 }
 
 // Pentane's entry, under the loader lock (B-N1): the log and the cfg, then each module's install() in order.
@@ -133,8 +104,7 @@ extern "C" void __stdcall Pentane_Main()
     di1::Config cfg;
     di1::loadConfig(core::pluginDir().c_str(), cfg);
 
-    // before any hook, in this order: RenderDoc, 1.0 archives, resident archives, tables, shaders10, playsets
-    trace::renderdoc::install({cfg.renderdoc10, gameDir + "\\di3cap"});
+    // before any hook, in this order: 1.0 archives, resident archives, tables, shaders10, playsets
     di1::vfs::install(cfg);
     di1::choalias::install(cfg);
     di1::session::install(cfg);
@@ -148,7 +118,7 @@ extern "C" void __stdcall Pentane_Main()
     // the modules' hooks in install order (B3): a hook is live once enabled
     if (!core::startHooks()) return;
     if (!engine::assets::install({(void*)&di1::assetopen::hkOpen, gameDir})) return;
-    installModules(cfg, gameDir);
+    installModules(cfg);
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

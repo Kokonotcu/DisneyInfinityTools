@@ -2,8 +2,9 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../chain.hpp"
 
 namespace trace::pause {
 
@@ -81,7 +82,7 @@ inline bool install(const Config& c)
 {
     if (!c.on) return true;
     detail::State& s = detail::g_state;
-    return core::installFeature("uitrace10", {
+    return dbg::chain::installFeature("uitrace10", {
         {"game loop pause (uitrace10)", 0x0138DA80, "535556578BF9B9????????", (void*)&detail::hkPauseOn,
          (void**)&s.g_pauseOn},
         {"game loop unpause (uitrace10)", 0x01385BB0, "56578BF1E8????????8B7C240C", (void*)&detail::hkPauseOff,

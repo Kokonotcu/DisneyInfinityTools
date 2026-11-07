@@ -25,9 +25,6 @@ inline void setListener(const float* wwise);
 inline V3 at(uint32_t obj);
 inline Listener listener();
 inline void erase(uint32_t obj);
-// fn(the object's position or null, the listener) under the lock; audiotrace10 logs from it.
-template <class Fn>
-inline void inspect(uint32_t obj, Fn fn);
 
 namespace detail {
 // Its own lock: game-thread SetPosition calls never wait for FMOD's update, which runs under system's lock.
@@ -90,20 +87,6 @@ inline void erase(uint32_t obj)
     detail::State& s = detail::g_state;
     std::lock_guard<std::mutex> l(s.mx);
     s.pos.erase(obj);
-}
-
-template <class Fn>
-inline void inspect(uint32_t obj, Fn fn)
-{
-    detail::State& s = detail::g_state;
-    std::lock_guard<std::mutex> l(s.mx);
-    auto it = s.pos.find(obj);
-    Listener ls;
-    memcpy(ls.pos, s.lpos, sizeof ls.pos);
-    memcpy(ls.fwd, s.lfwd, sizeof ls.fwd);
-    memcpy(ls.up, s.lup, sizeof ls.up);
-    ls.set = s.lset;
-    fn(it != s.pos.end() ? it->second.v : nullptr, ls);
 }
 
 }  // namespace engine::audio::positions

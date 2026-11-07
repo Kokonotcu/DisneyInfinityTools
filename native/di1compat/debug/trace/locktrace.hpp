@@ -7,9 +7,10 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../chain.hpp"
 
 namespace trace::locktrace {
 
@@ -436,7 +437,7 @@ inline bool install(const Config& c)
 {
     if (!c.on) return true;
     detail::State& s = detail::g_state;
-    return core::installFeature("locktrace10", {
+    return dbg::chain::installFeature("locktrace10", {
         {"GamePlayers lock controls (locktrace10)", 0x0139B8D0, "833D????????00558BE9", (void*)&detail::hkCtlLock,
          (void**)&s.g_ctlLock},
         {"GamePlayers unlock controls (locktrace10)", 0x0139B960, "55578B7C240C8BE985FF", (void*)&detail::hkCtlUnlock,

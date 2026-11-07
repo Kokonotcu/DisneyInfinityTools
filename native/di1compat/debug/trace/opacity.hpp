@@ -6,8 +6,9 @@
 #include <mutex>
 #include <set>
 #include <string>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../chain.hpp"
 
 namespace trace::opacity {
 
@@ -143,7 +144,7 @@ inline uint32_t __cdecl hkOpacityMask(uint32_t n, float fade, uint32_t prims, ui
 inline bool install(const Config& c)
 {
     if (!c.on) return true;
-    return core::hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&detail::hkOpacityMask,
+    return dbg::chain::hook("opacity mask (log)", 0x0044AD80, "83EC088B442418F30F105424", (void*)&detail::hkOpacityMask,
                       (void**)&detail::g_state.g_opacityMask);
 }
 

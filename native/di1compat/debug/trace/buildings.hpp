@@ -2,9 +2,10 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../chain.hpp"
 
 namespace trace::buildings {
 
@@ -59,7 +60,7 @@ inline bool install(const Config& c)
 {
     if (!c.on) return true;
     detail::State& s = detail::g_state;
-    return core::installFeature("spawntrace10 buildings", {
+    return dbg::chain::installFeature("spawntrace10 buildings", {
         {"lot state register (spawntrace10)", 0x00CEFE60, "538B5C2408555657", (void*)&detail::hkLotState,
          (void**)&s.g_lotState},
         {"SpawnBuilding Link_In (spawntrace10)", 0x011854B0, "6AFF68????????64A100000000", (void*)&detail::hkNode,

@@ -22,6 +22,11 @@ inline Module module(const char* name);
 inline bool jumpsInto(uint32_t staticVa, const Module& m);
 // All of a watch's hooks or none (H2). A row may match its prologue or jump into compat.
 inline bool installWatch(const char* watch, const std::vector<core::HookSpec>& hooks, const Module& compat);
+// Remembers di1compat's range for hook() and installFeature(); call once before any trace installs.
+inline void start(const Module& compat);
+// core::hook and core::installFeature for the moved traces, accepting di1compat's jump too.
+inline bool hook(const char* name, uint32_t staticVa, const char* prologueHex, void* detour, void** original);
+inline bool installFeature(const char* feature, const std::vector<core::HookSpec>& hooks);
 
 namespace eng {
 constexpr uint8_t kJmpRel32 = 0xE9;   // MinHook's x86 patch: E9 rel32 straight to the detour (hook.c, no relay)
@@ -48,6 +53,11 @@ inline bool jumpsInto(uint32_t staticVa, const Module& m)
 }
 
 namespace detail {
+
+struct State {
+    Module compat;   // set once by start()
+};
+inline State g_state;
 
 // MinHook direct: core::hook refuses a target di1compat already patched (CLAUDE.md H1 exception for di1debug).
 inline bool enable(const core::HookSpec& h)
@@ -83,6 +93,18 @@ inline bool installWatch(const char* watch, const std::vector<core::HookSpec>& h
         return false;
     }
     return true;
+}
+
+inline void start(const Module& compat) { detail::g_state.compat = compat; }
+
+inline bool hook(const char* name, uint32_t staticVa, const char* prologueHex, void* detour, void** original)
+{
+    return installWatch(name, {{name, staticVa, prologueHex, detour, original}}, detail::g_state.compat);
+}
+
+inline bool installFeature(const char* feature, const std::vector<core::HookSpec>& hooks)
+{
+    return installWatch(feature, hooks, detail::g_state.compat);
 }
 
 }  // namespace dbg::chain

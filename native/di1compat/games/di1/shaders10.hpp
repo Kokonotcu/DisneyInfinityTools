@@ -31,13 +31,10 @@ inline bool install(const Config& c)
     if (!c.shaders10) return true;
     engine::shaders::Config made;
     made.compiler = render10::compiler();
-    made.bufView = c.bufview10;
-    made.magenta = c.magenta10;
     made.generate = render10::generateShader10;
     engine::shaders::install(made);
     engine::shaderlinks::Config links;
     links.lazyLink = c.lazyLink10;
-    links.fadeProbe = c.fadeProbe10 != 0;
     links.gameShader = detail::shader10;
     return engine::shaderlinks::install(links);
 }

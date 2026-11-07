@@ -25,7 +25,6 @@ namespace di1::audio {
 struct Cfg {
     bool music = true;    // music10: 1.0 music through the MusicStack
     bool vo = true;       // vo10: 1.0 dialog banks and scripts in 3.0's dialog system
-    bool trace = false;   // audiotrace10: log each posted name once with the backend that took it
     bool mixer = true;    // mixer10: 1.0's Mixer presets as the 'Mixer' source of the 1.0 categories
     std::string install10;   // the 1.0 install: FMOD DLLs and sound data
     std::string game30;      // the 3.0 install
@@ -198,7 +197,6 @@ inline engine::audio::wwise::Config config(const Cfg& c)
     engine::audio::wwise::Config w;
     w.music = c.music;
     w.vo = c.vo;
-    w.trace = c.trace;
     w.log = c.log;
     w.systemCfg = detail::systemConfig(c);
     w.hostCfg = detail::hostConfig(c);

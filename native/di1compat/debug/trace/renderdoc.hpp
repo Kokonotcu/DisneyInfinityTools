@@ -3,8 +3,8 @@
 #include <windows.h>
 #include <string>
 #include <thread>
-#include "../core/log.hpp"
-#include "../renderdoc_app.h"
+#include "../../core/log.hpp"
+#include "../../renderdoc_app.h"
 
 namespace trace::renderdoc {
 

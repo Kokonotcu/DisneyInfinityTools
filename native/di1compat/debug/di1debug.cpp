@@ -9,13 +9,29 @@
 #include <string>
 #include "../core/hooks.hpp"
 #include "../core/log.hpp"
+#include "../core/paths.hpp"
 #include "../minhook/MinHook.h"
 #include "chain.hpp"
+#include "config.hpp"
 #include "files.hpp"
 #include "flash.hpp"
 #include "lua.hpp"
 #include "report.hpp"
 #include "sx.hpp"
+#include "trace/breaktrace.hpp"
+#include "trace/buildings.hpp"
+#include "trace/currency.hpp"
+#include "trace/fade.hpp"
+#include "trace/loadprof.hpp"
+#include "trace/locktrace.hpp"
+#include "trace/mission.hpp"
+#include "trace/opacity.hpp"
+#include "trace/pause.hpp"
+#include "trace/renderdoc.hpp"
+#include "trace/spawn.hpp"
+#include "trace/spawntrace.hpp"
+#include "trace/teardown.hpp"
+#include "trace/vfx.hpp"
 
 // ---- Pentane plugin ABI (upstream source/plugin.hpp), as in di1compat.cpp ----
 struct SemVer { uint16_t major, minor, patch; };
@@ -44,6 +60,28 @@ static bool compatRanFirst(const dbg::chain::Module& compat)
     return false;
 }
 
+// The log-only traces cfg switches on, in di1compat's former install order (B3).
+static void installTraces(const dbg::Config& cfg, const std::string& gameDir)
+{
+    trace::mission::Config m;
+    m.on = cfg.missionTrace;
+    m.ownMission = [](const char*) { return true; };
+    if (trace::renderdoc::loaded()) m.ownMissionTick = trace::renderdoc::arm;
+    trace::spawn::install({cfg.trace});
+    trace::mission::install(m);
+    trace::breaktrace::install({cfg.breakTrace});
+    trace::teardown::install({cfg.teardownTrace});
+    trace::locktrace::install({cfg.lockTrace10});
+    trace::opacity::install({cfg.opacityLog10});
+    trace::fade::install({cfg.fadeProbe10});
+    trace::loadprof::install({cfg.fpsLog10, cfg.loadProf10, gameDir});
+    trace::currency::install({cfg.currencyTrace10});
+    trace::vfx::install({cfg.vfxTrace});
+    trace::buildings::install({cfg.spawnTrace10});
+    trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});
+    trace::pause::install({cfg.uiTrace10});
+}
+
 // Pentane's entry, under the loader lock (H10): the log, the order check, the watches, the writer thread.
 extern "C" void __stdcall Pentane_Main();
 extern "C" void __stdcall Pentane_Main()
@@ -54,10 +92,15 @@ extern "C" void __stdcall Pentane_Main()
     const dbg::chain::Module compat = dbg::chain::module("di1compat.dll");
     core::logf("di1compat.dll %s", compat.lo ? "loaded" : "not loaded: every answer counts as 3.0's");
     if (!compatRanFirst(compat)) return;
+    dbg::Config cfg;
+    dbg::loadConfig(core::pluginDir(), cfg);
+    trace::renderdoc::install({cfg.renderdoc10, gameDir + "\\di3cap"});
     if (MH_Initialize() != MH_OK) {
         core::logf("di1debug off: MinHook init failed");
         return;
     }
+    dbg::chain::start(compat);
+    installTraces(cfg, gameDir);
     const bool filesOn = dbg::files::install(compat);
     const bool luaOn = dbg::lua::install({dbg::chain::module(nullptr), compat, &dbg::flash::noteError});
     const bool sxOn = dbg::sx::install(compat);

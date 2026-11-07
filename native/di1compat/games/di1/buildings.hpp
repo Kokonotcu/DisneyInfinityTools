@@ -12,7 +12,7 @@
 
 namespace di1::buildings {
 
-// Installs the lot spawn hook when c has building10 or spawntrace10 (H1); false when it was refused.
+// Installs the lot spawn hook when c has building10 (H1); false when it was refused.
 inline bool install(const Config& c);
 
 namespace detail {
@@ -51,8 +51,8 @@ typedef void*(__fastcall* StrCtorFn)(void* self, void* edx, const char* s);
 typedef void(__fastcall* ActivateFn)(void* self, void* edx, uint32_t on);
 
 struct State {
-    bool building10 = false, spawnTrace10 = false;   // set once in install()
-    LotSpawnFn g_lotSpawn = nullptr;                 // set once by hook() in install()
+    bool building10 = false;           // set once in install()
+    LotSpawnFn g_lotSpawn = nullptr;   // set once by hook() in install()
 };
 inline State g_state;
 
@@ -102,9 +102,6 @@ inline uint32_t* __fastcall hkLotSpawn(void* self, void*, uint32_t* out, int lot
     bool node = _ReturnAddress() == (void*)core::rt(eng::kNodeCall);   // here: a helper would see its own caller
     uint32_t* r = s.g_lotSpawn(self, nullptr, out, lot, name, useOwn);
     uint32_t h = out ? *out : 0;
-    if (s.spawnTrace10)
-        core::logf("spawntrace10: lot spawn '%s' lot %d own matrix %u from %s -> handle %08X", n, lot, useOwn & 0xff,
-                   node ? "SpawnBuilding node" : "other caller", h);
     const bool unbuilt = node && out && !h;
     const bool lotMatrix = lot >= 0 && !(useOwn & 0xff) && n[0];
     if (s.building10 && unbuilt && lotMatrix) *out = buildOnLot(lot, n);
@@ -117,8 +114,7 @@ inline bool install(const Config& c)
 {
     detail::State& s = detail::g_state;
     s.building10 = c.building10;
-    s.spawnTrace10 = c.spawnTrace10;
-    if (!c.building10 && !c.spawnTrace10) return true;
+    if (!c.building10) return true;
     return core::hook("building lot spawn (building10)", 0x00CEF120, "538BDC83EC0883E4F083C404558B6B04",
                       (void*)&detail::hkLotSpawn, (void**)&s.g_lotSpawn);
 }

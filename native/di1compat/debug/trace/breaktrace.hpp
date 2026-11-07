@@ -11,10 +11,11 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include "../base/format.hpp"
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
+#include "../../base/format.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../chain.hpp"
 
 namespace trace::breaktrace {
 
@@ -25,15 +26,13 @@ struct Config {
 // Installs the probes when c asks for them, all or none (H1, H2); false when they were refused.
 inline bool install(const Config& c);
 
-// The line for a choreography's start (engine::choreography's starting callback, set only under breaktrace).
-inline void choreographyStart(const uint8_t* cho, const char* name, uint32_t flags)
-{
-    core::logf("breaktrace cho start %p '%s' flags %08X", cho, name, flags);
-}
-
 namespace detail {
 
 namespace eng {
+// FUN_01449390 thiscall: a choreography's start; instance +0x38 path (engine/choreography.hpp)
+constexpr uint32_t kChoStart = 0x01449390;
+constexpr size_t kInstPath = 0x38;
+constexpr size_t kNameMax = 100;
 // H4 open: called without a prologue check (X-12)
 constexpr uint32_t kClipClock = 0x00528A70;   // FUN_00528a70: float __fastcall(processor), the processor's input clock
 // ClipProcessor fields (FUN_00543f40)
@@ -128,6 +127,7 @@ struct State {
     BindFn g_layBind = nullptr;
     HitFn g_munHit = nullptr;
     OneFn g_explode = nullptr;
+    ThisFn g_choStart = nullptr;
     std::mutex mx;                                    // guards first, moving, clocks, report and ready
     std::unordered_map<void*, float> first;           // processor -> its first clock
     std::unordered_set<void*> moving;                 // processors whose clock changed
@@ -137,6 +137,15 @@ struct State {
     std::atomic<LONG> evals{0}, applies{0}, gates{0}, clipSets{0}, binds{0}, hits{0}, booms{0};   // budgets
 };
 inline State g_state;
+
+// FUN_01449390, thiscall on a choreography instance. Per choreography played; di1compat's cinesync10 runs inside.
+inline void __fastcall hkChoStart(uint8_t* self, void*)
+{
+    char name[eng::kNameMax] = "";
+    core::safeCopy(name, sizeof(name), *(const char**)(self + eng::kInstPath));
+    core::logf("breaktrace cho start %p '%s' flags %08X", self, name, *(uint32_t*)(self + eng::kInstFlags));
+    g_state.g_choStart(self, nullptr);
+}
 
 // Every 2 s: the processors born in the last 60 s, youngest first, each one's clock. Caller holds mx.
 inline void reportClocks(ULONGLONG now)
@@ -408,7 +417,7 @@ inline bool install(const Config& c)
 {
     if (!c.on) return true;
     detail::State& s = detail::g_state;
-    return core::installFeature("breaktrace", {
+    return dbg::chain::installFeature("breaktrace", {
         {"ClipProcessor evaluate (breaktrace)", 0x00543F40, "B8E42E0000E8", (void*)&detail::hkClipEval,
          (void**)&s.g_clipEval},
         {"exploder munition impact (breaktrace)", 0x0151E420, "6AFF68????????64A100000000", (void*)&detail::hkMunHit,
@@ -428,6 +437,8 @@ inline bool install(const Config& c)
         {"clip setup (breaktrace)", 0x00552FC0, "8B44240456578BF1", (void*)&detail::hkClipSet, (void**)&s.g_clipSet},
         {"music cue push (breaktrace)", 0x0073C5C0, "81EC1C010000538BD9807B1000", (void*)&detail::hkMusicPush,
          (void**)&s.g_musicPush},
+        {"choreography start (breaktrace)", detail::eng::kChoStart, "83EC18568BF1E8", (void*)&detail::hkChoStart,
+         (void**)&s.g_choStart},
     });
 }
 

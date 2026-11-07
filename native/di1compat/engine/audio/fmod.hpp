@@ -15,7 +15,6 @@ constexpr unsigned kEventDefault = 0;     // FMOD_EVENT_DEFAULT
 constexpr unsigned kEventInfoOnly = 4;    // FMOD_EVENT_INFOONLY
 constexpr int kCacheEvents = 1;           // getGroup's cacheevents
 constexpr int kPropMaxPlaybacksBehavior = 13;   // FMOD_EVENTPROPERTY_*
-constexpr int kPropMode = 14;
 constexpr int kPropOneshot = 35;
 constexpr int kJustFailIfQuietest = 5;    // MAX_PLAYBACKS_BEHAVIOR value
 constexpr int kCallbackStolen = 3;        // FMOD_EVENT_CALLBACKTYPE_*

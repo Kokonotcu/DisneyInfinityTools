@@ -1,14 +1,12 @@
-// 1.0's AssetOpen detour: every engine file open through the stages, first answer wins. games/di1, trace/loadprof.
+// 1.0's AssetOpen detour: every engine file open through the stages, first answer wins. games/di1.
 // Several engine threads.
 #pragma once
 #include <windows.h>
-#include <intrin.h>
 #include <cstdint>
 #include <cstdio>
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
 #include "../../engine/assets.hpp"
-#include "../../trace/loadprof.hpp"
 #include "config.hpp"
 #include "edits30.hpp"
 #include "openstage.hpp"
@@ -30,22 +28,16 @@ struct State {
 };
 inline State g_state;
 
-// First answer wins, in this order (B3, C3); bitmasksStack, blockStage and a serveStage miss pass on.
+// First answer wins, in this order (B3, C3); a serveStage miss passes on.
 inline constexpr openstage::Stage kStages[] = {
     edits30::vtxfStage, edits30::tipsStage, edits30::playsetMenuStage, edits30::hudCurrencyStage,
-    edits30::zoneListStage, edits30::bitmasksStack, edits30::chdStage, edits30::rootGraphStage,
-    edits30::olderCompanionStage, serve::sysStage, edits30::memtestStage, serve::blockStage, serve::serveStage};
+    edits30::zoneListStage, edits30::chdStage, edits30::rootGraphStage, edits30::olderCompanionStage,
+    serve::sysStage, serve::serveStage};
 
-// Misses always (rare and cheap: what an unexplained fallback asks for), hits only when tracing.
+// Misses only: rare and cheap, they show what an unexplained fallback asks for.
 inline void logOpen(const openstage::Open& o)
 {
-    char pf[120] = "";
-    if (o.prof)
-        snprintf(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 lookup %.2f, total %.2f ms]",
-                 GetCurrentThreadId(), trace::loadprof::frameNo(), o.t30, o.tRead, trace::loadprof::nowMs() - o.tIn);
-    if (o.cfg->trace || !o.r)
-        core::logf("open %s flags=%X -> %s%s%s", o.p, o.flags & kFlagsLogged, o.r ? "ok" : "MISSING",
-                   o.r ? "" : o.missWhy.c_str(), pf);
+    if (!o.r) core::logf("open %s flags=%X -> MISSING%s", o.p, o.flags & kFlagsLogged, o.missWhy.c_str());
 }
 
 }  // namespace detail
@@ -54,14 +46,8 @@ inline void logOpen(const openstage::Open& o)
 inline int* __cdecl hkOpen(const char* path, uint32_t flags, uint32_t a3, uint32_t a4, int* a5)
 {
     const Config& c = detail::g_state.cfg;
-    openstage::Open o{&c, path, flags, a3, a4, a5, (const uint32_t*)_AddressOfReturnAddress(),
-                      (flags & openstage::kOpenWrite) != 0, c.loadProf10};
-    if (o.prof) {
-        o.tIn = trace::loadprof::nowMs();
-        trace::loadprof::noteOpenThread();
-    }
+    openstage::Open o{&c, path, flags, a3, a4, a5, (flags & openstage::kOpenWrite) != 0};
     o.r = engine::assets::open(path, flags, a3, a4, a5);
-    if (o.prof) o.t30 = trace::loadprof::nowMs() - o.tIn;
     core::safeCopy(o.p, sizeof(o.p), path);
     for (openstage::Stage stage : detail::kStages) {
         int* out = nullptr;

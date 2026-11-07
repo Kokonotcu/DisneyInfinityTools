@@ -7,10 +7,11 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
-#include "../core/stack.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../../core/stack.hpp"
+#include "../chain.hpp"
 
 namespace trace::teardown {
 
@@ -402,7 +403,7 @@ inline bool install(const Config& c)
 {
     if (!c.on) return true;
     detail::State& s = detail::g_state;
-    return core::installFeature("teardowntrace", {
+    return dbg::chain::installFeature("teardowntrace", {
         {"Zoo::Layout dtor (teardowntrace)", 0x00787BC0, "6AFF68????????64A100000000", (void*)&detail::hkLayoutDtor,
          (void**)&s.g_layoutDtor},
         {"Samurai::Node dtor (teardowntrace)", 0x004EE5F0, "6AFF68????????64A100000000", (void*)&detail::hkNodeDtor,

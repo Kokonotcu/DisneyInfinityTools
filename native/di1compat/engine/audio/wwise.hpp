@@ -25,7 +25,6 @@ namespace engine::audio::wwise {
 struct Config {
     bool music = true;    // music10: the MusicStack bridge
     bool vo = true;       // vo10: the dialogue bridge
-    bool trace = false;   // audiotrace10: log each posted name once with the backend that took it
     LogFn log = nullptr;
     system::Config systemCfg;
     host::Config hostCfg;
@@ -58,9 +57,6 @@ constexpr uint32_t kAkEndOfEvent = 1;
 constexpr uint32_t kAkDuration = 8;   // 3.0 FUN_01830370 asks it for dialog lines
 constexpr uint8_t kStreaming = 1;     // AkDurationCallbackInfo.bStreaming of our lines
 constexpr int kMaxLoadChain = 8;      // ponytail: 1.0 has no guard; no 1.0 'Load' chain is deeper than 3
-constexpr int kEndsPerName = 4;       // audiotrace10: ends and placements logged per name
-constexpr int kTracedLines = 300;     // audiotrace10: dialog line ends logged
-constexpr int kCategoryDepth = 8;     // audiotrace10: categories listed per event
 
 // AkDurationCallbackInfo and AkEventCallbackInfo as 3.0 LAB_01830120 reads them.
 struct AkDurationInfo {
@@ -82,7 +78,6 @@ typedef int(__cdecl* StopFn)(uint32_t pid, uint32_t ms, uint32_t curve);
 typedef int(__cdecl* UnregFn)(uint32_t obj);
 typedef int(__cdecl* ActionFn)(const char* name, int action, uint32_t obj, uint32_t ms, uint32_t curve, uint32_t pid);
 typedef int(__cdecl* SrcPosFn)(uint32_t pid, int* pos, uint8_t extrapolate);
-typedef int(__fastcall* QueuedPostFn)(void* mgr, void* edx, uint32_t* req);
 typedef void(__stdcall* FaderFn)(const char* cat, const char* src, float v, uint32_t a4);
 typedef void(__cdecl* AkCallback)(uint32_t type, void* info);
 
@@ -100,10 +95,6 @@ struct State {
     UnregFn oUnreg = nullptr;         // set once by hook()
     ActionFn oAction = nullptr;       // set once by hook()
     FaderFn oFader = nullptr;         // set once by hook()
-    QueuedPostFn oQueuedPost = nullptr;   // set once by hook()
-    std::unordered_map<uint32_t, int> endsSeen;      // tick thread only
-    int linesEnded = 0;                              // tick thread only
-    std::unordered_map<uint32_t, int> placedSeen;    // system's lock
 };
 inline State g_state;
 
@@ -198,11 +189,7 @@ inline void onPausePost(uint32_t ev)
 {
     State& s = g_state;
     const host::PauseScope scope = ev == s.idPauseExUi ? host::PauseScope::ExceptUi : host::PauseScope::All;
-    const host::PauseCount n = host::pause(ev != s.idResumeAll, scope);
-    if (tracing())
-        log("audio10: %s: %d 1.0 events %s, %d of them dialog lines", ev == s.idPauseAll ? "Pause_All" :
-            ev == s.idPauseExUi ? "Pause_All_Except_UI" : "Resume_All", n.events, ev == s.idResumeAll ? "resumed" :
-            "paused", n.lines);
+    host::pause(ev != s.idResumeAll, scope);
     if (ev != s.idPauseExUi) music::setPaused(ev == s.idPauseAll);
 }
 
@@ -288,95 +275,6 @@ inline void __stdcall hkFader(const char* cat, const char* src, float v, uint32_
     g_state.oFader(cat, src, v, a4);
 }
 
-// The categories an event plays in, with their volumes, from its own up.
-inline std::string categoryChain(void* ev)
-{
-    const fmod::Api& f = system::api();
-    std::string chain;
-    void* c = nullptr;
-    f.Event_GetCategory(ev, &c);
-    fmod::walkCategories(f, c, kCategoryDepth, [&](void* cat) {
-        char* cn = nullptr;
-        float cv = -1;
-        f.EventCategory_GetInfo(cat, nullptr, &cn);
-        f.EventCategory_GetVolume(cat, &cv);
-        char one[80];
-        snprintf(one, sizeof one, "%s%s %.3f", chain.empty() ? "" : " < ", cn ? cn : "?", cv);
-        chain += one;
-    });
-    return chain;
-}
-
-// audiotrace10: where one of our sounds plays against the listener, and the mix it plays in (posMx held).
-inline void tracePlacement(const char* name, const host::Play& pl, const float* at, const positions::Listener& ls)
-{
-    const float* lpos = ls.pos;
-    const float* v = at ? at : lpos;
-    const float dx = v[0] - lpos[0], dy = v[1] - lpos[1], dz = v[2] - lpos[2];
-    log("audio10: %s plays on obj %u at (%.1f %.1f %.1f)%s, %.1f from the listener (%.1f %.1f %.1f)", name, pl.obj,
-        v[0], v[1], v[2], at ? "" : " (no position: the listener's)", sqrtf(dx * dx + dy * dy + dz * dz), lpos[0],
-        lpos[1], lpos[2]);
-    // FMOD mode (0x10 3D, 0x8 2D, 0x40000 head-relative); fwd and up must be unit and perpendicular
-    unsigned mode = 0;
-    std::string chain;
-    if (void* ev = pl.ev; ev) {
-        system::api().Event_GetPropertyByIndex(ev, fmod::kPropMode, &mode, 0);
-        chain = categoryChain(ev);
-    }
-    const float *lf = ls.fwd, *lu = ls.up;
-    log("audio10: %s mode %x, categories %s; listener result %d, fwd (%.3f %.3f %.3f) up (%.3f %.3f %.3f) "
-        "|fwd| %.3f |up| %.3f fwd.up %.3f", name, mode, chain.c_str(), (int)host::listenerResult(), lf[0], lf[1],
-        lf[2], lu[0], lu[1], lu[2], sqrtf(lf[0] * lf[0] + lf[1] * lf[1] + lf[2] * lf[2]),
-        sqrtf(lu[0] * lu[0] + lu[1] * lu[1] + lu[2] * lu[2]), lf[0] * lu[0] + lf[1] * lu[1] + lf[2] * lu[2]);
-}
-
-// FUN_01830270, thiscall on the sound manager: a queued post {name, gameObj, 'bank:event'}. Game threads.
-inline int __fastcall hkQueuedPost(void* mgr, void*, uint32_t* req)
-{
-    State& s = g_state;
-    const int r = s.oQueuedPost(mgr, nullptr, req);
-    const char* name = req ? (const char*)req[0] : nullptr;
-    if (!name) return r;
-    const uint32_t id = hash::fnv1Lower(name);
-    bool ours;
-    {
-        std::unique_lock<std::recursive_mutex> l = system::lock();
-        ours = host::playOf((uint32_t)r) != nullptr;
-    }
-    traceBackend(id, name, !r ? "nothing (no Wwise or 1.0 event)" : ours ? "1.0 FMOD" : "Wwise");
-    if (!ours) return r;
-    std::unique_lock<std::recursive_mutex> l = system::lock();
-    const host::Play* pl = host::playOf((uint32_t)r);
-    if (!pl) return r;
-    const int seen = s.placedSeen[id]++;
-    if (seen >= kEndsPerName) return r;
-    positions::inspect(pl->obj,
-                       [&](const float* at, const positions::Listener& ls) { tracePlacement(name, *pl, at, ls); });
-    return r;
-}
-
-// audiotrace10: how long each sound played and what ended it (dialog lines up to a cap, others per name).
-inline void traceEnds(const std::vector<std::pair<uint32_t, host::Play>>& fin)
-{
-    State& s = g_state;
-    for (auto& d : fin) {
-        const host::Play& p = d.second;
-        const char* why = p.stopReq ? "stopped by 3.0" : p.ev ? "finished or stolen" : "retired";
-        if (p.fsb) {
-            const int line = s.linesEnded++;
-            if (line >= kTracedLines) continue;
-            const std::string n = dialogue::lineName(p.fsb, p.sub);
-            log("vo10: line %s (id %u) ended after %lu ms (%s)", n.c_str(), d.first, GetTickCount() - p.t0,
-                p.stopReq ? why : p.endBy ? p.endBy : why);
-            continue;
-        }
-        const int seen = s.endsSeen[p.eventId]++;
-        if (seen >= kEndsPerName) continue;
-        const std::string n = host::eventName(p.eventId).value_or(std::string());
-        log("audio10: %s ended after %lu ms (%s)", n.c_str(), GetTickCount() - p.t0, why);
-    }
-}
-
 }  // namespace detail
 
 inline int tick()
@@ -387,7 +285,6 @@ inline int tick()
         detail::AkDurationInfo info = {d.p.cookie, d.p.obj, d.id, d.p.eventId, d.ms, d.ms, 0, 0, detail::kStreaming};
         ((detail::AkCallback)d.p.cb)(detail::kAkDuration, &info);
     }
-    if (tracing()) detail::traceEnds(t.ended);
     for (auto& d : t.ended) {
         if (!(d.second.flags & detail::kAkEndOfEvent) || !d.second.cb) continue;
         detail::AkEventInfo info = {d.second.cookie, d.second.obj, d.first, d.second.eventId};
@@ -406,7 +303,7 @@ inline void setOriginals(ListenerFn listener, SetPosFn setPos)
 inline void configure(const Config& c)
 {
     detail::State& s = detail::g_state;
-    setLog(c.log, c.trace);
+    setLog(c.log);
     s.music = c.music;
     s.vo = c.vo;
     system::configure(c.systemCfg);
@@ -424,7 +321,7 @@ inline bool install(const Config& c)
     s.idPauseAll = hash::fnv1Lower("Pause_All");
     s.idPauseExUi = hash::fnv1Lower("Pause_All_Except_UI");
     s.idResumeAll = hash::fnv1Lower("Resume_All");
-    // music10, vo10 and audiotrace10 build on these hooks, so they install only with them
+    // music10 and vo10 build on these hooks, so they install only with them
     const bool base = installFeature("audio10", {
             {"sound bank request (audio10)", 0x0182DB30, "568B711C5785F6", (void*)&detail::hkBankReq,
              (void**)&s.oBankReq},
@@ -447,11 +344,6 @@ inline bool install(const Config& c)
     if (!base) return true;
     if (c.music) music::install(c.musicCfg);
     if (c.vo) dialogue::install(c.voCfg);
-    if (c.trace)
-        installFeature("audiotrace10", {
-            {"queued sound post (audiotrace10)", 0x01830270, "83EC44538B5C244C", (void*)&detail::hkQueuedPost,
-             (void**)&s.oQueuedPost},
-        });
     return true;
 }
 

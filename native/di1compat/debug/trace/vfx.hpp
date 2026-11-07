@@ -7,10 +7,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include "../base/hash.hpp"
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
+#include "../../base/hash.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../chain.hpp"
 
 namespace trace::vfx {
 
@@ -112,7 +113,7 @@ inline bool install(const Config& c)
 {
     if (!c.on) return true;
     detail::State& s = detail::g_state;
-    return core::installFeature("vfx_trace", {
+    return dbg::chain::installFeature("vfx_trace", {
         {"effect create (vfx trace)", 0x0065E3A0, "8B54240C8B4A18", (void*)&detail::hkEffect, (void**)&s.g_effect},
         {"emitter create (vfx trace)", 0x0066A1C0, "6AFF68????????64A100000000", (void*)&detail::hkEmitter,
          (void**)&s.g_emitter},

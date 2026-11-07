@@ -1,24 +1,20 @@
 // hkOpen's stages that serve files 3.0 lacks: GameDB supplements, the session, the 1.0 install. Open threads.
 #pragma once
 #include <windows.h>
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <set>
 #include <string>
-#include "../../base/format.hpp"
 #include "../../base/text.hpp"
 #include "../../core/engine_file.hpp"
 #include "../../core/log.hpp"
-#include "../../core/stack.hpp"
 #include "../../core/zip.hpp"
 #include "../../formats/gamedblua.hpp"
 #include "../../formats/oct.hpp"
 #include "challenges.hpp"
 #include "../../third_party/miniz/miniz.h"
-#include "../../trace/loadprof.hpp"
 #include "audio.hpp"
 #include "chestinfo.hpp"
 #include "config.hpp"
@@ -35,8 +31,6 @@ namespace di1::serve {
 
 // serve10: a di1sys/ path is a GameDB supplement (gamedb.hpp), served only where 3.0 has no file.
 inline bool sysStage(openstage::Open& o, int*& out);
-// block10: a path under a listed prefix is never served from 1.0. Always passes on.
-inline bool blockStage(openstage::Open& o, int*& out);
 // serve10: a file 3.0 lacks, from the session or the 1.0 install; passes on when 1.0 has none.
 inline bool serveStage(openstage::Open& o, int*& out);
 
@@ -56,18 +50,6 @@ constexpr size_t kDdsWidth = 16;
 constexpr size_t kDdsMips = 28;     // u32 dwMipMapCount
 constexpr size_t kDdsFourCc = 84;   // the pixel format's FourCC
 constexpr uint32_t kBlockSide = 4;  // a block-compressed texture's blocks are 4x4 texels
-
-// loadprof10's served-file stacks: the first 3 per kind, 15 in all, 16 exe addresses each
-inline constexpr const char* kStackKinds[] = {".oct", ".bent", ".banm", ".mer", ".tbody"};
-constexpr LONG kStacksPerKind = 3;
-constexpr LONG kStacksAll = 15;
-constexpr int kStackWords = 16;
-
-struct State {
-    std::atomic<LONG> stacks{0};                                   // served-file stacks logged; any open thread
-    std::atomic<LONG> perKind[sizeof(kStackKinds) / sizeof(kStackKinds[0])] = {};   // the same per kind
-};
-inline State g_state;
 
 // A di1sys/ supplement's server: p as opened, np normalised, pre its prefix's length.
 typedef int* (*SysServeFn)(const char* p, const std::string& np, size_t pre);
@@ -162,11 +144,7 @@ inline void padSmallDxt(std::string& d)
 inline int* serveSession(const openstage::Open& o, const std::string& hit)
 {
     int* r = core::memFile(hit.data(), hit.size());
-    char pf[100] = "";
-    if (o.prof)
-        snprintf(pf, sizeof(pf), " [prof tid %u frame %ld: 3.0 open %.2f, total %.2f ms]", GetCurrentThreadId(),
-                 trace::loadprof::frameNo(), o.t30, trace::loadprof::nowMs() - o.tIn);
-    core::logf("served %s %u B from asset session -> %s%s", o.p, (unsigned)hit.size(), r ? "ok" : "FAILED", pf);
+    core::logf("served %s %u B from asset session -> %s", o.p, (unsigned)hit.size(), r ? "ok" : "FAILED");
     return r;
 }
 
@@ -217,7 +195,6 @@ inline void* read10Lipsync(const Config& c, const char* p, size_t* n, std::strin
 // The 1.0 read of a missing file: overlay member, ChallengeData redirect, stand-ins, lipsync. Sets the miss reason.
 inline Read10 read10For(openstage::Open& o, const std::string& np, const std::string& over)
 {
-    double tR = o.prof ? trace::loadprof::nowMs() : 0;
     Read10 rd;
     // the count includes the candidate names that were not there (A-12)
     o.missWhy = over.empty() ? " (not in the 1.0 archives, " + std::to_string(vfs::archiveCount()) + " archives open)"
@@ -228,7 +205,6 @@ inline Read10 read10For(openstage::Open& o, const std::string& np, const std::st
     rd.data = scoped ? nullptr : vfs::read10(from, &rd.n, &rd.where);
     if (!rd.data) rd.data = read10StandIn(o, np, &rd.n, &rd.where);
     if (!rd.data) rd.data = read10Lipsync(*o.cfg, o.p, &rd.n, &rd.where);
-    if (o.prof) o.tRead = trace::loadprof::nowMs() - tR;
     return rd;
 }
 
@@ -276,42 +252,16 @@ inline void noteServedUi(const std::string& np, const char* p)
     session::noteScreen(np.substr(kPresentationDir, np.size() - kPresentationDir - kLuaSuffix));
 }
 
-// loadprof10: the engine stack of the first 3 served files per kind (15 in all), appended to pf.
-inline void appendServedStack(const char* p, const uint32_t* sp, char* pf, size_t cap, size_t len)
-{
-    State& s = g_state;
-    for (size_t k = 0; k < sizeof(kStackKinds) / sizeof(kStackKinds[0]); ++k) {
-        if (!text::endsWith(p, kStackKinds[k])) continue;
-        const LONG ofKind = ++s.perKind[k];
-        if (ofKind > kStacksPerKind) continue;
-        const LONG all = ++s.stacks;
-        if (all > kStacksAll) continue;
-        len = format::appendCut(pf, cap, len, " stack:");
-        core::stackOf(sp, pf, cap, len, kStackWords);
-    }
-}
-
 // A file served from 1.0: indexed overlay, transcode, MemFile, the served line. Frees rd's bytes.
 inline int* serveRead(const openstage::Open& o, const std::string& np, const std::string& over, const Read10& rd)
 {
     session::indexArchive(rd.where.substr(0, rd.where.find(':')));
-    double tT = o.prof ? trace::loadprof::nowMs() : 0;
     Transcoded t = transcodeServed(o, np, over, rd);
     noteServedUi(np, o.p);
-    double tTc = o.prof ? trace::loadprof::nowMs() - tT : 0;
-    double tM = o.prof ? trace::loadprof::nowMs() : 0;
     int* r = t.codec ? core::memFile(t.out.data(), t.out.size()) : core::memFile(rd.data, rd.n);
-    char pf[600] = "";
-    if (o.prof) {
-        const size_t len = format::appendCut(pf, sizeof(pf), 0, " [prof tid %u frame %ld: 3.0 open %.2f, 1.0 read "
-                                             "%.2f, transcode %.2f, memfile %.2f, total %.2f ms]", GetCurrentThreadId(),
-                                             trace::loadprof::frameNo(), o.t30, o.tRead, tTc,
-                                             trace::loadprof::nowMs() - tM, trace::loadprof::nowMs() - o.tIn);
-        appendServedStack(o.p, o.sp, pf, sizeof(pf), len);
-    }
-    core::logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s%s", o.p, (unsigned)(t.codec ? t.out.size() : rd.n),
+    core::logf("served %s %u B from 1.0 %s codec=%s%s%s -> %s", o.p, (unsigned)(t.codec ? t.out.size() : rd.n),
                rd.where.c_str(), t.codec ? t.codec : "raw", t.note.empty() ? "" : " ", t.note.c_str(),
-               r ? "ok" : "FAILED", pf);
+               r ? "ok" : "FAILED");
     mz_free(rd.data);
     return r;
 }
@@ -326,22 +276,9 @@ inline bool sysStage(openstage::Open& o, int*& out)
     return true;
 }
 
-inline bool blockStage(openstage::Open& o, int*&)
-{
-    if (!o.cfg->block10[0]) return false;
-    std::string np = text::norm(o.p), list = o.cfg->block10;
-    for (size_t a = 0, b; a < list.size(); a = b + 1) {
-        b = list.find(',', a);
-        if (b == std::string::npos) b = list.size();
-        std::string pre = list.substr(a, b - a);
-        if (!pre.empty() && np.rfind(pre, 0) == 0) o.blocked = true;
-    }
-    return false;
-}
-
 inline bool serveStage(openstage::Open& o, int*& out)
 {
-    const bool absent = !o.r && !o.blocked && !o.write;
+    const bool absent = !o.r && !o.write;
     if (!absent || !o.cfg->serve10 || !o.cfg->install10[0]) return false;
     std::string np = text::norm(o.p), hit, over;
     session::lookup(np, hit, over);

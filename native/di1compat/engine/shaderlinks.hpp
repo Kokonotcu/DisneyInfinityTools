@@ -14,7 +14,6 @@ namespace engine::shaderlinks {
 
 struct Config {
     bool lazyLink = false;    // the engine's own shaders link at first lookup too; the boot linker only sorts
-    bool fadeProbe = false;   // test: log passes that have no stage when linked
     std::function<uint8_t*(const char* name)> gameShader;   // the game's shader by name, linked always; nullptr: none
 };
 
@@ -245,9 +244,6 @@ inline bool linkShader(uint8_t* shd)
     for (int i = 0; i < npass; ++i) {
         uint8_t* p = passes + eng::kPassSize * i;
         const bool staged = p[eng::kPassStage] != 0;
-        if (!staged && s.cfg.fadeProbe && !seen)
-            core::logf("fade probe: shader %s pass %d word %08x has no stage at link time (no record)", nameOf(shd), i,
-                       *(uint32_t*)p);
         if (!staged || linkedAlready(shd, i, p)) continue;
         ++fresh;
         if (!addRecord(shd, i, p, shaderIndex)) return false;

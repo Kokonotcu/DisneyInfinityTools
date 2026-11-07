@@ -8,9 +8,10 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../chain.hpp"
 
 namespace trace::mission {
 
@@ -309,10 +310,10 @@ inline bool install(const Config& c)
     s.ownMissionTick = c.ownMissionTick;
     const bool armOnly = !c.on && c.ownMissionTick;
     if (armOnly)
-        return core::hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000",
+        return dbg::chain::hook("MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000",
                           (void*)&detail::hkMissionTick, (void**)&s.g_missionTick);
     if (!c.on) return true;
-    return core::installFeature("missiontrace", {
+    return dbg::chain::installFeature("missiontrace", {
         {"MissionContext update (trace)", 0x0166FFB0, "6AFF68????????64A100000000", (void*)&detail::hkMissionTick,
          (void**)&s.g_missionTick},
         {"FocusPoint_Actor update (missiontrace)", 0x015DF390, "6AFF64A10000000068????????50",

@@ -12,30 +12,15 @@ namespace di1 {
 struct Config {
     char install10[MAX_PATH] = "";   // the 1.0 install (its assets\ holds plain zips)
     bool serve10 = false;            // serve paths 3.0 lacks from the 1.0 zips
-    bool trace = false;              // diagnostic: log every open, 26 probe hooks (incl. hkInst, DR0 watch)
-    bool missionTrace = false;       // log 1.0 playset mission context state changes (one cheap hook)
-    bool teardownTrace = false;      // probe: Layout dtor placements, node dtor + hierarchy entry release inside it
-    bool breakTrace = false;         // probe: clip evaluation clocks, exploder hits and explodes (log only)
     bool shaders10 = false;          // real 1.0 shaders: translated at load (gen30.hpp) instead of 3.0 substitutes
     bool translate10 = true;         // shaders10's materials (0: its engine-side changes only, for bisecting)
     bool lazyLink10 = true;          // shaders10: 3.0's shaders link on first use too (0: the boot linker runs)
     bool skinLayout10 = true;        // skinned nodes' converted primitives in their 3.0 'skin' layout, bones kept
     bool skinTr10 = true;            // skinned materials take their translated 1.0 shader too (identity bones; gen30)
     bool sceneSettings10 = true;     // a 1.0 bundle's scene settings (SSET: fog, bloom, grading) re-laid into 3.0's
-    bool magenta10 = false;          // test: every translated pixel shader draws solid magenta
-    int bufview10 = 0;               // test: translated final passes show 1 light buffer (t3), 2 view depth (t0), 3 t4
-    int renderdoc10 = 0;             // >0: load RenderDoc (x86) and capture one frame this many seconds into the world
-    bool opacityLog10 = false;       // test: log primitives the opacity test drops from the opaque list
-    int fadeProbe10 = 0;             // test: 1 log faded objects' fade inputs (FUN_0044b8f0); 2 also draw them unfaded
-    bool fpsLog10 = false;           // test: each second, frame time and the main thread's wait on rendering
-    bool loadProf10 = false;         // diagnostic: per-open timings + a sampling profile of the busiest threads
-    char memtest[600] = "";          // comma list of path substrings served from a memory copy
-    bool hidePs = false;             // experiment: actor registry denies <name>_PS, so avatars fall back
-    char block10[600] = "";          // experiment: comma list of path prefixes never served from 1.0
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
     bool progress10 = true;          // mission .lua: 1.0's generated objective line -> ProgressString "<default>"
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
-    bool lockTrace10 = false;        // diagnostic: log control locks, contexts, choreography play/end, messages
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer::Rules::portRefs)
     bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them
     bool pins10 = true;              // .mer: complete pin tables on every instance (mer::Rules::pins10)
@@ -64,7 +49,6 @@ struct Config {
     bool hudMarker10 = true;         // playset30 on: + Include.hudmarker_inc, 3.0's mission compass (supplement.hpp)
     bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (groups.hpp)
     bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType (zones.hpp)
-    bool currencyTrace10 = false;    // probe: currency payouts, pickups and the balances read (trace/currency.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (skin.hpp, REN-3)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (gamedb30.hpp)
@@ -93,13 +77,11 @@ struct Config {
     bool audio10 = true;             // 1.0 FMOD runtime hosts the 1.0 sound data Wwise lacks (games/di1/audio.hpp)
     bool music10 = true;             // audio10: 1.0 Music_<X>.fev through 3.0's MusicStack
     bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
-    bool audioTrace10 = false;       // audio10: log each posted sound name once with the backend that took it
     bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
     bool cineSync10 = true;          // audio10: an audio-synced choreography starts the 1.0 sound event of its name
     bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
     bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (particles.hpp; needs vfx10)
     bool vfxChan10 = true;           // emitter curve channels re-laid for the shader of their material (chan.hpp)
-    bool vfxTrace = false;           // diagnostic: log effect/emitter spawns with their placement (trace/vfx.hpp)
     bool curves10 = true;            // gp: ledge/rail curves bound in 3.0 form (curves::curves30)
     bool surfaces10 = true;          // gp: collision shape SurfaceType mapped by name onto the 3.0 table (surfaces30)
     bool assetBufs10 = true;         // gp+npc: read10 finds <stem>_<n>.* members in <dir>/<stem>.zip
@@ -113,43 +95,25 @@ struct Config {
     bool playsetMenu10 = true;       // menu: a Play Sets entry per registered 1.0 playset (ui::playsetMenu10)
     bool zones10 = true;             // zonelist.lua: every 1.0 playset registered as it loads (playsets10, zones.hpp)
     bool building10 = true;          // a 1.0 SpawnBuilding node builds its building on the lot as in 1.0 (buildings)
-    bool spawnTrace10 = false;       // probe: lots, SpawnBuilding firing, lot spawns, player start lookups (log only)
-    bool capsuleTrace10 = false;     // probe: 1.0 expendable spawns, branches, completions (shutdown.hpp, log only)
     bool shutdown10 = true;          // a 1.0 expendable's actor stays drawn while shut down (shutdown; needs popin10)
     bool debris10 = true;            // a 1.0 breakable explodes into its DebrisModel (shutdown; needs popin10)
     bool rootGraph10 = true;         // 3.0-shipped 1.0-era models: Root takes the lone graph (edits30, octx)
     bool pause10 = true;             // ui: a 1.0 screen's pause is released at its exit unless handed on (selectmenu)
-    bool uiTrace10 = false;          // diagnostic: pauses on/off, screens' onEnter/onExit, focus changes (trace/pause)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
 inline constexpr core::ConfigKey kConfigKeys[] = {
     {"install10", core::ConfigKind::Text, offsetof(Config, install10), sizeof(Config::install10)},
     {"serve10", core::ConfigKind::Flag, offsetof(Config, serve10)},
-    {"trace", core::ConfigKind::Flag, offsetof(Config, trace)},
-    {"missiontrace", core::ConfigKind::Flag, offsetof(Config, missionTrace)},
-    {"teardowntrace", core::ConfigKind::Flag, offsetof(Config, teardownTrace)},
-    {"breaktrace", core::ConfigKind::Flag, offsetof(Config, breakTrace)},
     {"shaders10", core::ConfigKind::Flag, offsetof(Config, shaders10)},
     {"translate10", core::ConfigKind::Flag, offsetof(Config, translate10)},
     {"lazylink10", core::ConfigKind::Flag, offsetof(Config, lazyLink10)},
-    {"magenta10", core::ConfigKind::Flag, offsetof(Config, magenta10)},
     {"skinlayout10", core::ConfigKind::Flag, offsetof(Config, skinLayout10)},
     {"skintr10", core::ConfigKind::Flag, offsetof(Config, skinTr10)},
     {"scenesettings10", core::ConfigKind::Flag, offsetof(Config, sceneSettings10)},
-    {"bufview10", core::ConfigKind::Int, offsetof(Config, bufview10)},
-    {"renderdoc10", core::ConfigKind::Int, offsetof(Config, renderdoc10)},
-    {"opacitylog10", core::ConfigKind::Flag, offsetof(Config, opacityLog10)},
-    {"fadeprobe10", core::ConfigKind::Int, offsetof(Config, fadeProbe10)},
-    {"fpslog10", core::ConfigKind::Flag, offsetof(Config, fpsLog10)},
-    {"loadprof10", core::ConfigKind::Flag, offsetof(Config, loadProf10)},
-    {"memtest", core::ConfigKind::Text, offsetof(Config, memtest), sizeof(Config::memtest)},
-    {"hide_ps", core::ConfigKind::Flag, offsetof(Config, hidePs)},
-    {"block10", core::ConfigKind::Text, offsetof(Config, block10), sizeof(Config::block10)},
     {"events10", core::ConfigKind::Flag, offsetof(Config, events10)},
     {"progress10", core::ConfigKind::Flag, offsetof(Config, progress10)},
     {"aliases10", core::ConfigKind::Flag, offsetof(Config, aliases10)},
-    {"locktrace10", core::ConfigKind::Flag, offsetof(Config, lockTrace10)},
     {"portrefs10", core::ConfigKind::Flag, offsetof(Config, portRefs10)},
     {"ports10", core::ConfigKind::Flag, offsetof(Config, ports10)},
     {"pins10", core::ConfigKind::Flag, offsetof(Config, pins10)},
@@ -179,7 +143,6 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"hudmarker10", core::ConfigKind::Flag, offsetof(Config, hudMarker10)},
     {"rewards10", core::ConfigKind::Flag, offsetof(Config, rewards10)},
     {"currency10", core::ConfigKind::Flag, offsetof(Config, currency10)},
-    {"currencytrace10", core::ConfigKind::Flag, offsetof(Config, currencyTrace10)},
     {"psdna30", core::ConfigKind::Flag, offsetof(Config, psdna30)},
     {"avperc10", core::ConfigKind::Flag, offsetof(Config, avperc10)},
     {"spawner10", core::ConfigKind::Flag, offsetof(Config, spawner10)},
@@ -207,13 +170,11 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"audio10", core::ConfigKind::Flag, offsetof(Config, audio10)},
     {"music10", core::ConfigKind::Flag, offsetof(Config, music10)},
     {"vo10", core::ConfigKind::Flag, offsetof(Config, vo10)},
-    {"audiotrace10", core::ConfigKind::Flag, offsetof(Config, audioTrace10)},
     {"cinesync10", core::ConfigKind::Flag, offsetof(Config, cineSync10)},
     {"mixer10", core::ConfigKind::Flag, offsetof(Config, mixer10)},
     {"vfx10", core::ConfigKind::Flag, offsetof(Config, vfx10)},
     {"vfx_universal10", core::ConfigKind::Flag, offsetof(Config, vfxUniversal10)},
     {"vfxchan10", core::ConfigKind::Flag, offsetof(Config, vfxChan10)},
-    {"vfx_trace", core::ConfigKind::Flag, offsetof(Config, vfxTrace)},
     {"curves10", core::ConfigKind::Flag, offsetof(Config, curves10)},
     {"surfaces10", core::ConfigKind::Flag, offsetof(Config, surfaces10)},
     {"assetbufs10", core::ConfigKind::Flag, offsetof(Config, assetBufs10)},
@@ -227,30 +188,23 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"playsetmenu10", core::ConfigKind::Flag, offsetof(Config, playsetMenu10)},
     {"zones10", core::ConfigKind::Flag, offsetof(Config, zones10)},
     {"building10", core::ConfigKind::Flag, offsetof(Config, building10)},
-    {"spawntrace10", core::ConfigKind::Flag, offsetof(Config, spawnTrace10)},
-    {"capsuletrace10", core::ConfigKind::Flag, offsetof(Config, capsuleTrace10)},
     {"shutdown10", core::ConfigKind::Flag, offsetof(Config, shutdown10)},
     {"debris10", core::ConfigKind::Flag, offsetof(Config, debris10)},
     {"rootgraph10", core::ConfigKind::Flag, offsetof(Config, rootGraph10)},
     {"pause10", core::ConfigKind::Flag, offsetof(Config, pause10)},
-    {"uitrace10", core::ConfigKind::Flag, offsetof(Config, uiTrace10)},
 };
 
 // The config lines of the log; the other keys are logged by their features or not at all.
 inline void logConfig(const Config& c)
 {
-    core::logf("config: install10=%s serve10=%d trace=%d memtest=%s fpslog10=%d loadprof10=%d", c.install10, c.serve10,
-               c.trace, c.memtest, c.fpsLog10, c.loadProf10);
+    core::logf("config: install10=%s serve10=%d", c.install10, c.serve10);
     core::logf("config cho: chotime10=%d choanim10=%d choscene10=%d choconst10=%d cholayout10=%d clip10=%d "
-               "clip10motions=%d clip10ids=%d choalias10=%d banm10=%d variant10=%d camworld10=%d teardowntrace=%d "
-               "breaktrace=%d", c.choTime10, c.choAnim10, c.choScene10, c.choConst10, c.choLayout10, c.clip10,
-               c.clip10Motions, c.clip10Ids, c.choAlias10, c.banm10, c.variant10, c.camWorld10, c.teardownTrace,
-               c.breakTrace);
-    core::logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d spawntrace10=%d shutdown10=%d "
-               "debris10=%d capsuletrace10=%d", c.playsetMenu10, c.zones10, c.realmFile10, c.building10,
-               c.spawnTrace10, c.shutdown10, c.debris10, c.capsuleTrace10);
-    core::logf("config mis: gate10=%d toggletype10=%d beacon10=%d locktrace10=%d", c.gate10, c.toggleType10, c.beacon10,
-               c.lockTrace10);
+               "clip10motions=%d clip10ids=%d choalias10=%d banm10=%d variant10=%d camworld10=%d", c.choTime10,
+               c.choAnim10, c.choScene10, c.choConst10, c.choLayout10, c.clip10, c.clip10Motions, c.clip10Ids,
+               c.choAlias10, c.banm10, c.variant10, c.camWorld10);
+    core::logf("config menu: playsetmenu10=%d zones10=%d realmfile10=%d building10=%d shutdown10=%d debris10=%d",
+               c.playsetMenu10, c.zones10, c.realmFile10, c.building10, c.shutdown10, c.debris10);
+    core::logf("config mis: gate10=%d toggletype10=%d beacon10=%d", c.gate10, c.toggleType10, c.beacon10);
 }
 
 // Reads <dir>\di1compat.cfg into cfg; without the file cfg keeps its defaults and one line says so.

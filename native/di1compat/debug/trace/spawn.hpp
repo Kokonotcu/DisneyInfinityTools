@@ -9,19 +9,19 @@
 #include <map>
 #include <mutex>
 #include <string>
-#include "../base/text.hpp"
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
-#include "../core/stack.hpp"
-#include "../core/veh.hpp"
+#include "../../base/text.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../../core/stack.hpp"
+#include "../../core/veh.hpp"
 #include "start.hpp"
+#include "../chain.hpp"
 
 namespace trace::spawn {
 
 struct Config {
-    bool on = false;       // trace
-    bool hidePs = false;   // hide_ps (experiment): the actor registry denies AV_<name>_PS, so avatars fall back
+    bool on = false;   // trace
 };
 
 // Installs the probes when c asks for them, all or none (H1, H2); false when they were refused.
@@ -118,7 +118,6 @@ struct State {
     PlaceToyFn g_placeToy = nullptr;
     NodeMakeFn g_mkStart = nullptr, g_mkLocator = nullptr, g_mkSpawnExp = nullptr;
     HdrCloneFn g_hdrClone = nullptr;
-    bool hidePs = false;   // set once in install()
     // unguarded, as before: these hooks' threads are unverified (A-42)
     std::string readerLast, itemLast;   // the last reader list and item gate lines
     uint32_t instHeaders = 0;           // header count of the template being instanced, for the clone lines
@@ -133,11 +132,9 @@ inline State g_state;
 // FUN_00751750, thiscall (ret 4): the actor registry's "does <name> exist" (the playset avatar choice asks it).
 inline uint8_t __fastcall hkActorExists(void* self, void*, const char** name)
 {
-    State& s = g_state;
-    uint8_t r = s.g_actorExists(self, nullptr, name);
+    const uint8_t r = g_state.g_actorExists(self, nullptr, name);
     char n[200];
     core::safeCopy(n, sizeof(n), name && *name ? *name : "(null)");
-    if (s.hidePs && text::endsWith(n, "_PS") && !strncmp(n, "AV_", 3)) r = 0;
     core::logf("actor exists? %s -> %u", n, r);
     return r;
 }
@@ -479,8 +476,7 @@ inline bool install(const Config& c)
     if (!c.on) return true;
     detail::State& s = detail::g_state;
     start::detail::State& st = start::detail::g_state;
-    s.hidePs = c.hidePs;
-    return core::installFeature("trace", {
+    return dbg::chain::installFeature("trace", {
         {"actor exists (trace)", 0x00751750, "518B4424088B00", (void*)&detail::hkActorExists, (void**)&s.g_actorExists},
         {"figure check (trace)", 0x00DDAE30, "64A1000000006AFF68", (void*)&detail::hkFigureOk, (void**)&s.g_figureOk},
         {"figure playset (trace)", 0x00435080, "6AFF68????????64A100000000", (void*)&detail::hkFigurePlayset,

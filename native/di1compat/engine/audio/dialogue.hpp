@@ -75,8 +75,6 @@ inline bool media(const void* p, DlgBank** bank, int* sub);
 inline void buildEvNames();
 // The host tick: the next line of each running sequence when due.
 inline void seqTick();
-// The subsound name a play of fsb's subsound sub played ("?" if unknown).
-inline std::string lineName(void* fsb, int sub);
 // fn(first bank file, language folder) under the lock when the speaker has banks -> fn's answer; else false.
 template <class Fn>
 inline bool withSpeaker(uint16_t prefix, Fn fn);
@@ -113,7 +111,6 @@ constexpr size_t kRecordBank = 2;
 }  // namespace eng
 
 constexpr DWORD kArmedMs = 5000;   // an armed sequence waits this long for its first line
-constexpr int kTracedPosts = 300;  // audiotrace10: dialog line posts logged
 
 typedef const char*(__cdecl* LangFn)();
 typedef void*(__fastcall* MapFindFn)(void* map, void* edx, uint32_t key);
@@ -181,7 +178,6 @@ struct State {
     Scripts scripts;           // guarded by mx
     Armed armed;               // guarded by mx
     std::vector<Run> runs;     // guarded by mx
-    int posts = 0;             // guarded by mx; audiotrace10 post lines logged
 };
 inline State g_state;
 
@@ -358,23 +354,6 @@ inline uint32_t lineClassEvent(const fsbname::Index& x, int sub, uint32_t ev)
     return le != s.scripts.lineEvents.end() ? hash::fnv1Lower(le->second) : ev;
 }
 
-// audiotrace10: every dialog post up to kTracedPosts, with whether our sounds are paused (mx held).
-inline void tracePost(const fsbname::Index& x, int sub, const host::Post& p, const DlgBank* b, uint32_t id)
-{
-    State& s = g_state;
-    const int post = s.posts++;
-    if (post >= kTracedPosts) return;
-    std::string en = "?";
-    bool paused;
-    {
-        std::unique_lock<std::recursive_mutex> gl = system::lock();
-        if (std::optional<std::string> n = host::eventName(p.eventId); n) en = *n;
-        paused = host::paused();
-    }
-    log("vo10: line %s posted: event %s, obj %u, flags %x, bank %s -> id %u%s", x.subName(sub), en.c_str(), p.obj,
-        p.flags, b->file.c_str(), id, paused ? " (1.0 sounds paused)" : "");
-}
-
 // FUN_01948d80, cdecl PostEvent with external sources: 3.0 FUN_01830370 posts each line. Game threads, per line.
 inline uint32_t __cdecl hkPostExt(uint32_t ev, uint32_t obj, uint32_t flags, void* cb, void* cookie, uint32_t n,
                                   const uint32_t* ext, uint32_t pid)
@@ -391,8 +370,6 @@ inline uint32_t __cdecl hkPostExt(uint32_t ev, uint32_t obj, uint32_t flags, voi
     if (!host::knowsEvent(ev)) ev = lineClassEvent(x, sub, ev);
     const host::Post post{ev, obj, flags, cb, cookie};
     const uint32_t id = host::playLine(post, b->snd, sub);
-    traceBackend(ev ^ (uint32_t)sub, x.subName(sub), id ? "1.0 FMOD dialog" : "nothing (its 1.0 event is not loaded)");
-    if (tracing()) tracePost(x, sub, post, b, id);
     if (id) onLinePosted(b, sub, obj, id);   // the first line of an armed sequence starts the rest
     return id;
 }
@@ -643,18 +620,6 @@ inline void seqTick()
         }
         ++r;
     }
-}
-
-inline std::string lineName(void* fsb, int sub)
-{
-    detail::State& s = detail::g_state;
-    std::string n = "?";
-    std::lock_guard<std::recursive_mutex> l(s.mx);
-    for (auto& b : s.reg.banks) {
-        const bool same = b.second && b.second->snd == fsb;
-        if (same && sub >= 0) n = b.second->idx().subName(sub);
-    }
-    return n;
 }
 
 template <class Fn>

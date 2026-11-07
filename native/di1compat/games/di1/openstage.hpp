@@ -19,13 +19,9 @@ struct Open {
     const char* path;
     uint32_t flags, a3, a4;
     int* a5;
-    const uint32_t* sp;                   // hkOpen's return address slot: its stack walks start there
     bool write;                           // flags & kOpenWrite
-    bool prof;                            // loadprof10: the served and missing lines carry timings
-    double tIn = 0, t30 = 0, tRead = 0;   // loadprof10: start, the engine's own open, the 1.0 read
     int* r = nullptr;                     // the engine's stream, null when 3.0 has no such file
     char p[kPathCap] = "";
-    bool blocked = false;                 // block10 matched
     std::string missWhy = " (not served)";
 
     // A 3.0 file opened for reading: the stages that rewrite 3.0 files take these.

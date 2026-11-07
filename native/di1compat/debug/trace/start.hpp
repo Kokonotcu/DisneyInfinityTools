@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
-#include "../core/log.hpp"
+#include "../../core/log.hpp"
 
 namespace trace::start {
 

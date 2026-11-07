@@ -50,8 +50,6 @@ struct Compiler {
 
 struct Config {
     Compiler compiler;
-    int bufView = 0;        // test views of the game's lit pixel programs (bufview10)
-    bool magenta = false;   // test: every pixel program the game makes is solid magenta
     std::function<bool(const char* name, const Compile& compile, Generated& out)> generate;   // false: none
 };
 
@@ -90,26 +88,6 @@ constexpr uint32_t kRecordCount = 0x02173A66;   // pass-state records in use, u1
 
 constexpr size_t kDxbcHeader = 32;   // magic, checksum, version, size and chunk count
 constexpr size_t kAlign = 16;        // our copies of programs and shaders
-constexpr const char* kZeroAlbedo = "o.o1 = float4(0, 0, 0, 0);";
-constexpr const char* kMagenta = "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(1, 0, 1, 1); }";
-constexpr int kIdColourView = 8;
-constexpr int kFirstSolidView = 6;
-constexpr int kLastSolidView = 7;   // 6: lit final passes, 7: passes without a second target
-constexpr int kBufViews = 5;
-constexpr const char* kBufView[kBufViews] = {
-    "cbuffer perView : register(b1) { float4 CB1[18]; }; Texture2D t3 : register(t3); SamplerState s3 : register(s3);\n"
-    "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(t3.Sample(s3, p.xy * CB1[17].zw).rgb, 1); }",
-    "cbuffer perView : register(b1) { float4 CB1[18]; }; Texture2D t0 : register(t0); SamplerState s0 : register(s0);\n"
-    "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(t0.Sample(s0, p.xy * CB1[17].zw).xxx, 1); }",
-    "cbuffer perView : register(b1) { float4 CB1[18]; }; Texture2D t4 : register(t4); SamplerState s4 : register(s4);\n"
-    "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(t4.Sample(s4, p.xy * CB1[17].zw).rgb, 1); }",
-    "cbuffer perInstance : register(b4) { float4 CB4[1]; };\n"
-    "float4 main(float4 p : SV_Position) : SV_Target0 "
-    "{ return float4(CB4[0].rgb * 0.5 + float3(0.5, 0, 0) * (CB4[0].a == 0), 1); }",
-    "Texture2D t5 : register(t5); SamplerState s5 : register(s5);\n"
-    "struct PSIn { float4 pos : SV_Position; float4 TEXCOORD0 : TEXCOORD0; float4 TEXCOORD1 : TEXCOORD1; "
-    "float4 TEXCOORD2 : TEXCOORD2; };\n"
-    "float4 main(PSIn i) : SV_Target0 { return float4(t5.Sample(s5, i.TEXCOORD2.xy).rgb, 1); }"};
 }  // namespace eng
 
 struct State {
@@ -136,65 +114,10 @@ inline bool cachedDxbc(const std::string& path, std::string& code)
     return code.size() > eng::kDxbcHeader && !code.compare(0, 4, "DXBC");
 }
 
-// The colour test views give shader name: two bits of its fnv64 per channel.
-inline void viewColour(const char* name, double rgb[3])
-{
-    const uint64_t h = hash::fnv64(name);
-    rgb[0] = (h & 3) / 3.0;
-    rgb[1] = (h >> 2 & 3) / 3.0;
-    rgb[2] = (h >> 4 & 3) / 3.0;
-}
-
-// Test view 8: G-buffer albedo carries the shader's colour; lit final passes skip ("" when neither).
-inline std::string idColourView(const char* name, const std::string& hlsl)
-{
-    if (hlsl.find("tLight") != std::string::npos)
-        return "float4 main(float4 p : SV_Position) : SV_Target0 { discard; return 0; }";
-    const size_t at = hlsl.find(eng::kZeroAlbedo);
-    if (at == std::string::npos) return std::string();
-    double rgb[3];
-    viewColour(name, rgb);
-    char c[160];
-    snprintf(c, sizeof(c), "o.o1 = float4(sqrt(float3(%.2f, %.2f, %.2f)), 0.2236);", rgb[0], rgb[1], rgb[2]);
-    std::string out = hlsl;
-    out.replace(at, strlen(eng::kZeroAlbedo), c);
-    core::logf("idcolor %s = %.2f %.2f %.2f", name, rgb[0], rgb[1], rgb[2]);
-    return out;
-}
-
-// Test views 6 and 7: the pass draws one solid colour of its own, logged with its shader.
-inline std::string solidView(const char* name)
-{
-    double rgb[3];
-    viewColour(name, rgb);
-    char c[200];
-    snprintf(c, sizeof(c), "float4 main(float4 p : SV_Position) : SV_Target0 { return float4(%.2f, %.2f, %.2f, 1); }",
-             rgb[0], rgb[1], rgb[2]);
-    core::logf("idcolor %s = %.2f %.2f %.2f", name, rgb[0], rgb[1], rgb[2]);
-    return c;
-}
-
-// The test view that replaces a pixel program's HLSL (bufview10, magenta10); "" when none does.
-inline std::string testView(const Config& c, const char* name, const std::string& hlsl)
-{
-    const bool lit = hlsl.find("tLight") != std::string::npos;
-    std::string view = c.bufView == eng::kIdColourView ? idColourView(name, hlsl) : std::string();
-    const bool solid = c.bufView >= eng::kFirstSolidView && c.bufView <= eng::kLastSolidView;
-    const bool solidHere = c.bufView == eng::kLastSolidView ? hlsl.find("SV_Target1") == std::string::npos : lit;
-    if (solid && solidHere) view = solidView(name);
-    if (c.magenta) return eng::kMagenta;
-    if (!view.empty()) return view;
-    if (c.bufView && lit) return eng::kBufView[(c.bufView - 1) % eng::kBufViews];
-    return std::string();
-}
-
-// Compiles shader name's program (or its test view) through the DXBC cache; a fresh compile is cached.
-inline bool compile(const char* name, const std::string& source, const char* target, std::string& code,
-                    std::string& msg)
+// Compiles a program through the DXBC cache; a fresh compile is cached.
+inline bool compile(const std::string& hlsl, const char* target, std::string& code, std::string& msg)
 {
     const Config& c = g_state.cfg;
-    const std::string view = target[0] == 'p' ? testView(c, name, source) : std::string();
-    const std::string& hlsl = view.empty() ? source : view;
     const std::string path = c.compiler.cacheDir + "\\" + hash::shaderCacheName(target, hlsl);
     if (cachedDxbc(path, code)) return true;
     if (!c.compiler.compile) {
@@ -314,8 +237,8 @@ inline uint8_t* make(const char* name)
     if (auto it = s.shaders.find(name); it != s.shaders.end()) return it->second;
     uint8_t*& out = s.shaders[name];
     out = nullptr;
-    const Compile compile = [name](const std::string& hlsl, const char* target, std::string& code, std::string& msg) {
-        return detail::compile(name, hlsl, target, code, msg);
+    const Compile compile = [](const std::string& hlsl, const char* target, std::string& code, std::string& msg) {
+        return detail::compile(hlsl, target, code, msg);
     };
     Generated g;
     if (!s.cfg.generate || !s.cfg.generate(name, compile, g)) return nullptr;

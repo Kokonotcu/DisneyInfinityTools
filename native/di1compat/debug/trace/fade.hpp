@@ -1,16 +1,17 @@
-// fadeprobe10 probe: where object fades come from; mode 2 draws faded objects unfaded. core. Render-path threads.
+// fadeprobe10 probe: where object fades come from, logged. core. Render-path threads.
 #pragma once
 #include <windows.h>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../chain.hpp"
 
 namespace trace::fade {
 
 struct Config {
-    int mode = 0;   // fadeprobe10: 0 off, 1 log faded nodes' fade inputs, 2 also draw them unfaded (not log-only)
+    int mode = 0;   // fadeprobe10: 0 off, else log faded nodes' fade inputs
 };
 
 // Installs the probe when c asks for it (H1); false when its hook was refused.
@@ -39,13 +40,11 @@ constexpr float kOpaque = 0.999f;         // out[1] at or above this counts as u
 constexpr float kPi = 3.1415927f;
 constexpr ULONGLONG kNodeQuietMs = 3000;  // a node is logged again after 3 s
 constexpr int kLinesLogged = 800;
-constexpr int kModeUnfade = 2;
 
 typedef uint8_t(__cdecl* VisTestFn)(uint8_t* node, float* sphere, void* a3, uint8_t* view, uint8_t mask, float* out);
 
 struct State {
     VisTestFn g_visTest = nullptr;                   // set once by hook() in install()
-    bool unfade = false;                             // set once in install(): fadeprobe10 == 2
     std::mutex mx;                                   // guards last and lines
     std::unordered_map<uint8_t*, ULONGLONG> last;    // node -> tick of its last line
     int lines = 0;
@@ -85,15 +84,6 @@ inline uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t
 {
     uint8_t r = g_state.g_visTest(node, sphere, a3, view, mask, out);
     if (!(r & 1) || !(mask & 1) || out[1] >= kOpaque) return r;
-    // mode 2: every return below leaves the object unfaded
-    struct Unfade {
-        float* o;
-        bool on;
-        ~Unfade()
-        {
-            if (on) o[1] = 1.0f;
-        }
-    } unfade{out, g_state.unfade};
     if (!throttle(node)) return r;
     logFade(node, sphere, view, out);
     return r;
@@ -104,8 +94,7 @@ inline uint8_t __cdecl hkVisTest(uint8_t* node, float* sphere, void* a3, uint8_t
 inline bool install(const Config& c)
 {
     if (!c.mode) return true;
-    detail::g_state.unfade = c.mode == detail::kModeUnfade;
-    return core::hook("visibility test (fadeprobe10)", 0x0044B8F0, "8B5424088A442414F30F10620C",
+    return dbg::chain::hook("visibility test (fadeprobe10)", 0x0044B8F0, "8B5424088A442414F30F10620C",
                       (void*)&detail::hkVisTest, (void**)&detail::g_state.g_visTest);
 }
 

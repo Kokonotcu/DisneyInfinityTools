@@ -1,4 +1,4 @@
-// 1.0 Flash movies on 3.0 screens: action maps, focus, keys (actionmap10, focus10, keys10), input10 probes.
+// 1.0 Flash movies on 3.0 screens: action maps, focus, keys (actionmap10, focus10, keys10).
 // engine/screens. Main thread.
 #pragma once
 #include <cctype>
@@ -11,7 +11,6 @@
 #include "../../core/memcheck.hpp"
 #include "../../engine/screens.hpp"
 #include "config.hpp"
-#include "inputtrace.hpp"
 #include "session.hpp"
 
 namespace di1::movies {
@@ -30,17 +29,11 @@ constexpr size_t kFocusLists = 0x28C;           // the manager's per-player focu
 constexpr int kFocusListBytes = 0x20;
 constexpr size_t kFocusTop = 8;                 // a list head's holder of the top screen
 constexpr size_t kMapClear = 1;                 // an action map's vt[1], FUN_007f3640: empties it
-constexpr size_t kMapCount = 8;                 // an action map's entry count
 constexpr size_t kMapSlot = 0x20;               // the map's player slot (a byte), as FUN_00b48250 queries it
 constexpr size_t kInputMovie = 0x3C;            // the delivery input's movie (FUN_015520c0)
 constexpr size_t kHandleEvent = 0x8C / 4;       // a movie's vt index of HandleEvent
 constexpr uint32_t kKeyDown = 5;                // FUN_007f3320's KeyDown event type (0x007f3451..0x007f3480)
-constexpr size_t kMappers = 0xD54;              // the screen manager's UI control mappers, one per player slot
-constexpr size_t kMapperBytes = 0x1BC4;
-constexpr size_t kMapperEntries = 0xC, kMapperCount = 0x10;   // its entry pointers and their count
-constexpr size_t kEntryDown = 0x10, kEntryKey = 0x20;
-constexpr uint32_t kSlots = 11;                 // player slots 0..10 (FUN_01566f10)
-constexpr size_t kGfxType = 0xC, kGfxValue = 0x10, kGfxBytes = 0x20;   // a GFx Value
+constexpr size_t kGfxType = 0xC, kGfxValue = 0x10;   // a GFx Value
 constexpr uint32_t kGfxTypeMask = 0x8F, kGfxString = 6, kGfxManaged = 0x40;   // managed: one more hop
 }  // namespace eng
 
@@ -54,8 +47,7 @@ typedef char(__fastcall* MapStateFn)(void* map, void* edx, int i, uint32_t* key,
 typedef uint32_t(__fastcall* HandleEventFn)(void* movie, void* edx, const void* ev);
 
 struct State {
-    bool actionMap10 = false, keys10 = false, lockTrace10 = false;   // set once in install()
-    bool uiTrace10 = false;                                          // set once in install()
+    bool actionMap10 = false, keys10 = false;   // set once in install()
     // originals: set once by hook() / installFeature in install()
     FlashCallFn g_flashCall = nullptr;
     FocusGainFn g_focusGain = nullptr;
@@ -65,10 +57,6 @@ struct State {
     // main thread only: set while FUN_01565330 runs for a 3.0-script screen on a 1.0 movie (GP-15)
     uint8_t* keysScreen = nullptr;
     void* keysMovie = nullptr;
-    // main thread only: the delivery probes' last screen and gates, and each mapper entry's last state
-    uint8_t* lastScreen = nullptr;
-    uint32_t lastGates = ~0u;
-    uint8_t wasDown[256] = {};
 };
 inline State g_state;
 
@@ -125,12 +113,6 @@ inline void __cdecl hkFlashCall(void* a1, void* a2, const char* name, uint8_t* a
         core::logf("actionmap10: %s (1.0 movie) UsesActionMap -> its map is the movie's list", lua);
         name = "AppendActionMap";
     }
-    // probe: genericlist asks CanChangeSelection every frame while a key is held, which used up the budget
-    if (ten && strcmp(name, "CanChangeSelection") && inputtrace::room()) {
-        char a[64] = "";
-        if ((uintptr_t)argc >= 2) core::safeCopy(a, sizeof(a), gfxString(args + eng::kGfxBytes));
-        core::logf("input10: movie of %s calls %s('%s'), %u args", lua, name, a, (unsigned)(uintptr_t)argc);
-    }
     s.g_flashCall(a1, a2, name, args, argc);
 }
 
@@ -145,16 +127,6 @@ inline void movieFocus10(uint8_t* screen, bool focus, const char* why)
                screen[scr::kFocus]);
 }
 
-// uitrace10: a focus change of a screen on a 3.0 movie; 1.0 movies have their focus10 line.
-inline void focusTrace(const uint8_t* screen, const char* why)
-{
-    if (!g_state.uiTrace10 || !screen || movie10(screen)) return;
-    char name[64] = "";
-    engine::screens::copyField(screen, scr::kName, name, sizeof(name));
-    core::logf("uitrace10: focus %s %s (3.0 movie), player %d, +0x60 %d", name, why,
-               *(const int*)(screen + scr::kPlayer), screen[scr::kFocus]);
-}
-
 // FUN_01559480, thiscall on the manager (screen; ret 4), main thread, per focus change: the top screen gains it.
 inline void __fastcall hkFocusGain(uint8_t* mgr, void* edx, uint8_t* screen)
 {
@@ -164,7 +136,6 @@ inline void __fastcall hkFocusGain(uint8_t* mgr, void* edx, uint8_t* screen)
         screen ? *(uint8_t**)(mgr + eng::kFocusLists + *(int*)(screen + scr::kPlayer) * eng::kFocusListBytes) : nullptr;
     uint8_t** holder = head ? *(uint8_t***)(head + eng::kFocusTop) : nullptr;
     movieFocus10(holder ? holder[0] : nullptr, true, "gain");
-    focusTrace(holder ? holder[0] : nullptr, "gain");
 }
 
 // FUN_01554590, thiscall on the manager (holder; ret 4), main thread, per focus change.
@@ -172,7 +143,6 @@ inline void __fastcall hkFocusLoss(uint8_t* mgr, void* edx, uint8_t** holder)
 {
     g_state.g_focusLoss(mgr, edx, holder);
     movieFocus10(holder ? holder[0] : nullptr, false, "loss");
-    focusTrace(holder ? holder[0] : nullptr, "loss");
 }
 
 // A KeyDown event for the movie as FUN_007f3320 fills one: type, modifiers, keyCode, the player slot twice.
@@ -191,57 +161,8 @@ inline char __fastcall hkMapState(void* map, void* edx, int i, uint32_t* key, ui
     char r = s.g_mapState(map, edx, i, key, down, up);
     const bool asked = key && down && up;
     if (!r || !s.keysScreen || !asked) return r;
-    if (!*down && !*up) return r;
-    char name[64] = "";
-    engine::screens::copyField(s.keysScreen, scr::kName, name, sizeof(name));
-    bool sent = false;
-    if (*down && s.keysMovie && s.keys10) {
-        sendKey(s.keysMovie, map, *key);
-        sent = true;
-    }
-    if (inputtrace::room())
-        core::logf("input10: %s action key %u (map entry %d) %s -> %s", name, *key, i, *down ? "down" : "released",
-                   sent ? "sent to the movie as a key event" : "not sent");
+    if (*down && s.keysMovie && s.keys10) sendKey(s.keysMovie, map, *key);
     return r;
-}
-
-// probe (locktrace10): a 1.0-movie screen's delivery gates, logged whenever they change.
-inline void gatesProbe(uint8_t* screen, void* a1)
-{
-    State& s = g_state;
-    void* map = *(void**)screen;
-    uint32_t n = map ? *(uint32_t*)((uint8_t*)map + eng::kMapCount) : 0;
-    uint32_t gates = screen[scr::kFocus] | screen[scr::kLoaded] << 1 | screen[scr::kHidden] << 2 |
-                     screen[scr::kHiding] << 3 | n << 8 | (a1 ? 1u << 31 : 0);
-    char name[64] = "";
-    engine::screens::copyField(screen, scr::kName, name, sizeof(name));
-    const bool changed = screen != s.lastScreen || gates != s.lastGates;
-    if (changed && inputtrace::room())
-        core::logf("input10: %s delivery gates: focus(+0x60) %d loaded %d hidden %d hiding %d, "
-                   "map %u actions, input %p, 1.0 script %d",
-                   name, screen[scr::kFocus], screen[scr::kLoaded], screen[scr::kHidden], screen[scr::kHiding], n, a1,
-                   script10(screen));
-    s.lastScreen = screen;
-    s.lastGates = gates;
-}
-
-// probe: each UI action of the player's mapper that turns down while the screen takes input, mapped or not.
-inline void mapperProbe(uint8_t* screen)
-{
-    State& s = g_state;
-    void* map = *(void**)screen;
-    uint8_t* mgr = (uint8_t*)engine::screens::manager();
-    uint32_t slot = map ? *(const uint8_t*)((const uint8_t*)map + eng::kMapSlot) : 0;
-    uint8_t* mp = mgr && slot < eng::kSlots ? mgr + eng::kMappers + slot * eng::kMapperBytes : nullptr;
-    uint8_t** es = mp ? *(uint8_t***)(mp + eng::kMapperEntries) : nullptr;
-    uint32_t ne = mp ? *(uint32_t*)(mp + eng::kMapperCount) : 0;
-    for (uint32_t i = 0; es && i < ne && i < sizeof(s.wasDown); ++i) {
-        uint8_t d = es[i] ? es[i][eng::kEntryDown] : 0;
-        if (d && !s.wasDown[i] && inputtrace::room())
-            core::logf("input10: %s player slot %u UI action down: mapper entry %u key %u",
-                       *(const char**)(screen + scr::kName), slot, i, *(uint32_t*)(es[i] + eng::kEntryKey));
-        s.wasDown[i] = d;
-    }
 }
 
 // FUN_01565330, thiscall (a1, a2; ret 8), main thread, per frame per input screen and slot: a screen's actions.
@@ -249,12 +170,10 @@ inline void __fastcall hkDeliver(uint8_t* screen, void* edx, void* a1, void* a2)
 {
     State& s = g_state;
     bool ten = screen && movie10(screen);
-    if (ten && s.lockTrace10) gatesProbe(screen, a1);
     // a 1.0 script's screen keeps 3.0's path: SelectMenu works on raw keys and would see its select twice
     if (ten && a1 && !script10(screen)) {
         s.keysScreen = screen;
         s.keysMovie = *(void**)((uint8_t*)a1 + eng::kInputMovie);
-        mapperProbe(screen);
     }
     s.g_deliver(screen, edx, a1, a2);
     s.keysScreen = nullptr;
@@ -268,11 +187,9 @@ inline bool install(const Config& c)
     detail::State& s = detail::g_state;
     s.actionMap10 = c.actionMap10;
     s.keys10 = c.keys10;
-    s.lockTrace10 = c.lockTrace10;
-    s.uiTrace10 = c.uiTrace10;
     bool ok = true;
-    if (c.actionMap10 || c.lockTrace10)
-        ok &= core::hook("movie ExternalInterface call (1.0 UsesActionMap; input10 probe)", 0x01564790,
+    if (c.actionMap10)
+        ok &= core::hook("movie ExternalInterface call (1.0 UsesActionMap)", 0x01564790,
                          "64A1000000006AFF68????????506489250000000081ECC8000000", (void*)&detail::hkFlashCall,
                          (void**)&s.g_flashCall);
     if (c.focus10)
@@ -282,9 +199,9 @@ inline bool install(const Config& c)
             {"screen focus loss (1.0 movies)", 0x01554590, "64A1000000006AFF68????????506489250000000083EC28",
              (void*)&detail::hkFocusLoss, (void**)&s.g_focusLoss},
         });
-    if (c.lockTrace10 || c.keys10)
+    if (c.keys10)
         ok &= core::installFeature("keys10", {
-            {"screen action delivery (keys10; input10 probe)", 0x01565330,
+            {"screen action delivery (keys10)", 0x01565330,
              "64A1000000006AFF68????????506489250000000083EC44", (void*)&detail::hkDeliver, (void**)&s.g_deliver},
             {"action map entry state (keys10)", 0x00B48250, "8B44240456578BF1508D4E04", (void*)&detail::hkMapState,
              (void**)&s.g_mapState},

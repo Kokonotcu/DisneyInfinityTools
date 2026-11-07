@@ -1,7 +1,8 @@
 // spawntrace10 probe: where the player is put (the Pirates fall), trace's two start hooks alone. core. Spawn threads.
 #pragma once
-#include "../core/hooks.hpp"
+#include "../../core/hooks.hpp"
 #include "start.hpp"
+#include "../chain.hpp"
 
 namespace trace::spawntrace {
 
@@ -14,7 +15,7 @@ inline bool install(const Config& c)
 {
     if (!c.on) return true;
     start::detail::State& s = start::detail::g_state;
-    return core::installFeature("spawntrace10", {
+    return dbg::chain::installFeature("spawntrace10", {
         {"start lookup (spawntrace10)", 0x013A85D0, "6AFF68????????64A100000000", (void*)&start::detail::hkStartLookup,
          (void**)&s.g_startLookup},
         {"start query (spawntrace10)", 0x0145F720, "8B44240C83EC30", (void*)&start::detail::hkStartQuery,

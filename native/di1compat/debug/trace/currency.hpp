@@ -7,10 +7,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
-#include "../core/stack.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../../core/stack.hpp"
+#include "../chain.hpp"
 
 namespace trace::currency {
 
@@ -227,7 +228,7 @@ inline bool install(const Config& c)
         return false;
     }
     detail::State& s = detail::g_state;
-    return core::installFeature("currencytrace10", {
+    return dbg::chain::installFeature("currencytrace10", {
         {"InventoryItem add (currencytrace10)", 0x014B4C00, "5668BE0400008BF1E8", (void*)&detail::hkItemAdd,
          (void**)&s.g_itemAdd},
         {"InventoryItem change (currencytrace10)", 0x014BB210, "5668BE0400008BF1E8", (void*)&detail::hkItemChange,

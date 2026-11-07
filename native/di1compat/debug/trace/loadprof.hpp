@@ -12,10 +12,11 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "../core/hooks.hpp"
-#include "../core/log.hpp"
-#include "../core/memcheck.hpp"
-#include "../core/stack.hpp"
+#include "../../core/hooks.hpp"
+#include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../../core/stack.hpp"
+#include "../chain.hpp"
 
 namespace trace::loadprof {
 
@@ -573,10 +574,10 @@ inline bool install(const Config& c)
     if (!frames) return true;
     detail::State& s = detail::g_state;
     QueryPerformanceFrequency(&s.freq);
-    bool ok = core::hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8", (void*)&detail::hkFrameSync,
-                         (void**)&s.g_frameSync);
+    bool ok = dbg::chain::hook("frame sync (fps log)", 0x0047AAB0, "83EC105657B9????????E8",
+                               (void*)&detail::hkFrameSync, (void**)&s.g_frameSync);
     if (!c.loadProf) return ok;
-    const bool profiler = core::installFeature("loadprof10", {
+    const bool profiler = dbg::chain::installFeature("loadprof10", {
         {"fiber switch (loadprof10)", 0x0041E480, "8B44240C85C0740C", (void*)&detail::hkFiberSwitch,
          (void**)&s.g_fiberSwitch},
         {"file-done wait (loadprof10)", 0x0041FC10, "56578B3D????????8BF1", (void*)&detail::hkFileWait,

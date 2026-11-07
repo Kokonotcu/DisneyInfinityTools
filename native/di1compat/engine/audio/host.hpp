@@ -50,10 +50,6 @@ struct Play {
     bool ui;
     uint32_t born;   // tick at start: its end goes out a tick later at the earliest (3.0 FUN_01830270)
     void* fsb;       // a dialog line: the bank whose subsound it plays
-    DWORD t0 = GetTickCount();     // audiotrace10: started at
-    bool stopReq = false;          // audiotrace10: the game asked for its stop
-    int sub = -1;                  // audiotrace10: a dialog line's subsound
-    const char* endBy = nullptr;   // audiotrace10: what else ended it
 };
 
 // A Wwise post: event id, game object, AkCallbackType flags, callback and cookie.
@@ -128,7 +124,6 @@ inline void stopObject(uint32_t obj);
 inline PauseCount pause(bool on, PauseScope scope);
 inline TickResult tick();
 inline bool knowsEvent(uint32_t eventId);
-inline std::optional<std::string> eventName(uint32_t eventId);
 inline std::vector<uint32_t> idsOf(uint32_t eventId, uint32_t obj);
 inline void setMixer(const std::map<std::string, float>& mixer);
 inline void setFader(const char* cat, const char* src, float v);
@@ -138,9 +133,6 @@ inline void applyVolumes();
 inline Play* playOf(uint32_t id);
 // system::lock() held: stops every play of a dialog bank's sound.
 inline void stopBank(void* snd);
-// system::lock() held: audiotrace10's view.
-inline fmod::Result listenerResult();
-inline bool paused();
 // 1.0 SafeAudioSync (FUN_00ecabc0): an audio-synced choreography also starts the event named after it.
 inline void choreographyStarted(const char* path, uint32_t flags);
 
@@ -161,8 +153,6 @@ struct State {
     std::map<std::string, Project> projects;    // lower-case project file
     std::unordered_map<uint32_t, Entry> byId;   // fnv1Lower(event name), the id the game posts
     std::unordered_map<uint32_t, Play> plays;   // Wwise-space playing id
-    fmod::Result lres = 0;                      // the last listener update's result
-    bool pausedNow = false;                     // the last pause or resume posted
     uint32_t tickNo = 0;
     std::map<std::string, std::map<std::string, float>> faderValues;   // category -> source -> value
     std::map<std::string, float> mixer;         // the game's 'Mixer' source per category
@@ -474,7 +464,6 @@ inline uint32_t playLine(const Post& p, void* fsb, int sub)
         f.Event_SetCallback(pl.second.ev, nullptr, nullptr);
         f.Event_Stop(pl.second.ev, fmod::kStopImmediate);
         pl.second.ev = nullptr;
-        pl.second.endBy = "retired by the next line of its bank";
         finished::push(pl.first);
     }
     void* snd = nullptr;
@@ -486,7 +475,6 @@ inline uint32_t playLine(const Post& p, void* fsb, int sub)
     uint32_t id = 0;
     if (const bool started = detail::start(ev, p.obj, snd, id); !started) return 0;
     s.plays[id] = Play{ev, it->second.proj, p.obj, p.eventId, p.flags, p.cb, p.cookie, it->second.ui, s.tickNo, fsb};
-    s.plays[id].sub = sub;
     unsigned ms = 0;
     if (const fmod::Result failed = f.Sound_GetLength(snd, &ms, fmod::kTimeUnitMs); !failed)
         finished::length(id, (float)ms);
@@ -515,7 +503,6 @@ inline bool act(uint32_t id, int action)
         if (it->second.ev) f.Event_SetPaused(it->second.ev, action == kActionPause);
         return true;
     }
-    it->second.stopReq = true;
     if (it->second.ev) f.Event_Stop(it->second.ev, fmod::kStopFadeOut);   // EVENTFINISHED comes through the callback
     else finished::push(id);
     return true;
@@ -543,7 +530,6 @@ inline void stopObject(uint32_t obj)
     for (auto& pl : s.plays) {
         if (pl.second.obj != obj || !pl.second.ev) continue;
         system::api().Event_Stop(pl.second.ev, fmod::kStopImmediate);
-        pl.second.endBy = "its game object unregistered";
     }
     positions::erase(obj);
 }
@@ -553,7 +539,6 @@ inline PauseCount pause(bool on, PauseScope scope)
 {
     detail::State& s = detail::g_state;
     std::unique_lock<std::recursive_mutex> l = system::lock();
-    s.pausedNow = on;
     PauseCount n{0, 0};
     for (auto& pl : s.plays) {
         const bool kept = scope == PauseScope::ExceptUi && pl.second.ui;
@@ -575,7 +560,7 @@ inline TickResult tick()
     void* es = system::eventSystem();
     ++s.tickNo;
     const positions::Listener ls = positions::listener();
-    if (ls.set) s.lres = f.EventSystem_Set3DListenerAttributes(es, fmod::kListener, ls.pos, nullptr, ls.fwd, ls.up);
+    if (ls.set) f.EventSystem_Set3DListenerAttributes(es, fmod::kListener, ls.pos, nullptr, ls.fwd, ls.up);
     for (auto& pl : s.plays)
         if (pl.second.ev) detail::place(pl.second.ev, pl.second.obj);
     f.EventSystem_Update(es);
@@ -604,15 +589,6 @@ inline bool knowsEvent(uint32_t eventId)
 {
     std::unique_lock<std::recursive_mutex> l = system::lock();
     return detail::g_state.byId.count(eventId) != 0;
-}
-
-inline std::optional<std::string> eventName(uint32_t eventId)
-{
-    detail::State& s = detail::g_state;
-    std::unique_lock<std::recursive_mutex> l = system::lock();
-    auto e = s.byId.find(eventId);
-    if (e == s.byId.end()) return std::nullopt;
-    return e->second.name;
 }
 
 // Our ids playing that event, on that object (kAnyObject: any).
@@ -678,9 +654,6 @@ inline void stopBank(void* snd)
     for (auto& pl : detail::g_state.plays)
         if (pl.second.ev && pl.second.fsb == snd) system::api().Event_Stop(pl.second.ev, fmod::kStopImmediate);
 }
-
-inline fmod::Result listenerResult() { return detail::g_state.lres; }
-inline bool paused() { return detail::g_state.pausedNow; }
 
 // 3.0's audio sync (flag 0x20) requests only the dialog; the event plays at the listener, as long as it is.
 inline void choreographyStarted(const char* path, uint32_t flags)

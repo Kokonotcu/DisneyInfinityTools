@@ -85,10 +85,11 @@ Only code that exists because of how 1.0 data looks goes in games/di1.
                  install(). Examples: 3.0 asset reads, GameDB, zone list, UI glue, shader compile and cache, FMOD host.
   games/di1/     everything specific to 1.0: its translation rules and tables (ports10), its install layout, its
                  transcode dispatch, its runtime features, its config keys
-  trace/         log-only diagnostic hooks, built like engine modules
+  debug/         di1debug.dll, a separate watch-only plugin: its watches, chain.hpp, report, config
+  debug/trace/   log-only diagnostic hooks behind di1debug.cfg, built like engine modules
 
 M1. Includes go one way only. formats uses base. convert uses formats and base. core uses base. engine uses core,
-    convert, formats and base. games/di1 may use everything shared. trace uses core. di1compat.cpp uses all of them.
+    convert, formats and base. games/di1 may use everything shared. debug uses core, base and engine. di1compat.cpp uses all but debug.
     Shared folders never include games/. Never include one engine module or one game from another. If two need the
     same thing, move it down a level.
 M2. base, formats, convert and the translation code in games/di1 never touch the engine, hooks, the log or the
@@ -151,7 +152,8 @@ C8. Do not use a record index again after your own insert or erase has moved the
 Hooks and the engine
 
 H1. Every hook is a row in its module's hook table: name, static address, prologue bytes, detour, original pointer,
-    config switch. It is installed through core's hook(). Never call MH_ functions directly. Keep the install order:
+    config switch. It is installed through core's hook(), in di1debug through debug/chain.hpp. Never call MH_
+    functions directly anywhere else. Keep the install order:
     a hook is live the moment it is enabled.
 H2. A feature installs all of its hooks or none. Check every prologue of the feature first. If one does not match,
     log which one, install none of the feature's hooks, and log that the feature is off. A feature that needs another
@@ -201,8 +203,9 @@ E3. Check every size, count, offset and index that comes from a file before you 
     overflow. The plugin is 32-bit, so size_t wraps at 4 GiB: write bytes::fits(size, off, n), never off + n <= size.
 E4. Log only through core's logf. A new log line starts with a fixed subsystem tag. Existing log text is an interface
     and stays exactly the same (N28).
-E5. Check a diagnostic switch before you build its message. Diagnostic hooks live in trace/ behind their switch, and
-    diagnostic switches default to off. Real behaviour never hides behind a diagnostic switch.
+E5. Check a diagnostic switch before you build its message. Diagnostic hooks live in di1debug (debug/), never in
+    di1compat; di1debug never changes an argument or a result, and its switches default to off. Real behaviour
+    never hides behind a diagnostic switch.
 E6. Nothing fails silently. A refused hook, a missing table or a rejected file is logged once with the reason.
 
 Types and style
