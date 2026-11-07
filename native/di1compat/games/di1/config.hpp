@@ -50,6 +50,7 @@ struct Config {
     bool rewards10 = true;           // 1.0 expendable groups in 3.0's keys + the 1.0 core packages (groups.hpp)
     bool currency10 = true;          // a 1.0 playset's currency is its DefaultRewardType (zones.hpp)
     bool skin10 = true;              // 1.0 InfluenceRemap palettes applied to skinned vertices (skin.hpp, REN-3)
+    bool lod10 = true;               // a 1.0 LodGroup draws its nearest level only (3.0 draws them all: z-fighting)
     bool dnaChos10 = true;           // a 1.0 DNA's choreography effects name their scene in 3.0's Chos form
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (gamedb30.hpp)
@@ -146,6 +147,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"currency10", core::ConfigKind::Flag, offsetof(Config, currency10)},
     {"psdna30", core::ConfigKind::Flag, offsetof(Config, psdna30)},
     {"dnachos10", core::ConfigKind::Flag, offsetof(Config, dnaChos10)},
+    {"lod10", core::ConfigKind::Flag, offsetof(Config, lod10)},
     {"avperc10", core::ConfigKind::Flag, offsetof(Config, avperc10)},
     {"spawner10", core::ConfigKind::Flag, offsetof(Config, spawner10)},
     {"chotime10", core::ConfigKind::Flag, offsetof(Config, choTime10)},

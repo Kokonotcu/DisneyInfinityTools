@@ -25,6 +25,7 @@ inline OctSteps octStepsOf(const Config& c)
     o.scene = c.choScene10;
     o.curves = c.curves10;
     o.constSections = c.choConst10;
+    o.lodLevels = c.lod10;
     o.transforms = {kArenaSlack, c.variant10};
     return o;
 }

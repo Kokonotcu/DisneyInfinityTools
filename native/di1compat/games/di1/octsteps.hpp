@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include "../../base/text.hpp"
@@ -38,6 +39,7 @@ struct OctSteps {
     bool curves = false;        // curves10
     std::function<std::vector<std::string>()> surfaceTable;   // surfaces10: the engine's surface table, by index
     bool constSections = false; // choconst10, for paths under choreographies/ or exploders/
+    bool lodLevels = false;     // lod10: a LodGroup draws its first (nearest) level only
     octx::Options transforms;   // arena slack and variant groups (CO-01): the plugin's are octStepsOf's
 };
 
@@ -139,6 +141,52 @@ inline int rootParents(const std::string& path, oct::File& f)
     return (int)at.size();
 }
 
+// The record of field n inside the block opened at i; nullptr when it has none.
+inline oct::Rec* fieldOf(oct::File& f, size_t i, const char* n)
+{
+    for (size_t j = i + 1, be = f.blockEnd(i); j < be; ++j)
+        if (f.name(f.recs[j]) == n) return &f.recs[j];
+    return nullptr;
+}
+
+// Each LodGroup node's children, in node order (ParentNodeReferences), by node index.
+inline std::map<int, std::vector<int>> lodChildren(oct::File& f, const std::vector<size_t>& nodes)
+{
+    std::map<int, std::vector<int>> kids;
+    std::vector<bool> lod(nodes.size());
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        const oct::Rec* type = fieldOf(f, nodes[k], "Type");
+        lod[k] = type && f.name0(*type) == "LodGroup";
+    }
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        const oct::Rec* parent = fieldOf(f, nodes[k], "ParentNodeReferences");
+        const int p = parent ? f.int0(*parent) : -1;
+        if (p >= 0 && p < (int)nodes.size() && lod[p]) kids[p].push_back((int)k);
+    }
+    return kids;
+}
+
+// ponytail: far buildings draw at full detail; switch levels instead once 3.0's cell path honours LodGroup.
+// 3.0 draws every LodGroup child its cells link (no 3.0 world has one); 1.0 drew one. -> lower levels hidden
+inline int lodLevels30(oct::File& f)
+{
+    const long sp = f.pool("SceneTreeNodePool");
+    if (sp < 0) return 0;
+    std::vector<size_t> nodes;
+    for (size_t i = sp + 1, end = f.blockEnd(sp); i < end; i = f.blockEnd(i)) nodes.push_back(i);
+    int hidden = 0;
+    // the first child is the nearest level (Distances[0], 120 of 120 in_city groups: building, then its _Lod)
+    for (auto& [group, kids] : lodChildren(f, nodes)) {
+        for (size_t c = 1; c < kids.size(); ++c) {
+            oct::Rec* visible = fieldOf(f, nodes[kids[c]], "Visible");
+            if (!visible || !f.int0(*visible)) continue;
+            f.setInt(*visible, 0);
+            ++hidden;
+        }
+    }
+    return hidden;
+}
+
 // Whether a SubNetwork of f is named n.
 inline bool hasGraphNamed(const oct::File& f, const std::string& n)
 {
@@ -196,6 +244,7 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
     changed |= detail::navSteps(f, o, note);
     changed |= detail::noted(note, detail::exploderGraphName(path, f), "+graphname(", " names) ");
     changed |= detail::noted(note, detail::rootParents(path, f), "+parents(", " nodes) ");
+    changed |= detail::noted(note, o.lodLevels ? detail::lodLevels30(f) : 0, "+lod(", " lower levels hidden) ");
     if (octx::addAssetPool(f)) {
         note += "+AssetPool ";
         changed = true;
