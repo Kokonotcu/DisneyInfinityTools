@@ -11,6 +11,12 @@ add_library(di1compat SHARED
     third_party/miniz/miniz.c)
 target_compile_features(di1compat PRIVATE cxx_std_17)
 set_property(TARGET di1compat PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")   # no VC runtime DLL dependency
+# di1debug: the optional watch-only plugin (debug/); deleting its DLL from Pentane\Plugins turns it off
+add_library(di1debug SHARED
+    debug/di1debug.cpp debug/di1debug.def
+    minhook/buffer.c minhook/hook.c minhook/trampoline.c minhook/hde/hde32.c)
+target_compile_features(di1debug PRIVATE cxx_std_17)
+set_property(TARGET di1debug PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 # octtest: the offline test driver, its modes in octtest/ by job; it keeps the VC runtime DLL
 set(OCTTEST_SOURCES octtest.cpp
     octtest/test_oct.cpp octtest/test_data.cpp octtest/test_cho.cpp octtest/test_choconst.cpp octtest/test_clips.cpp
@@ -21,9 +27,9 @@ add_executable(octtest ${OCTTEST_SOURCES} third_party/miniz/miniz.c)
 target_compile_features(octtest PRIVATE cxx_std_17)
 target_compile_options(octtest PRIVATE /MP)   # its sources compile in parallel
 # /W4 on our C++ only; minhook and miniz keep the default level. Warnings, not errors.
-set_source_files_properties(di1compat.cpp ${OCTTEST_SOURCES} PROPERTIES COMPILE_OPTIONS /W4)
+set_source_files_properties(di1compat.cpp debug/di1debug.cpp ${OCTTEST_SOURCES} PROPERTIES COMPILE_OPTIONS /W4)
 # Release writes a PDB for crash dumps (docs/audit OT-29); /OPT:REF,ICF keep the folding /DEBUG turns off.
-foreach(target di1compat octtest)
+foreach(target di1compat di1debug octtest)
     target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:/Zi>)
     target_link_options(${target} PRIVATE "$<$<CONFIG:Release>:/DEBUG;/OPT:REF;/OPT:ICF>")
 endforeach()
