@@ -53,6 +53,7 @@ struct Config {
     bool lod10 = true;               // a 1.0 LodGroup draws its nearest level only (3.0 draws them all: z-fighting)
     bool dnaChos10 = true;           // a 1.0 DNA's choreography effects name their scene in 3.0's Chos form
     bool dnaExploder10 = true;       // a 1.0 exploder's PieceDNA / DebrisDNAFile under Exploder.DNAs (3.0's form)
+    bool dnaRespawn10 = true;        // a 1.0 TardisRespawn's RespawnCho under TardisRespawn.Chos (3.0's form)
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (gamedb30.hpp)
     bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory lacks type 10 (spawner.hpp)
@@ -149,6 +150,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"psdna30", core::ConfigKind::Flag, offsetof(Config, psdna30)},
     {"dnachos10", core::ConfigKind::Flag, offsetof(Config, dnaChos10)},
     {"dnaexploder10", core::ConfigKind::Flag, offsetof(Config, dnaExploder10)},
+    {"dnarespawn10", core::ConfigKind::Flag, offsetof(Config, dnaRespawn10)},
     {"lod10", core::ConfigKind::Flag, offsetof(Config, lod10)},
     {"avperc10", core::ConfigKind::Flag, offsetof(Config, avperc10)},
     {"spawner10", core::ConfigKind::Flag, offsetof(Config, spawner10)},

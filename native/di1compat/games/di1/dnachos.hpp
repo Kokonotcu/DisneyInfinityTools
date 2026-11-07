@@ -1,6 +1,7 @@
-// dnachos10 / dnaexploder10: a 1.0 DNA's choreography effects and exploder in 3.0's form. luachunk. Any thread.
+// dnachos10 / dnaexploder10 / dnarespawn10: 1.0 DNA tables 3.0 reads nested, in 3.0's form. luachunk. Any thread.
 #pragma once
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -14,12 +15,14 @@ namespace di1::dnachos {
 struct Steps {
     bool chos = false;       // Create's Name -> Chos = {Name}
     bool exploder = false;   // Exploder's PieceDNA / DebrisDNAFile -> Exploder.DNAs
+    bool respawn = false;    // TardisRespawn's RespawnCho -> TardisRespawn.Chos
 };
 
 // What a rewrite changed.
 struct Changed {
     int chos = 0;       // Create steps
     int exploder = 0;   // 1: the exploder's DNA names moved
+    int respawn = 0;    // 1: the respawn choreography moved
 };
 
 // chunk in 3.0's form per s, as Lua text into out; out untouched when nothing changed.
@@ -77,27 +80,29 @@ inline Value* gadget(std::map<std::string, Value>& g, const char* name)
     return v && v->t == Value::TAB ? v : nullptr;
 }
 
-inline bool isExploderDna(const std::pair<Value, Value>& f)
+// t's string fields a and b move into a new sub-table sub, unless t has one. -> 1 when moved
+inline int nest(Value& t, const char* sub, const char* a, const char* b)
 {
-    const bool named = f.first.t == Value::STR && (f.first.s == "PieceDNA" || f.first.s == "DebrisDNAFile");
-    return named && f.second.t == Value::STR;
+    if (t.get(sub)) return 0;
+    auto named = [a, b](const std::pair<Value, Value>& f) {
+        const bool key = f.first.t == Value::STR && (f.first.s == a || f.first.s == b);
+        return key && f.second.t == Value::STR;
+    };
+    Value inner;
+    inner.t = Value::TAB;
+    inner.tab = std::make_shared<std::vector<std::pair<Value, Value>>>();
+    std::copy_if(t.tab->begin(), t.tab->end(), std::back_inserter(*inner.tab), named);
+    if (inner.tab->empty()) return 0;
+    t.tab->erase(std::remove_if(t.tab->begin(), t.tab->end(), named), t.tab->end());
+    t.tab->push_back({str(sub), inner});
+    return 1;
 }
 
 // 3.0's exploder parser 0x1517bf0 reads PieceDNA from Exploder.DNAs (1485 of 1485 shipped); 1.0 wrote it flat (213).
-inline int exploderTo30(Value& ex)
-{
-    if (ex.get("DNAs")) return 0;
-    Value dnas;
-    dnas.t = Value::TAB;
-    dnas.tab = std::make_shared<std::vector<std::pair<Value, Value>>>();
-    for (auto& f : *ex.tab)
-        if (isExploderDna(f)) dnas.tab->push_back(f);
-    if (dnas.tab->empty()) return 0;
-    auto& fields = *ex.tab;
-    fields.erase(std::remove_if(fields.begin(), fields.end(), isExploderDna), fields.end());
-    fields.push_back({str("DNAs"), dnas});
-    return 1;
-}
+inline int exploderTo30(Value& ex) { return nest(ex, "DNAs", "PieceDNA", "DebrisDNAFile"); }
+
+// 3.0's TardisRespawn parser 0x151a830 reads Chos.RespawnCho (532 of 532 shipped); 1.0 wrote it flat (102).
+inline int respawnTo30(Value& tr) { return nest(tr, "Chos", "RespawnCho", "RespawnCho"); }
 
 }  // namespace detail
 
@@ -108,8 +113,9 @@ inline Changed dna30(const std::string& chunk, const Steps& s, std::string& out)
     const bool chos = s.chos && cho;
     const bool names = chunk.find("PieceDNA") != std::string::npos || chunk.find("DebrisDNAFile") != std::string::npos;
     const bool exploder = s.exploder && names;
+    const bool respawn = s.respawn && chunk.find("RespawnCho") != std::string::npos;
     Changed c;
-    if (!chos && !exploder) return c;
+    if (!chos && !exploder && !respawn) return c;
     auto g = luachunk::eval(chunk);
     luachunk::Value* fxs = chos ? detail::gadget(g, "Effects") : nullptr;
     luachunk::Value* fx = fxs ? fxs->get("FX") : nullptr;
@@ -117,7 +123,9 @@ inline Changed dna30(const std::string& chunk, const Steps& s, std::string& out)
         for (auto& [k, e] : *fx->tab) c.chos += detail::effectTo30(e);
     luachunk::Value* ex = exploder ? detail::gadget(g, "Exploder") : nullptr;
     if (ex) c.exploder = detail::exploderTo30(*ex);
-    if (!c.chos && !c.exploder) return c;
+    luachunk::Value* tr = respawn ? detail::gadget(g, "TardisRespawn") : nullptr;
+    if (tr) c.respawn = detail::respawnTo30(*tr);
+    if (!c.chos && !c.exploder && !c.respawn) return c;
     out.clear();
     for (auto& [name, v] : g) out += name + " = " + luachunk::text(v) + "\n";
     return c;
