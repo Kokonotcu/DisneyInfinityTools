@@ -1,9 +1,7 @@
-// 1.0 non-combat natives: attack move, ledge OBB, carry, spawner delay, absent systems. slangvm, sxkeys. Script thread.
+// 1.0 non-combat natives: attack move, ledge OBB, carry, absent systems. slangvm, sxkeys. Script thread.
 #pragma once
 #include <cstdint>
 #include <initializer_list>
-#include <mutex>
-#include <unordered_map>
 #include "../../core/hooks.hpp"
 #include "../../engine/slangvm.hpp"
 #include "sxkeys.hpp"
@@ -32,19 +30,6 @@ constexpr int kLedgeTail = 5;        // UseLedgeOBBCollision: bool and f1..f4 ab
 constexpr int kCarryResults = 2;     // Game_UpdateCarryStyle's pushes; 1.0's SetCarryStyle pushed none
 constexpr int kVec = 3;
 constexpr int kChaseOn = 1;          // 1.0 0xb20f90 writes Chase = 1 when the flag is set
-
-// 1.0 SpawnerQuarterback entry fields the natives read back; the rest only feed the spawn (SpawnFromActorNode).
-struct SpawnEntry {
-    float delay = 0.0f;       // +0x50
-    bool delaySet = false;    // +0x60 bit 8: the first SetSpawnDelay wins
-};
-
-struct State {
-    std::mutex mx;
-    // (QB, spawner handle) -> entry; guarded by mx. ponytail: never pruned, QBs live per zone (a few dozen entries)
-    std::unordered_map<uint64_t, SpawnEntry> spawn;
-};
-inline State g_state;
 
 inline void call(uint32_t va, uint8_t* ctx) { ((engine::slangvm::NativeFn)core::rt(va))(ctx); }
 
@@ -142,39 +127,6 @@ inline void __cdecl setCarryStyle(uint8_t* ctx)
     v.top() -= kCarryResults;
 }
 
-inline uint64_t spawnKey(const Cell& qb, const Cell& spawner)
-{
-    return (uint64_t)(uint32_t)cellInt(qb) << 32 | (uint32_t)cellInt(spawner);
-}
-
-// 1.0 0xed8070 (QB, spawner, delay): the first writer of the entry's delay wins.
-inline void __cdecl setSpawnDelay(uint8_t* ctx)
-{
-    Vm v{ctx};
-    const Cell delay = v.pop(), spawner = v.pop(), qb = v.pop();
-    State& s = g_state;
-    std::lock_guard<std::mutex> lock(s.mx);
-    SpawnEntry& e = s.spawn[spawnKey(qb, spawner)];
-    if (e.delaySet) return;
-    e.delay = delay.type == engine::slangvm::kFloat ? delay.f : (float)delay.i;
-    e.delaySet = true;
-}
-
-// 1.0 0xed8030 (QB, spawner) -> the entry's delay (+0x50).
-inline void __cdecl getSpawnDelay(uint8_t* ctx)
-{
-    Vm v{ctx};
-    const Cell spawner = v.pop(), qb = v.pop();
-    float delay = 0.0f;
-    {
-        State& s = g_state;
-        std::lock_guard<std::mutex> lock(s.mx);
-        auto it = s.spawn.find(spawnKey(qb, spawner));
-        if (it != s.spawn.end()) delay = it->second.delay;
-    }
-    pushFloat(v, delay);
-}
-
 }  // namespace detail
 
 // Rows replace g_natives' stubs by name (later rows win). drop/zeros: 1.0's own result without the system.
@@ -182,20 +134,8 @@ inline Native g_miscPorts[] = {
     {"SendAndTriggerAttackMoveAllParms", 9, 0, &detail::attackMoveAllParms},
     {"BipedCOM_UseLedgeOBBCollision", 9, 0, &detail::useLedgeObbCollision},
     {"Game_SetCarryStyle", 2, 0, &detail::setCarryStyle},
-    {"SpawnerQuarterback_SetSpawnDelay", 3, 0, &detail::setSpawnDelay},
-    {"SpawnerQuarterback_GetSpawnDelay", 2, 1, &detail::getSpawnDelay},
-    // Entries activate only through SpawnFromActorNode (1.0 0x10c9ec0), which 3.0 lacks: inactive-entry results
-    {"SpawnerQuarterback_SetMaxNumberOfSpawnableActors", 3, 0, &detail::drop<3>},
-    {"SpawnerQuarterback_SetMinNumberOfSpawnableActors", 3, 0, &detail::drop<3>},
-    {"SpawnerQuarterback_SetMakeRoomForSpawned", 3, 0, &detail::drop<3>},
-    {"SpawnerQuarterback_SetDeathDelay", 3, 0, &detail::drop<3>},
-    {"SpawnerQuarterback_SkipSpawn", 3, 0, &detail::drop<3>},
-    {"SpawnerQuarterback_SetAdditionalActorParms", 3, 0, &detail::drop<3>},
-    {"SpawnerQuarterback_StopSpawning", 2, 0, &detail::drop<2>},
-    {"SpawnerQuarterback_SpawnActorInstantly", 5, 0, &detail::drop<5>},
+    // spawner.hpp ports the other SpawnerQuarterback_* natives; 3.0 has no expendable spawn call (1.0 FUN_00f99200)
     {"SpawnerQuarterback_SpawnExpendableInstantly", 5, 0, &detail::drop<5>},
-    {"SpawnerQuarterback_NeedsReconciling", 2, 1, &detail::zeros<2, 0, 1>},
-    {"SpawnerQuarterback_GetLastActorSpawned", 2, 1, &detail::zeros<2, 0, 1>},
     // 3.0 has no WallJumpDetect component (no strings): 1.0's component-absent path (0xa04630, 0xa06e60, 0xa06e00)
     {"WallJump_GetWallJump_JumpToPoint", 1, 4, &detail::zeros<1, 3, 1>},
     {"WallDetect_GetLastWallPointAndNormal", 1, 6, &detail::zeros<1, 6, 0>},

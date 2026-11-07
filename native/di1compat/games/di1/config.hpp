@@ -55,6 +55,7 @@ struct Config {
     bool psdna30 = true;             // a 1.0 avatar <x>_ps.dnax 3.0 lacks: 3.0's <x>.dnax naming the _PS model
     bool avperc10 = true;            // gamedb30 on: the 1.0 avatar's perception policy in a 1.0 playset (gamedb30.hpp)
     bool spawner10 = true;           // 1.0 SpawnerQuarterback groups: 3.0's QB factory lacks type 10 (spawner.hpp)
+    bool spawnFrom10 = true;         // spawner10 on: SpawnFromActorNode + the group's spawn timer (spawner.hpp)
     bool choTime10 = true;           // cho.hpp: SubNetwork MinTime/MaxTime (choreography play range)
     bool choAnim10 = true;           // cho.hpp: Float 'Global.Time' clip/event input -> AnimState 'AnimState'
     bool choScene10 = true;          // cho.hpp: SceneTreeNodeRef on PlacementNode Associations
@@ -150,6 +151,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"lod10", core::ConfigKind::Flag, offsetof(Config, lod10)},
     {"avperc10", core::ConfigKind::Flag, offsetof(Config, avperc10)},
     {"spawner10", core::ConfigKind::Flag, offsetof(Config, spawner10)},
+    {"spawnfrom10", core::ConfigKind::Flag, offsetof(Config, spawnFrom10)},
     {"chotime10", core::ConfigKind::Flag, offsetof(Config, choTime10)},
     {"choanim10", core::ConfigKind::Flag, offsetof(Config, choAnim10)},
     {"choscene10", core::ConfigKind::Flag, offsetof(Config, choScene10)},

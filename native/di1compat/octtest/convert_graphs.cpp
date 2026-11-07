@@ -20,6 +20,7 @@
 #include "../games/di1/mission.hpp"
 #include "../games/di1/navmesh.hpp"
 #include "../games/di1/skin.hpp"
+#include "../games/di1/spawner.hpp"
 #include "../third_party/miniz/miniz.h"
 #include "../formats/bndl.hpp"
 #include "../games/di1/ui.hpp"
@@ -59,6 +60,7 @@ void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
         return;
     }
     if (flag == "--aliases") di1::mer::addAliases(T);   // as after hkMerRegistry
+    if (flag == "--spawnfrom") mernode::addToTable(T, di1::spawner::detail::nodeSpec());   // as after registerAll
 }
 
 // ---- --challenge ----

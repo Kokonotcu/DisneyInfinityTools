@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,7 +45,11 @@ constexpr uint32_t kStr = 0x006B6990;           // reads a string parameter
 constexpr uint32_t kDefDtor = 0x017C46D0;       // definition vtable: deleting destructor
 constexpr uint32_t kDefEquals = 0x006AB890;     // definition vtable: equality
 constexpr uint32_t kDefFalse = 0x015E89D0;      // definition vtable: returns false
+constexpr uint32_t kFetchAgent = 0x006DD190;    // Agent data input: thiscall(pin, node, &handle) -> bool, ret 8
+constexpr uint32_t kFetchVec3 = 0x006B2B20;     // Vector3d data input: thiscall(pin, node, float[3]) -> bool, ret 8
 constexpr uint32_t kDefReg = 0x02202C80;        // data: the definition creator map
+constexpr uint32_t kAgentElemVt = 0x01B3F8F0;   // data: DataElement<PortionedHandle<Agent,14,6,0>> vftable
+constexpr uint32_t kAgentType = 0x0213E76C;     // data: that element's type id (ActorTypeImpulse 0x14863b0 checks it)
 constexpr uint32_t kCbVft = 0x01B3F800;         // data: ContainedBase vftable
 constexpr uint32_t kNodeVt = 0x01B3FE6C;        // data: Node base vftable, 20 slots
 constexpr uint32_t kCbVt = 0x01B3FE5C;          // data: ContainedBase vftable, 3 slots
@@ -66,13 +71,15 @@ struct Param {
     int type;   // mer::T_*: the transcoder describes it so
 };
 using Impulse = void (*)(uint8_t* node, int pin, void* payload);
-// A native class: its pins, the parameters it reads, its state size, its impulse handler
+using Destroy = void (*)(uint8_t* node);
+// A native class: its pins, the parameters it reads, its state size, its impulse handler, its destroy notice
 struct Spec {
     const char* name;
     std::vector<Pin> pins;
     std::vector<Param> params;
     uint32_t state;
     Impulse impulse;
+    Destroy destroy = nullptr;   // before the node's memory goes: drop pointers to it (H11)
 };
 
 constexpr int kMax = 8, kMaxIn = 16;
@@ -115,8 +122,19 @@ struct Engine {
     uint8_t*(__fastcall* desc)(void*, void*, uint32_t);
     uint32_t(__fastcall* raw)(void*, void*, void*);
     const char*(__fastcall* str)(void*, void*, void*, bool*);
+    uint8_t(__fastcall* fetchAgent)(void*, void*, void*, int32_t*);
+    uint8_t(__fastcall* fetchVec3)(void*, void*, void*, float*);
     void* defReg;
     void* cbVft;
+    void* agentElemVt;
+    void* agentType;
+};
+
+// An impulse payload naming an actor, as 1.0's 0x109ee80 and 3.0's own senders build it on the stack.
+struct AgentPayload {
+    void* vft;
+    void* type;
+    int32_t handle;
 };
 
 // The module state (S1)
@@ -145,6 +163,56 @@ inline void fire(uint8_t* node, int c, int pin, void* payload)
     g_state.engine.fire(defOf(node) + g_state.rts[c].off[pin], nullptr, node, payload, -1);
 }
 
+// Output pin 'pin' with an actor as its payload (Who), inside a handler or not.
+inline void fireAgent(uint8_t* node, int c, int pin, int32_t handle)
+{
+    AgentPayload p{g_state.engine.agentElemVt, g_state.engine.agentType, handle};
+    fire(node, c, pin, &p);
+}
+
+// Data input 'pin' (DataV) as an actor handle; nullopt when unlinked or not an actor.
+inline std::optional<int32_t> fetchAgent(uint8_t* node, int c, int pin)
+{
+    int32_t h = 0;
+    if (!g_state.engine.fetchAgent(defOf(node) + g_state.rts[c].off[pin], nullptr, node, &h)) return std::nullopt;
+    return h;
+}
+
+// Data input 'pin' (DataV) as a vector: the linked value, else the pin's constant; nullopt when neither.
+inline std::optional<std::array<float, 3>> fetchVec3(uint8_t* node, int c, int pin)
+{
+    std::array<float, 3> v{};
+    if (!g_state.engine.fetchVec3(defOf(node) + g_state.rts[c].off[pin], nullptr, node, v.data())) return std::nullopt;
+    return v;
+}
+
+// A node's described parameter (FUN_006a9740 / FUN_006a9770), or nullptr when its graph does not describe it.
+inline uint8_t* paramOf(uint8_t* node, const char* name)
+{
+    const Engine& e = g_state.engine;
+    uint8_t* def = defOf(node);
+    return e.desc(def, nullptr, e.descIdx(def, nullptr, e.hash(name)));
+}
+
+// A bool / int / float parameter's 4 bytes (the type the class describes it as), else fallback.
+inline uint32_t rawParam(uint8_t* node, const char* name, uint32_t fallback)
+{
+    uint8_t* d = paramOf(node, name);
+    return d ? g_state.engine.raw(d, nullptr, node) : fallback;
+}
+
+// A string parameter, empty when absent.
+inline std::string strParam(uint8_t* node, const char* name)
+{
+    uint8_t* d = paramOf(node, name);
+    bool ok = false;
+    const char* s = d ? g_state.engine.str(d, nullptr, node, &ok) : nullptr;
+    return ok && s ? std::string(s) : std::string();
+}
+
+// A native node's state block (Spec::state bytes after the Node base).
+inline uint8_t* stateOf(uint8_t* node) { return node + eng::kStateAt; }
+
 template <int C> void construct(uint8_t* n)
 {
     Rt& c = g_state.rts[C];
@@ -165,6 +233,7 @@ template <int C> void* __fastcall createInstance(void*, void*, void*)
 template <int C> void* __fastcall cbDelete(uint8_t* vb, void*, uint32_t flags)
 {
     uint8_t* n = vb - g_state.rts[C].vbase;
+    if (g_state.rts[C].spec.destroy) g_state.rts[C].spec.destroy(n);
     g_state.engine.nodeDtor(n + eng::kDtorThis, nullptr);
     *(void**)vb = g_state.engine.cbVft;
     if (flags & 1) g_state.engine.free(n);
@@ -256,6 +325,8 @@ inline constexpr Check kChecks[] = {
     {eng::kDesc, "8B412485C074160FB740028B"},        {eng::kRaw, "83EC08538B5C241056576A00"},
     {eng::kStr, "51558B6C240C56576A00558B"},         {eng::kDefDtor, "568BF1E8"},
     {eng::kDefEquals, "5153558B6C2410568BF18B5E"},   {eng::kDefFalse, "32C0C3"},
+    {eng::kFetchAgent, "64A1000000006AFF68????????506489250000000081EC80000000"},
+    {eng::kFetchVec3, "64A1000000006AFF68????????506489250000000081EC84000000"},
 };
 
 // True when the bytes at 'at' are hex's ('??' skips a byte); same rule as core's prologue check (X-06)
@@ -308,8 +379,12 @@ template <class RtFn> Engine bindEngine(RtFn rt)
     e.desc = (decltype(e.desc))rt(eng::kDesc);
     e.raw = (decltype(e.raw))rt(eng::kRaw);
     e.str = (decltype(e.str))rt(eng::kStr);
+    e.fetchAgent = (decltype(e.fetchAgent))rt(eng::kFetchAgent);
+    e.fetchVec3 = (decltype(e.fetchVec3))rt(eng::kFetchVec3);
     e.defReg = (void*)rt(eng::kDefReg);
     e.cbVft = (void*)rt(eng::kCbVft);
+    e.agentElemVt = (void*)rt(eng::kAgentElemVt);
+    e.agentType = (void*)rt(eng::kAgentType);
     return e;
 }
 
