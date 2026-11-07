@@ -8,6 +8,7 @@
 #include "../../engine/slangvm.hpp"
 #include "config.hpp"
 #include "sxkeys.hpp"
+#include "sxmisc.hpp"
 
 namespace di1::sxnatives {
 
@@ -480,8 +481,10 @@ inline bool install(const Config& c)
     if (!c.sx10 || !c.sxNatives10) return true;
     engine::slangvm::Config vm;
     for (Native& n : g_natives) vm.natives.push_back(&n);
-    if (c.sxPorts10)
+    if (c.sxPorts10) {
         for (Native& n : g_ports) vm.natives.push_back(&n);
+        for (Native& n : sxmisc::g_miscPorts) vm.natives.push_back(&n);
+    }
     if (c.sxPorts10 && c.sxBeh10) vm.onCallByName = detail::behaviorTypeTo10;
     return engine::slangvm::install(vm);
 }
