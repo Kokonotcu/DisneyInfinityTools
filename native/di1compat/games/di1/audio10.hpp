@@ -17,6 +17,7 @@ inline bool install(const Config& c)
     a.log = core::logf;
     a.music = c.music10;
     a.vo = c.vo10;
+    a.voFirst = c.voFirst10;
     a.mixer = c.mixer10;
     a.install10 = c.install10;
     a.game30 = engine::assets::gameDir();

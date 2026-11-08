@@ -499,15 +499,25 @@ int checkSeqClock()
     const bool bound = u.driver == &marker;
     ea::dialogue::driverTime(&marker, -1.33f);
     ea::dialogue::driverTime(&marker, -0.33f);
-    const bool early = !dd::isDue(u, seq.items[1], u.clock);
+    const bool early = !dd::isDue(u, seq.items[1].delay, u.clock);
     ea::dialogue::driverTime(&marker, -0.03f);
-    const bool due = dd::isDue(u, seq.items[1], u.clock);
+    const bool due = dd::isDue(u, seq.items[1].delay, u.clock);
     ea::dialogue::driverStopped(&marker);
-    const bool wall = !u.driver && dd::isDue(u, seq.items[1], GetTickCount());
+    const bool wall = !u.driver && dd::isDue(u, seq.items[1].delay, GetTickCount());
     printf("SEQCLOCK bound %d, not due at 1.0 s %d, due at 1.3 s %d, wall clock after stop %d\n", bound, early, due,
            wall);
     dd::g_state.runs.clear();
     return !(bound && early && due && wall);
+}
+
+// vofirst10: TSIS_Cin_OpeningA's gaps are item 0's 500 ms, then items 2.. (245, 1610); item 1's 1206 unused.
+int checkFirstGap()
+{
+    namespace dd = ea::dialogue::detail;
+    const ea::dialogue::DlgSeq seq{4, {{0, 465, "", 500}, {0, 473, "", 1206}, {0, 197, "", 245}, {0, 474, "", 1610}}};
+    const uint32_t g1 = dd::gapBefore(seq, 1), g2 = dd::gapBefore(seq, 2), g3 = dd::gapBefore(seq, 3);
+    printf("FIRSTGAP gaps before items 1..3: %u %u %u ms\n", g1, g2, g3);
+    return !(g1 == 500 && g2 == 245 && g3 == 1610);
 }
 
 // ---- --host ----
@@ -583,6 +593,7 @@ int testVo(const Args& a)
     bad += checkEdnaLine(v);
     bad += checkAnno(v);
     bad += checkSeqClock();
+    bad += checkFirstGap();
     printf("VO bad %d\n", bad);
     return bad != 0;
 }
