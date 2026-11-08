@@ -119,6 +119,7 @@ struct Config {
     bool rcplace10 = true;           // ui: the Toy Store card list skips an item without a place record (rcplace)
     bool rcType10 = true;            // ui: a 1.0 playset's 3.0 RC catalog keeps 1.0's item types (edits30)
     bool statReward10 = true;        // missions: a 1.0 Stat reward carries its overrides' amount (edits30)
+    bool carBody10 = true;           // Cars townsfolk car bodies: playsets get 1.0's tinted models (carbody)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
@@ -232,6 +233,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"rcplace10", core::ConfigKind::Flag, offsetof(Config, rcplace10)},
     {"rctype10", core::ConfigKind::Flag, offsetof(Config, rcType10)},
     {"statreward10", core::ConfigKind::Flag, offsetof(Config, statReward10)},
+    {"carbody10", core::ConfigKind::Flag, offsetof(Config, carBody10)},
 };
 
 // The config lines of the log; the other keys are logged by their features or not at all.
