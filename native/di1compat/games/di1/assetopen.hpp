@@ -7,6 +7,7 @@
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
 #include "../../engine/assets.hpp"
+#include "carbody.hpp"
 #include "config.hpp"
 #include "edits30.hpp"
 #include "openstage.hpp"
@@ -31,8 +32,8 @@ inline State g_state;
 // First answer wins, in this order (B3, C3); a serveStage miss passes on.
 inline constexpr openstage::Stage kStages[] = {
     edits30::vtxfStage, edits30::tipsStage, edits30::playsetMenuStage, edits30::hudCurrencyStage,
-    edits30::zoneListStage, edits30::catalogTypeStage, edits30::chdStage, edits30::rootGraphStage,
-    edits30::olderCompanionStage, edits30::carBodyStage,
+    edits30::zoneListStage, edits30::catalogTypeStage, carbody::rrFlagStage, edits30::chdStage,
+    edits30::rootGraphStage, edits30::olderCompanionStage, carbody::playsetStage, carbody::toyBoxStage,
     serve::sysStage, serve::serveStage};
 
 // Misses only: rare and cheap, they show what an unexplained fallback asks for.

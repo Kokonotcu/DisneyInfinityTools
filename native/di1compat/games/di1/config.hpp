@@ -118,7 +118,7 @@ struct Config {
     bool bhteam10 = true;            // ai: a team check of an actor without the team component is 'not on it' (bhteam)
     bool rcplace10 = true;           // ui: the Toy Store card list skips an item without a place record (rcplace)
     bool rcType10 = true;            // ui: a 1.0 playset's 3.0 RC catalog keeps 1.0's item types (edits30)
-    bool carBody10 = true;           // Cars townsfolk sedan/truck/van bodies: 1.0's tinted models, not 3.0's (edits30)
+    bool carBody10 = true;           // Cars townsfolk car bodies: playsets get 1.0's tinted models (carbody)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
