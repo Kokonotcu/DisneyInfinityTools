@@ -28,6 +28,7 @@
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
 #include "games/di1/gamedb30.hpp"
+#include "games/di1/inertnodes.hpp"
 #include "games/di1/meridian.hpp"
 #include "games/di1/particles.hpp"
 #include "games/di1/movies.hpp"
@@ -84,6 +85,7 @@ static void installModules(const di1::Config& cfg)
     di1::sxnatives::install(cfg);
     di1::spawner::install(cfg);
     di1::scourge::install(cfg);
+    di1::inertnodes::install(cfg);
     di1::gamedb30::install(cfg);
     di1::screens::install(cfg);
     di1::audio10::install(cfg);

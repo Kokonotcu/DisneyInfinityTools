@@ -16,6 +16,7 @@
 #include "../games/di1/bent.hpp"
 #include "../games/di1/btd.hpp"
 #include "../games/di1/zones.hpp"
+#include "../games/di1/inertnodes.hpp"
 #include "../games/di1/mer.hpp"
 #include "../games/di1/mission.hpp"
 #include "../games/di1/navmesh.hpp"
@@ -64,6 +65,10 @@ void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
     if (flag == "--aliases-nomana") di1::mer::addAliases(T, false);
     if (flag == "--spawnfrom") mernode::addToTable(T, di1::spawner::detail::nodeSpec());   // as after registerAll
     if (flag == "--scourge") mernode::addToTable(T, di1::scourge::detail::nodeSpec());     // as after registerAll
+    if (flag == "--delivery") mernode::addToTable(T, di1::inertnodes::detail::deliverySpec());
+    if (flag != "--decosockets") return;
+    mernode::addToTable(T, di1::inertnodes::detail::spawnSocketsSpec());
+    mernode::addToTable(T, di1::inertnodes::detail::activateSocketsSpec());
 }
 
 // ---- --challenge ----

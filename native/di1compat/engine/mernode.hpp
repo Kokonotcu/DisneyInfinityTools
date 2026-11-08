@@ -58,6 +58,8 @@ constexpr uint32_t kRelease = 0x0063DA40;       // thiscall on a slot holding a 
 constexpr uint32_t kDefReg = 0x02202C80;        // data: the definition creator map
 constexpr uint32_t kAgentElemVt = 0x01B3F8F0;   // data: DataElement<PortionedHandle<Agent,14,6,0>> vftable
 constexpr uint32_t kAgentType = 0x0213E76C;     // data: that element's type id (ActorTypeImpulse 0x14863b0 checks it)
+constexpr uint32_t kIntElemVt = 0x01B3F848;     // data: DataElement<int> vftable
+constexpr uint32_t kIntType = 0x0213E86C;       // data: that element's type id (FUN_006ac980 builds one)
 constexpr uint32_t kCbVft = 0x01B3F800;         // data: ContainedBase vftable
 constexpr uint32_t kNodeVt = 0x01B3FE6C;        // data: Node base vftable, 20 slots
 constexpr uint32_t kCbVt = 0x01B3FE5C;          // data: ContainedBase vftable, 3 slots
@@ -152,6 +154,8 @@ struct Engine {
     void* cbVft;
     void* agentElemVt;
     void* agentType;
+    void* intElemVt;
+    void* intType;
 };
 
 // An impulse payload naming an actor, as 1.0's 0x109ee80 and 3.0's own senders build it on the stack.
@@ -159,6 +163,13 @@ struct AgentPayload {
     void* vft;
     void* type;
     int32_t handle;
+};
+
+// A Meridian::DataElement<int>, as FUN_006ac980 builds it: what an int data output's getter returns.
+struct IntElement {
+    void* vft;
+    void* type;
+    int32_t value;
 };
 
 // The module state (S1)
@@ -481,6 +492,8 @@ template <class RtFn> Engine bindEngine(RtFn rt)
     e.cbVft = (void*)rt(eng::kCbVft);
     e.agentElemVt = (void*)rt(eng::kAgentElemVt);
     e.agentType = (void*)rt(eng::kAgentType);
+    e.intElemVt = (void*)rt(eng::kIntElemVt);
+    e.intType = (void*)rt(eng::kIntType);
     return e;
 }
 
