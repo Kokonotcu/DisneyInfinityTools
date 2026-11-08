@@ -50,12 +50,12 @@ struct Stats {
     int typed = 0;
 };
 
-// mission.hpp's kAliases as registered classes, each with its 3.0 twin's pins and parameter types added
-inline void addAliases(Table& T)
+// mission.hpp's aliases as registered classes, each with its 3.0 twin's pins and parameter types added
+inline void addAliases(Table& T, bool mana10)
 {
-    for (auto& a : mission::kAliases) {
-        T.registered.insert(a.name);
-        Class &c = T.classes[a.name], &t = T.classes[a.twin];
+    for (const mission::Alias* a : mission::aliases(mana10)) {
+        T.registered.insert(a->name);
+        Class &c = T.classes[a->name], &t = T.classes[a->twin];
         c.pins.insert(t.pins.begin(), t.pins.end());
         c.params.insert(t.params.begin(), t.params.end());
     }
@@ -501,6 +501,30 @@ inline void toggleType(Graph& g, const NodeView& v, NodeParams& p)
     ++g.s.typed;
 }
 
+// A registered alias node's boolOn parameter as true (mission.hpp Alias)
+inline void aliasBool(const NodeView& v, NodeParams& p)
+{
+    const mission::Alias* a = v.n.stub ? nullptr : mission::aliasOf(v.n.type);
+    if (!a || !a->boolOn || p.done.count(a->boolOn)) return;
+    const int32_t o = (int32_t)p.block.val.size();
+    const int32_t on = 1;
+    p.block.val.append((const char*)&on, sizeof on);
+    ::mer::describe(p.block, ::mer::T_BOOL, a->boolOn, o);
+}
+
+// A registered alias node's pinFrom record from 'from' on in out, also as pinTo: the twin binds pins by name
+inline void aliasPin(Graph& g, const NodeView& v, size_t from)
+{
+    const mission::Alias* a = v.n.stub ? nullptr : mission::aliasOf(v.n.type);
+    if (!a || !a->pinFrom || v.names.count(a->pinTo)) return;
+    for (size_t i = from; i < g.out.size(); ++i) {
+        const oct::Rec& r = g.out[i];
+        if (r.level != g.fl || !isPlainInt(r) || g.f.name(r) != a->pinFrom) continue;
+        g.out.push_back(g.f.intScalar(g.fl, a->pinTo, (int32_t)g.f.ints(r)[0]));
+        return;
+    }
+}
+
 // The class's pin table on this instance too: the names it lacks (pins10), else all when it lists none
 inline void copyPinTable(Graph& g, const NodeView& v)
 {
@@ -530,6 +554,7 @@ inline void rebuildNode(Graph& g, size_t k)
     const NodeView v = viewOf(g, k);
     NodeParams p;
     bool firstType = true;
+    const size_t outAt = g.out.size();
     for (size_t j = v.n.at + 1; j < v.n.end; ++j) {
         Field fd{g.f.recs[j], g.f.name(g.f.recs[j])};
         copyField(g, v, firstType, fd);
@@ -542,7 +567,9 @@ inline void rebuildNode(Graph& g, size_t k)
         describeField(g, v, fd, p);
     }
     toggleType(g, v, p);
+    aliasBool(v, p);
     if (!v.n.stub) copyPinTable(g, v);
+    aliasPin(g, v, outAt);
     if (!g.port[k].empty() && !v.names.count("LeafNameHash"))
         g.out.push_back(g.f.intScalar(g.fl, "LeafNameHash", (int32_t)::mer::lookup2(g.port[k])));
     g.out.push_back(g.f.intScalar(g.fl, "Mer_ParametersOffset", (int32_t)g.values[v.ns].size()));

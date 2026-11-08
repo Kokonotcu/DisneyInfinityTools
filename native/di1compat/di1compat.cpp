@@ -76,7 +76,7 @@ static void installModules(const di1::Config& cfg)
     engine::playsetslot::install({});   // always on: no cfg key (B-20)
     di1::shaders10::install(cfg);
     di1::chostart::install(cfg);
-    di1::meridian::install({cfg.aliases10, cfg.native10, di1::tables::mer()});
+    di1::meridian::install({cfg.aliases10, cfg.native10, di1::tables::mer(), cfg.mana10});
     di1::assetdefs::install(cfg);
     engine::crt::install({});
     di1::sxkeys::install(cfg);

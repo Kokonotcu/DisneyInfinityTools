@@ -21,6 +21,7 @@ struct Config {
     bool events10 = true;            // mission presentation Event ints: 1.0 enum -> 3.0 (mission.hpp; .lua and .mer)
     bool progress10 = true;          // mission .lua: 1.0's generated objective line -> ProgressString "<default>"
     bool aliases10 = true;           // register dropped 1.0 Meridian classes with their 3.0 template (mission.hpp)
+    bool mana10 = true;              // aliases10 on: SpawnManaNode as SpawnGroupKiller KeepAlive (mission.hpp)
     bool portRefs10 = true;          // .mer: owner fields naming port sub-nodes stay plain ints (mer::Rules::portRefs)
     bool ports10 = true;             // .mer: port names from owner fields, DataFetch constants under them
     bool pins10 = true;              // .mer: complete pin tables on every instance (mer::Rules::pins10)
@@ -117,6 +118,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"events10", core::ConfigKind::Flag, offsetof(Config, events10)},
     {"progress10", core::ConfigKind::Flag, offsetof(Config, progress10)},
     {"aliases10", core::ConfigKind::Flag, offsetof(Config, aliases10)},
+    {"mana10", core::ConfigKind::Flag, offsetof(Config, mana10)},
     {"portrefs10", core::ConfigKind::Flag, offsetof(Config, portRefs10)},
     {"ports10", core::ConfigKind::Flag, offsetof(Config, ports10)},
     {"pins10", core::ConfigKind::Flag, offsetof(Config, pins10)},
