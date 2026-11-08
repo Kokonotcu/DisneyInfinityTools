@@ -16,6 +16,8 @@ namespace di1::rowboatmount {
 inline bool install(const Config& c);
 // From the TriggerAction hook (rowboatdrive10): a host avatar that replaced the rowboat's driver gets the Drive.
 inline void onAction();
+// Whether the handle's actor has that ActorType UID (bitmasks.lua); false until install() checked the calls.
+inline bool hasActorType(uint32_t handle, uint32_t uid);
 
 namespace detail {
 
@@ -73,6 +75,7 @@ struct State {
     ApplyFn g_apply = nullptr;          // the original; set once in install()
     bool retarget = false;              // rowboatmount10; set once in install()
     bool connect = false;               // rowboatconnect10; set once in install()
+    bool checked = false;               // every called prologue matched; set once in install()
     std::atomic<int> logged{0};
     std::atomic<uint32_t> vehicle{0};   // the last Tardis rowboat (game thread writes, script threads read)
     std::atomic<uint32_t> mounted{0};   // the avatar its mount went to
@@ -90,15 +93,17 @@ inline uint32_t vehicleOf(const uint8_t* info)
     return *(const uint32_t*)(rec + eng::kTransportVehicle);
 }
 
-// Whether the handle's actor is typed PIR_Rowboat, by the rule's own calls.
-inline bool isRowboat(uint32_t vehicle)
+// Whether the handle's actor has the ActorType UID's bit, by the rule's own calls (0xdf4f3a).
+inline bool actorTypeIs(uint32_t handle, uint32_t uid)
 {
     const uint16_t type = *(const uint16_t*)core::rt(eng::kTypeComponent);
-    uint8_t* comp = (uint8_t*)((ComponentFn)core::rt(eng::kComponent))(vehicle, type);
+    uint8_t* comp = (uint8_t*)((ComponentFn)core::rt(eng::kComponent))(handle, type);
     if (!comp || !core::readable(comp + eng::kTypeMask, sizeof(void*))) return false;
-    const uint32_t index = ((TypeIndexFn)core::rt(eng::kTypeIndex))(eng::kRowboatUid);
+    const uint32_t index = ((TypeIndexFn)core::rt(eng::kTypeIndex))(uid);
     return ((HasBitFn)core::rt(eng::kHasBit))(*(void**)(comp + eng::kTypeMask), index);
 }
+
+inline bool isRowboat(uint32_t vehicle) { return actorTypeIs(vehicle, eng::kRowboatUid); }
 
 // The host player's id, as Lua's Players_GetHostPlayerID (FUN_00b3ed40 -> FUN_013807c0): 0 without a session.
 inline int hostPlayer()
@@ -224,6 +229,11 @@ inline void onAction()
     s.busy = false;
 }
 
+inline bool hasActorType(uint32_t handle, uint32_t uid)
+{
+    return handle && detail::g_state.checked && detail::actorTypeIs(handle, uid);
+}
+
 inline bool install(const Config& c)
 {
     if (!c.rowboatMount10 && !c.rowboatConnect10) return true;
@@ -235,6 +245,7 @@ inline bool install(const Config& c)
         core::logf("rowboatmount10 off: %08X prologue differs", f.va);
         return false;
     }
+    s.checked = true;
     return core::installFeature("rowboatmount10", {{"transport rule apply (rowboatmount10)",
                                                     detail::eng::kTransportApply, "6AFF68????????64A100000000506489",
                                                     (void*)&detail::hkApply, (void**)&s.g_apply}});
