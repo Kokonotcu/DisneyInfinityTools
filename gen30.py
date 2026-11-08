@@ -152,6 +152,26 @@ class Binding30(sm3.Binding):
     def bool_(self, num):
         return 'false'                     # renderReducedRes, the only 1.0 bool: full-resolution passes
 
+    def position30(self, v):
+        """3.0's depth pre-pass position of input v as pos30 (VS 832e03d7: mad chains z, y, x); sm3.hpp position30.
+        1.0's G-buffer pass tests depth EQUAL against it, and 1.0's own arithmetic landed 1-2 ulp off (holes)."""
+        g = globals30()
+        if 'g_transform_objectToWorld' not in g or 'g_transform_worldToProjected' not in g:
+            return ''
+        (wb, wo, _), (pb, po, _) = g['g_transform_objectToWorld'], g['g_transform_worldToProjected']
+        wr, pr = wo // 16, po // 16
+        self.used[wb] = max(self.used[wb], wr + 4)
+        self.used[pb] = max(self.used[pb], pr + 4)
+        W = lambda r: 'CB%d[%d]' % (wb, wr + r)
+        P = lambda r: 'CB%d[%d]' % (pb, pr + r)
+        return '\n'.join([
+            '    float3 w30 = mad(%s.zzz, %s.xyz, %s.xyz);' % (v, W(2), W(3)),
+            '    w30 = mad(%s.yyy, %s.xyz, w30);' % (v, W(1)),
+            '    w30 = mad(%s.xxx, %s.xyz, w30);' % (v, W(0)),
+            '    float4 pos30 = mad(w30.zzzz, %s, %s);' % (P(2), P(3)),
+            '    pos30 = mad(w30.yyyy, %s, pos30);' % P(1),
+            '    pos30 = mad(w30.xxxx, %s, pos30);' % P(0)])
+
     def cbuffers(self):
         names = {0: 'perFrame', 1: 'perView', 2: 'perDraw', 3: 'perMaterial', 4: 'perInstance'}
         return '\n'.join('cbuffer %s : register(b%d) { float4 CB%d[%d]; };' % (names[k], k, k, n)

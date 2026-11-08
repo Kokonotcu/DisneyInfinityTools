@@ -127,6 +127,8 @@ def fmt_reg(r):
 VARYINGS = ['TEXCOORD%d' % i for i in range(10)] + ['COLOR0', 'COLOR1']
 # 3.0 renders reversed-Z (its sky VSs write z = 0); 1.0's far-plane idiom z = w is 3.0's near plane (sm3.hpp REVERSED_Z)
 REVERSED_Z = '    if (vout.pos.z == vout.pos.w) vout.pos.z = 0;'
+# Within 1e-4 |w| of 3.0's pre-pass position: that position; farther (wind, billboards) stays 1.0's (sm3.hpp)
+SAME_POSITION = '    if (all(abs(vout.pos - pos30) <= 1e-4 * abs(pos30.w) + 1e-6)) vout.pos = pos30;'
 SWZ = 'xyzw'
 
 
@@ -302,6 +304,10 @@ def to_hlsl(kind, prog, binding=None):
         else:
             raise ValueError('opcode ' + n)
 
+    pos30 = ''
+    if kind == 'vs' and hasattr(B, 'position30'):   # before cbuffers(): it marks the matrix registers
+        pk = [k for k, v in inputs.items() if v == 'POSITION0']
+        pos30 = B.position30('v%d' % pk[0]) if pk else ''
     out = [B.cbuffers()] + [B.sampler(num, k)[2] for num, k in sorted(samplers.items())]
     io = ' '.join(['float4 pos : SV_Position;'] + ['float4 %s : %s;' % (v, v) for v in VARYINGS])
     if kind == 'vs':
@@ -330,6 +336,8 @@ def to_hlsl(kind, prog, binding=None):
     if kind == 'vs':
         out.append('    VSOut vout = (VSOut)0;')
         out += ['    vout.%s = o%d;' % ('pos' if v == 'POSITION0' else v, k) for k, v in sorted(outputs.items())]
+        if pos30:
+            out += [pos30, SAME_POSITION]
         out.append(REVERSED_Z)
         out.append('    return vout;')
     else:
