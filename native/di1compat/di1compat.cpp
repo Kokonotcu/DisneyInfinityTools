@@ -19,6 +19,7 @@
 #include "games/di1/assetdefs.hpp"
 #include "games/di1/assetopen.hpp"
 #include "games/di1/audio10.hpp"
+#include "games/di1/bhteam.hpp"
 #include "games/di1/buildings.hpp"
 #include "games/di1/choalias.hpp"
 #include "games/di1/chostart.hpp"
@@ -98,6 +99,7 @@ static void installModules(const di1::Config& cfg)
     di1::movies::install(cfg);
     di1::buildings::install(cfg);
     di1::shutdown::install(cfg);
+    di1::bhteam::install(cfg);
 }
 
 // Pentane's entry, under the loader lock (B-N1): the log and the cfg, then each module's install() in order.
