@@ -20,6 +20,7 @@
 #include "../games/di1/mer.hpp"
 #include "../games/di1/mission.hpp"
 #include "../games/di1/navmesh.hpp"
+#include "../games/di1/prank.hpp"
 #include "../games/di1/scourge.hpp"
 #include "../games/di1/skin.hpp"
 #include "../games/di1/spawner.hpp"
@@ -54,7 +55,8 @@ constexpr MerFlag kMerFlags[] = {{"--noportrefs", &di1::mer::Rules::portRefs},
                                  {"--nogate", &di1::mer::Rules::gate10},
                                  {"--notoggletype", &di1::mer::Rules::toggleType10},
                                  {"--nocacheend", &di1::mer::Rules::cacheEnd10},
-                                 {"--norealmstart", &di1::mer::Rules::realmStart10}};
+                                 {"--norealmstart", &di1::mer::Rules::realmStart10},
+                                 {"--noprankfacing", &di1::mer::Rules::prankFacing10}};
 
 void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
 {
@@ -70,8 +72,9 @@ void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
     if (flag == "--delivery") mernode::addToTable(T, di1::inertnodes::detail::deliverySpec());
     if (flag == "--prankcombo") mernode::addToTable(T, di1::inertnodes::detail::comboEndedSpec());
     if (flag == "--prank") {
-        mernode::addToTable(T, di1::inertnodes::detail::registerPranksSpec());
-        mernode::addToTable(T, di1::inertnodes::detail::prankSocketSpec());
+        mernode::addToTable(T, di1::prank::detail::socketSpec());
+        mernode::addToTable(T, di1::prank::detail::registerSpec());
+        mernode::addToTable(T, di1::prank::detail::querySpec());
         mernode::addToTable(T, di1::inertnodes::detail::prankComboSpec());
     }
     if (flag != "--decosockets") return;
@@ -281,6 +284,7 @@ int convertMer(const Args& a)
     if (st.uncacheAtEnd) printf("cacheend: %d choreographies uncache at their end\n", st.uncacheAtEnd);
     for (const di1::realmstart::Change& c : st.realmStarts)
         printf("realmstart: RealmCache %s StartWeight %g -> %g\n", c.realm.c_str(), c.from, c.to);
+    if (st.prankFacing) printf("prankfacing: %d PrankTargetQuery read their toy's facing locator\n", st.prankFacing);
     return 0;
 }
 

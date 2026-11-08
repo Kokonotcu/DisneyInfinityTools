@@ -36,6 +36,7 @@ struct Rules {
     bool toggleType10 = true;   // toggletype10: the ColVisToggle family describes Type = its class
     bool cacheEnd10 = true;     // cacheend10: a cached, bound Choreography nobody uncaches uncaches itself at its end
     bool realmStart10 = true;   // realmstart10: a RealmCache starts at the weight a Catalyst sets at once
+    bool prankFacing10 = true;  // prankfacing10: a registered PrankTargetQuery reads its toy's 'facing' locator
 };
 
 // What transcode changed, for the log line
@@ -53,6 +54,7 @@ struct Stats {
     int typed = 0;
     int uncacheAtEnd = 0;
     std::vector<realmstart::Change> realmStarts;
+    int prankFacing = 0;
 };
 
 // mission.hpp's aliases as registered classes, each with its 3.0 twin's pins and parameter types added
@@ -179,6 +181,7 @@ struct Graph {
     std::vector<int> nsOut, nsPriv;                           // per node: MasterNetSync Link_Out / Private pin
     std::map<size_t, int> dIn, dOut;                          // node index -> links dropped (negative: added)
     std::set<size_t> uncachedAtEnd;                           // cacheEnd10: Choreography nodes given End -> Uncache
+    std::set<size_t> facing;                                  // prankFacing10: PrankTargetQuery nodes given Facing
     std::vector<Out> newLinks;
     std::vector<oct::Rec> out;                                // the file's records as rebuilt
     std::vector<std::string> values, strs;                    // per namespace: ParameterValues, ParameterStrings
@@ -395,6 +398,44 @@ inline uint32_t uncacheAtEnd(Graph& g, const NS& ns, const std::vector<Link>& ke
     return added;
 }
 
+inline constexpr char kFacingSuffix[] = "|facing";   // every MU launcher toy binds 'Anchor|facing'
+inline constexpr int kFacingPin = 2;                   // prank.hpp: PrankTargetQuery's Facing after Transform, Height
+inline constexpr uint16_t kDataKind = 3;               // link code kind of a data link (FORMATS.md 5.3)
+
+// prankFacing10: namespace ns's LocatorNode bound to "...|facing", -1 none
+inline long facingLocator(const Graph& g, const NS& ns)
+{
+    const size_t n = sizeof(kFacingSuffix) - 1;
+    for (size_t k = ns.begin + 1; k < ns.end && k < g.nodes.size(); ++k) {
+        if (g.nodes[k].stub || g.nodes[k].type != "LocatorNode") continue;
+        const long b = ::mer::field(g.f, g.nodes[k], g.fl, "BoundObjectName");
+        const std::optional<std::string> v = b >= 0 ? ::mer::firstName(g.f, g.f.recs[b]) : std::nullopt;
+        if (v && v->size() >= n && !v->compare(v->size() - n, n, kFacingSuffix)) return (long)k;
+    }
+    return -1;
+}
+
+// prankFacing10: facing locator's Transform -> each registered PrankTargetQuery's Facing (1.0 asked the slot instead)
+inline uint32_t prankFacing(Graph& g, const NS& ns, std::string& rows)
+{
+    const long loc = g.R.prankFacing10 ? facingLocator(g, ns) : -1;
+    const int from = loc >= 0 ? pinOf(g, (size_t)loc, "Transform") : -1;
+    const bool counted = loc >= 0 && ::mer::field(g.f, g.nodes[loc], g.fl, "NumOutLinks") >= 0;
+    if (from < 0 || from > kMaxFromPin || !counted) return 0;
+    uint32_t added = 0;
+    for (size_t k = ns.begin + 1; k < ns.end && k < g.nodes.size(); ++k) {
+        if (g.nodes[k].stub || g.nodes[k].type != "PrankTargetQuery" || g.facing.count(k)) continue;
+        const uint16_t code = (uint16_t)(from << ::mer::kFromPinShift | kFacingPin << ::mer::kToPinShift | kDataKind);
+        ::mer::appendRow(rows, code, (size_t)loc - ns.begin - 1, k - ns.begin - 1);
+        --g.dOut[(size_t)loc];
+        --g.dIn[k];
+        g.facing.insert(k);
+        ++added;
+    }
+    g.s.prankFacing += (int)added;
+    return added;
+}
+
 // A LinksBuffer of namespace ns in 3.0's form into newLinks; links leaving ns or touching a stand-in dropped
 inline bool relinkBuffer(Graph& g, size_t data, const NS& ns, std::string* why)
 {
@@ -426,7 +467,7 @@ inline bool relinkBuffer(Graph& g, size_t data, const NS& ns, std::string* why)
         keptLinks.push_back(*L);
         ++kept;
     }
-    const uint32_t added = uncacheAtEnd(g, ns, keptLinks, rows);
+    const uint32_t added = uncacheAtEnd(g, ns, keptLinks, rows) + prankFacing(g, ns, rows);
     g.newLinks.push_back({data, ::mer::version3Links(kept + added, rows)});
     g.s.links += (int)kept;
     return true;
@@ -615,6 +656,14 @@ inline void copyPinTable(Graph& g, const NodeView& v)
     g.s.pinsCopied += copied;
 }
 
+// prankFacing10: the Facing pin and, when the 1.0 node counts no in-link, its one
+inline void facingPin(Graph& g, const NodeView& v)
+{
+    if (!g.facing.count(v.k)) return;
+    if (!v.names.count("Facing")) g.out.push_back(g.f.intScalar(g.fl, "Facing", kFacingPin));
+    if (!v.names.count("NumInLinks")) g.out.push_back(g.f.intScalar(g.fl, "NumInLinks", 1));
+}
+
 // Node k rebuilt into out: its fields, pin table, LeafNameHash and parameter description
 inline void rebuildNode(Graph& g, size_t k)
 {
@@ -637,6 +686,7 @@ inline void rebuildNode(Graph& g, size_t k)
     toggleType(g, v, p);
     aliasBool(v, p);
     if (!v.n.stub) copyPinTable(g, v);
+    facingPin(g, v);
     aliasPin(g, v, outAt);
     if (!g.port[k].empty() && !v.names.count("LeafNameHash"))
         g.out.push_back(g.f.intScalar(g.fl, "LeafNameHash", (int32_t)::mer::lookup2(g.port[k])));

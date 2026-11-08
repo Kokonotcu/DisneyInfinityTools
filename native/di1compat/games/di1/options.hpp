@@ -61,6 +61,7 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
     o.merRules.toggleType10 = c.toggleType10;
     o.merRules.cacheEnd10 = c.cacheEnd10;
     o.merRules.realmStart10 = c.realmStart10;
+    o.merRules.prankFacing10 = c.prankFacing10;
     return o;
 }
 

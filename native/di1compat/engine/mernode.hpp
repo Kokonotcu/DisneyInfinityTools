@@ -60,6 +60,10 @@ constexpr uint32_t kAgentElemVt = 0x01B3F8F0;   // data: DataElement<PortionedHa
 constexpr uint32_t kAgentType = 0x0213E76C;     // data: that element's type id (ActorTypeImpulse 0x14863b0 checks it)
 constexpr uint32_t kIntElemVt = 0x01B3F848;     // data: DataElement<int> vftable
 constexpr uint32_t kIntType = 0x0213E86C;       // data: that element's type id (FUN_006ac980 builds one)
+constexpr uint32_t kFloatElemVt = 0x01B3F880;   // data: DataElement<float> vftable (Vector3Splitter ctor FUN_014549e0)
+constexpr uint32_t kFloatType = 0x0213E84C;     // data: that element's type id
+constexpr uint32_t kXformElemVt = 0x01B451BC;   // data: a Transform3d handle element (LocatorNode ctor FUN_01466fc0)
+constexpr uint32_t kXformType = 0x0213E7CC;     // data: its type id; FUN_0115f4f0 reads the handle at +8
 constexpr uint32_t kCbVft = 0x01B3F800;         // data: ContainedBase vftable
 constexpr uint32_t kNodeVt = 0x01B3FE6C;        // data: Node base vftable, 20 slots
 constexpr uint32_t kCbVt = 0x01B3FE5C;          // data: ContainedBase vftable, 3 slots
@@ -90,6 +94,7 @@ struct Param {
 using Impulse = void (*)(uint8_t* node, int pin, void* payload);
 using Destroy = void (*)(uint8_t* node);
 using Getter = void* (*)(uint8_t* node, int pin);
+using Create = void (*)(uint8_t* node);
 // A native class: its pins, the parameters it reads, its state size, its impulse handler, its destroy notice
 struct Spec {
     const char* name;
@@ -99,6 +104,7 @@ struct Spec {
     Impulse impulse;
     Destroy destroy = nullptr;   // before the node's memory goes: drop pointers to it (H11)
     Getter getter = nullptr;     // a DataOut pin's DataElement inside the node, or null
+    Create create = nullptr;     // after the node is built (graph load thread): a class with no input learns of it
 };
 
 constexpr int kMax = 12, kMaxIn = 16, kMaxOut = 4;
@@ -156,6 +162,10 @@ struct Engine {
     void* agentType;
     void* intElemVt;
     void* intType;
+    void* floatElemVt;
+    void* floatType;
+    void* xformElemVt;
+    void* xformType;
 };
 
 // An impulse payload naming an actor, as 1.0's 0x109ee80 and 3.0's own senders build it on the stack.
@@ -170,6 +180,20 @@ struct IntElement {
     void* vft;
     void* type;
     int32_t value;
+};
+
+// A Meridian::DataElement<float> (Vector3Splitter's X / Y / Z outputs).
+struct FloatElement {
+    void* vft;
+    void* type;
+    float value;
+};
+
+// A Transform3d handle element (LocatorNode's Transform output); the handle is borrowed, its owner keeps it alive.
+struct XformElement {
+    void* vft;
+    void* type;
+    uint8_t* handle;
 };
 
 // The module state (S1)
@@ -266,6 +290,44 @@ inline std::vector<std::array<float, 3>> fetchPositions(uint8_t* node, int c, in
     return out;
 }
 
+// A linked transform the caller now owns a reference to; releaseHandle drops it.
+struct HeldTransform {
+    uint8_t* handle;
+    std::array<float, 3> pos;
+};
+
+// Drops a reference fetchHandles handed over (FUN_0063da40 on the slot, as the list free does per element).
+inline void releaseHandle(uint8_t* h)
+{
+    if (h) g_state.engine.release(&h, nullptr);
+}
+
+// Data input 'pin' (Data) as positions with their handles: each kept handle's reference passes to the caller.
+inline std::vector<HeldTransform> fetchHandles(uint8_t* node, int c, int pin)
+{
+    const Engine& e = g_state.engine;
+    HandleList list;
+    e.fetchXforms(defOf(node) + g_state.rts[c].off[pin], nullptr, node, &list);
+    std::vector<HeldTransform> out;
+    try {
+        out.reserve(list.count);
+    } catch (...) {   // bad_alloc: the engine's list is still freed
+        e.listFree(&list, nullptr);
+        throw;
+    }
+    for (uint32_t i = 0; i < list.count; ++i) {
+        const auto p = positionOf(list.data[i]);
+        if (!p) continue;
+        out.push_back({list.data[i], *p});
+        list.data[i] = nullptr;   // FUN_0063da40 skips an empty slot, so this reference stays ours
+    }
+    e.listFree(&list, nullptr);
+    return out;
+}
+
+// The namespace a native node runs in: its ContainedBase's second word (FORMATS.md 5.9).
+inline void* namespaceOf(uint8_t* node, int c) { return *(void**)(node + g_state.rts[c].vbase + sizeof(void*)); }
+
 // A node's described parameter (FUN_006a9740 / FUN_006a9770), or nullptr when its graph does not describe it.
 inline uint8_t* paramOf(uint8_t* node, const char* name)
 {
@@ -302,6 +364,7 @@ template <int C> void construct(uint8_t* n)
     *(void***)n = c.mainVt;
     *(void***)(n + c.vbase) = c.cbVt;
     memset(n + eng::kStateAt, 0, c.vbase - eng::kStateAt);
+    if (c.spec.create) c.spec.create(n);
 }
 template <int C> uint32_t __fastcall getSize(void*, void*) { return g_state.rts[C].nodeSize; }
 template <int C> void* __fastcall createInstance(void*, void*, void*)
@@ -494,6 +557,10 @@ template <class RtFn> Engine bindEngine(RtFn rt)
     e.agentType = (void*)rt(eng::kAgentType);
     e.intElemVt = (void*)rt(eng::kIntElemVt);
     e.intType = (void*)rt(eng::kIntType);
+    e.floatElemVt = (void*)rt(eng::kFloatElemVt);
+    e.floatType = (void*)rt(eng::kFloatType);
+    e.xformElemVt = (void*)rt(eng::kXformElemVt);
+    e.xformType = (void*)rt(eng::kXformType);
     return e;
 }
 
