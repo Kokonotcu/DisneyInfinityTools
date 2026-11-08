@@ -28,6 +28,7 @@
 #include "dnachos.hpp"
 #include "psdna.hpp"
 #include "rendermtb.hpp"
+#include "playership.hpp"
 #include "rowboat.hpp"
 #include "scourgehp.hpp"
 #include "deliverybox.hpp"
@@ -53,6 +54,7 @@ struct TranscodeOptions {
     bool dnaChos = false;     // dnachos10
     bool scourgeHp = false;   // scourgehp10
     bool rowboat = false;     // rowboat10
+    bool playerShip = false;  // playership10
     bool boxTouch = false;    // rcbox10 (with rcdelivery10)
     bool twin = false;        // twin10
     bool dnaNest = false;     // dnanest10
@@ -570,6 +572,17 @@ inline Verdict rowboatDna(Request& r)
     return "rowboat10";
 }
 
+inline bool playerShipMatches(const Request& r) { return r.o.playerShip && ends(r, ".dnax") && startsLua(r); }
+
+// 1.0's player ship deck and its rigid body as one 3.0 boat vehicle (playership::ship30); other DNAs: passed on.
+inline Verdict playerShipDna(Request& r)
+{
+    const rowboat::Steps s{{r.o.dnaChos, r.o.dnaNest}, r.io.read10, r.io.read30};
+    const bool done = playership::ship30(std::string((const char*)r.data, r.n), s, r.out, r.note);
+    if (!done) return dispatch::kNext;
+    return "playership10";
+}
+
 inline bool dnaChosMatches(const Request& r)
 {
     return (r.o.dnaChos || r.o.dnaNest) && ends(r, ".dnax") && startsLua(r);
@@ -751,6 +764,7 @@ inline constexpr Rule kRules[] = {
     {mtbMatches, materialBundle},
     {psDnaMatches, playsetDna},
     {rowboatMatches, rowboatDna},    // before dnachos: it applies dnachos' edits itself
+    {playerShipMatches, playerShipDna},   // so does this one
     {dnaChosMatches, dnaChos},
     {twinMatches, twinModel},        // the MU enemy DNAs carry no choreography effect either
     {scourgeHpMatches, scourgeHp},   // pod DNAs carry no choreography effect, so dnachos passes them on
