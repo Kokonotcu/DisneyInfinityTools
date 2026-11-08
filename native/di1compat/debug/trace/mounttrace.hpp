@@ -88,9 +88,9 @@ inline bool install(const Config& c)
     return dbg::chain::installFeature("mounttrace10", {
         {"trigger action (mounttrace10)", detail::eng::kTriggerAction, "8B442408568BF18B4C240850518BCEE8",
          (void*)&detail::hkTriggerAction, (void**)&s.g_triggerAction},
-        {"transport rule apply (mounttrace10)", detail::eng::kTransportApply, "6AFF68B0A3A30164A100000000506489",
+        {"transport rule apply (mounttrace10)", detail::eng::kTransportApply, "6AFF68????????64A100000000506489",
          (void*)&detail::hkApply, (void**)&s.g_apply},
-        {"vehicle connect (mounttrace10)", detail::eng::kConnect, "6AFF68B818A30164A100000000506489",
+        {"vehicle connect (mounttrace10)", detail::eng::kConnect, "6AFF68????????64A100000000506489",
          (void*)&detail::hkConnect, (void**)&s.g_connect},
     });
 }
