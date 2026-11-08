@@ -71,6 +71,7 @@ void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
     if (flag == "--spawnfrom") mernode::addToTable(T, di1::spawner::detail::nodeSpec());   // as after registerAll
     if (flag == "--scourge") mernode::addToTable(T, di1::scourge::detail::nodeSpec());     // as after registerAll
     if (flag == "--delivery") mernode::addToTable(T, di1::inertnodes::detail::deliverySpec());
+    if (flag == "--prankmission") mernode::addToTable(T, di1::prankcombo::detail::taskSpec());
     if (flag == "--prankcombo") {
         mernode::addToTable(T, di1::prankcombo::detail::comboSpec());
         mernode::addToTable(T, di1::prankcombo::detail::endedSpec());
