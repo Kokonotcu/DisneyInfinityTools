@@ -6,6 +6,7 @@
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
 #include "config.hpp"
+#include "rowboatmount.hpp"
 
 namespace di1::rowboatdrive {
 
@@ -37,6 +38,7 @@ inline State g_state;
 inline void __fastcall hkTriggerAction(void* agent, void* edx, int action, void* hash)
 {
     State& s = g_state;
+    rowboatmount::onAction();   // an avatar swap after a rowboat mount: its actions run through here (6039)
     if (action == kDriveRowboat) {
         action = kDrive;
         if (!s.logged.exchange(true)) core::logf("rowboatdrive10: DriveRowboat sent as Drive (first mount)");
