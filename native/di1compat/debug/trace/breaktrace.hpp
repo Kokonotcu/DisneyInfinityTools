@@ -82,6 +82,8 @@ constexpr size_t kPieceFile = 0x1c;
 constexpr size_t kPieceName = 0x20;
 constexpr size_t kPieceCount = 0x60;
 constexpr size_t kExplodeFlags = 0xf1;        // 0x40 = exploded
+constexpr size_t kNotBefore = 0xcc;           // float: FUN_0151e130 returns while the clock is below it
+constexpr uint32_t kNow = 0x02201910;         // float: the game clock
 }  // namespace eng
 
 constexpr size_t kProcessorsLogged = 40;
@@ -109,6 +111,14 @@ typedef uint32_t(__fastcall* MusicFn)(void* self, void* edx, const char* name, i
 typedef int(__fastcall* BindFn)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4);
 typedef void(__cdecl* HitFn)(uint32_t actor, uint32_t a2, uint8_t* mun);
 typedef void(__fastcall* OneFn)(void* self, void* edx, uint32_t a1);
+typedef uint32_t*(__fastcall* SpawnFn)(uint8_t* def, void* edx, uint32_t* out, const float* t, uint8_t* params);
+typedef void(__cdecl* DoneFn)(uint32_t handle, uint8_t* record);
+constexpr LONG kSpawnsLogged = 100;
+constexpr size_t kDefName = 4;                // an expendable definition's Name (shutdown10's kDefName)
+constexpr uint32_t kExpManager = 0x0228AA40;  // *: the expendables manager; +0x1c its definition table
+constexpr size_t kManagerDefs = 0x1C;
+constexpr size_t kRecordKilled = 0x80;        // a pending record's cancel flag
+constexpr size_t kSpawnPos = 4;               // the spawn transform: quaternion, then position
 
 struct Clock {
     ULONGLONG born, changed;
@@ -127,6 +137,9 @@ struct State {
     BindFn g_layBind = nullptr;
     HitFn g_munHit = nullptr;
     OneFn g_explode = nullptr;
+    SpawnFn g_spawn = nullptr;
+    DoneFn g_done = nullptr;
+    std::atomic<LONG> spawns{0};
     ThisFn g_choStart = nullptr;
     std::mutex mx;                                    // guards first, moving, clocks, report and ready
     std::unordered_map<void*, float> first;           // processor -> its first clock
@@ -401,14 +414,56 @@ inline void __fastcall hkExplode(void* self, void*, uint32_t a1)
     State& s = g_state;
     uint8_t* d = (uint8_t*)self;
     int before = *(int*)(d + eng::kPieceCount);
+    const uint8_t gateFlags = d[eng::kExplodeFlags];
+    const float notBefore = *(float*)(d + eng::kNotBefore), now = *(const float*)core::rt(eng::kNow);
     s.g_explode(self, nullptr, a1);
     const LONG nth = ++s.booms;
     if (nth > kBoomsLogged) return;
     char file[100] = "", piece[40] = "";
     core::safeCopy(file, sizeof(file), *(const char**)(d + eng::kPieceFile));
     core::safeCopy(piece, sizeof(piece), *(const char**)(d + eng::kPieceName));
-    core::logf("breaktrace explode: data %p actor %08X PieceFile '%s' PieceName '%s' pieces %d -> %d flags %02X", self,
-               *(uint32_t*)d, file, piece, before, *(int*)(d + eng::kPieceCount), d[eng::kExplodeFlags]);
+    core::logf("breaktrace explode: data %p actor %08X PieceFile '%s' PieceName '%s' pieces %d -> %d flags %02X -> %02X"
+               " not-before %.2f now %.2f", self, *(uint32_t*)d, file, piece, before, *(int*)(d + eng::kPieceCount),
+               gateFlags, d[eng::kExplodeFlags], notBefore, now);
+}
+
+// An expendable definition's Name; "?" when unreadable.
+inline void defName(const uint8_t* def, char (&out)[64])
+{
+    const bool named = def && core::readable(def + kDefName, 4);
+    core::safeCopy(out, sizeof(out), named ? *(const char* const*)(def + kDefName) : "?");
+}
+
+// Rescue props (INC_rescue*) are logged past the budget: the world's own spawns use it up at load.
+inline bool rescue(const char* n) { return _strnicmp(n, "INC_rescue", 10) == 0; }
+
+// FUN_0160a3e0, thiscall on a definition (out, transform, params; ret 0xc): per expendable spawn. 0 out: async.
+inline uint32_t* __fastcall hkSpawn(uint8_t* def, void*, uint32_t* out, const float* t, uint8_t* params)
+{
+    State& s = g_state;
+    uint32_t* r = s.g_spawn(def, nullptr, out, t, params);
+    char n[64];
+    defName(def, n);
+    if (!rescue(n) && ++s.spawns > kSpawnsLogged) return r;
+    const bool pos = t && core::readable(t, (kSpawnPos + 3) * sizeof(float));
+    core::logf("breaktrace expendable spawn '%s' at (%.1f, %.1f, %.1f) -> handle %08X", n, pos ? t[kSpawnPos] : 0.f,
+               pos ? t[kSpawnPos + 1] : 0.f, pos ? t[kSpawnPos + 2] : 0.f, out ? *out : 0);
+    return r;
+}
+
+// 0x0160A270, cdecl (handle, record): an async expendable spawn completes; record +0 indexes the definitions.
+inline void __cdecl hkDone(uint32_t handle, uint8_t* record)
+{
+    State& s = g_state;
+    char n[64] = "?";
+    const bool killed = record && record[kRecordKilled];
+    uint8_t* mgr = *(uint8_t**)core::rt(kExpManager);
+    uint8_t** table = mgr && core::readable(mgr + kManagerDefs, 4) ? *(uint8_t***)(mgr + kManagerDefs) : nullptr;
+    const uint32_t idx = record ? *(const uint32_t*)record : 0;
+    if (table && core::readable(table + idx, 4)) defName(table[idx], n);
+    s.g_done(handle, record);
+    if (rescue(n) || ++s.spawns <= kSpawnsLogged)
+        core::logf("breaktrace expendable spawn done '%s' handle %08X%s", n, handle, killed ? " (cancelled)" : "");
 }
 
 }  // namespace detail
@@ -424,6 +479,10 @@ inline bool install(const Config& c)
          (void**)&s.g_munHit},
         {"exploder explode (breaktrace)", 0x0151E130, "6AFF64A100000000", (void*)&detail::hkExplode,
          (void**)&s.g_explode},
+        {"expendable base spawn (breaktrace)", 0x0160A3E0, "558BEC83E4F06AFF68????????64A1", (void*)&detail::hkSpawn,
+         (void**)&s.g_spawn},
+        {"expendable async spawn done (breaktrace)", 0x0160A270, "8B0D????????568B74240C", (void*)&detail::hkDone,
+         (void**)&s.g_done},
         {"choreography audio-sync wait (breaktrace)", 0x01442EE0, "568BF185F6744D8B06", (void*)&detail::hkChoReady,
          (void**)&s.g_choReady},
         {"choreography play (breaktrace)", 0x01445E70, "5183790C00753B8B01", (void*)&detail::hkBtPlay,
