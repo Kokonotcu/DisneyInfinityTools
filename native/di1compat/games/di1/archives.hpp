@@ -39,10 +39,19 @@ inline std::string bufferAsset(const std::string& stem)
     return digits ? stem.substr(0, us) : stem;
 }
 
+// 1.0 shards materials/ by name parts: materials__fx__activityicon_bob.mtb in ma__fx__ac.zip (1496 of 1496).
+inline std::string materialShard(const std::string& dir, const std::string& stem)
+{
+    if (dir != "materials") return "";
+    const size_t a = stem.find("__"), b = a == std::string::npos ? a : stem.find("__", a + 2);
+    if (b == std::string::npos || b + 2 >= stem.size()) return "";
+    return dir + "/" + stem.substr(0, 2) + "__" + stem.substr(a + 2, b - a - 2) + "__" + stem.substr(b + 2, 2) + ".zip";
+}
+
 }  // namespace detail
 
 // Archives that may hold p's member after the '/' at cut, in search order (first hit wins); "" is none.
-inline std::array<std::string, 5> candidateArchives(const std::string& p, size_t cut, AssetBuffers buffers)
+inline std::array<std::string, 6> candidateArchives(const std::string& p, size_t cut, AssetBuffers buffers)
 {
     std::string dir = p.substr(0, cut), member = p.substr(cut + 1);
     std::string stem = member.substr(0, member.find('.'));
@@ -50,7 +59,8 @@ inline std::array<std::string, 5> candidateArchives(const std::string& p, size_t
     std::string bufAsset = detail::bufferAsset(stem);
     // <dir>.zip, the folder-named one (gamedb/core/core.zip), the member's (inc_bob/inc_bob_ps.zip), the shard
     return {dir + ".zip", dir + "/" + dir.substr(dir.rfind('/') + 1) + ".zip", dir + "/" + stem + ".zip", shard,
-            buffers == AssetBuffers::Search ? dir + "/" + bufAsset + ".zip" : std::string()};
+            buffers == AssetBuffers::Search ? dir + "/" + bufAsset + ".zip" : std::string(),
+            detail::materialShard(dir, stem)};
 }
 
 // 1.0's root archives (members under full paths), searched in this order after every split.

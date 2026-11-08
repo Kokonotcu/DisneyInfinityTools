@@ -43,6 +43,7 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
     o.psdna = c.psdna30;
     o.dnaChos = c.dnaChos10;
     o.scourgeHp = c.scourgeHp10;
+    o.dnaNest = c.dnaNest10;
     o.vfx = c.vfx10;
     o.rewards = c.rewards10;
     o.sx = c.sx10;
