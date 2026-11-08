@@ -29,6 +29,7 @@ struct OctSteps {
     bool navmesh = false;       // navmesh10; off, or a mesh that does not convert: NavMeshPool dropped
     bool cameras = false;       // camworld10
     bool realmFile = false;     // realmfile10, for paths under realms/
+    bool zoneVolumes = false;   // zonevolume10
     bool clips = false;         // clip10
     // clip10motions: is a clip template's folder in the 3.0 install? Empty: motion clips stay as they are
     std::function<bool(const std::string& dir)> installed30;
@@ -312,6 +313,7 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
     changed |= detail::noted(note, collision30(f, o.transforms), "+collision(", ") ");
     const bool realmFile = o.realmFile && path.rfind("realms/", 0) == 0;
     const RealmRule rule = realmFile ? RealmRule::RealmFile : RealmRule::WorldOnly;
+    changed |= detail::noted(note, o.zoneVolumes ? zoneVolumeRealms(f) : 0, "+zonevolumes(", " volumes) ");
     changed |= detail::noted(note, realm30w(f, rule), "+lighting(", " nodes) ");
     changed |= detail::choSteps(f, o, note);
     int nfl = 0, ncv = o.curves ? curves::curves30(f, &nfl) : 0;

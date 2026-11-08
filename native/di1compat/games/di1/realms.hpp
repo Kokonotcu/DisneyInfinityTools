@@ -443,6 +443,37 @@ inline bool realmFile30(oct::File& f, const Block& realm, const std::string& rea
 }
 }  // namespace detail
 
+// zonevolume10: a RealmVolume naming no realm names its zone's only realm; realm30w then sets AddToZone 0.
+inline int zoneVolumeRealms(oct::File& f)
+{
+    std::map<std::string, std::string> byZone;   // ZoneName -> its realm; "" when the zone has several
+    for (const detail::Block& e : detail::poolEntries(f, "RealmDataPool")) {
+        const oct::Rec* zone = detail::entryField(f, e, "ZoneName");
+        const oct::Rec* name = detail::entryField(f, e, "Name");
+        if (!zone || !name) continue;
+        auto [it, fresh] = byZone.emplace(f.name0(*zone), f.name0(*name));
+        if (!fresh) it->second.clear();
+    }
+    const long vp = f.pool("RealmVolumePool");
+    if (vp < 0 || byZone.empty()) return 0;
+    int named = 0;
+    for (size_t i = (size_t)vp + 1, end = f.blockEnd((size_t)vp); i < end; i = f.blockEnd(i)) {
+        const detail::Block e(f.recs.begin() + i + 1, f.recs.begin() + f.blockEnd(i));
+        const oct::Rec* zone = detail::entryField(f, e, "ZoneName");
+        auto it = zone ? byZone.find(f.name0(*zone)) : byZone.end();
+        if (it == byZone.end() || it->second.empty()) continue;
+        for (size_t j = i + 1, je = f.blockEnd(i); j < je; ++j) {
+            oct::Rec& r = f.recs[j];
+            const bool field = r.level == f.recs[i].level + 1 && f.name(r) == "RealmName";
+            const bool named0 = field && oct::spec(r.type).kind == oct::NAME;
+            if (!named0 || !f.name0(r).empty()) continue;
+            r = f.nameScalar(r.level, r.name, it->second);   // one name index either way: no record moves
+            ++named;
+        }
+    }
+    return named;
+}
+
 // World lighting in 3.0 form: 3.0 ignores 1.0's realm pools and misreads its string-typed lights. -> nodes changed.
 inline int realm30w(oct::File& f, RealmRule rule = RealmRule::WorldOnly)
 {
