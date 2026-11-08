@@ -561,22 +561,12 @@ inline Verdict playsetDna(Request& r)
 
 inline bool rowboatMatches(const Request& r) { return r.o.rowboat && ends(r, ".dnax") && startsLua(r); }
 
-// 1.0's player rowboat as a 3.0 boat vehicle (rowboat::vehicle30), after dnachos' edits; other DNAs: passed on.
+// 1.0's player rowboat as a 3.0 boat vehicle (rowboat::rowboat30); other DNAs: passed on.
 inline Verdict rowboatDna(Request& r)
 {
-    const std::string chunk((const char*)r.data, r.n);
-    if (chunk.find("ShipController") == std::string::npos) return dispatch::kNext;
-    auto g = luachunk::eval(chunk);
-    if (!rowboat::isPlayerRowboat(g)) return dispatch::kNext;
-    const dnachos::Changed c = dnachos::edit30(g, chunk, {r.o.dnaChos, r.o.dnaNest});
-    std::string base;
-    const bool defaults = r.io.read30 && r.io.read30(rowboat::kBoatDna30, base);
-    const int renamed = rowboat::vehicle30(g, defaults ? base : std::string());
-    r.out.clear();
-    for (auto& [name, v] : g) r.out += name + " = " + luachunk::text(v) + "\n";
-    r.note += "+rowboat10(" + std::to_string(renamed) + " components as ToyBoxVehicle/BoatController, " +
-              (defaults ? "TB_Boat defaults" : "no 3.0 boat defaults") + ", transport vehicle gadgets) ";
-    if (c.nested) r.note += "+nest(" + std::to_string(c.nested) + " gadget fields) ";
+    const rowboat::Steps s{{r.o.dnaChos, r.o.dnaNest}, r.io.read10, r.io.read30};
+    const bool done = rowboat::rowboat30(std::string((const char*)r.data, r.n), s, r.out, r.note);
+    if (!done) return dispatch::kNext;
     return "rowboat10";
 }
 

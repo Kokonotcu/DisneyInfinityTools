@@ -2,12 +2,14 @@
 // Any thread.
 #pragma once
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 #include "../../formats/luachunk.hpp"
+#include "dnachos.hpp"
 
 namespace di1::rowboat {
 
@@ -20,6 +22,20 @@ constexpr char kBoatDna30[] = "characters/TB_Boat.dnax";
 inline bool isPlayerRowboat(const Globals& g);
 // g's rowboat as 3.0's boat vehicle; base30 is 3.0's TB_Boat DNA (empty: no 3.0 boat defaults). Returns the edits.
 inline int vehicle30(Globals& g, const std::string& base30);
+// dnachos' steps s, then vehicle30, as Lua text; the note gets what changed (after the caller's tag).
+inline std::string finish30(Globals& g, const std::string& chunk, const dnachos::Steps& s, const std::string& base30,
+                            std::string& note);
+
+using Read = std::function<bool(const std::string& path, std::string& out)>;
+// What a boat DNA rule needs: dnachos' steps, a 1.0 read (a ship's rigid body) and a 3.0 read (TB_Boat).
+struct Steps {
+    dnachos::Steps chos;
+    Read read10, read30;   // empty: that read fails
+};
+// A player rowboat chunk as 3.0's boat vehicle text into out, tagged in note; false (both untouched): not one.
+inline bool rowboat30(const std::string& chunk, const Steps& s, std::string& out, std::string& note);
+// 3.0's TB_Boat DNA through s.read30; "" when it cannot be read.
+inline std::string boatDefaults(const Steps& s);
 
 namespace detail {
 
@@ -172,6 +188,36 @@ inline int vehicle30(Globals& g, const std::string& base30)
     const int n = detail::renameComponents(*comps, detail::baseBoat(base));
     detail::vehicleGadgets(*gadgets);
     return n;
+}
+
+inline std::string finish30(Globals& g, const std::string& chunk, const dnachos::Steps& s, const std::string& base30,
+                            std::string& note)
+{
+    const dnachos::Changed c = dnachos::edit30(g, chunk, s);
+    const int renamed = vehicle30(g, base30);
+    note += "(" + std::to_string(renamed) + " components as ToyBoxVehicle/BoatController, " +
+            (base30.empty() ? "no 3.0 boat defaults" : "TB_Boat defaults") + ", transport vehicle gadgets) ";
+    if (c.nested) note += "+nest(" + std::to_string(c.nested) + " gadget fields) ";
+    std::string out;
+    for (auto& [name, v] : g) out += name + " = " + luachunk::text(v) + "\n";
+    return out;
+}
+
+inline std::string boatDefaults(const Steps& s)
+{
+    std::string base;
+    if (!s.read30 || !s.read30(kBoatDna30, base)) base.clear();
+    return base;
+}
+
+inline bool rowboat30(const std::string& chunk, const Steps& s, std::string& out, std::string& note)
+{
+    if (chunk.find("ShipController") == std::string::npos) return false;
+    auto g = luachunk::eval(chunk);
+    if (!isPlayerRowboat(g)) return false;
+    note += "+rowboat10";
+    out = finish30(g, chunk, s.chos, boatDefaults(s), note);
+    return true;
 }
 
 }  // namespace di1::rowboat
