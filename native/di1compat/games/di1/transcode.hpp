@@ -28,6 +28,7 @@
 #include "dnachos.hpp"
 #include "psdna.hpp"
 #include "rendermtb.hpp"
+#include "scourgehp.hpp"
 #include "../../formats/bndl.hpp"
 #include "vfx.hpp"
 #include "bent.hpp"
@@ -48,6 +49,7 @@ struct TranscodeOptions {
     bool banm = false;        // banm10
     bool psdna = false;       // psdna30
     bool dnaChos = false;     // dnachos10
+    bool scourgeHp = false;   // scourgehp10
     bool vfx = false;         // vfx10
     bool rewards = false;     // rewards10
     bool sx = false;          // sx10
@@ -556,6 +558,16 @@ inline Verdict dnaChos(Request& r)
     return "dnachos";
 }
 
+inline bool scourgeHpMatches(const Request& r) { return r.o.scourgeHp && ends(r, ".dnax") && startsLua(r); }
+
+// A 1.0 pod DNA: 3.0's Health gadget with the pod's 1.0 health (scourgehp::health30); other DNAs: passed on.
+inline Verdict scourgeHp(Request& r)
+{
+    if (!scourgehp::health30(std::string((const char*)r.data, r.n), r.out)) return dispatch::kNext;
+    r.note += "+scourgehp(Health gadget) ";
+    return "scourgehp";
+}
+
 inline bool particlesMatches(const Request& r) { return r.o.vfx && ends(r, ".particledata"); }
 
 // A particle package, trailer v12 -> v47 (3.0 rejects 1.0's); vfxchan10 re-lays channels for each material's shader.
@@ -677,6 +689,7 @@ inline constexpr Rule kRules[] = {
     {mtbMatches, materialBundle},
     {psDnaMatches, playsetDna},
     {dnaChosMatches, dnaChos},
+    {scourgeHpMatches, scourgeHp},   // pod DNAs carry no choreography effect, so dnachos passes them on
     {particlesMatches, particles},
     {meshMatches, mesh},
     {groupsMatches, groups},

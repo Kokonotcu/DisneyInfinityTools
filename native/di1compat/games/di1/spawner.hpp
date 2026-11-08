@@ -577,6 +577,12 @@ inline int32_t createActor(const std::string& key, const std::array<float, detai
 }
 // The actor is gone, or Combat marks it dead.
 inline bool actorGone(int32_t h) { return !detail::actorAlive(h) || detail::actorDead(h); }
+// The actor's Combat component, or null.
+inline uint8_t* combatOf(int32_t h)
+{
+    const uint32_t type = *(const uint16_t*)core::rt(detail::eng::kCombatType);
+    return ((detail::ComponentFn)core::rt(detail::eng::kComponent))(h, type);
+}
 
 inline bool install(const Config& c)
 {

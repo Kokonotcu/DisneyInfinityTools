@@ -27,6 +27,9 @@ constexpr uint32_t kTagFind = 0x0070F900;     // thiscall (type, name) on *kTagD
 constexpr uint32_t kTagDb = 0x022039C8;       // data: the object kTagFind runs on (caller FUN_00dc71d0)
 constexpr uint32_t kTagAdd = 0x01498930;      // thiscall (actor, tag, weight) on *kTagMgr, ret 0xc (1.0 FUN_00f77700)
 constexpr uint32_t kTagMgr = 0x02289720;      // data: the actor tag manager (ActorTagNode Register FUN_0173a0f0)
+// Combat_SetInvulnerableOn / Off's calls (natives 0xeb8be0 / 0xeb8c30), thiscall on the Combat component
+constexpr uint32_t kShieldOn = 0x00FF5050;    // (duration; ret 4): ENEMY_CANNOT_BE_ATTACKED; 0 lasts until Off
+constexpr uint32_t kShieldOff = 0x00FF50C0;   // (): clears it; its timer FUN_00ff5120 skips a duration <= 0
 }  // namespace eng
 
 // Pod types in 1.0's order (FUN_00c95e40 loops 0..4); Junior n guards vine n
@@ -51,6 +54,9 @@ enum Pin : int {
 typedef void(__cdecl* MerUpdateFn)(float dt);
 typedef uint32_t(__fastcall* TagFindFn)(void* db, void* edx, const char* type, const char* name);
 typedef void(__fastcall* TagAddFn)(void* mgr, void* edx, int32_t actor, uint32_t tag, float weight);
+typedef void(__fastcall* ShieldOnFn)(void* combat, void* edx, float duration);
+typedef void(__fastcall* ShieldOffFn)(void* combat, void* edx);
+constexpr float kUntilOff = 0.0f;
 
 struct Pod {
     int32_t actor;
@@ -73,6 +79,12 @@ struct NodeState {
 struct Fire {
     uint8_t* node;
     int pin;
+};
+
+// What an update's deaths lead to, done once mx is released
+struct Outcome {
+    std::vector<Fire> fires;
+    std::vector<int32_t> unshield;   // mothers whose last junior died
 };
 
 struct State {
@@ -133,6 +145,36 @@ inline std::vector<Pod> spawnPods(uint8_t* node)
     return pods;
 }
 
+inline bool isJunior(const Pod& p) { return p.type > 0 && p.type < kMother; }
+
+// The wave's mother, 0 when it has none (Caller holds mx, or owns pods).
+inline int32_t motherOf(const std::vector<Pod>& pods)
+{
+    for (const Pod& p : pods)
+        if (p.type == kMother) return p.actor;
+    return 0;
+}
+
+// 1.0 FUN_00c7e400: a mother takes no damage while a junior of its wave lives; 3.0's Combat shield stands in.
+inline void shield(int32_t mother, bool on)
+{
+    uint8_t* combat = spawner::combatOf(mother);
+    if (!combat) {
+        core::logf("scourge10: mother pod %08X has no Combat component; it stays unshielded", (unsigned)mother);
+        return;
+    }
+    if (on) ((ShieldOnFn)core::rt(eng::kShieldOn))(combat, nullptr, kUntilOff);
+    else ((ShieldOffFn)core::rt(eng::kShieldOff))(combat, nullptr);
+}
+
+// A new wave's mother is shielded when it has juniors.
+inline void shieldNewMother(const std::vector<Pod>& pods)
+{
+    const int32_t mother = motherOf(pods);
+    const bool juniors = std::any_of(pods.begin(), pods.end(), isJunior);
+    if (mother && juniors) shield(mother, true);
+}
+
 // The pending waves spawn (engine calls without mx), then join their wave if it is still there.
 inline void spawnPending()
 {
@@ -148,6 +190,7 @@ inline void spawnPending()
     for (uint8_t* node : nodes) {
         std::vector<Pod> pods = spawnPods(node);
         core::logf("scourge10: ScourgeWave %p spawned %u pods", (void*)node, (unsigned)pods.size());
+        shieldNewMother(pods);
         std::lock_guard<std::mutex> lock(g_state.mx);
         auto it = waveOf(node);
         if (it != g_state.waves.end()) it->pods = std::move(pods);
@@ -173,35 +216,48 @@ inline std::vector<int32_t> deadPods()
     return dead;
 }
 
-// Dead pods leave: <type>Died each; an emptied wave fires Empty and goes (1.0 FUN_00caf3e0, FUN_00c961b0).
-inline std::vector<Fire> removeDead(const std::vector<int32_t>& dead)
+// One wave's dead pods leave: <type>Died each; its mother unshields with its last junior. Caller holds mx.
+inline void removeDeadOf(Wave& w, const std::vector<int32_t>& dead, Outcome& o)
 {
-    std::vector<Fire> fires;
+    const bool hadJuniors = std::any_of(w.pods.begin(), w.pods.end(), isJunior);
+    std::vector<Pod> alive;
+    for (const Pod& p : w.pods) {
+        const bool gone = std::find(dead.begin(), dead.end(), p.actor) != dead.end();
+        if (gone) o.fires.push_back({w.node, kBabyDied + p.type});
+        else alive.push_back(p);
+    }
+    w.pods.swap(alive);
+    const bool lastJunior = hadJuniors && !std::any_of(w.pods.begin(), w.pods.end(), isJunior);
+    const int32_t mother = motherOf(w.pods);
+    if (lastJunior && mother) o.unshield.push_back(mother);
+}
+
+// Dead pods leave; an emptied wave fires Empty and goes (1.0 FUN_00caf3e0, FUN_00c8baa0, FUN_00c961b0).
+inline Outcome removeDead(const std::vector<int32_t>& dead)
+{
+    Outcome o;
     std::lock_guard<std::mutex> lock(g_state.mx);
     std::vector<Wave>& waves = g_state.waves;
     for (auto w = waves.begin(); w != waves.end();) {
         const size_t before = w->pods.size();
-        std::vector<Pod> alive;
-        for (const Pod& p : w->pods) {
-            const bool gone = std::find(dead.begin(), dead.end(), p.actor) != dead.end();
-            if (gone) fires.push_back({w->node, kBabyDied + p.type});
-            else alive.push_back(p);
-        }
-        w->pods.swap(alive);
+        removeDeadOf(*w, dead, o);
         const bool emptied = before && w->pods.empty();
-        if (emptied) fires.push_back({w->node, kEmpty});
+        if (emptied) o.fires.push_back({w->node, kEmpty});
         w = emptied ? waves.erase(w) : w + 1;
     }
     g_state.any = !waves.empty();
-    return fires;
+    return o;
 }
 
-// One Meridian update: pending waves spawn, dead pods report.
+// One Meridian update: pending waves spawn, dead pods report, unguarded mothers lose their shield.
 inline void tick()
 {
     spawnPending();
     const std::vector<int32_t> dead = deadPods();
-    if (!dead.empty()) fireAll(removeDead(dead));
+    if (dead.empty()) return;
+    const Outcome o = removeDead(dead);
+    for (int32_t mother : o.unshield) shield(mother, false);
+    fireAll(o.fires);
 }
 
 // --- the node (1.0 vtable 0x013586c8, handlers 0xd3a5d0 / 0xd3a620)
@@ -223,15 +279,19 @@ inline void activate(uint8_t* node)
 inline void deactivate(uint8_t* node)
 {
     std::vector<Fire> fires;
+    int32_t mother = 0;
     {
         std::lock_guard<std::mutex> lock(g_state.mx);
         auto it = waveOf(node);
         if (it == g_state.waves.end()) return;
         // ponytail: 1.0's plant component kills the pods (FUN_00ab8d90); no 3.0 kill call, they stay standing
         for (const Pod& p : it->pods) fires.push_back({node, kBabyDied + p.type});
+        mother = motherOf(it->pods);
         g_state.waves.erase(it);
         g_state.any = !g_state.waves.empty();
     }
+    // a standing mother no wave guards any more must not stay invulnerable
+    if (mother && !spawner::actorGone(mother)) shield(mother, false);
     fireAll(fires);
 }
 
@@ -307,6 +367,8 @@ struct Call {
 inline constexpr Call kCalls[] = {
     {eng::kTagFind, "8B442404566A01508BF1E8"},
     {eng::kTagAdd, "8B44240457508BF9E8"},
+    {eng::kShieldOn, "56578BF90FB70D????????8B0751"},
+    {eng::kShieldOff, "0FB705????????8B09565051E8"},
 };
 
 inline bool callsMatch()
