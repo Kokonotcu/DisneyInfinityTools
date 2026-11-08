@@ -51,6 +51,9 @@ constexpr uint32_t kBehaviorString = 0x01375C50;    // AiBehaviorGetStringProper
 constexpr uint32_t kBehaviorFloat = 0x01375CA0;     // AiBehaviorGetFloatProperty: type, name -> value
 constexpr uint32_t kCurrentBehavior = 0x01375D20;   // AiBehaviorGetCurrentBehaviorType: actor -> type, -1 without
 constexpr uint32_t kBehaviorName = 0x01523C30;      // FUN_01523c30, cdecl (type) -> its name in table 0x210455c
+constexpr uint32_t kRegisterAction = 0x00AA1B30;    // ActionHandler_RegisterAction: actor, id, name, float
+constexpr uint32_t kRegisterBehavior = 0x00AA1BF0;  // actor, id, name, event, name2, float, float
+constexpr uint32_t kRegisterProperty = 0x00AA1D10;  // actor, id, id, name, type, event, float
 }  // namespace eng
 
 constexpr size_t kKeyCap = 128;         // a key name's buffer
@@ -66,6 +69,8 @@ constexpr int kEventTypeSlot = 2;       // TriggerEvent's type, below actor and 
 constexpr int kFirstMovedEvent = 10;    // 1.0 types 10..14 are 3.0's 12..16 (enumdrift.py: 7 of 7 twin pairs)
 constexpr int kLastMovedEvent = 14;
 constexpr int kInsertedEvents = 2;
+constexpr int kPropertyEventSlot = 0;   // RegisterProperty's event, on top in 1.0; 3.0 wants the type below it
+constexpr char kPropertyType[] = "Value";   // 3.0's float property (0xaa1e3d); 1.0 had no type argument
 constexpr size_t kFlipCap = 512;
 constexpr size_t kFlipInput = 256;
 
@@ -165,6 +170,42 @@ inline void __cdecl reactionInfoFlipMotionName(uint8_t* ctx)
     if (c.type != engine::slangvm::kPointer || !engine::slangvm::cellText(ctx, c.s, s, sizeof(s))) s[0] = 0;
     flipMotionName(s, buf, kFlipCap);
     v.pushPointer(buf);
+}
+
+inline void pushFloat(const Vm& v, float f)
+{
+    Cell x;
+    x.type = engine::slangvm::kFloat;
+    x.f = f;
+    v.push(x);
+}
+
+// 1.0 0xa13590 (actor, id, name); 3.0 appended a float.
+inline void __cdecl registerAction(uint8_t* ctx)
+{
+    pushFloat(Vm{ctx}, 0.0f);
+    call(eng::kRegisterAction, ctx);
+}
+
+// 1.0 0xa135e0 (actor, id, name, event); 3.0 appended a second name and two floats.
+inline void __cdecl registerBehavior(uint8_t* ctx)
+{
+    Vm v{ctx};
+    v.pushPointer("");
+    pushFloat(v, 0.0f);
+    pushFloat(v, 0.0f);
+    call(eng::kRegisterBehavior, ctx);
+}
+
+// 1.0 0xa13650 (actor, id, id, name, event); 3.0 takes a type before the event and a float after it.
+inline void __cdecl registerProperty(uint8_t* ctx)
+{
+    Vm v{ctx};
+    Cell event = v.pop();
+    v.pushPointer(kPropertyType);
+    v.push(event);
+    pushFloat(v, 0.0f);
+    call(eng::kRegisterProperty, ctx);
 }
 
 // 1.0 0xa1de30 pushes nothing; 3.0 pushes the vehicle (0x731d10).
@@ -472,6 +513,9 @@ inline Native g_ports[] = {
     {"AiBehaviorGetCurrentBehaviorType", 1, 1, &detail::aiBehaviorGetCurrentBehaviorType},
     {"SlaveActorToVehicle", 5, 0, &detail::slaveActorToVehicle},
     {"TriggerEvent", 3, 0, &detail::triggerEvent},
+    {"ActionHandler_RegisterAction", 3, 0, &detail::registerAction},
+    {"ActionHandler_RegisterBehavior", 4, 0, &detail::registerBehavior},
+    {"ActionHandler_RegisterProperty", 5, 0, &detail::registerProperty},
 };
 
 // Stubs for every listed native, the ports over them with sxPorts10; behavior types with sxBeh10 too.
