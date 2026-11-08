@@ -21,6 +21,7 @@
 #include "games/di1/audio10.hpp"
 #include "games/di1/bhteam.hpp"
 #include "games/di1/oceanboat.hpp"
+#include "games/di1/rowboatdrive.hpp"
 #include "games/di1/rcplace.hpp"
 #include "games/di1/buildings.hpp"
 #include "games/di1/choalias.hpp"
@@ -104,6 +105,7 @@ static void installModules(const di1::Config& cfg)
     di1::bhteam::install(cfg);
     di1::rcplace::install(cfg);
     di1::oceanboat::install(cfg);
+    di1::rowboatdrive::install(cfg);
 }
 
 // Pentane's entry, under the loader lock (B-N1): the log and the cfg, then each module's install() in order.
