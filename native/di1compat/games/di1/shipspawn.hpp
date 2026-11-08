@@ -1,12 +1,18 @@
-// shipspawn10 (test, off): a 1.0 player ship deck spawns its rigid body and rides it.
-// slangvm, rowboatmount. Script threads.
+// shipspawn10 (test, off): a 1.0 player ship deck spawns its rigid body and rides it. slangvm, engine/handles.
+
+// Port on script threads, followBody on the game thread.
 #pragma once
 #include <cstdint>
+#include <atomic>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
+#include "../../engine/handles.hpp"
 #include "../../engine/slangvm.hpp"
+#include "config.hpp"
 #include "rowboatmount.hpp"
 
 namespace di1::shipspawn {
@@ -37,9 +43,22 @@ constexpr int kSlaveMode = 1;   // mgshipriding.btl.sx (3.0's own ship slave) pa
 constexpr int kSlaveFlag = 1;
 constexpr int kVec = 3;
 
+// The deck follows its body by the setters ActorSetPosition (0x1876690) and ActorSetRotationY (0x74c6f0) use:
+
+// thiscall (actor*; value*; ret 4); position at +0x2c, quaternion at +0x1c
+constexpr uint32_t kSetPosition = 0x00742F90;
+constexpr uint32_t kSetOrientation = 0x007465F0;
+constexpr size_t kActorPosition = 0x2c;
+constexpr size_t kActorOrientation = 0x1c;
+constexpr size_t kTransformBytes = 0x1c;   // quaternion and position, read together
+typedef void(__fastcall* SetFn)(uint8_t** actor, void* edx, const float* value);
+
 struct State {
-    std::mutex m;                    // guards decks
-    std::unordered_set<int> decks;   // decks that spawned their body; ponytail: never pruned, a few per session
+    std::mutex m;                                       // guards decks and deckOf
+    std::unordered_set<int> decks;                      // decks that spawned their body
+    std::unordered_map<uint32_t, uint32_t> deckOf;      // body -> deck; ponytail: never pruned, a few per session
+    bool follow = false;                                // setters' prologues matched; set once in install()
+    std::atomic<bool> logged{false};
 };
 inline State g_state;
 
@@ -119,10 +138,48 @@ inline void __cdecl registerShip(uint8_t* ctx)
         if (!g_state.decks.insert(deck).second) return;
     }
     const int body = spawnBody(ctx, deck);
-    if (body) slaveDeck(ctx, deck, body);
+    if (!body) return;
+    slaveDeck(ctx, deck, body);
+    std::lock_guard<std::mutex> lock(g_state.m);
+    g_state.deckOf[(uint32_t)body] = (uint32_t)deck;
 }
 
 }  // namespace detail
+
+// From the boat update hook (oceanboat10) after each body's step: its deck takes the body's transform.
+inline void followBody(uint32_t body)
+{
+    detail::State& s = detail::g_state;
+    if (!s.follow || !body) return;
+    uint32_t deck = 0;
+    {
+        std::unique_lock<std::mutex> lock(s.m, std::try_to_lock);   // per frame: never wait (L4)
+        if (!lock.owns_lock()) return;
+        auto it = s.deckOf.find(body);
+        if (it == s.deckOf.end()) return;
+        deck = it->second;
+    }
+    uint8_t* from = engine::handles::actorOf(body);
+    uint8_t* to = engine::handles::actorOf(deck);
+    const bool ok = from && to && core::readable(from + detail::kActorOrientation, detail::kTransformBytes);
+    if (!ok) return;
+    ((detail::SetFn)core::rt(detail::kSetPosition))(&to, nullptr, (const float*)(from + detail::kActorPosition));
+    ((detail::SetFn)core::rt(detail::kSetOrientation))(&to, nullptr, (const float*)(from + detail::kActorOrientation));
+    if (!s.logged.exchange(true)) core::logf("shipspawn10: deck %08X follows body %08X each frame", deck, body);
+}
+
+// Checks the setters followBody calls (H4); the port itself is added by sxnatives with shipSpawn10.
+inline bool install(const Config& c)
+{
+    if (!c.shipSpawn10) return true;
+    const char* setter = "8B09668B4106BAFF0300006623C2663B";   // FUN_00742f90 and FUN_007465f0 open alike
+    const bool pos = core::prologueMatches(detail::kSetPosition, setter);
+    const bool rot = core::prologueMatches(detail::kSetOrientation, setter);
+    const bool resolve = core::prologueMatches(engine::handles::eng::kResolve, "8B4424088B0085C07503C20800");
+    detail::g_state.follow = pos && rot && resolve;
+    if (!detail::g_state.follow) core::logf("shipspawn10: deck follow off, a setter's prologue differs");
+    return detail::g_state.follow;
+}
 
 // Rows replace g_natives' stubs by name; sxnatives adds them with sxPorts10 and shipSpawn10.
 inline Native g_ports[] = {

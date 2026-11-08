@@ -108,6 +108,7 @@ static void installModules(const di1::Config& cfg)
     di1::oceanboat::install(cfg);
     di1::rowboatdrive::install(cfg);
     di1::rowboatmount::install(cfg);
+    di1::shipspawn::install(cfg);
 }
 
 // Pentane's entry, under the loader lock (B-N1): the log and the cfg, then each module's install() in order.
