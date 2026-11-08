@@ -31,7 +31,8 @@ inline State g_state;
 // First answer wins, in this order (B3, C3); a serveStage miss passes on.
 inline constexpr openstage::Stage kStages[] = {
     edits30::vtxfStage, edits30::tipsStage, edits30::playsetMenuStage, edits30::hudCurrencyStage,
-    edits30::zoneListStage, edits30::chdStage, edits30::rootGraphStage, edits30::olderCompanionStage,
+    edits30::zoneListStage, edits30::catalogTypeStage, edits30::chdStage, edits30::rootGraphStage,
+    edits30::olderCompanionStage,
     serve::sysStage, serve::serveStage};
 
 // Misses only: rare and cheap, they show what an unexplained fallback asks for.

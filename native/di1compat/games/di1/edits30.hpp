@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -40,6 +41,8 @@ inline bool hudCurrencyStage(openstage::Open& o, int*& out);
 inline bool zoneListStage(openstage::Open& o, int*& out);
 // A .lua the GameDB CHD callback loader is reading: its CHD compile. Consumes r (null or not).
 inline bool chdStage(openstage::Open& o, int*& out);
+// rctype10: a 3.0 RC catalog of a 1.0 playset gets 1.0's item types. Consumes r; answers text or reopens.
+inline bool catalogTypeStage(openstage::Open& o, int*& out);
 // rootgraph10: a 3.0 model in 1.0's older exploder form: 1.0's own is served, else Root gets its graph. Destroys r.
 inline bool rootGraphStage(openstage::Open& o, int*& out);
 // rootgraph10: the .mtb and buffers of a model rootGraphStage passed to 1.0 go to 1.0 too. Destroys r.
@@ -107,6 +110,51 @@ inline int* chdForLua(const char* p, int* r)
         core::logf("CHD compile of %s failed: %s; served as it is", p, e.what());
         return core::memFile(src.data(), src.size());
     }
+}
+
+// The quoted value after `key = ` from i, inside the record ending at end; at: where it starts.
+inline std::string catalogField(const std::string& t, const char* key, size_t i, size_t end, size_t* at = nullptr)
+{
+    const size_t k = t.find(std::string(key) + " = ", i);
+    if (k == std::string::npos || k >= end) return "";
+    const size_t q = t.find_first_of("'\"", k);
+    const size_t e = q == std::string::npos ? q : t.find(t[q], q + 1);
+    if (e == std::string::npos || e >= end) return "";
+    if (at) *at = q + 1;
+    return t.substr(q + 1, e - q - 1);
+}
+
+// Each record's (name, type) in an RC catalog, in file order; both games write type after name.
+inline std::vector<std::pair<std::string, std::string>> catalogTypes(const std::string& t)
+{
+    std::vector<std::pair<std::string, std::string>> r;
+    for (size_t i = t.find("name = "); i != std::string::npos;) {
+        const size_t next = t.find("name = ", i + 1);
+        const size_t end = next == std::string::npos ? t.size() : next;
+        r.push_back({catalogField(t, "name", i, end), catalogField(t, "type", i, end)});
+        i = next;
+    }
+    return r;
+}
+
+// t30 with every record's type set to 1.0's for the same item name, where t10 has it and they differ.
+inline std::string catalogTypes10(std::string t30, const std::string& t10, int& changed)
+{
+    std::map<std::string, std::string> types10;
+    for (auto& [name, type] : catalogTypes(t10))
+        if (!name.empty() && !type.empty()) types10.emplace(name, type);
+    changed = 0;
+    for (size_t i = t30.find("name = "); i != std::string::npos; i = t30.find("name = ", i + 1)) {
+        const size_t next = t30.find("name = ", i + 1);
+        const size_t end = next == std::string::npos ? t30.size() : next;
+        size_t at = 0;
+        const std::string type = catalogField(t30, "type", i, end, &at);
+        auto it = types10.find(catalogField(t30, "name", i, end));
+        if (type.empty() || it == types10.end() || it->second == type) continue;
+        t30.replace(at, type.size(), it->second);
+        ++changed;
+    }
+    return t30;
 }
 
 // The model t with Root given its lone graph (octx::rootTakesGraph); "" when not that form or unreadable.
@@ -235,6 +283,27 @@ inline bool chdStage(openstage::Open& o, int*& out)
 {
     if (o.write || !text::endsWith(o.p, ".lua") || !engine::gamedb::isChdPath(o.p)) return false;
     out = detail::chdForLua(o.p, o.r);
+    return true;
+}
+
+inline bool catalogTypeStage(openstage::Open& o, int*& out)
+{
+    if (!o.edits() || !o.cfg->rcType10 || !text::endsWith(o.p, "rc_catalog__lua.lua")) return false;
+    const std::string np = text::norm(o.p);
+    std::string t30, t10;
+    if (!vfs::read10s(np, t10)) return false;   // not a 1.0 playset's catalog: 3.0's stays
+    const bool read = core::readStream(o.r, t30);
+    const bool chunk = !t30.empty() && t30[0] == openstage::kLuaChunk;
+    if (!read || chunk) {
+        core::logf("rctype10: %s: not readable text (%u B): unchanged", o.p, (unsigned)t30.size());
+        out = openstage::reopen(o);
+        return true;
+    }
+    int changed = 0;
+    std::string s = detail::catalogTypes10(t30, t10, changed);
+    // 3.0 retyped Cars' CAT_ACTIONTOY items CAT_INSTANTFUN, which RC_CatalogType lacks: no type record, a fault
+    if (changed) core::logf("rctype10: %s: %d item types back to 1.0's", o.p, changed);
+    out = core::memFile(s.data(), s.size());
     return true;
 }
 
