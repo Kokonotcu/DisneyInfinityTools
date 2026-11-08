@@ -14,6 +14,7 @@
 #include "../../formats/mer.hpp"
 #include "../../formats/oct.hpp"
 #include "mission.hpp"
+#include "realmstart.hpp"
 
 namespace di1::mer {
 
@@ -34,6 +35,7 @@ struct Rules {
     bool gate10 = true;         // gate10: MasterNetSync Link_Out links leave from Private
     bool toggleType10 = true;   // toggletype10: the ColVisToggle family describes Type = its class
     bool cacheEnd10 = true;     // cacheend10: a cached, bound Choreography nobody uncaches uncaches itself at its end
+    bool realmStart10 = true;   // realmstart10: a RealmCache starts at the weight a Catalyst sets at once
 };
 
 // What transcode changed, for the log line
@@ -50,6 +52,7 @@ struct Stats {
     int netSync = 0;
     int typed = 0;
     int uncacheAtEnd = 0;
+    std::vector<realmstart::Change> realmStarts;
 };
 
 // mission.hpp's aliases as registered classes, each with its 3.0 twin's pins and parameter types added
@@ -699,6 +702,7 @@ inline bool transcode(const Table& T, const Rules& R, oct::File& f, Stats* st = 
     const bool countsReadable = detail::dropsReadable(f, g.nodes, g.fl, g.dIn, "NumInLinks") &&
                                 detail::dropsReadable(f, g.nodes, g.fl, g.dOut, "NumOutLinks");
     if (!countsReadable) return detail::fail(why, "NumInLinks / NumOutLinks holds no int");
+    if (R.realmStart10) g.s.realmStarts = realmstart::apply(f);   // same-size edits: node ranges stay valid
     detail::rebuild(g, (size_t)pool, poolEnd);
     f.recs = std::move(g.out);
     if (st) *st = g.s;
