@@ -56,6 +56,7 @@ struct Config {
     dlgscript::Transcode transcode;
     core::InstallFeatureFn installFeature = nullptr;
     uintptr_t (*rt)(uint32_t) = nullptr;   // core::rt; null: no engine (octtest)
+    bool firstGapFromItem0 = false;        // item 1 waits item 0's delay; item 1's own is never used
 };
 
 // Keeps c and binds the dialog engine's functions; before any audio hook.
@@ -318,15 +319,22 @@ inline void hashStrings(const std::vector<uint8_t>& d, dlgscript::EventNames& ou
     }
 }
 
-// Whether a run's next line is due: type 4 counts from the previous line's start, type 3 from its end.
-inline bool isDue(Run& u, const DlgSeqItem& it, DWORD now)
+// The delay before item k (k >= 1). 1.0 FUN_00718650 loads item 0's for item 1; FUN_00715fc0 item k's after.
+inline uint32_t gapBefore(const DlgSeq& q, size_t k)
 {
-    if (u.seq.type == kFromStart) return now - u.prevStart >= it.delay;
+    const bool first = g_state.cfg.firstGapFromItem0 && k == 1;
+    return q.items[first ? 0 : k].delay;
+}
+
+// Whether a run's next line is due: type 4 counts from the previous line's start, type 3 from its end.
+inline bool isDue(Run& u, uint32_t delay, DWORD now)
+{
+    if (u.seq.type == kFromStart) return now - u.prevStart >= delay;
     if (!u.prevEnd) {
         std::unique_lock<std::recursive_mutex> l = system::lock();
         if (!host::playOf(u.prevPid)) u.prevEnd = now;
     }
-    return u.prevEnd && now - u.prevEnd >= it.delay;
+    return u.prevEnd && now - u.prevEnd >= delay;
 }
 
 inline uint32_t playSeqLine(const DlgSeqItem& it, uint32_t obj)
@@ -409,6 +417,9 @@ inline void onLinePosted(DlgBank* b, int sub, uint32_t obj, uint32_t pid)
     s.armed.on = false;
     log("vo10: sequence of %u lines started at %c%c%03u (1.0 type %u)", (unsigned)s.runs.back().seq.items.size(),
         first.prefix & 0xff, first.prefix >> 8, first.line, s.armed.seq.type);
+    if (s.cfg.firstGapFromItem0 && s.armed.seq.items.size() > 1)
+        log("vo10: sequence at %c%c%03u: line 2 waits item 0's %u ms, as 1.0 does (vofirst10)", first.prefix & 0xff,
+            first.prefix >> 8, first.line, gapBefore(s.armed.seq, 1));
     takeDriver(s.runs.back());
 }
 
@@ -677,14 +688,15 @@ inline void seqTick()
         if (stale) detail::dropDriver(u, wall, "silent");
         const DWORD now = u.pushed ? u.clock : wall;
         const DlgSeqItem& it = u.seq.items[u.next];
-        const bool due = detail::isDue(u, it, now);
+        const uint32_t gap = detail::gapBefore(u.seq, u.next);
+        const bool due = detail::isDue(u, gap, now);
         if (!due) {
             ++r;
             continue;
         }
         if (u.next == 1 && !u.driver) detail::logClock(u, "the wall clock");
         u.prevPid = detail::playSeqLine(it, u.obj);
-        u.prevStart = u.seq.type == detail::kFromStart ? u.prevStart + it.delay : now;
+        u.prevStart = u.seq.type == detail::kFromStart ? u.prevStart + gap : now;
         u.prevEnd = 0;
         ++u.next;
         if (u.next < u.seq.items.size()) {

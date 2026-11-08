@@ -25,6 +25,7 @@ namespace di1::audio {
 struct Cfg {
     bool music = true;    // music10: 1.0 music through the MusicStack
     bool vo = true;       // vo10: 1.0 dialog banks and scripts in 3.0's dialog system
+    bool voFirst = true;  // vofirst10: a sequence's line 2 waits item 0's delay (1.0 FUN_00718650)
     bool mixer = true;    // mixer10: 1.0's Mixer presets as the 'Mixer' source of the 1.0 categories
     std::string install10;   // the 1.0 install: FMOD DLLs and sound data
     std::string game30;      // the 3.0 install
@@ -143,6 +144,7 @@ inline engine::audio::dialogue::Config dialogueConfig(const Cfg& c)
     d.transcode = dlg::dlgTranscode;
     d.installFeature = c.installFeature;
     d.rt = c.rt;
+    d.firstGapFromItem0 = c.voFirst;
     return d;
 }
 
