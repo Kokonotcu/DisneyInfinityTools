@@ -28,6 +28,7 @@
 #include "dnachos.hpp"
 #include "psdna.hpp"
 #include "rendermtb.hpp"
+#include "rowboat.hpp"
 #include "scourgehp.hpp"
 #include "deliverybox.hpp"
 #include "../../formats/bndl.hpp"
@@ -51,6 +52,7 @@ struct TranscodeOptions {
     bool psdna = false;       // psdna30
     bool dnaChos = false;     // dnachos10
     bool scourgeHp = false;   // scourgehp10
+    bool rowboat = false;     // rowboat10
     bool boxTouch = false;    // rcbox10 (with rcdelivery10)
     bool twin = false;        // twin10
     bool dnaNest = false;     // dnanest10
@@ -557,6 +559,27 @@ inline Verdict playsetDna(Request& r)
     return "psdna30";
 }
 
+inline bool rowboatMatches(const Request& r) { return r.o.rowboat && ends(r, ".dnax") && startsLua(r); }
+
+// 1.0's player rowboat as a 3.0 boat vehicle (rowboat::vehicle30), after dnachos' edits; other DNAs: passed on.
+inline Verdict rowboatDna(Request& r)
+{
+    const std::string chunk((const char*)r.data, r.n);
+    if (chunk.find("ShipController") == std::string::npos) return dispatch::kNext;
+    auto g = luachunk::eval(chunk);
+    if (!rowboat::isPlayerRowboat(g)) return dispatch::kNext;
+    const dnachos::Changed c = dnachos::edit30(g, chunk, {r.o.dnaChos, r.o.dnaNest});
+    std::string base;
+    const bool defaults = r.io.read30 && r.io.read30(rowboat::kBoatDna30, base);
+    const int renamed = rowboat::vehicle30(g, defaults ? base : std::string());
+    r.out.clear();
+    for (auto& [name, v] : g) r.out += name + " = " + luachunk::text(v) + "\n";
+    r.note += "+rowboat10(" + std::to_string(renamed) + " components as ToyBoxVehicle/BoatController, " +
+              (defaults ? "TB_Boat defaults" : "no 3.0 boat defaults") + ", transport vehicle gadgets) ";
+    if (c.nested) r.note += "+nest(" + std::to_string(c.nested) + " gadget fields) ";
+    return "rowboat10";
+}
+
 inline bool dnaChosMatches(const Request& r)
 {
     return (r.o.dnaChos || r.o.dnaNest) && ends(r, ".dnax") && startsLua(r);
@@ -737,6 +760,7 @@ inline constexpr Rule kRules[] = {
     {banmMatches, blend},
     {mtbMatches, materialBundle},
     {psDnaMatches, playsetDna},
+    {rowboatMatches, rowboatDna},    // before dnachos: it applies dnachos' edits itself
     {dnaChosMatches, dnaChos},
     {twinMatches, twinModel},        // the MU enemy DNAs carry no choreography effect either
     {scourgeHpMatches, scourgeHp},   // pod DNAs carry no choreography effect, so dnachos passes them on
