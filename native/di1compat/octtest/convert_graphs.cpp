@@ -60,7 +60,8 @@ void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
         R.*f.off = false;
         return;
     }
-    if (flag == "--aliases") di1::mer::addAliases(T);   // as after hkMerRegistry
+    if (flag == "--aliases") di1::mer::addAliases(T, true);   // as after hkMerRegistry, mana10 on
+    if (flag == "--aliases-nomana") di1::mer::addAliases(T, false);
     if (flag == "--spawnfrom") mernode::addToTable(T, di1::spawner::detail::nodeSpec());   // as after registerAll
     if (flag == "--scourge") mernode::addToTable(T, di1::scourge::detail::nodeSpec());     // as after registerAll
 }

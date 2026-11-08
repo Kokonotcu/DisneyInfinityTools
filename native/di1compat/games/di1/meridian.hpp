@@ -15,6 +15,7 @@ struct Config {
     bool aliases = false;        // aliases10: mission.hpp kAliases, each with its 3.0 twin's template
     bool native = false;         // native10: mernode.hpp's native classes
     mer::Table* mer = nullptr;   // the loaded mer table; nullptr: none, hook off
+    bool mana = false;           // mana10 (with aliases10): SpawnManaNode through SpawnGroupKiller's template
 };
 
 // Installs the class registry hook when c registers classes (H1); false when it was refused.
@@ -31,14 +32,14 @@ struct State {
 inline State g_state;
 
 // aliases10: each 1.0 class through its twin's template (H4 open: called without a prologue check, X-12).
-inline void registerAliases(mer::Table& mer)
+inline void registerAliases(mer::Table& mer, bool mana10)
 {
     typedef void(__cdecl * RegFn)(const char* name);
-    for (auto& a : mission::kAliases) {
-        ((RegFn)core::rt(a.templateVa))(a.name);
-        core::logf("meridian: 1.0 class %s registered with the template of %s", a.name, a.twin);
+    for (const mission::Alias* a : mission::aliases(mana10)) {
+        ((RegFn)core::rt(a->templateVa))(a->name);
+        core::logf("meridian: 1.0 class %s registered with the template of %s", a->name, a->twin);
     }
-    mer::addAliases(mer);
+    mer::addAliases(mer, mana10);
 }
 
 // native10: every native class added with mernode::add before this.
@@ -53,7 +54,7 @@ inline void __cdecl hkMerRegistry()
 {
     State& s = g_state;
     s.g_merRegistry();
-    if (s.cfg.aliases) registerAliases(*s.cfg.mer);
+    if (s.cfg.aliases) registerAliases(*s.cfg.mer, s.cfg.mana);
     if (s.cfg.native) registerNatives(*s.cfg.mer);
 }
 

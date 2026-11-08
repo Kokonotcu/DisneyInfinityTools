@@ -17,6 +17,8 @@ namespace di1::mission {
 namespace eng {
 // 3.0 FUN_0177a8b0, cdecl(name): registers MissionTask_ProximityCheck_ActorToLocator's class
 constexpr uint32_t kProximityCheckTemplate = 0x0177A8B0;
+// 3.0 FUN_01788030, cdecl(name): registers SpawnGroupKiller's class (pin Link_In, bool KeepAlive)
+constexpr uint32_t kSpawnGroupKillerTemplate = 0x01788030;
 }  // namespace eng
 
 // A 1.0 Meridian class 3.0 lacks, registered with its 3.0 twin's template and transcoded with its table
@@ -24,11 +26,35 @@ struct Alias {
     const char* name;
     uint32_t templateVa;   // static VA, called after FUN_0178e330 built the registry
     const char* twin;
+    const char* pinFrom = nullptr;   // a 1.0 pin whose index the twin's pin pinTo also gets
+    const char* pinTo = nullptr;
+    const char* boolOn = nullptr;    // a twin bool parameter every node describes as true
 };
 inline constexpr Alias kAliases[] = {
     {"MissionFocusPoint_Rule_ProximityCheck_ActorToLocator", eng::kProximityCheckTemplate,
      "MissionTask_ProximityCheck_ActorToLocator"},
 };
+// mana10. 1.0 SpawnManaNode (0x109a860, 0x109a8f0) holds its spawn-group instance; SpawnGroupKiller KeepAlive does
+inline constexpr Alias kManaAlias = {"SpawnManaNode", eng::kSpawnGroupKillerTemplate, "SpawnGroupKiller",
+                                     "Consume", "Link_In", "KeepAlive"};
+
+// The aliases to register: kAliases, and kManaAlias when mana10 is on
+inline std::vector<const Alias*> aliases(bool mana10)
+{
+    std::vector<const Alias*> v;
+    for (const Alias& a : kAliases) v.push_back(&a);
+    if (mana10) v.push_back(&kManaAlias);
+    return v;
+}
+
+// The alias named name, registered or not; nullptr for any other class
+inline const Alias* aliasOf(const std::string& name)
+{
+    if (name == kManaAlias.name) return &kManaAlias;
+    for (const Alias& a : kAliases)
+        if (name == a.name) return &a;
+    return nullptr;
+}
 
 namespace detail {
 
