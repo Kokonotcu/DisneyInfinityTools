@@ -297,6 +297,26 @@ struct Binding30 {
 
     std::string boolean(int) { return "false"; }
 
+    // pos30: 3.0's pre-pass position of in (VS 832e03d7, mad z,y,x). 1.0's EQUAL pass missed it by 1-2 ulp: holes
+    bool position30(const std::string& in, std::string& code)
+    {
+        auto w = rules.globals.find("g_transform_objectToWorld");
+        auto p = rules.globals.find("g_transform_worldToProjected");
+        if (w == rules.globals.end() || p == rules.globals.end()) return false;
+        const int wb = w->second[0], wr = w->second[1] / shd::kRegisterBytes;
+        const int pb = p->second[0], pr = p->second[1] / shd::kRegisterBytes;
+        used[wb] = (std::max)(used[wb], wr + kBoneRows);
+        used[pb] = (std::max)(used[pb], pr + kBoneRows);
+        auto row = [](int cb, int r) { return "CB" + std::to_string(cb) + "[" + std::to_string(r) + "]"; };
+        code = "    float3 w30 = mad(" + in + ".zzz, " + row(wb, wr + 2) + ".xyz, " + row(wb, wr + 3) + ".xyz);\n"
+               "    w30 = mad(" + in + ".yyy, " + row(wb, wr + 1) + ".xyz, w30);\n"
+               "    w30 = mad(" + in + ".xxx, " + row(wb, wr) + ".xyz, w30);\n"
+               "    float4 pos30 = mad(w30.zzzz, " + row(pb, pr + 2) + ", " + row(pb, pr + 3) + ");\n"
+               "    pos30 = mad(w30.yyyy, " + row(pb, pr + 1) + ", pos30);\n"
+               "    pos30 = mad(w30.xxxx, " + row(pb, pr) + ", pos30);";
+        return true;
+    }
+
     std::string cbuffers()
     {
         std::string s;

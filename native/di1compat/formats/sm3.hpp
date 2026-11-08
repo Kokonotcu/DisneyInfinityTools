@@ -682,11 +682,29 @@ inline void declareTemps(const std::set<int>& temps, bool vs, std::vector<std::s
     out.push_back(t + ";");
 }
 
-inline void vsTail(const Decls& d, std::vector<std::string>& out)
+// Within 1e-4 |w| of 3.0's pre-pass position: that position. Farther (wind, billboards) stays 1.0's
+constexpr const char* kSamePosition =
+    "    if (all(abs(vout.pos - pos30) <= 1e-4 * abs(pos30.w) + 1e-6)) vout.pos = pos30;";
+
+// The binding's pre-pass position of the VS's POSITION0 input; "" without one. Before cbuffers(): it marks registers
+template <class Binding>
+inline std::string position30(const Decls& d, Binding& B)
+{
+    std::string code;
+    for (auto& [k, v] : d.inputs)
+        if (v == "POSITION0" && B.position30("v" + std::to_string(k), code)) return code;
+    return "";
+}
+
+inline void vsTail(const Decls& d, const std::string& pos30, std::vector<std::string>& out)
 {
     out.push_back("    VSOut vout = (VSOut)0;");
     for (auto& [k, v] : d.outputs)
         out.push_back("    vout." + (v == "POSITION0" ? std::string("pos") : v) + " = o" + std::to_string(k) + ";");
+    if (!pos30.empty()) {
+        out.push_back(pos30);
+        out.push_back(kSamePosition);
+    }
     out.push_back(kReversedZ);
     out.push_back("    return vout;");
 }
@@ -714,6 +732,7 @@ inline std::string toHlsl(const Program& P, Binding& B)
         detail::checkOp(o);
         e.instruction(o);
     }
+    const std::string pos30 = P.ps ? "" : detail::position30(d, B);
     std::vector<std::string> out = {B.cbuffers()};
     for (auto& [num, k] : d.samplers) {
         std::string t, sm, decl;
@@ -725,7 +744,7 @@ inline std::string toHlsl(const Program& P, Binding& B)
     else detail::vsHead(d.inputs, B, out);
     detail::declareTemps(e.temps, !P.ps, out);
     out.insert(out.end(), e.body.begin(), e.body.end());
-    if (!P.ps) detail::vsTail(d, out);
+    if (!P.ps) detail::vsTail(d, pos30, out);
     else if (!B.epilogue.empty()) out.push_back(B.epilogue);
     if (P.ps && !quiet) out.push_back("    return o;");
     out.push_back("}");
