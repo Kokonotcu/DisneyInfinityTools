@@ -17,6 +17,7 @@ inline OctSteps octStepsOf(const Config& c)
     o.navmesh = c.navmesh10;
     o.cameras = c.camWorld10;
     o.realmFile = c.realmFile10;
+    o.zoneVolumes = c.zoneVolume10;
     o.clips = c.clip10;
     o.clipIds = c.clip10Ids;
     o.layout = c.choLayout10;

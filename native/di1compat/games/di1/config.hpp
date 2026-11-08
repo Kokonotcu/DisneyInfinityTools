@@ -76,6 +76,7 @@ struct Config {
     bool choConst10 = true;          // choconst.hpp: choreography Static nodes stay Static under constant headers
     bool camWorld10 = true;          // associations.hpp: a camera's world-basis twin (Transform/In WorldBasis)
     bool realmFile10 = true;         // realms.hpp: a 1.0 realm file's RealmDataPool as 3.0's RealmData node
+    bool zoneVolume10 = true;        // realms.hpp: a RealmVolume naming no realm names its zone's realm
     bool choLayout10 = true;         // cholayout.hpp: ContextNodes -> InstanceNodes (actors and clips instanced)
     bool clip10 = true;              // cho.hpp: ClipDataBlock output tables in the 3.0 layout (scene clips)
     bool clip10Motions = true;       // cho.hpp: the same for motion clips on templates 3.0 lacks (ids kept)
@@ -190,6 +191,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"choconst10", core::ConfigKind::Flag, offsetof(Config, choConst10)},
     {"camworld10", core::ConfigKind::Flag, offsetof(Config, camWorld10)},
     {"realmfile10", core::ConfigKind::Flag, offsetof(Config, realmFile10)},
+    {"zonevolume10", core::ConfigKind::Flag, offsetof(Config, zoneVolume10)},
     {"cholayout10", core::ConfigKind::Flag, offsetof(Config, choLayout10)},
     {"clip10", core::ConfigKind::Flag, offsetof(Config, clip10)},
     {"clip10motions", core::ConfigKind::Flag, offsetof(Config, clip10Motions)},
