@@ -1,4 +1,5 @@
 // Data converters: GameDB, DataMap, Lua and script transforms written or printed for the oracles and golden files.
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -68,6 +69,8 @@ void writeSxTables(const fs::path& out)
     for (auto& n : di1::sxnatives::g_natives) nt << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
     for (auto& n : di1::sxnatives::g_ports)
         nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
+    for (auto& n : di1::sxcombat::g_combatPorts)
+        nt << "port:" << n.name << '\t' << (int)n.args << '\t' << (int)n.results << '\n';
     for (auto& k : di1::sxkeys::KEYS30) kt << k.name << '\t' << k.id << '\n';
     std::ofstream bt(out / "beh10.tsv");
     for (auto* n : di1::sxnatives::BEH10) bt << n << '\n';
@@ -88,6 +91,23 @@ int checkFlips()
         printf("FlipMotionName(%s) = %s, want %s\n", f[0], b, f[1]);
         ++bad;
     }
+    return bad;
+}
+
+// combat10's pure 1.0 arithmetic (0xaa00e0 / 0xaa0180, 0xace890's segment test) on hand-worked cases.
+int checkCombat()
+{
+    di1::combat10::Side s;
+    di1::combat10::decrementWaitProb(s, 0.25f, 0.05f);   // lower 0.05, upper 1.1 -> 1.0's quirk sets lower to 1
+    int bad = s.lowerProb == 1.0f && std::fabs(s.upperProb - 1.1f) < 1e-6f ? 0 : 1;
+    di1::combat10::incrementWaitProb(s, 0.25f, 0.05f);   // lower 0.9
+    bad += std::fabs(s.lowerProb - 0.9f) < 1e-6f ? 0 : 1;
+    di1::combat10::Vec3 perp{};
+    const bool blocks = di1::combat10::inWayOf({5, 0.5f, 0}, {0, 0, 0}, {10, 0, 0}, 1.0f, &perp);
+    bad += blocks && perp.y == 1.0f ? 0 : 1;
+    bad += di1::combat10::inWayOf({5, 2, 0}, {0, 0, 0}, {10, 0, 0}, 1.0f, &perp) ? 1 : 0;
+    bad += di1::combat10::pick({{1, 2, 3}}, 3) == 3.0f ? 0 : 1;
+    if (bad) printf("combat10 arithmetic: %d case(s) wrong\n", bad);
     return bad;
 }
 
@@ -230,6 +250,7 @@ int convertSx(const Args& a)
     for (int i = 3; i < a.argc; ++i) transcodeScripts(out, a.argv[i], r);
     writeSxTables(out);
     r.bad += checkFlips();
+    r.bad += checkCombat();
     printf("sx transcoded %zu (%zu imports), refused %zu; %zu natives, %zu ports, %zu keys\n", r.ok, r.imports, r.bad,
            std::size(di1::sxnatives::g_natives), std::size(di1::sxnatives::g_ports), std::size(di1::sxkeys::KEYS30));
     return r.bad ? 1 : 0;

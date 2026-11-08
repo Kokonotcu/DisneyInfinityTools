@@ -11,6 +11,7 @@
 #include "config.hpp"
 #include "shipspawn.hpp"
 #include "spawner.hpp"
+#include "sxcombat.hpp"
 #include "sxkeys.hpp"
 #include "sxmisc.hpp"
 
@@ -582,6 +583,8 @@ inline bool install(const Config& c)
     }
     if (c.sxPorts10 && c.shipSpawn10)
         for (Native& n : shipspawn::g_ports) vm.natives.push_back(&n);
+    if (c.sxPorts10 && sxcombat::install())
+        for (Native& n : sxcombat::g_combatPorts) vm.natives.push_back(&n);
     if (c.sxPorts10 && c.sxBeh10) vm.onCallByName = detail::behaviorTypeTo10;
     return engine::slangvm::install(vm);
 }
