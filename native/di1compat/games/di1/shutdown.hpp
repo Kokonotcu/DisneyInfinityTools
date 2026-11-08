@@ -46,6 +46,8 @@ constexpr size_t kDefPopin = 0x9C;              // a definition's pop-in range s
 constexpr size_t kGeomMatrix = 0x258;           // a geometry node's matrix (FUN_01604070)
 // debris10
 constexpr size_t kDefName = 4;                  // a definition's Name (FUN_0160a3e0's "name" param)
+constexpr size_t kDefSpawnName = 0x14;          // FUN_0160a3e0 spawns by this name, else kDefSpawnAlt;
+constexpr size_t kDefSpawnAlt = 0x10;           // both empty: the definition's own spawn (vtable +8)
 constexpr uint32_t kXformOf = 0x006867E0;       // FUN_006867e0: thiscall on &node -> quaternion, position
 constexpr size_t kXformFloats = 8;
 constexpr uint32_t kFastDebris = 0x01645280;    // FUN_01645280: cdecl (params, transform, parent, model)
@@ -182,7 +184,17 @@ inline void __cdecl hkDone(uint32_t handle, uint8_t* record)
 inline uint32_t* __fastcall hkBase(uint8_t* def, void*, uint32_t* out, const float* t, uint8_t* params)
 {
     State& s = g_state;
+    // 0x160a413 strlen()s both names unchecked; a 1.0 gem drop's are null (TS crystal: AV read 0). Null = empty
+    const char** names[] = {(const char**)(def + eng::kDefSpawnName), (const char**)(def + eng::kDefSpawnAlt)};
+    bool nulled[2] = {};
+    for (int i = 0; i < 2; ++i)
+        if (def && !*names[i]) {
+            *names[i] = "";
+            nulled[i] = true;
+        }
     uint32_t* r = s.g_base(def, nullptr, out, t, params);
+    for (int i = 0; i < 2; ++i)
+        if (nulled[i]) *names[i] = nullptr;
     if (!def10(def)) return r;
     uint32_t h = out ? *out : 0;   // 0: queued (async), the completion marks it
     if (h && s.shutdown10) keep(h);
