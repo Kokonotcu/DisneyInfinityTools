@@ -25,6 +25,7 @@ struct Config {
     bool opacityLog10 = false;     // primitives the opacity test drops (trace/opacity)
     int fadeProbe10 = 0;           // non-zero: faded objects' fade inputs (trace/fade)
     int renderdoc10 = 0;           // > 0: RenderDoc captures one frame this many seconds after the first mission tick
+    bool mountTrace10 = false;     // Tardis transport rules, actions after a Drive, vehicle connects (trace/mounttrace)
 };
 
 inline const core::ConfigKey kConfigKeys[] = {
@@ -42,6 +43,7 @@ inline const core::ConfigKey kConfigKeys[] = {
     {"opacitylog10", core::ConfigKind::Flag, offsetof(Config, opacityLog10)},
     {"fadeprobe10", core::ConfigKind::Int, offsetof(Config, fadeProbe10)},
     {"renderdoc10", core::ConfigKind::Int, offsetof(Config, renderdoc10)},
+    {"mounttrace10", core::ConfigKind::Flag, offsetof(Config, mountTrace10)},
 };
 
 // Reads <dir>\di1debug.cfg into cfg and logs the switches; without the file every trace stays off.
