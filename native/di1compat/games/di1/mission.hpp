@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -316,6 +317,29 @@ inline MapRows convertRows(const std::string& t, size_t open, size_t close, std:
     return m;
 }
 
+// The unquoted value of a tab-indented `key = v,` line inside [i, end); "" when absent.
+inline std::string bareField(const std::string& t, const char* key, size_t i, size_t end)
+{
+    const size_t k = t.find(std::string("\t") + key + " = ", i);
+    if (k == std::string::npos || k >= end) return "";
+    const size_t v = k + strlen("\t") + strlen(key) + strlen(" = ");
+    const size_t e = t.find_first_of(",\r\n", v);
+    return e == std::string::npos || e >= end ? "" : t.substr(v, e - v);
+}
+
+// A 1.0 .lua_overrides' "Value" entries by MissionID (1.0 keeps a Stat reward's amount there)
+inline std::map<std::string, std::string> overrideValues(const std::string& t)
+{
+    std::map<std::string, std::string> v;
+    for (size_t p = t.find("Name = \"Value\""); p != std::string::npos; p = t.find("Name = \"Value\"", p + 1)) {
+        const size_t open = t.rfind('{', p), close = t.find('}', p);
+        if (open == std::string::npos || close == std::string::npos) continue;
+        const std::string id = bareField(t, "MissionID", open, close), val = bareField(t, "Value", open, close);
+        if (!id.empty() && !val.empty()) v[id] = val;
+    }
+    return v;
+}
+
 }  // namespace detail
 
 // A 1.0 presentation event as 3.0's (events10); a value outside 1.0's enum stays as it is
@@ -442,6 +466,27 @@ inline int beaconMap30(std::string& t, int* aliases = nullptr)
     for (auto& e : edits) t.replace(e.at, e.len, e.text);
     if (aliases) *aliases = na;
     return n;
+}
+
+// statreward10: 1.0 rewards t with each Stat reward's Value copied in from its .lua_overrides (3.0 reads it inline)
+inline std::string statRewards10(std::string t, const std::string& overrides, int& added)
+{
+    const std::map<std::string, std::string> values = detail::overrideValues(overrides);
+    const std::string type = "Type = \"Stat\",";
+    added = 0;
+    for (size_t p = t.find(type); p != std::string::npos; p = t.find(type, p + 1)) {
+        const size_t open = t.rfind('{', p), close = t.find('}', p);
+        const bool block = open != std::string::npos && close != std::string::npos;
+        if (!block || !detail::bareField(t, "Value", open, close).empty()) continue;
+        auto it = values.find(detail::bareField(t, "MissionID", open, close));
+        if (it == values.end()) continue;
+        const size_t line = t.rfind('\n', p) + 1;   // npos + 1 = 0: the first line
+        const size_t after = p + type.size();
+        const std::string eol = after < t.size() && t[after] == '\r' ? "\r\n" : "\n";
+        t.insert(after, eol + t.substr(line, p - line) + "Value = " + it->second + ",");
+        ++added;
+    }
+    return t;
 }
 
 }  // namespace di1::mission
