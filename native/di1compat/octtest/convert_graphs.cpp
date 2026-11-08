@@ -67,6 +67,12 @@ void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
     if (flag == "--spawnfrom") mernode::addToTable(T, di1::spawner::detail::nodeSpec());   // as after registerAll
     if (flag == "--scourge") mernode::addToTable(T, di1::scourge::detail::nodeSpec());     // as after registerAll
     if (flag == "--delivery") mernode::addToTable(T, di1::inertnodes::detail::deliverySpec());
+    if (flag == "--prankcombo") mernode::addToTable(T, di1::inertnodes::detail::comboEndedSpec());
+    if (flag == "--prank") {
+        mernode::addToTable(T, di1::inertnodes::detail::registerPranksSpec());
+        mernode::addToTable(T, di1::inertnodes::detail::prankSocketSpec());
+        mernode::addToTable(T, di1::inertnodes::detail::prankComboSpec());
+    }
     if (flag != "--decosockets") return;
     mernode::addToTable(T, di1::inertnodes::detail::spawnSocketsSpec());
     mernode::addToTable(T, di1::inertnodes::detail::activateSocketsSpec());

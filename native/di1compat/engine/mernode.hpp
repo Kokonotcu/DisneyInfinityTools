@@ -101,7 +101,7 @@ struct Spec {
     Getter getter = nullptr;     // a DataOut pin's DataElement inside the node, or null
 };
 
-constexpr int kMax = 8, kMaxIn = 16, kMaxOut = 4;
+constexpr int kMax = 12, kMaxIn = 16, kMaxOut = 4;
 // A class's runtime record: the engine keeps pointers to its vtables, vbt and names
 struct Rt {
     Spec spec;
