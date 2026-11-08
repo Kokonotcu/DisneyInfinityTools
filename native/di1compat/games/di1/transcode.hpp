@@ -29,6 +29,7 @@
 #include "psdna.hpp"
 #include "rendermtb.hpp"
 #include "scourgehp.hpp"
+#include "deliverybox.hpp"
 #include "../../formats/bndl.hpp"
 #include "vfx.hpp"
 #include "bent.hpp"
@@ -50,6 +51,7 @@ struct TranscodeOptions {
     bool psdna = false;       // psdna30
     bool dnaChos = false;     // dnachos10
     bool scourgeHp = false;   // scourgehp10
+    bool boxTouch = false;    // rcbox10 (with rcdelivery10)
     bool dnaNest = false;     // dnanest10
     bool vfx = false;         // vfx10
     bool rewards = false;     // rewards10
@@ -575,6 +577,16 @@ inline Verdict scourgeHp(Request& r)
     return "scourgehp";
 }
 
+inline bool boxTouchMatches(const Request& r) { return r.o.boxTouch && ends(r, ".dnax") && startsLua(r); }
+
+// The 1.0 delivery box: collected on touch (deliverybox::touch30); other DNAs: passed on.
+inline Verdict boxTouch(Request& r)
+{
+    if (!deliverybox::touch30(std::string((const char*)r.data, r.n), r.out)) return dispatch::kNext;
+    r.note += "+boxtouch(CollisionDetect) ";
+    return "boxtouch";
+}
+
 inline bool particlesMatches(const Request& r) { return r.o.vfx && ends(r, ".particledata"); }
 
 // A particle package, trailer v12 -> v47 (3.0 rejects 1.0's); vfxchan10 re-lays channels for each material's shader.
@@ -697,6 +709,7 @@ inline constexpr Rule kRules[] = {
     {psDnaMatches, playsetDna},
     {dnaChosMatches, dnaChos},
     {scourgeHpMatches, scourgeHp},   // pod DNAs carry no choreography effect, so dnachos passes them on
+    {boxTouchMatches, boxTouch},
     {particlesMatches, particles},
     {meshMatches, mesh},
     {groupsMatches, groups},
