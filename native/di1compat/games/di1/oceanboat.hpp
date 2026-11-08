@@ -4,6 +4,7 @@
 #include <cstdint>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
+#include "../../core/memcheck.hpp"
 #include "config.hpp"
 
 namespace di1::oceanboat {
@@ -56,17 +57,20 @@ inline void* oceanSurface()
     return layers ? surface : nullptr;
 }
 
-// The hull's height, or fallback when its handle does not resolve. Engine-owned live objects, as 0x1890040 reads.
+// The hull's height, or fallback when any step is null or unreadable (H8). Boats only: a few checks per frame.
 inline float hullY(const uint8_t* controller, float fallback)
 {
     const uint8_t* owner = *(uint8_t* const*)(controller + eng::kOwner);
     void* handles = *(void**)core::rt(eng::kHandles);
-    if (!owner || !handles) return fallback;
+    const bool ownerOk = owner && core::readable(owner + eng::kOwnerHandle, sizeof(uint32_t));
+    if (!ownerOk || !handles) return fallback;
     const uint32_t handle = *(const uint32_t*)(owner + eng::kOwnerHandle);
     uint32_t slot = 0;
     const uint8_t* entry = ((ResolveFn)core::rt(eng::kResolve))(handles, nullptr, &slot, &handle);
-    const uint8_t* actor = entry ? *(uint8_t* const*)(entry + eng::kEntryActor) : nullptr;
-    return actor ? *(const float*)(actor + eng::kActorY) : fallback;
+    if (!entry || !core::readable(entry + eng::kEntryActor, sizeof(void*))) return fallback;
+    const uint8_t* actor = *(uint8_t* const*)(entry + eng::kEntryActor);
+    if (!actor || !core::readable(actor + eng::kActorY, sizeof(float))) return fallback;
+    return *(const float*)(actor + eng::kActorY);
 }
 
 // FUN_00d47900: before the boat step, the water plane at the sea level under the hull, as 1.0 floated ships.
