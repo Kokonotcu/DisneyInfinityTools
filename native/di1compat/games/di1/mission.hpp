@@ -20,6 +20,8 @@ namespace eng {
 constexpr uint32_t kProximityCheckTemplate = 0x0177A8B0;
 // 3.0 FUN_01788030, cdecl(name): registers SpawnGroupKiller's class (pin Link_In, bool KeepAlive)
 constexpr uint32_t kSpawnGroupKillerTemplate = 0x01788030;
+// 3.0 FUN_0114aac0, cdecl(name): registers TardisTransportRule's class (FUN_01151f78 passes it the name)
+constexpr uint32_t kTardisTransportTemplate = 0x0114AAC0;
 }  // namespace eng
 
 // A 1.0 Meridian class 3.0 lacks, registered with its 3.0 twin's template and transcoded with its table
@@ -30,6 +32,15 @@ struct Alias {
     const char* pinFrom = nullptr;   // a 1.0 pin whose index the twin's pin pinTo also gets
     const char* pinTo = nullptr;
     const char* boolOn = nullptr;    // a twin bool parameter every node describes as true
+    const char* boolOn2 = nullptr;   // a second one
+    const char* strName = nullptr;   // a twin string parameter every node describes as strValue
+    const char* strValue = nullptr;
+};
+
+// Which optional aliases register: mana10, shiprules10
+struct AliasSet {
+    bool mana = false;
+    bool ships = false;
 };
 inline constexpr Alias kAliases[] = {
     {"MissionFocusPoint_Rule_ProximityCheck_ActorToLocator", eng::kProximityCheckTemplate,
@@ -39,12 +50,22 @@ inline constexpr Alias kAliases[] = {
 inline constexpr Alias kManaAlias = {"SpawnManaNode", eng::kSpawnGroupKillerTemplate, "SpawnGroupKiller",
                                      "Consume", "Link_In", "KeepAlive"};
 
-// The aliases to register: kAliases, and kManaAlias when mana10 is on
-inline std::vector<const Alias*> aliases(bool mana10)
+// shiprules10. pc_oceanmaster.mer's parameterless ship rules (no 3.0 class) as a TardisTransportRule of the hull
+inline constexpr Alias kShipAliases[] = {
+    {"TardisShipSpawnRule", eng::kTardisTransportTemplate, "TardisTransportRule", nullptr, nullptr, "AllowMount",
+     "AllowDismount", "Transport", "AV_PirateShipRB"},
+    {"TardisShipTransportRule", eng::kTardisTransportTemplate, "TardisTransportRule", nullptr, nullptr,
+     "AllowMount", "AllowDismount", "Transport", "AV_PirateShipRB"},
+};
+
+// The aliases to register: kAliases, kManaAlias with mana10, kShipAliases with shiprules10
+inline std::vector<const Alias*> aliases(const AliasSet& s)
 {
     std::vector<const Alias*> v;
     for (const Alias& a : kAliases) v.push_back(&a);
-    if (mana10) v.push_back(&kManaAlias);
+    if (s.mana) v.push_back(&kManaAlias);
+    for (const Alias& a : kShipAliases)
+        if (s.ships) v.push_back(&a);
     return v;
 }
 
@@ -53,6 +74,8 @@ inline const Alias* aliasOf(const std::string& name)
 {
     if (name == kManaAlias.name) return &kManaAlias;
     for (const Alias& a : kAliases)
+        if (name == a.name) return &a;
+    for (const Alias& a : kShipAliases)
         if (name == a.name) return &a;
     return nullptr;
 }

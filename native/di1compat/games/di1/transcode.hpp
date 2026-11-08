@@ -55,6 +55,7 @@ struct TranscodeOptions {
     bool dnaChos = false;     // dnachos10
     bool scourgeHp = false;   // scourgehp10
     bool rowboat = false;     // rowboat10
+    bool shipBody = false;    // shipbody10
     bool boxTouch = false;    // rcbox10 (with rcdelivery10)
     bool twin = false;        // twin10
     bool dnaNest = false;     // dnanest10
@@ -564,12 +565,16 @@ inline Verdict playsetDna(Request& r)
     return "psdna30";
 }
 
-inline bool rowboatMatches(const Request& r) { return r.o.rowboat && ends(r, ".dnax") && startsLua(r); }
+inline bool rowboatMatches(const Request& r)
+{
+    const bool any = r.o.rowboat || r.o.shipBody;
+    return any && ends(r, ".dnax") && startsLua(r);
+}
 
-// 1.0's player rowboat as a 3.0 boat vehicle (rowboat::rowboat30); other DNAs: passed on.
+// 1.0's player rowboat or ship body as a 3.0 boat vehicle (rowboat::rowboat30, codec rowboat10); others: passed on.
 inline Verdict rowboatDna(Request& r)
 {
-    const rowboat::Steps s{{r.o.dnaChos, r.o.dnaNest}, r.io.read10, r.io.read30};
+    const rowboat::Steps s{{r.o.dnaChos, r.o.dnaNest}, r.io.read10, r.io.read30, r.o.rowboat, r.o.shipBody};
     const bool done = rowboat::rowboat30(std::string((const char*)r.data, r.n), s, r.out, r.note);
     if (!done) return dispatch::kNext;
     return "rowboat10";
