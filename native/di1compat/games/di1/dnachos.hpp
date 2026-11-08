@@ -55,6 +55,10 @@ inline constexpr Nested kNested[] = {
 
 // chunk in 3.0's form per s, as Lua text into out; out untouched when nothing changed.
 inline Changed dna30(const std::string& chunk, const Steps& s, std::string& out);
+// The steps s that chunk's text can need: a cheap test before eval.
+inline Steps stepsFor(const std::string& chunk, const Steps& s);
+// dna30's edits on g, chunk's evaluated globals; for a rule that edits the same DNA further.
+inline Changed edit30(std::map<std::string, luachunk::Value>& g, const std::string& chunk, const Steps& s);
 
 namespace detail {
 
@@ -157,14 +161,18 @@ inline bool namesNested(const std::string& chunk)
 
 }  // namespace detail
 
-inline Changed dna30(const std::string& chunk, const Steps& s, std::string& out)
+inline Steps stepsFor(const std::string& chunk, const Steps& s)
 {
     const bool cho = chunk.find("CHOREOGRAPHY") != std::string::npos && chunk.find("Create") != std::string::npos;
-    const bool chos = s.chos && cho;
-    const bool nest = s.nest && detail::namesNested(chunk);
+    return {s.chos && cho, s.nest && detail::namesNested(chunk)};
+}
+
+inline Changed edit30(std::map<std::string, luachunk::Value>& g, const std::string& chunk, const Steps& s)
+{
+    const Steps on = stepsFor(chunk, s);
+    const bool chos = on.chos, nest = on.nest;
     Changed c;
     if (!chos && !nest) return c;
-    auto g = luachunk::eval(chunk);
     luachunk::Value* fxs = chos ? detail::gadget(g, "Effects") : nullptr;
     luachunk::Value* fx = fxs ? fxs->get("FX") : nullptr;
     if (fx && fx->t == luachunk::Value::TAB)
@@ -175,6 +183,15 @@ inline Changed dna30(const std::string& chunk, const Steps& s, std::string& out)
     }
     luachunk::Value* det = nest ? detail::gadget(g, "Detonate") : nullptr;
     if (det) c.nested += detail::detonateTo30(*det);
+    return c;
+}
+
+inline Changed dna30(const std::string& chunk, const Steps& s, std::string& out)
+{
+    const Steps on = stepsFor(chunk, s);
+    if (!on.chos && !on.nest) return {};
+    auto g = luachunk::eval(chunk);
+    const Changed c = edit30(g, chunk, s);
     if (!c.chos && !c.nested) return c;
     out.clear();
     for (auto& [name, v] : g) out += name + " = " + luachunk::text(v) + "\n";
