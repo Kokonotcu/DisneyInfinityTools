@@ -36,6 +36,7 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
 {
     TranscodeOptions o;
     o.challenge = c.challenge10;
+    o.prankTask = c.prankTask10;
     o.behaviour = c.behav10;
     o.events = c.events10;
     o.progress = c.progress10;

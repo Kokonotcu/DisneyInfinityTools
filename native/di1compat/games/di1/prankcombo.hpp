@@ -51,6 +51,7 @@ enum ComboPin : int { kComboIn, kWho, kEnder };
 enum EndedPin : int { kLinkOut, kEndedWho, kEndedEnder, kLaunchCount };
 // MissionTask_Pranked's pins as its graphs name them (Trigger=0 .. Pranked=4; 1.0 describe FUN_00d62180 differs)
 enum TaskPin : int { kTrigger, kTaskWho, kPrank, kTaskLaunches, kPranked };
+enum CounterPin : int { kDone };   // PrankTaskCounter (pranktasks.hpp)
 
 // A running combo, as 1.0's SlotManager FUN_00b7ae90 keeps one per victim
 struct Combo {
@@ -70,6 +71,7 @@ struct TaskState {
     mernode::AgentPayload who;
     mernode::IntElement prank, launches;   // Prank: the pranks counted so far
     int count;                             // Meridian thread only
+    bool counter;                          // a PrankTaskCounter (pranktask10): Done fires once, at the goal
 };
 
 typedef void(__cdecl* MerFrameFn)(float dt);
@@ -78,11 +80,12 @@ struct State {
     std::mutex mx;                     // guards combos, enders and tasks; never held across an engine call
     std::vector<Combo> combos;
     std::vector<uint8_t*> enders;      // live PrankComboEnded nodes
-    std::vector<uint8_t*> tasks;       // live MissionTask_Pranked nodes (prankmission10)
+    std::vector<uint8_t*> tasks;       // live MissionTask_Pranked and PrankTaskCounter nodes
     std::atomic<bool> any{false};      // combos is not empty: the per-frame early out (F1)
     float now = 0.0f;                  // seconds of Meridian frames; Meridian thread only
-    int comboClass = -1, endedClass = -1, taskClass = -1;   // set once in install()
+    int comboClass = -1, endedClass = -1, taskClass = -1, counterClass = -1;   // set once in install()
     bool typeTest = false;             // kTypeCalls matched: set once in install()
+    bool enderTest = false;            // prankender10: a task's Ender is its ender's ActorType; set in install()
     MerFrameFn g_merFrame = nullptr;   // set once by installFeature() in install()
     core::LogOnce<int> told;           // its own leaf lock
 };
@@ -245,21 +248,57 @@ inline bool isType(int32_t h, const std::string& name)
     return have && ((TagMatchFn)core::rt(eng::kTagMatch))(have, want);
 }
 
-// One ended combo of the wanted character counted as a prank (1.0 Eval_Pranked FUN_00b547d0); Pranked fires
+// 1.0 Eval_Pranked Ender values that name no ActorType (FUN_00b547d0: "Specific Ender" -> the Trigger list)
+inline bool enderMatches(int32_t ender, const std::string& name)
+{
+    const bool anyEnder = name.empty() || name == "Specific Ender";
+    return !g_state.enderTest || anyEnder || isType(ender, name);
+}
+
+// One ended combo of the wanted character by the wanted ender counted as a prank (1.0 Eval_Pranked FUN_00b547d0)
 inline void countPrank(uint8_t* node, const Combo& k)
 {
     TaskState& ts = taskState(node);
     const std::string wanted = mernode::strParam(node, "PrankedCharacter");
-    if (!isType(k.who, wanted)) return;
+    const std::string ender = mernode::strParam(node, "Ender");
+    const std::string id = mernode::strParam(node, ts.counter ? "TaskID" : "MissionID");
+    const bool victimOk = isType(k.who, wanted);
+    if (!victimOk || !enderMatches(k.ender, ender)) {
+        core::logf("prankmission10: %s: combo of actor %d not counted (wanted %s by %s: %s)", id.c_str(), k.who,
+                   wanted.c_str(), ender.c_str(), victimOk ? "other ender" : "other character");
+        return;
+    }
     const int need = (int)mernode::rawParam(node, "PrankCount", 1);
     ++ts.count;
     setTask(node, k.who, k.launches);
-    const std::string id = mernode::strParam(node, "MissionID");
-    const std::string ender = mernode::strParam(node, "Ender");
+    const bool goal = ts.count == need;
+    const char* end = ts.counter ? "; task done, Success fired" : "; done, but 3.0's mission system does not see it";
     core::logf("prankmission10: %s: prank %d of %d (wanted %s by %s; actor %d, %d launches)%s", id.c_str(), ts.count,
-               need, wanted.c_str(), ender.c_str(), k.who, k.launches,
-               ts.count == need ? "; done, but 3.0's mission system does not see this task" : "");
-    mernode::fireAgent(node, g_state.taskClass, kPranked, k.who);
+               need, wanted.c_str(), ender.c_str(), k.who, k.launches, goal ? end : "");
+    if (!ts.counter) mernode::fireAgent(node, g_state.taskClass, kPranked, k.who);
+    else if (goal) mernode::fireAgent(node, g_state.counterClass, kDone, k.who);
+}
+
+// pranktask10: a new counter (pranktasks.hpp put it beside its MissionTask_Generic)
+inline void counterCreate(uint8_t* node)
+{
+    setTask(node, 0, 0);
+    taskState(node).counter = true;
+    remember(&State::tasks, node);
+}
+
+// pranktask10: counts its task's pranks; Done -> the task's Success (pranktasks.hpp links them)
+inline mernode::Spec counterSpec()
+{
+    return {"PrankTaskCounter",
+            {{"Done", mernode::Out}},
+            {{"TaskID", ::mer::T_STRING}, {"PrankedCharacter", ::mer::T_STRING}, {"Ender", ::mer::T_STRING},
+             {"PrankCount", ::mer::T_INT}, {"PrankZone", ::mer::T_INT}},
+            sizeof(TaskState),
+            nullptr,
+            &taskDestroy,
+            nullptr,
+            &counterCreate};
 }
 
 // Pins as the 11 MU graphs number them; parameters the Eval_Pranked fields they carry
@@ -340,6 +379,8 @@ inline bool install(const Config& c)
     s.comboClass = mernode::add(detail::comboSpec());
     s.endedClass = mernode::add(detail::endedSpec());
     if (c.prankMission10) s.taskClass = mernode::add(detail::taskSpec());
+    if (c.prankTask10) s.counterClass = mernode::add(detail::counterSpec());
+    s.enderTest = c.prankEnder10;
     s.typeTest = true;
     for (const detail::Call& k : detail::kTypeCalls) {
         if (core::prologueMatches(k.va, k.bytes)) continue;
@@ -347,7 +388,9 @@ inline bool install(const Config& c)
         s.typeTest = false;
         break;
     }
-    const bool taskMissing = c.prankMission10 && s.taskClass < 0;
+    const bool nativeTaskMissing = c.prankMission10 && s.taskClass < 0;
+    const bool counterMissing = c.prankTask10 && s.counterClass < 0;
+    const bool taskMissing = nativeTaskMissing || counterMissing;
     const bool comboMissing = s.comboClass < 0 || s.endedClass < 0;
     if (comboMissing || taskMissing) core::logf("prankcombo10: a class not added (native class table full)");
     return true;

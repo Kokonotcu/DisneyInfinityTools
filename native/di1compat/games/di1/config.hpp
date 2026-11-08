@@ -69,6 +69,8 @@ struct Config {
     bool prankFacing10 = true;       // .mer: PrankTargetQuery's Facing linked from its toy's 'facing' locator
     bool prankCombo10 = true;        // native10 on: RegisterPrankCombo combos end in PrankComboEnded (prankcombo.hpp)
     bool prankMission10 = true;      // prankcombo10 on: MissionTask_Pranked counts ended combos as pranks
+    bool prankTask10 = true;         // MissionTask_Pranked as MissionTask_Generic + PrankTaskCounter (pranktasks.hpp)
+    bool prankEnder10 = true;        // prankcombo10 on: a prank task's Ender must be the ender actor's ActorType
     bool rcDelivery10 = true;        // a purchased 1.0 catalog lock goes DELIVERED, AVAILABLE at once (deliveries.hpp)
     bool rcBox10 = true;             // rcdelivery10 on: its Delivery expendable spawns at the avatar (deliveries.hpp)
     bool twin10 = true;              // a 1.0 DNA's model 3.0 retired names 3.0's '<model>2' re-export (transcode)
@@ -188,6 +190,8 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"prankfacing10", core::ConfigKind::Flag, offsetof(Config, prankFacing10)},
     {"prankcombo10", core::ConfigKind::Flag, offsetof(Config, prankCombo10)},
     {"prankmission10", core::ConfigKind::Flag, offsetof(Config, prankMission10)},
+    {"pranktask10", core::ConfigKind::Flag, offsetof(Config, prankTask10)},
+    {"prankender10", core::ConfigKind::Flag, offsetof(Config, prankEnder10)},
     {"rcdelivery10", core::ConfigKind::Flag, offsetof(Config, rcDelivery10)},
     {"rcbox10", core::ConfigKind::Flag, offsetof(Config, rcBox10)},
     {"twin10", core::ConfigKind::Flag, offsetof(Config, twin10)},
