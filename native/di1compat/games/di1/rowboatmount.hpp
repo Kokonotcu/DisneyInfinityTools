@@ -3,11 +3,13 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
 #include "../../core/enginestring.hpp"
 #include "../../core/memcheck.hpp"
+#include "../../engine/actorpos.hpp"
 #include "../../engine/players.hpp"
 #include "config.hpp"
 #include "shipdeck.hpp"
@@ -60,11 +62,22 @@ constexpr int kDrive = 1448;                       // AvatarAction Drive (core b
 }  // namespace eng
 
 constexpr int kMaxTries = 600;   // actions to wait for the new avatar's driver agent before giving up
-constexpr int kCancel = 6039;    // AvatarAction CustomInteractionCancel (core bitmasks.lua)
-// In game the cancel that unseated Jack came 2 ms after our Drive (mounttrace 11:46:00.017 -> .019)
-constexpr std::chrono::milliseconds kCancelGuard{1000};
+constexpr int kCancel = 6039;    // AvatarAction CustomInteractionCancel (startup2 core bitmasks.lua)
+constexpr int kDismount = 1494;  // AvatarAction Dismount (same file): ends the seat guard
+// Cancels unseated Jack 1 ms and ~5 s after the mount in game; dropped this long unless he dismounts
+constexpr std::chrono::seconds kSeatGuard{120};
+constexpr std::chrono::milliseconds kWatchEvery{250};   // seat distance checks, on TriggerAction calls
+constexpr int kMaxReseats = 3;
+// Guesses: a seated driver stays this close to the vehicle's origin (metres); farther means left behind
+constexpr float kRowboatReach = 8.f;
+constexpr float kHullReach = 30.f;
+constexpr int kMaxDropLogs = 8;
 
 using Clock = std::chrono::steady_clock;
+
+inline Clock::rep nowTicks() { return Clock::now().time_since_epoch().count(); }
+template <class D>
+inline Clock::rep ticks(D d) { return std::chrono::duration_cast<Clock::duration>(d).count(); }
 
 typedef void(__fastcall* ApplyFn)(void* rule, void* edx, uint32_t avatar, const uint8_t* info);
 typedef void(__fastcall* ConnectFn)(void* mgr, void* edx, uint32_t biped, uint32_t vehicle, uint32_t other,
@@ -93,8 +106,11 @@ struct State {
     std::atomic<uint32_t> mounted{0};   // the avatar its mount went to
     std::atomic<int> tries{0};
     std::atomic<bool> busy{false};      // a re-mount runs: its own TriggerAction must not start another
-    std::atomic<void*> driver{nullptr};       // the re-mounted avatar's AiAvatarDriver
-    std::atomic<Clock::rep> remountAt{0};     // when its Drive went out (Clock ticks)
+    std::atomic<void*> driver{nullptr};       // the seated avatar's AiAvatarDriver; null once it dismounted
+    std::atomic<Clock::rep> mountAt{0};       // when the mount or re-mount went out (Clock ticks)
+    std::atomic<Clock::rep> lastWatch{0};
+    std::atomic<int> reseats{0};
+    std::atomic<int> drops{0};
 };
 inline State g_state;
 
@@ -139,6 +155,22 @@ inline uint32_t hostAvatar(const uint8_t* table)
 }
 
 inline bool logMore() { return g_state.logged.fetch_add(1) < 8; }
+
+// The avatar's AiAvatarDriver agent component, the one the rule's Drive goes to; null when it has none yet.
+inline void* driverOf(uint32_t avatar)
+{
+    void* agent = avatar ? ((AgentFn)core::rt(eng::kAgent))(avatar) : nullptr;
+    return agent ? ((ComponentByNameFn)core::rt(eng::kComponentByName))(agent, nullptr, "AiAvatarDriver", 0) : nullptr;
+}
+
+// A mount went out to driver: the seat guard and the distance watch start over.
+inline void seat(void* driver)
+{
+    State& s = g_state;
+    s.driver = driver;
+    s.mountAt = nowTicks();
+    s.reseats = 0;
+}
 
 // What the retarget saw, once per rowboat transport (at most 8): the rule's avatar, the host's, players 0-3.
 inline void logAvatars(uint32_t rule, const uint8_t* table)
@@ -186,6 +218,7 @@ inline void __fastcall hkApply(void* rule, void* edx, uint32_t avatar, const uin
     s.vehicle = vehicle;
     s.mounted = avatar;
     s.tries = 0;
+    seat(driverOf(avatar));
     if (hull) core::logf("shiprules10: Tardis ship hull %08X mounted by %08X", vehicle, avatar);
     if (hull) shipdeck::spawnFor(vehicle);
     if (s.connect) connectDriver(avatar, vehicle);
@@ -204,6 +237,18 @@ inline void* forceMountHash(uint32_t vehicle)
     return hash;
 }
 
+// Drive with the rule's ForceMountHash to avatar's driver agent; false until that agent exists.
+inline bool sendDrive(uint32_t avatar, uint32_t vehicle)
+{
+    void* driver = driverOf(avatar);
+    void* hash = driver ? forceMountHash(vehicle) : nullptr;
+    if (!hash) return false;
+    seat(driver);   // before the send: a cancel inside it must already meet the guard
+    ((TriggerActionFn)core::rt(eng::kTriggerAction))(driver, nullptr, eng::kDrive, hash);
+    if (g_state.connect) connectDriver(avatar, vehicle);
+    return true;
+}
+
 // Drive to rowboat sent to avatar's driver agent, as the rule sends it; false until that agent exists.
 inline bool remount(uint32_t avatar, uint32_t vehicle)
 {
@@ -213,18 +258,35 @@ inline bool remount(uint32_t avatar, uint32_t vehicle)
         core::logf("rowboatmount10: %s %08X is gone; no re-mount", vehicleWord(), vehicle);
         return true;
     }
-    void* agent = ((AgentFn)core::rt(eng::kAgent))(avatar);
-    void* driver = agent ? ((ComponentByNameFn)core::rt(eng::kComponentByName))(agent, nullptr, "AiAvatarDriver", 0)
-                         : nullptr;
-    void* hash = driver ? forceMountHash(vehicle) : nullptr;
-    if (!hash) return false;
-    core::logf("rowboatmount10: host avatar %08X replaced %08X: Drive to %s %08X re-sent", avatar, s.mounted.load(),
+    const uint32_t replaced = s.mounted.load();
+    if (!sendDrive(avatar, vehicle)) return false;
+    core::logf("rowboatmount10: host avatar %08X replaced %08X: Drive to %s %08X re-sent", avatar, replaced,
                vehicleWord(), vehicle);
-    s.driver = driver;
-    s.remountAt = Clock::now().time_since_epoch().count();
-    ((TriggerActionFn)core::rt(eng::kTriggerAction))(driver, nullptr, eng::kDrive, hash);
-    if (s.connect) connectDriver(avatar, vehicle);
     return true;
+}
+
+// The seated driver farther than reach from its vehicle (left behind): Drive again, a few times per mount.
+inline void watchSeat(uint32_t avatar, uint32_t vehicle)
+{
+    State& s = g_state;
+    const Clock::rep now = nowTicks();
+    const bool due = now - s.lastWatch.load() >= ticks(kWatchEvery);
+    const bool guarded = s.driver.load() && now - s.mountAt.load() < ticks(kSeatGuard);
+    if (!due || !guarded || s.reseats.load() >= kMaxReseats) return;
+    s.lastWatch = now;
+    float a[engine::actorpos::kVec], v[engine::actorpos::kVec];
+    if (!engine::actorpos::of(avatar, a) || !engine::actorpos::of(vehicle, v)) return;
+    const float dx = a[0] - v[0], dy = a[1] - v[1], dz = a[2] - v[2];
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    const float reach = s.hull ? kHullReach : kRowboatReach;
+    if (d2 <= reach * reach || s.busy.exchange(true)) return;
+    const int n = s.reseats.load() + 1;
+    if (sendDrive(avatar, vehicle)) {
+        s.reseats = n;   // sendDrive's seat() reset it
+        core::logf("rowboatmount10: driver %08X is %.1f m from its %s %08X: Drive re-sent (%d of %d)", avatar,
+                   std::sqrt(d2), vehicleWord(), vehicle, n, kMaxReseats);
+    }
+    s.busy = false;
 }
 
 // A called function's prologue, checked once in install() (H4); relocated immediates are ??.
@@ -241,6 +303,7 @@ inline constexpr Called kCalled[] = {
     {eng::kComponentByName, "8B89F000000085C97405E9"}, {eng::kHashCreate, "64A1000000006AFF68????????50"},
     {eng::kHasher, "A1????????85C075226A24E8"}, {eng::kHashAdd, "53568BF18B4E0432DB85C97507"},
     {core::eng::kCStringCtor, "8B44240456508BF1E8"},
+    {engine::actorpos::eng::kResolve, engine::actorpos::eng::kResolvePrologue},
 };
 
 }  // namespace detail
@@ -254,7 +317,11 @@ inline void onAction()
     const uint8_t* table = pm ? engine::players::table(pm) : nullptr;
     const uint32_t host = table ? detail::hostAvatar(table) : 0;
     const bool swapped = host && host != s.mounted.load();
-    if (!swapped || s.tries.fetch_add(1) >= detail::kMaxTries || s.busy.exchange(true)) return;
+    if (!swapped) {
+        if (host) detail::watchSeat(host, vehicle);
+        return;
+    }
+    if (s.tries.fetch_add(1) >= detail::kMaxTries || s.busy.exchange(true)) return;
     if (detail::remount(host, vehicle)) s.mounted = host;
     s.busy = false;
 }
@@ -262,12 +329,18 @@ inline void onAction()
 inline bool dropCancel(void* agent, int action)
 {
     detail::State& s = detail::g_state;
-    const bool cancel = action == detail::kCancel && agent && agent == s.driver.load();
-    if (!cancel) return false;
-    const auto since = detail::Clock::now() - detail::Clock::time_point(detail::Clock::duration(s.remountAt.load()));
-    if (since >= detail::kCancelGuard) return false;
-    core::logf("rowboatmount10: CustomInteractionCancel to the re-mounted driver dropped (%lld ms after Drive)",
-               (long long)std::chrono::duration_cast<std::chrono::milliseconds>(since).count());
+    const bool ours = agent && agent == s.driver.load();
+    if (ours && action == detail::kDismount) {
+        s.driver = nullptr;
+        core::logf("rowboatmount10: driver dismounts; seat guard off");
+    }
+    if (!ours || action != detail::kCancel) return false;
+    const detail::Clock::rep since = detail::nowTicks() - s.mountAt.load();
+    if (since >= detail::ticks(detail::kSeatGuard)) return false;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(detail::Clock::duration(since)).count();
+    if (s.drops.fetch_add(1) < detail::kMaxDropLogs)
+        core::logf("rowboatmount10: CustomInteractionCancel to the re-mounted driver dropped (%lld ms after Drive)",
+                   (long long)ms);
     return true;
 }
 

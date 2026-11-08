@@ -1,12 +1,11 @@
-// shiprules10: a Tardis-spawned ship hull (AV_PirateShipRB) gets its deck, slaved to it. core, oceanboat. Game thread.
+// shiprules10: a Tardis-spawned ship hull (AV_PirateShipRB) gets its deck, slaved to it. core, actorpos. Game thread.
 #pragma once
 #include <cstdint>
 #include <mutex>
 #include <unordered_set>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
-#include "../../core/memcheck.hpp"
-#include "oceanboat.hpp"
+#include "../../engine/actorpos.hpp"
 
 namespace di1::shipdeck {
 
@@ -30,7 +29,6 @@ constexpr size_t kActorHandle = 4;             // actor +4: its handle (FUN_0073
 constexpr size_t kInitBytes = 16;              // FUN_00705ec0 clears 4 dwords
 // ActorGetRotationY (0x74c580) -> FUN_0074b350, cdecl (handle) -> float
 constexpr uint32_t kRotationY = 0x0074B350;
-constexpr size_t kActorPos = 0x2c;             // ActorGetPosition (0x74b7f7): a non-avatar actor's position
 // SlaveActorToActor (0x6f69c0) -> FUN_018a8d40, thiscall (mgr; slave, master, offset*, 3x3*, mode, bool; ret 0x18)
 constexpr uint32_t kSlave = 0x018A8D40;
 constexpr uint32_t kSlaveMgr = 0x0228E658;
@@ -65,21 +63,6 @@ struct State {
 };
 inline State g_state;
 
-// The hull's position as ActorGetPosition reads it; false when a step is null or unreadable (H8).
-inline bool positionOf(uint32_t handle, float* out)
-{
-    namespace ob = oceanboat::detail;
-    void* handles = *(void**)core::rt(ob::eng::kHandles);
-    uint32_t slot = 0;
-    const uint8_t* entry = handles ? ((ob::ResolveFn)core::rt(ob::eng::kResolve))(handles, nullptr, &slot, &handle)
-                                   : nullptr;
-    if (!entry || !core::readable(entry + ob::eng::kEntryActor, sizeof(void*))) return false;
-    const uint8_t* actor = *(uint8_t* const*)(entry + ob::eng::kEntryActor);
-    if (!actor || !core::readable(actor + eng::kActorPos, kVec * sizeof(float))) return false;
-    for (int i = 0; i < kVec; ++i) out[i] = ((const float*)(actor + eng::kActorPos))[i];
-    return true;
-}
-
 // The deck at pos and heading rot, as CreateFromInitString makes it; its handle, 0 when none.
 inline uint32_t createDeck(const float* pos, float rot)
 {
@@ -111,7 +94,7 @@ inline constexpr Called kCalled[] = {
     {eng::kInitCtor, "33C0568BF1890689460489460889460C"}, {eng::kInitDtor, "578BF98B470485C0740AFF4808C74704"},
     {eng::kCreate, "83EC5CF30F1005????????8B4424640F"},  {eng::kRotationY, "83EC2C8B442430568D4C2404518B0D"},
     {eng::kSlave, "0FB705????????8B4C24045051E8"},       {eng::kPassthrough, "0FB705????????8B4C24045051E8"},
-    {oceanboat::detail::eng::kResolve, "8B4424088B0085C07503C20800"},
+    {engine::actorpos::eng::kResolve, engine::actorpos::eng::kResolvePrologue},
 };
 
 }  // namespace detail
@@ -131,7 +114,7 @@ inline void spawnFor(uint32_t hull)
 {
     detail::State& s = detail::g_state;
     float pos[detail::kVec];
-    if (!s.checked || !detail::positionOf(hull, pos)) return;
+    if (!s.checked || !engine::actorpos::of(hull, pos)) return;
     {
         std::lock_guard<std::mutex> lock(s.m);
         if (!s.hulls.insert(hull).second) return;
