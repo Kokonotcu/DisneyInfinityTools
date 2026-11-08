@@ -21,6 +21,7 @@
 #include "../games/di1/mission.hpp"
 #include "../games/di1/navmesh.hpp"
 #include "../games/di1/prank.hpp"
+#include "../games/di1/prankcombo.hpp"
 #include "../games/di1/scourge.hpp"
 #include "../games/di1/skin.hpp"
 #include "../games/di1/spawner.hpp"
@@ -70,12 +71,14 @@ void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
     if (flag == "--spawnfrom") mernode::addToTable(T, di1::spawner::detail::nodeSpec());   // as after registerAll
     if (flag == "--scourge") mernode::addToTable(T, di1::scourge::detail::nodeSpec());     // as after registerAll
     if (flag == "--delivery") mernode::addToTable(T, di1::inertnodes::detail::deliverySpec());
-    if (flag == "--prankcombo") mernode::addToTable(T, di1::inertnodes::detail::comboEndedSpec());
+    if (flag == "--prankcombo") {
+        mernode::addToTable(T, di1::prankcombo::detail::comboSpec());
+        mernode::addToTable(T, di1::prankcombo::detail::endedSpec());
+    }
     if (flag == "--prank") {
         mernode::addToTable(T, di1::prank::detail::socketSpec());
         mernode::addToTable(T, di1::prank::detail::registerSpec());
         mernode::addToTable(T, di1::prank::detail::querySpec());
-        mernode::addToTable(T, di1::inertnodes::detail::prankComboSpec());
     }
     if (flag != "--decosockets") return;
     mernode::addToTable(T, di1::inertnodes::detail::spawnSocketsSpec());

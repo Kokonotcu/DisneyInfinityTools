@@ -1,5 +1,4 @@
-// delivery10, decosockets10, prank10, prankcombo10: 1.0 classes whose system 3.0 lacks; links kept, inputs logged.
-// Meridian thread.
+// delivery10, decosockets10: 1.0 classes whose system 3.0 lacks; links kept, inputs logged. Meridian thread.
 #pragma once
 #include <cstdint>
 #include "../../core/log.hpp"
@@ -9,8 +8,7 @@
 
 namespace di1::inertnodes {
 
-// Adds DeliveryNode (delivery10), the decoration socket classes (decosockets10), the prank combo classes (prank10 /
-// prankcombo10).
+// Adds DeliveryNode (delivery10) and the two decoration socket classes (decosockets10).
 inline void install(const Config& c);
 
 namespace detail {
@@ -21,7 +19,7 @@ struct DeliveryState {
 };
 
 // What a log line is about: one key each for LogOnce
-enum Told : int { kDeliveryInput, kSpawnSockets, kActivateSockets, kPrankCombo, kComboEnded };
+enum Told : int { kDeliveryInput, kSpawnSockets, kActivateSockets };
 
 struct State {
     core::LogOnce<int> told;   // Told keys logged; its own leaf lock
@@ -107,61 +105,6 @@ inline mernode::Spec activateSocketsSpec()
             &activateSocketsImpulse};
 }
 
-// 1.0 0xd87e70 -> SlotManager FUN_00b7ae90: a combo of Who and its Ender; 3.0 keeps no combos.
-inline void prankComboImpulse(uint8_t*, int, void*)
-{
-    tellOnce(kPrankCombo, "prank10: RegisterPrankCombo: 3.0 has no prank combos; PrankComboEnded never fires");
-}
-
-// 1.0 describe FUN_00d8d1c0; no parameters (node 0x30 B)
-inline mernode::Spec prankComboSpec()
-{
-    return {"RegisterPrankCombo",
-            {{"Link_In", mernode::In}, {"Who", mernode::DataV}, {"Ender", mernode::DataV}},
-            {},
-            0,
-            &prankComboImpulse};
-}
-
-// PrankComboEnded's outputs: Who and Ender actors, LaunchCount an int (1.0 node +0x24 / +0x30 / +0x3c)
-struct ComboEndedState {
-    mernode::AgentPayload who, ender;
-    mernode::IntElement launchCount;
-};
-
-// PrankComboEnded's pins in 1.0's numbering (describe FUN_00d60120)
-enum ComboEndedPin : int { kLinkOut, kWho, kEnder, kLaunchCount };
-
-// 1.0 getters 0xd57bf0 / 0x109ad90 / 0xd58a60; no combo ends in 3.0, so handles and count stay 0.
-inline void* comboEndedOut(uint8_t* node, int pin)
-{
-    const mernode::Engine& e = mernode::g_state.engine;
-    ComboEndedState& cs = *(ComboEndedState*)mernode::stateOf(node);
-    tellOnce(kComboEnded, "prankcombo10: PrankComboEnded read: no combo ended in 3.0; Who / Ender none, LaunchCount 0");
-    if (pin == kLaunchCount) {
-        cs.launchCount.vft = e.intElemVt;
-        cs.launchCount.type = e.intType;
-        return &cs.launchCount;
-    }
-    mernode::AgentPayload& a = pin == kEnder ? cs.ender : cs.who;
-    a.vft = e.agentElemVt;
-    a.type = e.agentType;
-    return &a;
-}
-
-// 1.0 0xd77ae0 listens for the "PrankComboEnded" message, which 3.0 never posts; no input pin.
-inline mernode::Spec comboEndedSpec()
-{
-    using mernode::DataOut;
-    return {"PrankComboEnded",
-            {{"Link_Out", mernode::Out}, {"Who", DataOut}, {"Ender", DataOut}, {"LaunchCount", DataOut}},
-            {},
-            sizeof(ComboEndedState),
-            nullptr,
-            nullptr,
-            &comboEndedOut};
-}
-
 inline void add(const mernode::Spec& s)
 {
     if (mernode::add(s) < 0) core::logf("inertnodes: %s not added (native class table full)", s.name);
@@ -172,8 +115,6 @@ inline void add(const mernode::Spec& s)
 inline void install(const Config& c)
 {
     if (c.delivery10) detail::add(detail::deliverySpec());
-    if (c.prankCombo10) detail::add(detail::comboEndedSpec());
-    if (c.prank10) detail::add(detail::prankComboSpec());
     if (!c.decoSockets10) return;
     detail::add(detail::spawnSocketsSpec());
     detail::add(detail::activateSocketsSpec());

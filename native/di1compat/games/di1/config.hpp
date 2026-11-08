@@ -67,7 +67,7 @@ struct Config {
     bool prank10 = true;             // native10 on: MU prank sockets, RegisterPranks, PrankTargetQuery (prank.hpp)
     bool prankMarker10 = true;       // prank10 on: each prank socket gets 1.0's DecorationSocket marker actor
     bool prankFacing10 = true;       // .mer: PrankTargetQuery's Facing linked from its toy's 'facing' locator
-    bool prankCombo10 = true;        // native10 on: PrankComboEnded keeps its pins and links (inertnodes.hpp)
+    bool prankCombo10 = true;        // native10 on: RegisterPrankCombo combos end in PrankComboEnded (prankcombo.hpp)
     bool rcDelivery10 = true;        // a purchased 1.0 catalog lock goes DELIVERED, AVAILABLE at once (deliveries.hpp)
     bool rcBox10 = true;             // rcdelivery10 on: its Delivery expendable spawns at the avatar (deliveries.hpp)
     bool twin10 = true;              // a 1.0 DNA's model 3.0 retired names 3.0's '<model>2' re-export (transcode)

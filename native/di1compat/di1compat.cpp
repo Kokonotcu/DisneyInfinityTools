@@ -38,6 +38,7 @@
 #include "games/di1/playsets.hpp"
 #include "games/di1/popin.hpp"
 #include "games/di1/prank.hpp"
+#include "games/di1/prankcombo.hpp"
 #include "games/di1/render10.hpp"
 #include "games/di1/screens.hpp"
 #include "games/di1/selectmenu.hpp"
@@ -91,6 +92,7 @@ static void installModules(const di1::Config& cfg)
     di1::scourge::install(cfg);
     di1::inertnodes::install(cfg);
     di1::prank::install(cfg);
+    di1::prankcombo::install(cfg);
     di1::gamedb30::install(cfg);
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
