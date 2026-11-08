@@ -47,16 +47,31 @@ inline bool catalogTypeStage(openstage::Open& o, int*& out);
 inline bool rootGraphStage(openstage::Open& o, int*& out);
 // rootgraph10: the .mtb and buffers of a model rootGraphStage passed to 1.0 go to 1.0 too. Destroys r.
 inline bool olderCompanionStage(openstage::Open& o, int*& out);
+// carbody10: the Cars townsfolk car bodies' model files go to 1.0's copies. Destroys r.
+inline bool carBodyStage(openstage::Open& o, int*& out);
 
 namespace detail {
 
 constexpr size_t kExtLen = sizeof(".oct") - 1;   // .oct and .mtb alike
 
+// 3.0 re-exported these as sedan_blue/truck_green/van_red: tint 1, coloured texture. 1.0: white texture, tinted.
+inline constexpr const char* kCarBodies10[] = {"characters/cars_townspeople/sedan/sedan",
+                                               "characters/cars_townspeople/truck/truck",
+                                               "characters/cars_townspeople/van/van"};
+
 struct State {
     std::mutex mx;                 // guards older
     std::set<std::string> older;   // rootgraph10: stems of models served from 1.0 over 3.0's copy; never cleared
+    core::LogOnce<std::string> bodies;   // carbody10: stems logged; its own lock
 };
 inline State g_state;
+
+inline bool carBody10(const std::string& stem)
+{
+    for (const char* b : kCarBodies10)
+        if (stem == b) return true;
+    return false;
+}
 
 // A model file's stem: "objects/x" for objects/x.oct, x.mtb, x_0.vbuf, x_0.ibuf; "" for anything else.
 inline std::string modelStem(const std::string& np)
@@ -348,6 +363,20 @@ inline bool olderCompanionStage(openstage::Open& o, int*&)
         if (!detail::g_state.older.count(stem)) return false;
     }
     detail::passTo10(o, " (its model was served from 1.0)");
+    return false;
+}
+
+inline bool carBodyStage(openstage::Open& o, int*&)
+{
+    if (!o.edits() || !o.cfg->carBody10) return false;
+    const std::string np = text::norm(o.p);
+    const std::string stem = detail::modelStem(np);
+    std::string t10;
+    if (stem.empty() || !detail::carBody10(stem) || !vfs::read10s(np, t10)) return false;
+    // the prebuilt colour (Cars_Townspeople_Sedan: index 0, grey) is 1.0's block A tint; 3.0's copy ignores it
+    if (detail::g_state.bodies.first(stem))
+        core::logf("carbody10: %s: 1.0's tinted car body served over 3.0's baked-colour copy", stem.c_str());
+    detail::passTo10(o, " (carbody10: 1.0's car body)");
     return false;
 }
 
