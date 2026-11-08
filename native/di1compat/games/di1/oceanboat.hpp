@@ -5,9 +5,7 @@
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
-#include "../../engine/handles.hpp"
 #include "config.hpp"
-#include "shipspawn.hpp"
 
 namespace di1::oceanboat {
 
@@ -33,11 +31,15 @@ constexpr size_t kWaterPoint = 0x5c;   // FUN_00d46fc0: the water plane's point;
 // The hull's actor: FUN_00d47900 passes [[controller+4]+4] to FUN_00745830 and FUN_0069ecd0 as its handle
 constexpr size_t kOwner = 4;
 constexpr size_t kOwnerHandle = 4;
+constexpr uint32_t kHandles = 0x02202A38;   // the handle table FUN_00492e20 reads (deliveries.hpp)
+constexpr uint32_t kResolve = 0x00492E20;   // FUN_00492e20: thiscall (uint32_t* out, handle*) -> entry
+constexpr size_t kEntryActor = 8;           // a resolved entry: the actor
 constexpr size_t kActorY = 0x30;            // non-avatar actor: quaternion at +0x1c, position at +0x2c (0x1890092)
 }  // namespace eng
 
 typedef void(__fastcall* BoatUpdateFn)(uint8_t* controller, void* edx, float dt);
 typedef float(__fastcall* SeaLevelFn)(void* surface, void* edx, float y);
+typedef uint8_t*(__fastcall* ResolveFn)(void* handles, void* edx, uint32_t* out, const uint32_t* handle);
 
 struct State {
     BoatUpdateFn boatUpdate = nullptr;   // the original; set once in install()
@@ -55,18 +57,18 @@ inline void* oceanSurface()
     return layers ? surface : nullptr;
 }
 
-// The hull's actor handle, 0 when the owner is null or unreadable (H8).
-inline uint32_t hullHandle(const uint8_t* controller)
+// The hull's height, or fallback when any step is null or unreadable (H8). Boats only: a few checks per frame.
+inline float hullY(const uint8_t* controller, float fallback)
 {
     const uint8_t* owner = *(uint8_t* const*)(controller + eng::kOwner);
+    void* handles = *(void**)core::rt(eng::kHandles);
     const bool ownerOk = owner && core::readable(owner + eng::kOwnerHandle, sizeof(uint32_t));
-    return ownerOk ? *(const uint32_t*)(owner + eng::kOwnerHandle) : 0;
-}
-
-// The hull's height, or fallback when any step is null or unreadable (H8). Boats only: a few checks per frame.
-inline float hullY(uint32_t hull, float fallback)
-{
-    const uint8_t* actor = engine::handles::actorOf(hull);
+    if (!ownerOk || !handles) return fallback;
+    const uint32_t handle = *(const uint32_t*)(owner + eng::kOwnerHandle);
+    uint32_t slot = 0;
+    const uint8_t* entry = ((ResolveFn)core::rt(eng::kResolve))(handles, nullptr, &slot, &handle);
+    if (!entry || !core::readable(entry + eng::kEntryActor, sizeof(void*))) return fallback;
+    const uint8_t* actor = *(uint8_t* const*)(entry + eng::kEntryActor);
     if (!actor || !core::readable(actor + eng::kActorY, sizeof(float))) return fallback;
     return *(const float*)(actor + eng::kActorY);
 }
@@ -75,16 +77,14 @@ inline float hullY(uint32_t hull, float fallback)
 inline void __fastcall hkBoatUpdate(uint8_t* controller, void* edx, float dt)
 {
     State& s = g_state;
-    const uint32_t hull = hullHandle(controller);
     if (void* surface = oceanSurface()) {
         float* point = (float*)(controller + eng::kWaterPoint);
         // Pirates stacks oceans (y 100 and 1664): the highest layer at or below the hull, as 1.0 asked per ship
-        point[1] = ((SeaLevelFn)core::rt(eng::kSeaLevel))(surface, nullptr, hullY(hull, point[1]));
+        point[1] = ((SeaLevelFn)core::rt(eng::kSeaLevel))(surface, nullptr, hullY(controller, point[1]));
         controller[eng::kInWater] = 1;
         if (!s.logged.exchange(true)) core::logf("oceanboat10: a boat floats on the ocean at sea level %.2f", point[1]);
     }
     s.boatUpdate(controller, edx, dt);
-    shipspawn::followBody(hull);   // a ship body's deck takes the body's place (shipspawn10)
 }
 
 }  // namespace detail
@@ -95,7 +95,7 @@ inline bool install(const Config& c)
     detail::State& s = detail::g_state;
     // the engine functions the detour calls (H4)
     const bool sea = core::prologueMatches(detail::eng::kSeaLevel, "8B4158A9FEFFFFFF7505D9EEC20400");
-    const bool resolve = core::prologueMatches(engine::handles::eng::kResolve, "8B4424088B0085C07503C20800");
+    const bool resolve = core::prologueMatches(detail::eng::kResolve, "8B4424088B0085C07503C20800");
     if (!sea || !resolve) {
         core::logf("oceanboat10 off: %s prologue differs", sea ? "handle resolve" : "sea level");
         return false;
