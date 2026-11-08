@@ -2,6 +2,7 @@
 // core, engine/players. Game thread.
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
@@ -17,6 +18,8 @@ namespace di1::rowboatmount {
 inline bool install(const Config& c);
 // From the TriggerAction hook (rowboatdrive10): a host avatar that replaced the rowboat's driver gets the Drive.
 inline void onAction();
+// From the TriggerAction hook: true drops a CustomInteractionCancel to the driver just re-mounted.
+inline bool dropCancel(void* agent, int action);
 // Whether the handle's actor has that ActorType UID (bitmasks.lua); false until install() checked the calls.
 inline bool hasActorType(uint32_t handle, uint32_t uid);
 
@@ -57,6 +60,11 @@ constexpr int kDrive = 1448;                       // AvatarAction Drive (core b
 }  // namespace eng
 
 constexpr int kMaxTries = 600;   // actions to wait for the new avatar's driver agent before giving up
+constexpr int kCancel = 6039;    // AvatarAction CustomInteractionCancel (core bitmasks.lua)
+// In game the cancel that unseated Jack came 2 ms after our Drive (mounttrace 11:46:00.017 -> .019)
+constexpr std::chrono::milliseconds kCancelGuard{1000};
+
+using Clock = std::chrono::steady_clock;
 
 typedef void(__fastcall* ApplyFn)(void* rule, void* edx, uint32_t avatar, const uint8_t* info);
 typedef void(__fastcall* ConnectFn)(void* mgr, void* edx, uint32_t biped, uint32_t vehicle, uint32_t other,
@@ -85,6 +93,8 @@ struct State {
     std::atomic<uint32_t> mounted{0};   // the avatar its mount went to
     std::atomic<int> tries{0};
     std::atomic<bool> busy{false};      // a re-mount runs: its own TriggerAction must not start another
+    std::atomic<void*> driver{nullptr};       // the re-mounted avatar's AiAvatarDriver
+    std::atomic<Clock::rep> remountAt{0};     // when its Drive went out (Clock ticks)
 };
 inline State g_state;
 
@@ -154,6 +164,12 @@ inline void __fastcall hkApply(void* rule, void* edx, uint32_t avatar, const uin
 {
     State& s = g_state;
     const uint32_t vehicle = vehicleOf(info);
+    // a re-apply (in game 1 ms after our re-mount) stays on the rule's avatar: retargeted, it cancelled Jack's seat
+    if (vehicle && vehicle == s.vehicle.load()) {
+        if (logMore()) core::logf("rowboatmount10: transport rule re-applied (%08X), left on its avatar", avatar);
+        s.g_apply(rule, edx, avatar, info);
+        return;
+    }
     const bool rowboat = vehicle && isRowboat(vehicle);
     const bool hull = vehicle && !rowboat && isHull(vehicle);
     const uint8_t* pm = rowboat || hull ? engine::players::manager() : nullptr;
@@ -204,6 +220,8 @@ inline bool remount(uint32_t avatar, uint32_t vehicle)
     if (!hash) return false;
     core::logf("rowboatmount10: host avatar %08X replaced %08X: Drive to %s %08X re-sent", avatar, s.mounted.load(),
                vehicleWord(), vehicle);
+    s.driver = driver;
+    s.remountAt = Clock::now().time_since_epoch().count();
     ((TriggerActionFn)core::rt(eng::kTriggerAction))(driver, nullptr, eng::kDrive, hash);
     if (s.connect) connectDriver(avatar, vehicle);
     return true;
@@ -239,6 +257,18 @@ inline void onAction()
     if (!swapped || s.tries.fetch_add(1) >= detail::kMaxTries || s.busy.exchange(true)) return;
     if (detail::remount(host, vehicle)) s.mounted = host;
     s.busy = false;
+}
+
+inline bool dropCancel(void* agent, int action)
+{
+    detail::State& s = detail::g_state;
+    const bool cancel = action == detail::kCancel && agent && agent == s.driver.load();
+    if (!cancel) return false;
+    const auto since = detail::Clock::now() - detail::Clock::time_point(detail::Clock::duration(s.remountAt.load()));
+    if (since >= detail::kCancelGuard) return false;
+    core::logf("rowboatmount10: CustomInteractionCancel to the re-mounted driver dropped (%lld ms after Drive)",
+               (long long)std::chrono::duration_cast<std::chrono::milliseconds>(since).count());
+    return true;
 }
 
 inline bool hasActorType(uint32_t handle, uint32_t uid)
