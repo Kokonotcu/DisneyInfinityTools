@@ -51,6 +51,9 @@ constexpr uint32_t kSetOrientation = 0x007465F0;
 constexpr size_t kActorPosition = 0x2c;
 constexpr size_t kActorOrientation = 0x1c;
 constexpr size_t kTransformBytes = 0x1c;   // quaternion and position, read together
+constexpr int kTraced = 3;                 // followBody calls logged with the deck read back
+constexpr float kJumpSq = 25.f;            // a body move over 5 m between calls is a teleport worth a line
+constexpr int kJumps = 6;
 typedef void(__fastcall* SetFn)(uint8_t** actor, void* edx, const float* value);
 
 struct State {
@@ -58,7 +61,9 @@ struct State {
     std::unordered_set<int> decks;                      // decks that spawned their body
     std::unordered_map<uint32_t, uint32_t> deckOf;      // body -> deck; ponytail: never pruned, a few per session
     bool follow = false;                                // setters' prologues matched; set once in install()
-    std::atomic<bool> logged{false};
+    std::atomic<int> traced{0};                         // followBody lines logged
+    float lastX = 0, lastZ = 0;                         // the last logged body x / z; game thread only
+    int jumps = 0;                                      // jump lines logged; game thread only
 };
 inline State g_state;
 
@@ -161,11 +166,23 @@ inline void followBody(uint32_t body)
     }
     uint8_t* from = engine::handles::actorOf(body);
     uint8_t* to = engine::handles::actorOf(deck);
-    const bool ok = from && to && core::readable(from + detail::kActorOrientation, detail::kTransformBytes);
-    if (!ok) return;
-    ((detail::SetFn)core::rt(detail::kSetPosition))(&to, nullptr, (const float*)(from + detail::kActorPosition));
+    const bool fromOk = from && core::readable(from + detail::kActorOrientation, detail::kTransformBytes);
+    const bool toOk = to && core::readable(to + detail::kActorOrientation, detail::kTransformBytes);
+    if (!fromOk || !toOk) return;
+    const float* p = (const float*)(from + detail::kActorPosition);
+    const float* d = (const float*)(to + detail::kActorPosition);
+    const float before[] = {d[0], d[1], d[2]};
+    ((detail::SetFn)core::rt(detail::kSetPosition))(&to, nullptr, p);
     ((detail::SetFn)core::rt(detail::kSetOrientation))(&to, nullptr, (const float*)(from + detail::kActorOrientation));
-    if (!s.logged.exchange(true)) core::logf("shipspawn10: deck %08X follows body %08X each frame", deck, body);
+    // the first calls, then each jump of the body (a teleport), up to kJumps more lines
+    const float dx = p[0] - s.lastX, dz = p[2] - s.lastZ;
+    const bool jumped = dx * dx + dz * dz > detail::kJumpSq && s.jumps < detail::kJumps;
+    if (s.traced.fetch_add(1) >= detail::kTraced && !jumped) return;
+    s.jumps += jumped;
+    s.lastX = p[0];
+    s.lastZ = p[2];
+    core::logf("shipspawn10: deck %08X follows body %08X: body (%.1f, %.1f, %.1f), deck (%.1f, %.1f, %.1f) -> "
+               "(%.1f, %.1f, %.1f)", deck, body, p[0], p[1], p[2], before[0], before[1], before[2], d[0], d[1], d[2]);
 }
 
 // Checks the setters followBody calls (H4); the port itself is added by sxnatives with shipSpawn10.
