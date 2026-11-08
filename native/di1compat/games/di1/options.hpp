@@ -45,6 +45,7 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
     o.dnaChos = c.dnaChos10;
     o.scourgeHp = c.scourgeHp10;
     o.rowboat = c.rowboat10;
+    o.shipBody = c.shipBody10;
     o.boxTouch = c.rcDelivery10 && c.rcBox10;
     o.twin = c.twin10;
     o.dnaNest = c.dnaNest10;

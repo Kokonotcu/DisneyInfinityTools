@@ -35,9 +35,13 @@ using Read = std::function<bool(const std::string& path, std::string& out)>;
 // What a boat DNA rule needs: dnachos' steps, a 1.0 read (a ship's rigid body) and a 3.0 read (TB_Boat).
 struct Steps {
     dnachos::Steps chos;
-    Read read10, read30;   // empty: that read fails
+    Read read10, read30;     // empty: that read fails
+    bool rowboat = true;     // rowboat10: the player rowboat
+    bool shipBody = false;   // shipbody10: the player ship's rigid body actor
 };
-// A player rowboat chunk as 3.0's boat vehicle text into out, tagged in note; false (both untouched): not one.
+// Whether g is the rigid body actor 1.0's player ship deck spawns (kShipBodies) with its ship components.
+inline bool isPlayerShipBody(const Globals& g);
+// A player rowboat or ship body chunk as 3.0's boat vehicle text into out, tagged in note; false: untouched.
 inline bool rowboat30(const std::string& chunk, const Steps& s, std::string& out, std::string& note);
 // 3.0's TB_Boat DNA through s.read30; "" when it cannot be read.
 inline std::string boatDefaults(const Steps& s);
@@ -66,6 +70,11 @@ constexpr char kResolution[] = "None";
 constexpr char kPerception[] = "VehicleTalkToMissionGiver|PassengerRideCar|Driving|DriveHelicopter";   // tb_boat
 constexpr char kLocomotion[] = "Locomotion";   // 1.0's AI movement gadget, removed
 constexpr double kMaxPassengers = 1;   // tb_boat's ToyBoxVehicleData; TransportVehicle lets a Tardis rule mount it
+constexpr char kDrivable[] = "Drivable";
+constexpr char kNoStates[] = "NONE";
+constexpr char kVehicleStates[] = "Perceivable|Targetable|Drivable";   // tb_boat.dnax, for a 1.0 mask of NONE
+// Rigid body actors of player ship decks (av_pirateship.dnax ShipRigidBodyConnector.RigidBodyName)
+inline constexpr const char* kShipBodies[] = {"AV_PirateShipRB"};
 
 inline Value str(const std::string& s)
 {
@@ -141,9 +150,20 @@ inline int renameComponents(Value& comps, const Value* base30)
     return n;
 }
 
+// The actor state Drive needs on the vehicle: TB_Boat's mask has Drivable; the ship body's 1.0 mask is NONE.
+inline void drivable(Value& gadgets)
+{
+    Value* states = gadgets.get("StateBitmask");
+    const std::string mask = states ? states->str("ActorStateMask") : "";
+    if (mask.find(kDrivable) != std::string::npos) return;
+    const bool none = mask.empty() || mask == kNoStates;
+    putIn(gadgets, "StateBitmask", "ActorStateMask", str(none ? kVehicleStates : mask + "|" + kDrivable));
+}
+
 // 3.0's vehicle gadgets: transport data, script, AI tree, net type, collision mode, driving perception; no Locomotion.
 inline void vehicleGadgets(Value& gadgets)
 {
+    drivable(gadgets);
     Value yes;
     yes.t = Value::BOOL;
     yes.b = true;
@@ -244,12 +264,26 @@ inline std::string boatDefaults(const Steps& s)
     return base;
 }
 
+inline bool isPlayerShipBody(const Globals& g)
+{
+    const luachunk::Value* comps = detail::sub(g, "Components");
+    const luachunk::Value* gadgets = detail::sub(g, "AgentGadgets");
+    const luachunk::Value* id = gadgets ? gadgets->get("Identification") : nullptr;
+    const std::string name = id ? id->str("Name") : "";
+    bool listed = false;
+    for (const char* n : detail::kShipBodies) listed = listed || name == n;
+    const bool ship = comps && comps->get(detail::kController10) && comps->get(detail::kPhysics10);
+    return listed && ship;
+}
+
 inline bool rowboat30(const std::string& chunk, const Steps& s, std::string& out, std::string& note)
 {
     if (chunk.find("ShipController") == std::string::npos) return false;
     auto g = luachunk::eval(chunk);
-    if (!isPlayerRowboat(g)) return false;
-    note += "+rowboat10";
+    const bool rowboat = s.rowboat && isPlayerRowboat(g);
+    const bool body = !rowboat && s.shipBody && isPlayerShipBody(g);
+    if (!rowboat && !body) return false;
+    note += rowboat ? "+rowboat10" : "+shipbody10";
     out = finish30(g, chunk, s.chos, boatDefaults(s), note);
     return true;
 }
