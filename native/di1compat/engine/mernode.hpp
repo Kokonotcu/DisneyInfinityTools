@@ -1,5 +1,6 @@
 // Native Meridian node classes inside 3.0 (FORMATS.md 5.9). formats/mer; registered at boot, thunks on engine threads.
 #pragma once
+#include <intrin.h>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +31,7 @@ constexpr uint32_t kPinInCtor = 0x006A7C60;     // pin member constructors, by K
 constexpr uint32_t kPinOutCtor = 0x006A7D20;
 constexpr uint32_t kPinDataCtor = 0x006A7D60;
 constexpr uint32_t kPinDataVCtor = 0x006A8D90;
+constexpr uint32_t kPinDataOutCtor = 0x006A7CA0;   // link type 2: a data output (1.0 FUN_0068cef0)
 constexpr uint32_t kBindIn = 0x006C7EF0;        // binds an impulse input pin and its handler
 constexpr uint32_t kBind = 0x006C7FF0;          // binds an output or data pin
 constexpr uint32_t kBindV = 0x006C7F80;         // binds a data pin with a constant
@@ -47,6 +49,12 @@ constexpr uint32_t kDefEquals = 0x006AB890;     // definition vtable: equality
 constexpr uint32_t kDefFalse = 0x015E89D0;      // definition vtable: returns false
 constexpr uint32_t kFetchAgent = 0x006DD190;    // Agent data input: thiscall(pin, node, &handle) -> bool, ret 8
 constexpr uint32_t kFetchVec3 = 0x006B2B20;     // Vector3d data input: thiscall(pin, node, float[3]) -> bool, ret 8
+constexpr uint32_t kFetchXforms = 0x010F3780;   // Transform3d list input: thiscall(pin, node, list), ret 8
+constexpr uint32_t kListFree = 0x006E4E60;      // that list's destructor: releases each handle, frees the array
+constexpr uint32_t kSpinLock = 0x00412EF0;      // a handle's spin lock (thiscall on handle + kLockAt), FUN_01167dc0
+constexpr uint32_t kSpinUnlock = 0x0040A770;
+constexpr uint32_t kXformOf = 0x0048D2B0;       // thiscall on a Transform3d data node: its refreshed transform
+constexpr uint32_t kRelease = 0x0063DA40;       // thiscall on a slot holding a data node: drops that reference
 constexpr uint32_t kDefReg = 0x02202C80;        // data: the definition creator map
 constexpr uint32_t kAgentElemVt = 0x01B3F8F0;   // data: DataElement<PortionedHandle<Agent,14,6,0>> vftable
 constexpr uint32_t kAgentType = 0x0213E76C;     // data: that element's type id (ActorTypeImpulse 0x14863b0 checks it)
@@ -59,9 +67,16 @@ constexpr uint32_t kDtorThis = 0x14;            // the Node base destructor's th
 constexpr uint32_t kDefOfSlot = 0x10;           // the definition pointer inside a node's slot
 constexpr uint32_t kDefBase = 0x28;             // definition base size (FUN_006ae840)
 constexpr int kCreateInstanceSlot = 14;         // Node vftable slot CreateInstance (FUN_01804bc0)
+// a Transform3d list element (FUN_01167dc0 reads them so): handle -> data node -> transform
+constexpr uint32_t kLockAt = 0xC;               // handle: spin lock
+constexpr uint32_t kDataNodeAt = 8;             // handle: the data node, or null
+constexpr uint32_t kRefAt = 4;                  // data node: reference count, low 21 bits
+constexpr uint32_t kRefMask = 0x1FFFFF;
+constexpr uint32_t kPosAt = 0x10;               // transform: position, 3 floats
 }  // namespace eng
 
-enum Kind : uint8_t { In, Out, Data, DataV };   // (windows.h defines IN / OUT)
+enum Kind : uint8_t { In, Out, Data, DataV, DataOut };   // (windows.h defines IN / OUT)
+constexpr int kKinds = 5;
 struct Pin {
     const char* name;
     Kind kind;
@@ -72,6 +87,7 @@ struct Param {
 };
 using Impulse = void (*)(uint8_t* node, int pin, void* payload);
 using Destroy = void (*)(uint8_t* node);
+using Getter = void* (*)(uint8_t* node, int pin);
 // A native class: its pins, the parameters it reads, its state size, its impulse handler, its destroy notice
 struct Spec {
     const char* name;
@@ -80,9 +96,10 @@ struct Spec {
     uint32_t state;
     Impulse impulse;
     Destroy destroy = nullptr;   // before the node's memory goes: drop pointers to it (H11)
+    Getter getter = nullptr;     // a DataOut pin's DataElement inside the node, or null
 };
 
-constexpr int kMax = 8, kMaxIn = 16;
+constexpr int kMax = 8, kMaxIn = 16, kMaxOut = 4;
 // A class's runtime record: the engine keeps pointers to its vtables, vbt and names
 struct Rt {
     Spec spec;
@@ -90,6 +107,7 @@ struct Rt {
     uint32_t defId = 0, defSize = 0, nodeSize = 0, vbase = 0;
     std::vector<uint32_t> off;   // pin member offset in the definition
     std::vector<int> inPin;      // handler k -> pin index
+    std::vector<int> outPin;     // getter k -> pin index (DataOut)
     int32_t vbt[2] = {};
     void* defVt[4] = {};
     void* mainVt[20] = {};
@@ -109,7 +127,7 @@ struct Engine {
     void*(__fastcall* defAdd)(void*, void*, uint32_t, void**);
     void(__cdecl* nodeLoad)(void*, uint32_t, void*, void*);
     CtorFn defCtor;
-    CtorFn pinCtor[4];   // by Kind
+    CtorFn pinCtor[kKinds];   // by Kind
     void(__fastcall* bindIn)(void*, void*, void*, uint32_t, void*);
     BindFn bind;
     BindFn bindV;
@@ -124,6 +142,12 @@ struct Engine {
     const char*(__fastcall* str)(void*, void*, void*, bool*);
     uint8_t(__fastcall* fetchAgent)(void*, void*, void*, int32_t*);
     uint8_t(__fastcall* fetchVec3)(void*, void*, void*, float*);
+    void(__fastcall* fetchXforms)(void*, void*, void*, void*);
+    CtorFn listFree;
+    CtorFn spinLock;
+    CtorFn spinUnlock;
+    uint8_t*(__fastcall* xformOf)(void*, void*);
+    CtorFn release;
     void* defReg;
     void* cbVft;
     void* agentElemVt;
@@ -184,6 +208,51 @@ inline std::optional<std::array<float, 3>> fetchVec3(uint8_t* node, int c, int p
     std::array<float, 3> v{};
     if (!g_state.engine.fetchVec3(defOf(node) + g_state.rts[c].off[pin], nullptr, node, v.data())) return std::nullopt;
     return v;
+}
+
+// The engine's handle list a list fetch fills (ctor FUN_01573b00): elements are handles, 4 B each.
+struct HandleList {
+    int32_t id = -1;
+    uint8_t** data = nullptr;
+    uint32_t count = 0, cap = 0;
+};
+
+// A Transform3d handle's position, taken under its lock and reference as FUN_01167dc0 does; nullopt when stale.
+inline std::optional<std::array<float, 3>> positionOf(uint8_t* h)
+{
+    const Engine& e = g_state.engine;
+    if (!h) return std::nullopt;
+    e.spinLock(h + eng::kLockAt, nullptr);
+    uint8_t* dn = *(uint8_t**)(h + eng::kDataNodeAt);
+    const bool live = dn && (*(uint32_t*)(dn + eng::kRefAt) & eng::kRefMask) != 0;
+    if (live) _InterlockedIncrement((long*)(dn + eng::kRefAt));
+    e.spinUnlock(h + eng::kLockAt, nullptr);
+    if (!live) return std::nullopt;
+    const float* p = (const float*)(e.xformOf(dn, nullptr) + eng::kPosAt);
+    const std::array<float, 3> pos{p[0], p[1], p[2]};
+    e.release(&dn, nullptr);
+    return pos;
+}
+
+// Data input 'pin' (Data) as positions: each linked locator, or each entry of a linked locator list.
+inline std::vector<std::array<float, 3>> fetchPositions(uint8_t* node, int c, int pin)
+{
+    const Engine& e = g_state.engine;
+    HandleList list;
+    e.fetchXforms(defOf(node) + g_state.rts[c].off[pin], nullptr, node, &list);
+    std::vector<std::array<float, 3>> out;
+    try {
+        out.reserve(list.count);
+    } catch (...) {   // bad_alloc: the engine's list is still freed
+        e.listFree(&list, nullptr);
+        throw;
+    }
+    for (uint32_t i = 0; i < list.count; ++i) {
+        const auto p = positionOf(list.data[i]);
+        if (p) out.push_back(*p);
+    }
+    e.listFree(&list, nullptr);
+    return out;
 }
 
 // A node's described parameter (FUN_006a9740 / FUN_006a9770), or nullptr when its graph does not describe it.
@@ -261,16 +330,31 @@ template <int C, int... K> void* handlerAt(int k, std::integer_sequence<int, K..
     static void* const t[] = {(void*)&handler<C, K>...};
     return t[k];
 }
+// A data output's getter, cdecl(ctx) -> DataElement*, as 3.0's own (0x006cc330: *(ctx + 4) + offset).
+template <int C, int K> void* __cdecl getterThunk(uint8_t* ctx)
+{
+    Rt& c = g_state.rts[C];
+    if (K < (int)c.outPin.size() && c.spec.getter) return c.spec.getter(*(uint8_t**)(ctx + 4), c.outPin[K]);
+    return nullptr;
+}
+template <int C, int... K> void* getterAt(int k, std::integer_sequence<int, K...>)
+{
+    static void* const t[] = {(void*)&getterThunk<C, K>...};
+    return t[k];
+}
 template <int C> void __fastcall describe(uint8_t* def, void*, void* rec)
 {
     Rt& c = g_state.rts[C];
     const Engine& e = g_state.engine;
-    for (size_t i = 0, k = 0; i < c.spec.pins.size(); ++i) {
+    for (size_t i = 0, k = 0, o = 0; i < c.spec.pins.size(); ++i) {
         const Pin& p = c.spec.pins[i];
         uint32_t h = e.hash(p.name);
         if (p.kind == In) {
             void* handlerK = handlerAt<C>((int)k++, std::make_integer_sequence<int, kMaxIn>());
             e.bindIn(def + c.off[i], nullptr, rec, h, handlerK);
+        } else if (p.kind == DataOut) {
+            void* getterK = getterAt<C>((int)o++, std::make_integer_sequence<int, kMaxOut>());
+            e.bindIn(def + c.off[i], nullptr, rec, h, getterK);
         } else if (p.kind == DataV) e.bindV(def + c.off[i], nullptr, rec, h);
         else e.bind(def + c.off[i], nullptr, rec, h);
     }
@@ -327,6 +411,11 @@ inline constexpr Check kChecks[] = {
     {eng::kDefEquals, "5153558B6C2410568BF18B5E"},   {eng::kDefFalse, "32C0C3"},
     {eng::kFetchAgent, "64A1000000006AFF68????????506489250000000081EC80000000"},
     {eng::kFetchVec3, "64A1000000006AFF68????????506489250000000081EC84000000"},
+    {eng::kPinDataOutCtor, "6A028BD1E8"},
+    {eng::kFetchXforms, "64A1000000006AFF68????????506489250000000081EC80000000"},
+    {eng::kListFree, "568BF18B460485C07418"},       {eng::kSpinLock, "51568BF1B901000000"},
+    {eng::kSpinUnlock, "51870424C70100000000"},     {eng::kXformOf, "568BF18B461C668B4E20"},
+    {eng::kRelease, "568B3185F67428"},
 };
 
 // True when the bytes at 'at' are hex's ('??' skips a byte); same rule as core's prologue check (X-06)
@@ -367,6 +456,7 @@ template <class RtFn> Engine bindEngine(RtFn rt)
     e.pinCtor[Out] = (CtorFn)rt(eng::kPinOutCtor);
     e.pinCtor[Data] = (CtorFn)rt(eng::kPinDataCtor);
     e.pinCtor[DataV] = (CtorFn)rt(eng::kPinDataVCtor);
+    e.pinCtor[DataOut] = (CtorFn)rt(eng::kPinDataOutCtor);
     e.bindIn = (decltype(e.bindIn))rt(eng::kBindIn);
     e.bind = (BindFn)rt(eng::kBind);
     e.bindV = (BindFn)rt(eng::kBindV);
@@ -381,6 +471,12 @@ template <class RtFn> Engine bindEngine(RtFn rt)
     e.str = (decltype(e.str))rt(eng::kStr);
     e.fetchAgent = (decltype(e.fetchAgent))rt(eng::kFetchAgent);
     e.fetchVec3 = (decltype(e.fetchVec3))rt(eng::kFetchVec3);
+    e.fetchXforms = (decltype(e.fetchXforms))rt(eng::kFetchXforms);
+    e.listFree = (CtorFn)rt(eng::kListFree);
+    e.spinLock = (CtorFn)rt(eng::kSpinLock);
+    e.spinUnlock = (CtorFn)rt(eng::kSpinUnlock);
+    e.xformOf = (decltype(e.xformOf))rt(eng::kXformOf);
+    e.release = (CtorFn)rt(eng::kRelease);
     e.defReg = (void*)rt(eng::kDefReg);
     e.cbVft = (void*)rt(eng::kCbVft);
     e.agentElemVt = (void*)rt(eng::kAgentElemVt);
@@ -391,14 +487,16 @@ template <class RtFn> Engine bindEngine(RtFn rt)
 // The definition's pin members: offsets after the base, and which pins are impulse inputs
 inline void layoutPins(Rt& c)
 {
-    static const uint32_t pinSize[4] = {0xc, 8, 8, 0x1c};   // by Kind (FORMATS.md 5.9)
+    static const uint32_t pinSize[kKinds] = {0xc, 8, 8, 0x1c, 0xc};   // by Kind (FORMATS.md 5.9)
     c.defSize = eng::kDefBase;
     c.off.clear();
     c.inPin.clear();
+    c.outPin.clear();
     for (size_t i = 0; i < c.spec.pins.size(); ++i) {
         c.off.push_back(c.defSize);
         c.defSize += pinSize[c.spec.pins[i].kind];
         if (c.spec.pins[i].kind == In) c.inPin.push_back((int)i);
+        if (c.spec.pins[i].kind == DataOut) c.outPin.push_back((int)i);
     }
 }
 
@@ -454,6 +552,10 @@ template <class RtFn, class LogFn> int registerAll(RtFn rt, LogFn log, mer::Tabl
         layoutPins(c);
         if ((int)c.inPin.size() > kMaxIn) {
             log("meridian native: %s has more than %d impulse inputs; skipped", c.spec.name, kMaxIn);
+            continue;
+        }
+        if ((int)c.outPin.size() > kMaxOut) {
+            log("meridian native: %s has more than %d data outputs; skipped", c.spec.name, kMaxOut);
             continue;
         }
         layoutNode(c, t, rt);

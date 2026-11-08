@@ -568,6 +568,16 @@ inline bool callsMatch()
 
 }  // namespace detail
 
+// True once spawnfrom10 checked its actor calls and added its class: the calls below may run.
+inline bool actorCallsOn() { return detail::g_state.nodeClass >= 0; }
+// An actor of creation key 'key' at pos (CreateActorFromCreationKey 0x75a4c0); 0 for an unknown key.
+inline int32_t createActor(const std::string& key, const std::array<float, detail::kVec>& pos)
+{
+    return detail::createActor(key, pos);
+}
+// The actor is gone, or Combat marks it dead.
+inline bool actorGone(int32_t h) { return !detail::actorAlive(h) || detail::actorDead(h); }
+
 inline bool install(const Config& c)
 {
     detail::State& s = detail::g_state;

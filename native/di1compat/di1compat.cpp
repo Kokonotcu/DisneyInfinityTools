@@ -36,6 +36,7 @@
 #include "games/di1/render10.hpp"
 #include "games/di1/screens.hpp"
 #include "games/di1/selectmenu.hpp"
+#include "games/di1/scourge.hpp"
 #include "games/di1/session.hpp"
 #include "games/di1/shaders10.hpp"
 #include "games/di1/shutdown.hpp"
@@ -82,6 +83,7 @@ static void installModules(const di1::Config& cfg)
     di1::sxkeys::install(cfg);
     di1::sxnatives::install(cfg);
     di1::spawner::install(cfg);
+    di1::scourge::install(cfg);
     di1::gamedb30::install(cfg);
     di1::screens::install(cfg);
     di1::audio10::install(cfg);
