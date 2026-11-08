@@ -2,6 +2,7 @@
 // engine/players, playsets. Main thread.
 #pragma once
 #include <windows.h>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -51,6 +52,7 @@ constexpr int kXformCopied = 7;
 constexpr int kXformPos = 4;
 constexpr int kXformY = 5;
 constexpr float kLiftY = 0.5f;                  // 1.0 FUN_00b7b430 spawns half a metre over the avatar
+constexpr float kAhead = 3.0f;                  // metres in front: a delivered vehicle must not land on the avatar
 }  // namespace eng
 
 typedef void(__fastcall* UnlockFn)(uint8_t* lock, void* edx, uint32_t state, int player, uint32_t network,
@@ -99,6 +101,17 @@ inline uint8_t* avatarActor(int player)
     return actor && core::readable(actor, eng::kActorRead) ? actor : nullptr;
 }
 
+// The transform's position moved kAhead along its facing: local -z (in game: +z lands behind), kept level.
+inline void stepAhead(float* xform)
+{
+    const float x = xform[0], y = xform[1], z = xform[2], w = xform[3];
+    float fx = -2.f * (x * z + w * y), fz = -(1.f - 2.f * (x * x + y * y));
+    const float len = std::sqrt(fx * fx + fz * fz);
+    if (len < 1e-3f) return;   // facing straight up or down: keep the avatar's spot
+    xform[eng::kXformPos] += eng::kAhead * fx / len;
+    xform[eng::kXformPos + 2] += eng::kAhead * fz / len;
+}
+
 // rcbox10: the Delivery expendable at the avatar, as 1.0's initiator path FUN_00b7b430 spawns it.
 inline void spawnAtAvatar(const char* expendable, int player)
 {
@@ -115,6 +128,7 @@ inline void spawnAtAvatar(const char* expendable, int player)
     float xform[eng::kXformFloats];
     for (int i = 0; i < eng::kXformFloats; ++i) xform[i] = i < eng::kXformCopied ? at[i] : 1.f;
     xform[eng::kXformY] += eng::kLiftY;
+    stepAhead(xform);
     uint32_t r = ((DispenseFn)core::rt(eng::kDispense))(mgr, nullptr, expendable, xform, 1, 1);
     const float* pos = xform + eng::kXformPos;
     core::logf("rcbox10: %s dispensed at player %d's avatar (%.1f, %.1f, %.1f) -> %u", expendable, player, pos[0],
