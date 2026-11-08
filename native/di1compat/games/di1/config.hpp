@@ -27,6 +27,7 @@ struct Config {
     bool pins10 = true;              // .mer: complete pin tables on every instance (mer::Rules::pins10)
     bool gate10 = true;              // .mer: MasterNetSync Link_Out chains fire locally as in 1.0 (mer::Rules::gate10)
     bool toggleType10 = true;        // .mer: Collision/VisibilityToggle keep their 1.0 mode (mer::Rules::toggleType10)
+    bool cacheEnd10 = true;          // .mer: a cached, bound, never uncached Choreography uncaches at its end
     bool beacon10 = true;            // zonelist.lua: 1.0 BeaconMap rows in 3.0's row form (mission::beaconMap30)
     bool behav10 = true;            // mission lines: MissionBehavior 2 -> 3 story / 4 side (mission.hpp behaviour30)
     bool native10 = true;            // native Meridian classes (mernode.hpp): registration after the class registry
@@ -131,6 +132,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"pins10", core::ConfigKind::Flag, offsetof(Config, pins10)},
     {"gate10", core::ConfigKind::Flag, offsetof(Config, gate10)},
     {"toggletype10", core::ConfigKind::Flag, offsetof(Config, toggleType10)},
+    {"cacheend10", core::ConfigKind::Flag, offsetof(Config, cacheEnd10)},
     {"beacon10", core::ConfigKind::Flag, offsetof(Config, beacon10)},
     {"behav10", core::ConfigKind::Flag, offsetof(Config, behav10)},
     {"native10", core::ConfigKind::Flag, offsetof(Config, native10)},

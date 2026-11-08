@@ -400,6 +400,7 @@ inline Verdict merGraph(Request& r)
              st.params, st.pinsCopied, st.stubs, st.links, st.linksDropped, st.events, st.fetches, st.netSync,
              st.typed);
     r.note += buf;
+    if (st.uncacheAtEnd) r.note += "+cacheend(" + std::to_string(st.uncacheAtEnd) + " choreographies) ";
     r.out = isMtc ? ::mer::mtc(f) : f.write();
     if (!isMtc && r.mtc) *r.mtc = ::mer::mtc(f);
     return isMtc ? "mtc" : "mer";

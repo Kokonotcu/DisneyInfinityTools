@@ -52,7 +52,8 @@ constexpr MerFlag kMerFlags[] = {{"--noportrefs", &di1::mer::Rules::portRefs},
                                  {"--nopins", &di1::mer::Rules::pins10},
                                  {"--noevents", &di1::mer::Rules::events10},
                                  {"--nogate", &di1::mer::Rules::gate10},
-                                 {"--notoggletype", &di1::mer::Rules::toggleType10}};
+                                 {"--notoggletype", &di1::mer::Rules::toggleType10},
+                                 {"--nocacheend", &di1::mer::Rules::cacheEnd10}};
 
 void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
 {
@@ -261,6 +262,7 @@ int convertMer(const Args& a)
     printf("%d namespaces, %d nodes, %d params, %d pin tables copied, %d stand-ins, %d links, %d dropped, %d events, "
            "%d fetches, %d net-sync links, %d toggle types; %zu B\n", st.namespaces, st.nodes, st.params, st.pinsCopied,
            st.stubs, st.links, st.linksDropped, st.events, st.fetches, st.netSync, st.typed, o.size());
+    if (st.uncacheAtEnd) printf("cacheend: %d choreographies uncache at their end\n", st.uncacheAtEnd);
     return 0;
 }
 

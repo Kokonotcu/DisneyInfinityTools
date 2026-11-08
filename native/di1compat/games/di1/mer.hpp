@@ -33,6 +33,7 @@ struct Rules {
     bool pins10 = true;         // pins10: every plain non-parameter int is a pin; copies add the names missing
     bool gate10 = true;         // gate10: MasterNetSync Link_Out links leave from Private
     bool toggleType10 = true;   // toggletype10: the ColVisToggle family describes Type = its class
+    bool cacheEnd10 = true;     // cacheend10: a cached, bound Choreography nobody uncaches uncaches itself at its end
 };
 
 // What transcode changed, for the log line
@@ -48,6 +49,7 @@ struct Stats {
     int fetches = 0;
     int netSync = 0;
     int typed = 0;
+    int uncacheAtEnd = 0;
 };
 
 // mission.hpp's aliases as registered classes, each with its 3.0 twin's pins and parameter types added
@@ -172,7 +174,8 @@ struct Graph {
     std::vector<std::set<std::string>> portRefs;              // per node: its fields naming port sub-nodes
     std::map<std::string, std::vector<oct::Rec>> pinTables;   // class -> its pin records
     std::vector<int> nsOut, nsPriv;                           // per node: MasterNetSync Link_Out / Private pin
-    std::map<size_t, int> dIn, dOut;                          // node index -> links dropped
+    std::map<size_t, int> dIn, dOut;                          // node index -> links dropped (negative: added)
+    std::set<size_t> uncachedAtEnd;                           // cacheEnd10: Choreography nodes given End -> Uncache
     std::vector<Out> newLinks;
     std::vector<oct::Rec> out;                                // the file's records as rebuilt
     std::vector<std::string> values, strs;                    // per namespace: ParameterValues, ParameterStrings
@@ -330,6 +333,65 @@ inline void keepLink(Graph& g, const NS& ns, Link L, std::string& rows)
     ::mer::appendRow(rows, L.code, a - ns.begin - 1, L.to - ns.begin - 1);
 }
 
+// Whether a link in links reaches node k at pin (-1: never)
+inline bool receives(const std::vector<Link>& links, size_t k, int pin)
+{
+    return pin >= 0 && std::any_of(links.begin(), links.end(), [&](const Link& L) {
+        return L.to == k && (int)(L.code >> ::mer::kToPinShift & ::mer::kPinMask) == pin;
+    });
+}
+
+// Whether a link in links leaves node k at pin (-1: never)
+inline bool sends(const std::vector<Link>& links, size_t k, int pin)
+{
+    return pin >= 0 && std::any_of(links.begin(), links.end(), [&](const Link& L) {
+        return L.from == k && (int)(L.code >> ::mer::kFromPinShift) == pin;
+    });
+}
+
+// The implicit end pin of a surge output sits at its pin + 2 (FORMATS.md 5.9, FUN_006c7f10)
+inline constexpr int kSurgeEndPin = 2;
+inline constexpr uint16_t kImpulseKind = 1;   // link code kind (FORMATS.md 5.3)
+inline constexpr int kMaxFromPin = 0x3f;      // the from pin: code bits 10-15
+
+// cacheEnd10: node k is a Choreography handing out its ChoHandle, its Cache linked and Uncache not, within kept
+inline bool cachedNeverUncached(const Graph& g, size_t k, const std::vector<Link>& kept)
+{
+    const Node& n = g.nodes[k];
+    const bool cho = !n.stub && n.type == "Choreography";
+    if (!g.R.cacheEnd10 || !cho || g.uncachedAtEnd.count(k)) return false;
+    const int end = pinOf(g, k, "Playing") + kSurgeEndPin, unc = pinOf(g, k, "Uncache");
+    const bool endFits = end >= kSurgeEndPin && end <= kMaxFromPin;
+    const bool uncFits = unc >= 0 && unc <= ::mer::kPinMask;
+    const bool inCounted = ::mer::field(g.f, n, g.fl, "NumInLinks") >= 0;
+    const bool outCounted = ::mer::field(g.f, n, g.fl, "NumOutLinks") >= 0;
+    const bool cached = receives(kept, k, pinOf(g, k, "Cache")) && !receives(kept, k, unc);
+    // a handed-out handle binds into the instance (G2G Bind), which a kept cached instance never releases
+    const bool bound = sends(kept, k, pinOf(g, k, "ChoHandle"));
+    const bool fits = endFits && uncFits;
+    const bool counted = inCounted && outCounted;
+    const bool held = cached && bound;
+    return fits && counted && held;
+}
+
+// cacheEnd10: Playing's end -> own Uncache, as 3.0's emp_hoth_story_atattakedown node 198 wires it.
+inline uint32_t uncacheAtEnd(Graph& g, const NS& ns, const std::vector<Link>& kept, std::string& rows)
+{
+    uint32_t added = 0;
+    for (size_t k = ns.begin + 1; k < ns.end && k < g.nodes.size(); ++k) {
+        if (!cachedNeverUncached(g, k, kept)) continue;
+        const int end = pinOf(g, k, "Playing") + kSurgeEndPin, unc = pinOf(g, k, "Uncache");
+        const uint16_t code = (uint16_t)(end << ::mer::kFromPinShift | unc << ::mer::kToPinShift | kImpulseKind);
+        ::mer::appendRow(rows, code, k - ns.begin - 1, k - ns.begin - 1);
+        --g.dOut[k];
+        --g.dIn[k];
+        g.uncachedAtEnd.insert(k);
+        ++added;
+    }
+    g.s.uncacheAtEnd += (int)added;
+    return added;
+}
+
 // A LinksBuffer of namespace ns in 3.0's form into newLinks; links leaving ns or touching a stand-in dropped
 inline bool relinkBuffer(Graph& g, size_t data, const NS& ns, std::string* why)
 {
@@ -340,6 +402,7 @@ inline bool relinkBuffer(Graph& g, size_t data, const NS& ns, std::string* why)
     if (b->uu) byUuid = nodesByUuid(g);
     std::string rows;
     uint32_t kept = 0;
+    std::vector<Link> keptLinks;
     for (uint32_t k = 0; k < b->n; ++k) {
         const std::optional<Link> L = ::mer::linkAt(*b, k, byUuid);
         if (!L) {
@@ -357,9 +420,11 @@ inline bool relinkBuffer(Graph& g, size_t data, const NS& ns, std::string* why)
             continue;
         }
         keepLink(g, ns, *L, rows);
+        keptLinks.push_back(*L);
         ++kept;
     }
-    g.newLinks.push_back({data, ::mer::version3Links(kept, rows)});
+    const uint32_t added = uncacheAtEnd(g, ns, keptLinks, rows);
+    g.newLinks.push_back({data, ::mer::version3Links(kept + added, rows)});
     g.s.links += (int)kept;
     return true;
 }
