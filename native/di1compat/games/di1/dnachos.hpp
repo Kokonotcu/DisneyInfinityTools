@@ -129,11 +129,30 @@ inline int nest(Value& t, const Nested& n)
     return 1;
 }
 
+// 1.0 Detonate.DetonationFX {cho, anchor} -> 3.0 Chos.DetonationFX_Cho, DetonationFX_Anchor. -> 1 moved
+inline int detonateTo30(Value& det)
+{
+    const Value* fx = det.get("DetonationFX");
+    if (!fx || fx->t != Value::TAB || fx->tab->size() != 2) return 0;
+    const Value cho = (*fx->tab)[0].second, anchor = (*fx->tab)[1].second;
+    if (cho.t != Value::STR || anchor.t != Value::STR || det.get("DetonationFX_Anchor")) return 0;
+    if (!det.get("Chos")) det.tab->push_back({str("Chos"), table()});
+    Value* chos = det.get("Chos");
+    if (chos->t != Value::TAB || chos->get("DetonationFX_Cho")) return 0;
+    chos->tab->push_back({str("DetonationFX_Cho"), cho});
+    det.tab->push_back({str("DetonationFX_Anchor"), anchor});
+    auto named = [](const std::pair<Value, Value>& f) {
+        return f.first.t == Value::STR && f.first.s == "DetonationFX";
+    };
+    det.tab->erase(std::remove_if(det.tab->begin(), det.tab->end(), named), det.tab->end());
+    return 1;
+}
+
 // Whether chunk names any kNested key: most DNAs do not, and skip their evaluation.
 inline bool namesNested(const std::string& chunk)
 {
     auto in = [&chunk](const Nested& n) { return chunk.find(n.key) != std::string::npos; };
-    return std::any_of(std::begin(kNested), std::end(kNested), in);
+    return chunk.find("DetonationFX") != std::string::npos || std::any_of(std::begin(kNested), std::end(kNested), in);
 }
 
 }  // namespace detail
@@ -154,6 +173,8 @@ inline Changed dna30(const std::string& chunk, const Steps& s, std::string& out)
         luachunk::Value* t = nest ? detail::gadget(g, n.gadget) : nullptr;
         if (t) c.nested += detail::nest(*t, n);
     }
+    luachunk::Value* det = nest ? detail::gadget(g, "Detonate") : nullptr;
+    if (det) c.nested += detail::detonateTo30(*det);
     if (!c.chos && !c.nested) return c;
     out.clear();
     for (auto& [name, v] : g) out += name + " = " + luachunk::text(v) + "\n";
