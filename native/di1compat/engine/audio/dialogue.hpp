@@ -75,6 +75,12 @@ inline bool media(const void* p, DlgBank** bank, int* sub);
 inline void buildEvNames();
 // The host tick: the next line of each running sequence when due.
 inline void seqTick();
+// An audio-synced choreography started: the type 4 run named like its leaf follows its time (1.0 FUN_00ec3820).
+inline void driverStarted(const void* cho, const char* path);
+// Game thread, per update of a playing driver: its time in seconds. Skipped while the lock is busy (L4).
+inline void driverTime(const void* cho, float seconds);
+// The driver stopped playing: its runs finish on the wall clock.
+inline void driverStopped(const void* cho);
 // fn(first bank file, language folder) under the lock when the speaker has banks -> fn's answer; else false.
 template <class Fn>
 inline bool withSpeaker(uint16_t prefix, Fn fn);
@@ -111,6 +117,9 @@ constexpr size_t kRecordBank = 2;
 }  // namespace eng
 
 constexpr DWORD kArmedMs = 5000;   // an armed sequence waits this long for its first line
+// A driver silent this long has gone; a pause that stopped choreography updates would trip it too
+constexpr DWORD kDriverStaleMs = 3000;
+constexpr uint8_t kFromStart = 4;   // type 4: delays from the previous line's start; the type a driver clocks
 
 typedef const char*(__cdecl* LangFn)();
 typedef void*(__fastcall* MapFindFn)(void* map, void* edx, uint32_t key);
@@ -151,12 +160,25 @@ struct Armed {
     DlgSeq seq;
     DWORD at = 0;
     bool on = false;
+    uint32_t entry = 0;   // x131 of the lower-cased entry name
 };
 struct Run {
     DlgSeq seq;
     size_t next;
     DWORD prevStart, prevEnd;
     uint32_t prevPid, obj;
+    uint32_t entry;                 // Armed::entry
+    const void* driver = nullptr;   // the choreography clocking it, compared only; null: the wall clock
+    bool pushed = false;            // the driver's time arrived: clock and prevStart count its ms
+    float driverStart = 0;          // the driver's first time, seconds (1.0 FUN_00ec3820's sync+0x2c)
+    DWORD clock = 0;                // driver ms since driverStart
+    DWORD pushedAt = 0;             // wall ms of the last push
+};
+// A started driver whose run has not begun yet.
+struct Driver {
+    const void* cho;
+    uint32_t entry;
+    DWORD at;
 };
 
 struct State {
@@ -178,6 +200,7 @@ struct State {
     Scripts scripts;           // guarded by mx
     Armed armed;               // guarded by mx
     std::vector<Run> runs;     // guarded by mx
+    std::vector<Driver> drivers;   // guarded by mx; dropped after kArmedMs
 };
 inline State g_state;
 
@@ -298,7 +321,6 @@ inline void hashStrings(const std::vector<uint8_t>& d, dlgscript::EventNames& ou
 // Whether a run's next line is due: type 4 counts from the previous line's start, type 3 from its end.
 inline bool isDue(Run& u, const DlgSeqItem& it, DWORD now)
 {
-    constexpr uint8_t kFromStart = 4;
     if (u.seq.type == kFromStart) return now - u.prevStart >= it.delay;
     if (!u.prevEnd) {
         std::unique_lock<std::recursive_mutex> l = system::lock();
@@ -327,6 +349,53 @@ inline uint32_t playSeqLine(const DlgSeqItem& it, uint32_t obj)
     return 0;
 }
 
+// The run's line counts from 'to' instead of 'from', the same ms after its start (unsigned wrap is intended).
+inline void rebase(Run& u, DWORD from, DWORD to)
+{
+    u.prevStart = to - (from - u.prevStart);
+}
+
+inline void logClock(const Run& u, const char* clock)
+{
+    const DlgSeqItem& first = u.seq.items[0];
+    log("vo10: sequence at %c%c%03u timed by %s", first.prefix & 0xff, first.prefix >> 8, first.line, clock);
+}
+
+// A type 4 run follows cho's time from its next push.
+inline void bindDriver(Run& u, const void* cho)
+{
+    u.driver = cho;
+    u.pushed = false;
+    logClock(u, "its choreography's clock (vosync10)");
+}
+
+// mx held: the run takes a started driver of its entry's name.
+inline void takeDriver(Run& u)
+{
+    State& s = g_state;
+    const DWORD now = GetTickCount();
+    auto old = [now](const Driver& d) { return now - d.at > kArmedMs; };
+    s.drivers.erase(std::remove_if(s.drivers.begin(), s.drivers.end(), old), s.drivers.end());
+    if (u.seq.type != kFromStart) return;
+    for (size_t i = 0; i < s.drivers.size(); ++i) {
+        if (s.drivers[i].entry != u.entry) continue;
+        bindDriver(u, s.drivers[i].cho);
+        s.drivers.erase(s.drivers.begin() + i);
+        return;
+    }
+}
+
+// The run leaves its driver: the rest of it on the wall clock.
+inline void dropDriver(Run& u, DWORD wall, const char* why)
+{
+    if (u.pushed) rebase(u, u.clock, wall);
+    const DlgSeqItem& first = u.seq.items[0];
+    log("vo10: sequence at %c%c%03u: choreography %s at %.2f s, the rest on the wall clock", first.prefix & 0xff,
+        first.prefix >> 8, first.line, why, u.clock / 1000.0);
+    u.driver = nullptr;
+    u.pushed = false;
+}
+
 // The first line of the armed sequence was posted: the rest runs from now (1.0 FUN_00718650 starts item 0).
 inline void onLinePosted(DlgBank* b, int sub, uint32_t obj, uint32_t pid)
 {
@@ -336,10 +405,11 @@ inline void onLinePosted(DlgBank* b, int sub, uint32_t obj, uint32_t pid)
     const DlgSeqItem& first = s.armed.seq.items[0];
     if (b->idx().prefix() != first.prefix || lineOf(b, sub) != first.line) return;
     const DWORD now = GetTickCount();
-    s.runs.push_back({s.armed.seq, 1, now, 0, pid, obj});
+    s.runs.push_back({s.armed.seq, 1, now, 0, pid, obj, s.armed.entry});
     s.armed.on = false;
     log("vo10: sequence of %u lines started at %c%c%03u (1.0 type %u)", (unsigned)s.runs.back().seq.items.size(),
         first.prefix & 0xff, first.prefix >> 8, first.line, s.armed.seq.type);
+    takeDriver(s.runs.back());
 }
 
 // A line posted with an event we lack plays with its line class's event, as 1.0 plays that class.
@@ -436,12 +506,12 @@ inline void* __fastcall hkDlgReq(void* pool, void*, const char** nameRec, uint32
     const char* name = nameRec ? *nameRec : nullptr;
     uint8_t* dm = s.dialogMgr;
     const uint32_t cs = name ? hash::h131Signed(name, SIZE_MAX) : 0;
+    const uint32_t lo = name ? hash::h131Signed(text::lower(name).c_str(), SIZE_MAX) : 0;
     if (name) {   // a sequence entry of that name is armed: its first line's post starts the rest
         std::lock_guard<std::recursive_mutex> l(s.mx);
         auto q = s.scripts.seqs.find(cs);
-        if (q != s.scripts.seqs.end()) s.armed = {q->second, GetTickCount(), true};
+        if (q != s.scripts.seqs.end()) s.armed = {q->second, GetTickCount(), true, lo};
     }
-    const uint32_t lo = name && dm ? hash::h131Signed(text::lower(name).c_str(), SIZE_MAX) : 0;
     if (name && dm && cs != lo) aliasScripts(dm, name, cs, lo);
     return s.oDlgReq(pool, nullptr, nameRec, a2);
 }
@@ -600,26 +670,78 @@ inline void seqTick()
 {
     detail::State& s = detail::g_state;
     std::lock_guard<std::recursive_mutex> l(s.mx);
-    const DWORD now = GetTickCount();
+    const DWORD wall = GetTickCount();
     for (size_t r = 0; r < s.runs.size();) {
         detail::Run& u = s.runs[r];
+        const bool stale = u.pushed && wall - u.pushedAt > detail::kDriverStaleMs;
+        if (stale) detail::dropDriver(u, wall, "silent");
+        const DWORD now = u.pushed ? u.clock : wall;
         const DlgSeqItem& it = u.seq.items[u.next];
         const bool due = detail::isDue(u, it, now);
         if (!due) {
             ++r;
             continue;
         }
-        constexpr uint8_t kFromStart = 4;
+        if (u.next == 1 && !u.driver) detail::logClock(u, "the wall clock");
         u.prevPid = detail::playSeqLine(it, u.obj);
-        u.prevStart = u.seq.type == kFromStart ? u.prevStart + it.delay : now;
+        u.prevStart = u.seq.type == detail::kFromStart ? u.prevStart + it.delay : now;
         u.prevEnd = 0;
         ++u.next;
-        if (u.next >= u.seq.items.size()) {
-            s.runs.erase(s.runs.begin() + r);
+        if (u.next < u.seq.items.size()) {
+            ++r;
             continue;
         }
-        ++r;
+        if (u.pushed) log("vo10: sequence done at its choreography's %.2f s", u.clock / 1000.0);
+        s.runs.erase(s.runs.begin() + r);
     }
+}
+
+inline void driverStarted(const void* cho, const char* path)
+{
+    detail::State& s = detail::g_state;
+    const char* slash = path ? strrchr(path, '/') : nullptr;
+    const char* leaf = slash ? slash + 1 : path;
+    if (!leaf || !*leaf) return;
+    const uint32_t entry = hash::h131Signed(text::lower(leaf).c_str(), SIZE_MAX);
+    std::lock_guard<std::recursive_mutex> l(s.mx);
+    for (detail::Run& u : s.runs) {
+        const bool mine = u.entry == entry && u.seq.type == detail::kFromStart && !u.driver;
+        if (!mine) continue;
+        detail::bindDriver(u, cho);
+        return;
+    }
+    s.drivers.push_back({cho, entry, GetTickCount()});
+}
+
+inline void driverTime(const void* cho, float seconds)
+{
+    detail::State& s = detail::g_state;
+    std::unique_lock<std::recursive_mutex> l(s.mx, std::try_to_lock);
+    if (!l.owns_lock()) return;
+    const DWORD wall = GetTickCount();
+    for (detail::Run& u : s.runs) {
+        if (u.driver != cho) continue;
+        if (!u.pushed) {
+            u.driverStart = seconds;
+            u.clock = 0;
+            detail::rebase(u, wall, 0);
+            u.pushed = true;
+        }
+        const float ms = (seconds - u.driverStart) * 1000.0f;
+        u.clock = ms > 0 ? (DWORD)ms : 0;
+        u.pushedAt = wall;
+    }
+}
+
+inline void driverStopped(const void* cho)
+{
+    detail::State& s = detail::g_state;
+    std::unique_lock<std::recursive_mutex> l(s.mx, std::try_to_lock);
+    if (!l.owns_lock()) return;
+    for (detail::Run& u : s.runs)
+        if (u.driver == cho) detail::dropDriver(u, GetTickCount(), "stopped");
+    auto mine = [cho](const detail::Driver& d) { return d.cho == cho; };
+    s.drivers.erase(std::remove_if(s.drivers.begin(), s.drivers.end(), mine), s.drivers.end());
 }
 
 template <class Fn>

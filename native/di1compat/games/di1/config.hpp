@@ -96,6 +96,7 @@ struct Config {
     bool vo10 = true;                // audio10: 1.0 dialog banks (.fsb/.name) and .dlg scripts in 3.0's dialog system
     bool mixer10 = true;             // audio10: 1.0's Mixer presets as the 'Mixer' volume source of the 1.0 categories
     bool cineSync10 = true;          // audio10: an audio-synced choreography starts the 1.0 sound event of its name
+    bool voSync10 = true;            // vo10: a type 4 dialog run follows its audio-synced choreography's clock
     bool vfx10 = true;               // 1.0 particle packages and .p3d meshes in 3.0 form (vfx.hpp)
     bool vfxUniversal10 = true;      // 1.0's universal particle package beside 3.0's (particles.hpp; needs vfx10)
     bool vfxChan10 = true;           // emitter curve channels re-laid for the shader of their material (chan.hpp)
@@ -210,6 +211,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"music10", core::ConfigKind::Flag, offsetof(Config, music10)},
     {"vo10", core::ConfigKind::Flag, offsetof(Config, vo10)},
     {"cinesync10", core::ConfigKind::Flag, offsetof(Config, cineSync10)},
+    {"vosync10", core::ConfigKind::Flag, offsetof(Config, voSync10)},
     {"mixer10", core::ConfigKind::Flag, offsetof(Config, mixer10)},
     {"vfx10", core::ConfigKind::Flag, offsetof(Config, vfx10)},
     {"vfx_universal10", core::ConfigKind::Flag, offsetof(Config, vfxUniversal10)},

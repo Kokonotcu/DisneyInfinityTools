@@ -486,6 +486,30 @@ int checkAnno(const VoLine& v)
     return !anno || zr != kEdnaZip;
 }
 
+// vosync10: TSIS_Cin_OpeningA's first gap (1206 ms) runs on its choreography's clock, then the wall clock.
+int checkSeqClock()
+{
+    namespace dd = ea::dialogue::detail;
+    const int marker = 0;   // the choreography instance: only its address is used
+    const ea::dialogue::DlgSeq seq{4, {{'J' | 'S' << 8, 465, "", 500}, {'W' | 'Y' << 8, 473, "", 1206}}};
+    const uint32_t entry = hash::h131Signed("tsis_cin_openinga", SIZE_MAX);
+    dd::g_state.runs.push_back({seq, 1, GetTickCount(), 0, 0, 0, entry});
+    dd::Run& u = dd::g_state.runs.back();
+    ea::dialogue::driverStarted(&marker, "Choreographies/TSIS_Cin_OpeningA");
+    const bool bound = u.driver == &marker;
+    ea::dialogue::driverTime(&marker, -1.33f);
+    ea::dialogue::driverTime(&marker, -0.33f);
+    const bool early = !dd::isDue(u, seq.items[1], u.clock);
+    ea::dialogue::driverTime(&marker, -0.03f);
+    const bool due = dd::isDue(u, seq.items[1], u.clock);
+    ea::dialogue::driverStopped(&marker);
+    const bool wall = !u.driver && dd::isDue(u, seq.items[1], GetTickCount());
+    printf("SEQCLOCK bound %d, not due at 1.0 s %d, due at 1.3 s %d, wall clock after stop %d\n", bound, early, due,
+           wall);
+    dd::g_state.runs.clear();
+    return !(bound && early && due && wall);
+}
+
 // ---- --host ----
 
 constexpr DWORD kHostWaitMs = 2000, kInstallMaxMs = 1000;
@@ -558,6 +582,7 @@ int testVo(const Args& a)
     const VoLine v = ednaLine();
     bad += checkEdnaLine(v);
     bad += checkAnno(v);
+    bad += checkSeqClock();
     printf("VO bad %d\n", bad);
     return bad != 0;
 }
