@@ -114,6 +114,7 @@ struct Config {
     bool pause10 = true;             // ui: a 1.0 screen's pause is released at its exit unless handed on (selectmenu)
     bool bhteam10 = true;            // ai: a team check of an actor without the team component is 'not on it' (bhteam)
     bool rcplace10 = true;           // ui: the Toy Store card list skips an item without a place record (rcplace)
+    bool rcType10 = true;            // ui: a 1.0 playset's 3.0 RC catalog keeps 1.0's item types (edits30)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
@@ -222,6 +223,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"pause10", core::ConfigKind::Flag, offsetof(Config, pause10)},
     {"bhteam10", core::ConfigKind::Flag, offsetof(Config, bhteam10)},
     {"rcplace10", core::ConfigKind::Flag, offsetof(Config, rcplace10)},
+    {"rctype10", core::ConfigKind::Flag, offsetof(Config, rcType10)},
 };
 
 // The config lines of the log; the other keys are logged by their features or not at all.
