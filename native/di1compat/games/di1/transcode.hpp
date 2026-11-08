@@ -52,6 +52,7 @@ struct TranscodeOptions {
     bool dnaChos = false;     // dnachos10
     bool scourgeHp = false;   // scourgehp10
     bool boxTouch = false;    // rcbox10 (with rcdelivery10)
+    bool twin = false;        // twin10
     bool dnaNest = false;     // dnanest10
     bool vfx = false;         // vfx10
     bool rewards = false;     // rewards10
@@ -80,6 +81,7 @@ struct TranscodeIO {
     groups::Readers groupReaders;   // rewards10: 1.0 DNAs (coin pickups with currency10, debris DNA), 1.0 models
     std::function<void(const groups::Debris& d)> debrisDef;   // debris10: an entry given a '<Name>_Debris10' entry
     std::function<void(const std::string& entry)> dataMapEntry;   // each DataMap entry before it is normalised
+    std::function<bool(const std::string& path)> shipped30;   // twin10: whether 3.0's own archives have path
 };
 
 // currency10: the engine path of a 1.0 expendable's DNA ('FastCoin_Spark', 'X.dnax', a path); "" for none.
@@ -567,6 +569,30 @@ inline Verdict dnaChos(Request& r)
     return "dnachos";
 }
 
+inline bool twinMatches(const Request& r)
+{
+    return r.o.twin && r.io.shipped30 && r.io.groupReaders.has10 && ends(r, ".dnax") && startsLua(r);
+}
+
+// A model 3.0 retired, with its re-export '<model>2' shipped: the DNA names the twin (MU_Crabby_Jock faults)
+inline Verdict twinModel(Request& r)
+{
+    auto G = luachunk::eval(std::string((const char*)r.data, r.n));
+    auto dna = G.find("DNA");
+    luachunk::Value* gad = dna != G.end() ? dna->second.get("AgentGadgets") : nullptr;
+    luachunk::Value* ent = gad ? gad->get("EntityInstance") : nullptr;
+    luachunk::Value* m = ent ? ent->get("ModelName") : nullptr;
+    if (!m || m->t != luachunk::Value::STR || m->s.empty()) return dispatch::kNext;
+    const std::string model = m->s, twin = m->s + "2";
+    if (!r.io.groupReaders.has10(model) || r.io.shipped30(model + ".oct") || !r.io.shipped30(twin + ".oct"))
+        return dispatch::kNext;
+    m->s = twin;
+    r.out.clear();
+    for (auto& [name, v] : G) r.out += name + " = " + luachunk::text(v) + "\n";
+    r.note += "+twin30(" + model + " -> 3.0's " + twin + ") ";
+    return "twin30";
+}
+
 inline bool scourgeHpMatches(const Request& r) { return r.o.scourgeHp && ends(r, ".dnax") && startsLua(r); }
 
 // A 1.0 pod DNA: 3.0's Health gadget with the pod's 1.0 health (scourgehp::health30); other DNAs: passed on.
@@ -708,6 +734,7 @@ inline constexpr Rule kRules[] = {
     {mtbMatches, materialBundle},
     {psDnaMatches, playsetDna},
     {dnaChosMatches, dnaChos},
+    {twinMatches, twinModel},        // the MU enemy DNAs carry no choreography effect either
     {scourgeHpMatches, scourgeHp},   // pod DNAs carry no choreography effect, so dnachos passes them on
     {boxTouchMatches, boxTouch},
     {particlesMatches, particles},

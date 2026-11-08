@@ -65,6 +65,7 @@ struct Config {
     bool decoSockets10 = true;       // native10 on: Spawn/ActivateDecorationSockets keep theirs (inertnodes.hpp)
     bool rcDelivery10 = true;        // a purchased 1.0 catalog lock goes DELIVERED, AVAILABLE at once (deliveries.hpp)
     bool rcBox10 = true;             // rcdelivery10 on: its Delivery expendable spawns at the avatar (deliveries.hpp)
+    bool twin10 = true;              // a 1.0 DNA's model 3.0 retired names 3.0's '<model>2' re-export (transcode)
     bool choTime10 = true;           // cho.hpp: SubNetwork MinTime/MaxTime (choreography play range)
     bool choAnim10 = true;           // cho.hpp: Float 'Global.Time' clip/event input -> AnimState 'AnimState'
     bool choScene10 = true;          // cho.hpp: SceneTreeNodeRef on PlacementNode Associations
@@ -171,6 +172,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"decosockets10", core::ConfigKind::Flag, offsetof(Config, decoSockets10)},
     {"rcdelivery10", core::ConfigKind::Flag, offsetof(Config, rcDelivery10)},
     {"rcbox10", core::ConfigKind::Flag, offsetof(Config, rcBox10)},
+    {"twin10", core::ConfigKind::Flag, offsetof(Config, twin10)},
     {"chotime10", core::ConfigKind::Flag, offsetof(Config, choTime10)},
     {"choanim10", core::ConfigKind::Flag, offsetof(Config, choAnim10)},
     {"choscene10", core::ConfigKind::Flag, offsetof(Config, choScene10)},

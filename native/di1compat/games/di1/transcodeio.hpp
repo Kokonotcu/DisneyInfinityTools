@@ -121,6 +121,7 @@ inline TranscodeIO io()
     t.groupReaders.has10 = detail::has10;
     if (c.debris10) t.debrisDef = [](const groups::Debris& d) { shutdown::addDebris(d.def, d.model, d.dna); };
     t.dataMapEntry = detail::dataMapEntry10;
+    if (c.twin10) t.shipped30 = [](const std::string& p) { return engine::assets::shipped(p.c_str()); };
     return t;
 }
 
