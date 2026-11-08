@@ -5,6 +5,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include "../../base/text.hpp"
@@ -149,6 +150,60 @@ inline oct::Rec* fieldOf(oct::File& f, size_t i, const char* n)
     return nullptr;
 }
 
+// Scene nodes a CollisionInstanceToSceneTreeNode association binds.
+inline std::set<int> colliderNodes(oct::File& f)
+{
+    std::set<int> out;
+    const long ap = f.pool("AssociationPool");
+    for (size_t i = ap + 1, end = ap < 0 ? 0 : f.blockEnd(ap); i < end; i = f.blockEnd(i)) {
+        const oct::Rec* type = fieldOf(f, i, "Type");
+        const oct::Rec* ref = fieldOf(f, i, "SceneTreeNodeRef");
+        if (type && ref && f.name0(*type) == "CollisionInstanceToSceneTreeNode") out.insert(f.int0(*ref));
+    }
+    return out;
+}
+
+// 3.0 hits a hidden exploder collider only as node 1 (INC_rescueBus: node 6, no hits): it moves there. -> 1
+inline int hiddenColliderFirst(const std::string& path, oct::File& f)
+{
+    const long sp = f.pool("SceneTreeNodePool");
+    if (path.rfind("exploders/", 0) != 0 || sp < 0) return 0;
+    std::vector<size_t> nodes;
+    for (size_t i = sp + 1, end = f.blockEnd(sp); i < end; i = f.blockEnd(i)) nodes.push_back(i);
+    const std::set<int> colliders = colliderNodes(f);
+    int k = -1;
+    for (int c : colliders) {
+        const oct::Rec* visible = c > 1 && c < (int)nodes.size() ? fieldOf(f, nodes[c], "Visible") : nullptr;
+        if (visible && !f.int0(*visible) && k < 0) k = c;
+    }
+    if (k < 0 || colliders.count(1)) return 0;
+    // new order: 0, k, 1 .. k-1, k+1 ..; each slot keeps its own key ('0', '1', ...)
+    std::vector<int> order{0, k};
+    for (int i = 1; i < (int)nodes.size(); ++i)
+        if (i != k) order.push_back(i);
+    std::vector<int> moved(nodes.size());
+    for (int p = 0; p < (int)order.size(); ++p) moved[order[p]] = p;
+    std::vector<oct::Rec> pool;
+    pool.reserve(f.blockEnd(sp) - sp - 1);
+    for (int p = 0; p < (int)order.size(); ++p) {
+        const size_t from = nodes[order[p]], at = pool.size();
+        pool.insert(pool.end(), f.recs.begin() + from, f.recs.begin() + f.blockEnd(from));
+        pool[at].pay.replace(0, 2, f.recs[nodes[p]].pay.substr(0, 2));
+    }
+    std::copy(pool.begin(), pool.end(), f.recs.begin() + sp + 1);
+    for (oct::Rec& r : f.recs) {
+        const std::string& n = f.name(r);
+        const bool ref = n == "SceneTreeNodeRef", parents = n == "ParentNodeReferences";
+        if (!ref && !parents) continue;
+        std::vector<int32_t> vs = f.ints(r);
+        for (int32_t& v : vs)
+            if (v >= 0 && v < (int32_t)moved.size()) v = moved[v];
+        if (ref && !vs.empty()) f.setInt(r, vs[0]);
+        if (parents) f.setInts(r, vs);
+    }
+    return 1;
+}
+
 // Each LodGroup node's children, in node order (ParentNodeReferences), by node index.
 inline std::map<int, std::vector<int>> lodChildren(oct::File& f, const std::vector<size_t>& nodes)
 {
@@ -244,6 +299,7 @@ inline bool octSteps(const std::string& path, oct::File& f, const OctSteps& o, s
     bool changed = o.render && o.render(path, f, note);
     changed |= detail::navSteps(f, o, note);
     changed |= detail::noted(note, detail::exploderGraphName(path, f), "+graphname(", " names) ");
+    changed |= detail::noted(note, detail::hiddenColliderFirst(path, f), "+colliderfirst(", ") ");
     changed |= detail::noted(note, detail::rootParents(path, f), "+parents(", " nodes) ");
     changed |= detail::noted(note, o.lodLevels ? detail::lodLevels30(f) : 0, "+lod(", " lower levels hidden) ");
     if (octx::addAssetPool(f)) {
