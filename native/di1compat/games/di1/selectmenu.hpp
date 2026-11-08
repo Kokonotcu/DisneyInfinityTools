@@ -40,6 +40,8 @@ constexpr uint32_t kUnpause = 0x015E91C0;      // FUN_015e91c0: cdecl (player): 
 constexpr char kUnpausePrologue[] = "A1????????83781C00";
 // FUN_00d612a0 (player takes a vehicle) sets Allow_UIRibbon only when this zone query says Toy Box
 constexpr uint32_t kRibbonZoneCall = 0x00D616F2;   // return address of its call to FUN_0139e6e0
+// FUN_00c9c0d0 (ToolSelectionUI, Q) refuses in a zone whose WorldIsPlayset is set: every 1.0 zone
+constexpr uint32_t kToolSelectWorldCall = 0x00C9C148;   // return address of its WorldIsPlayset query
 }  // namespace eng
 
 typedef const char*(__fastcall* RibbonNameFn)(void* ecx, void* edx, int player, int a2);
@@ -55,6 +57,7 @@ typedef void(__cdecl* LuaPushIntFn)(void* L, int n);
 typedef void(__fastcall* ScreenLifeFn)(uint8_t* screen, void* edx);
 typedef void(__cdecl* UnpauseFn)(int player);
 typedef char(__fastcall* ZoneToyFn)(void* zones, void* edx, int zone);
+typedef char(__fastcall* ZoneFlagFn)(void* mode, void* edx, const char* key, void* zone, int a3, int def);
 
 // The 1.0 screen whose onEnter paused a player, compared only (never read), and whether a screen took the pause over.
 struct Lease {
@@ -69,6 +72,7 @@ struct State {
     ScreenReqFn g_screenReq = nullptr;
     LuaAddScreenFn g_luaAddScreen = nullptr;
     ZoneToyFn g_zoneToy = nullptr;
+    ZoneFlagFn g_zoneFlag = nullptr;
     ScreenLifeFn g_screenEnter = nullptr, g_screenExit = nullptr;
     Lease leases[eng::kPauseSlots] = {};   // per player; main thread only, cleared at the screen's onExit (H11)
 };
@@ -130,6 +134,15 @@ inline char __fastcall hkZoneToy(void* zones, void* edx, int zone)
     if (r || _ReturnAddress() != (void*)core::rt(eng::kRibbonZoneCall) || !playsets::currentZone10()) return r;
     core::logf("ribbon: vehicle control in a 1.0 zone -> Allow_UIRibbon (Tab opens SelectMenu)");
     return 1;
+}
+
+// FUN_0139de80 (key, zone, a3, default; ret 0x10): a zone property. Q's tool picker hears 'not a playset' in 1.0.
+inline char __fastcall hkZoneFlag(void* mode, void* edx, const char* key, void* zone, int a3, int def)
+{
+    const char r = g_state.g_zoneFlag(mode, edx, key, zone, a3, def);
+    if (!r || _ReturnAddress() != (void*)core::rt(eng::kToolSelectWorldCall) || !playsets::currentZone10()) return r;
+    core::logf("toolselect: Q (ToolSelectionUI) in a 1.0 zone: WorldIsPlayset -> no (1.0 had Packs and Tools)");
+    return 0;
 }
 
 // FUN_0156dde0, thiscall, main thread, per event screen request: 1.0's ProgressLog event is 3.0's MissionLog.
@@ -240,6 +253,8 @@ inline bool install(const Config& c)
          (void*)&detail::hkLuaAddScreen, (void**)&s.g_luaAddScreen},
         {"zone Toy Box query (vehicle ribbon)", 0x0139E6E0, "8B4424045332DB568BF185C0", (void*)&detail::hkZoneToy,
          (void**)&s.g_zoneToy},
+        {"zone property query (Q tool picker)", 0x0139DE80, "83EC08568BF180BEE403000000", (void*)&detail::hkZoneFlag,
+         (void**)&s.g_zoneFlag},
     });
     if (!c.pause10) return menu;
     if (!menu) core::logf("feature pause10 off: it needs selectmenu10's hooks");
