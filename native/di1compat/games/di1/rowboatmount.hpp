@@ -193,6 +193,8 @@ inline bool remount(uint32_t avatar, uint32_t vehicle)
 }
 
 // A called function's prologue, checked once in install() (H4); relocated immediates are ??.
+
+// Not kTriggerAction: rowboatdrive10's row checks it before hooking, and only its detour calls onAction.
 struct Called {
     uint32_t va;
     const char* prologueHex;
@@ -203,7 +205,7 @@ inline constexpr Called kCalled[] = {
     {eng::kHostId, "8B0D????????33C085C974078B018B50"}, {eng::kAgent, "83EC088B44240C8D0C24518B0D"},
     {eng::kComponentByName, "8B89F000000085C97405E9"}, {eng::kHashCreate, "64A1000000006AFF68????????50"},
     {eng::kHasher, "A1????????85C075226A24E8"}, {eng::kHashAdd, "53568BF18B4E0432DB85C97507"},
-    {eng::kTriggerAction, "8B442408568BF18B4C240850518BCEE8"}, {core::eng::kCStringCtor, "8B44240456508BF1E8"},
+    {core::eng::kCStringCtor, "8B44240456508BF1E8"},
 };
 
 }  // namespace detail
