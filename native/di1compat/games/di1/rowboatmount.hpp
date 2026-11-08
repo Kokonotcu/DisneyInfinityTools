@@ -64,13 +64,17 @@ constexpr int kDrive = 1448;                       // AvatarAction Drive (core b
 constexpr int kMaxTries = 600;   // actions to wait for the new avatar's driver agent before giving up
 constexpr int kCancel = 6039;    // AvatarAction CustomInteractionCancel (startup2 core bitmasks.lua)
 constexpr int kDismount = 1494;  // AvatarAction Dismount (same file): ends the seat guard
-// Cancels unseated Jack 1 ms and ~5 s after the mount in game; dropped this long unless he dismounts
-constexpr std::chrono::seconds kSeatGuard{120};
+// In game, cancels unseated Jack 1 ms and ~5.1 s after mounting; guard and watch last this long
+constexpr std::chrono::seconds kSeatGuard{15};
 constexpr std::chrono::milliseconds kWatchEvery{250};   // seat distance checks, on TriggerAction calls
 constexpr int kMaxReseats = 3;
-// Guesses: a seated driver stays this close to the vehicle's origin (metres); farther means left behind
-constexpr float kRowboatReach = 8.f;
-constexpr float kHullReach = 30.f;
+// Guesses (metres from the vehicle's origin): within reach is seated, beyond gap a script moved the driver
+struct Reach {
+    float seated;
+    float gap;
+};
+constexpr Reach kRowboatReach = {8.f, 25.f};
+constexpr Reach kHullReach = {30.f, 60.f};
 constexpr int kMaxDropLogs = 8;
 
 using Clock = std::chrono::steady_clock;
@@ -265,7 +269,7 @@ inline bool remount(uint32_t avatar, uint32_t vehicle)
     return true;
 }
 
-// The seated driver farther than reach from its vehicle (left behind): Drive again, a few times per mount.
+// The driver left behind near its vehicle: Drive again, a few times per mount. A script-sized jump ends the guard.
 inline void watchSeat(uint32_t avatar, uint32_t vehicle)
 {
     State& s = g_state;
@@ -278,8 +282,14 @@ inline void watchSeat(uint32_t avatar, uint32_t vehicle)
     if (!engine::actorpos::of(avatar, a) || !engine::actorpos::of(vehicle, v)) return;
     const float dx = a[0] - v[0], dy = a[1] - v[1], dz = a[2] - v[2];
     const float d2 = dx * dx + dy * dy + dz * dz;
-    const float reach = s.hull ? kHullReach : kRowboatReach;
-    if (d2 <= reach * reach || s.busy.exchange(true)) return;
+    const Reach r = s.hull ? kHullReach : kRowboatReach;
+    if (d2 > r.gap * r.gap) {
+        s.driver = nullptr;
+        core::logf("rowboatmount10: driver %08X is %.1f m from its %s: moved away, seat guard off", avatar,
+                   std::sqrt(d2), vehicleWord());
+        return;
+    }
+    if (d2 <= r.seated * r.seated || s.busy.exchange(true)) return;
     const int n = s.reseats.load() + 1;
     if (sendDrive(avatar, vehicle)) {
         s.reseats = n;   // sendDrive's seat() reset it
