@@ -1,16 +1,17 @@
-// rowboatmount10 (plan B, off): a Tardis-mounted PIR_Rowboat's driver connected through 3.0's VehicleManager.
-// core. Game thread.
+// rowboatmount10: a Tardis PIR_Rowboat mount goes to the player's current avatar; rowboatconnect10 (off) connects.
+// core, engine/players. Game thread.
 #pragma once
 #include <atomic>
 #include <cstdint>
 #include "../../core/hooks.hpp"
 #include "../../core/log.hpp"
 #include "../../core/memcheck.hpp"
+#include "../../engine/players.hpp"
 #include "config.hpp"
 
 namespace di1::rowboatmount {
 
-// Installs the transport rule hook when c.rowboatMount10 is on; false when a prologue was refused.
+// Installs the transport rule hook when c.rowboatMount10 or c.rowboatConnect10 is on; false when refused.
 inline bool install(const Config& c);
 
 namespace detail {
@@ -43,6 +44,8 @@ typedef bool(__cdecl* HasBitFn)(void* mask, uint32_t index);
 
 struct State {
     ApplyFn g_apply = nullptr;   // the original; set once in install()
+    bool retarget = false;       // rowboatmount10; set once in install()
+    bool connect = false;        // rowboatconnect10; set once in install()
     std::atomic<int> logged{0};
 };
 inline State g_state;
@@ -66,24 +69,48 @@ inline bool isRowboat(uint32_t vehicle)
     return ((HasBitFn)core::rt(eng::kHasBit))(*(void**)(comp + eng::kTypeMask), index);
 }
 
-// FUN_00df4cb0: after the rule's own mount, a rowboat's driver is connected the way VehicleManager_Biped.. does.
+// The first local player's avatar handle, 0 when there is none.
+inline uint32_t localAvatar()
+{
+    const uint8_t* pm = engine::players::manager();
+    const uint8_t* table = pm ? engine::players::table(pm) : nullptr;
+    if (!table) return 0;
+    for (int p = 0; p < engine::players::eng::kMaxPlayers; ++p)
+        if (engine::players::isLocal(table, p)) return engine::players::avatarHandle(table, p);
+    return 0;
+}
+
+inline void logOnce(const char* what, uint32_t a, uint32_t b)
+{
+    if (g_state.logged.fetch_add(1) < 8) core::logf("rowboatmount10: %s %08X / %08X", what, a, b);
+}
+
+// FUN_00df4cb0: a rowboat mount goes to the player's avatar; in-game the rule named 0x34025000, Jack is 0x30007033.
 inline void __fastcall hkApply(void* rule, void* edx, uint32_t avatar, const uint8_t* info)
 {
     State& s = g_state;
-    s.g_apply(rule, edx, avatar, info);
     const uint32_t vehicle = vehicleOf(info);
+    const bool rowboat = vehicle && isRowboat(vehicle);
+    const uint32_t local = rowboat && s.retarget ? localAvatar() : 0;
+    if (local && local != avatar) {
+        logOnce("transport rule's avatar / the player's avatar mounted instead", avatar, local);
+        avatar = local;
+    }
+    s.g_apply(rule, edx, avatar, info);
     void* mgr = *(void**)core::rt(eng::kVehicleManager);
-    if (!vehicle || !avatar || !mgr || !isRowboat(vehicle)) return;
+    if (!rowboat || !s.connect || !avatar || !mgr) return;
     ((ConnectFn)core::rt(eng::kConnect))(mgr, nullptr, avatar, vehicle, 0, 1);
-    if (s.logged.fetch_add(1) < 4) core::logf("rowboatmount10: driver %08X connected to rowboat %08X", avatar, vehicle);
+    logOnce("driver connected to rowboat (rowboatconnect10)", avatar, vehicle);
 }
 
 }  // namespace detail
 
 inline bool install(const Config& c)
 {
-    if (!c.rowboatMount10) return true;
+    if (!c.rowboatMount10 && !c.rowboatConnect10) return true;
     detail::State& s = detail::g_state;
+    s.retarget = c.rowboatMount10;
+    s.connect = c.rowboatConnect10;
     // the engine functions the detour calls (H4); push / mov immediates are relocated, so wildcarded
     const bool connect = core::prologueMatches(detail::eng::kConnect, "6AFF68????????64A100000000506489");
     const bool component = core::prologueMatches(detail::eng::kComponent, "8B5424088B0D????????8B018B40106A");
