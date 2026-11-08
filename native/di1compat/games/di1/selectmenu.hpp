@@ -1,6 +1,7 @@
 // selectmenu10 (plan KIO-1): Tab opens 1.0's SelectMenu; pause10: a 1.0 screen's pause ends with it. engine/screens.
 // Main thread.
 #pragma once
+#include <intrin.h>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,8 @@ constexpr int kPauseSlots = 8;                 // FUN_0138da80 writes the flag o
 constexpr uint32_t kUnpause = 0x015E91C0;      // FUN_015e91c0: cdecl (player): Pause_UnPauseFromPausedScreenIfPaused
 // H4: FUN_015e91c0 starts mov eax,[0x0225F484]; cmp [eax+0x1c],0
 constexpr char kUnpausePrologue[] = "A1????????83781C00";
+// FUN_00d612a0 (player takes a vehicle) sets Allow_UIRibbon only when this zone query says Toy Box
+constexpr uint32_t kRibbonZoneCall = 0x00D616F2;   // return address of its call to FUN_0139e6e0
 }  // namespace eng
 
 typedef const char*(__fastcall* RibbonNameFn)(void* ecx, void* edx, int player, int a2);
@@ -51,6 +54,7 @@ typedef const char*(__cdecl* LuaToStringFn)(void* L, int idx, size_t* len);
 typedef void(__cdecl* LuaPushIntFn)(void* L, int n);
 typedef void(__fastcall* ScreenLifeFn)(uint8_t* screen, void* edx);
 typedef void(__cdecl* UnpauseFn)(int player);
+typedef char(__fastcall* ZoneToyFn)(void* zones, void* edx, int zone);
 
 // The 1.0 screen whose onEnter paused a player, compared only (never read), and whether a screen took the pause over.
 struct Lease {
@@ -64,6 +68,7 @@ struct State {
     ShowRibbonFn g_showRibbon = nullptr;
     ScreenReqFn g_screenReq = nullptr;
     LuaAddScreenFn g_luaAddScreen = nullptr;
+    ZoneToyFn g_zoneToy = nullptr;
     ScreenLifeFn g_screenEnter = nullptr, g_screenExit = nullptr;
     Lease leases[eng::kPauseSlots] = {};   // per player; main thread only, cleared at the screen's onExit (H11)
 };
@@ -116,6 +121,15 @@ inline int __fastcall hkShowRibbon(uint8_t* self, void* edx, int player)
     int h = engine::screens::addByName("SelectMenu", player);
     core::logf("ribbon: SelectMenu for player %d -> screen %d", player, h);
     return -1;   // as 3.0's refusal: FUN_00df6230 then skips OverrideModeToRibbon for the screen (GP-17)
+}
+
+// FUN_0139e6e0 (zone; ret 4): Toy Box? Its vehicle caller gates Allow_UIRibbon (Tab): yes there in 1.0 zones.
+inline char __fastcall hkZoneToy(void* zones, void* edx, int zone)
+{
+    const char r = g_state.g_zoneToy(zones, edx, zone);
+    if (r || _ReturnAddress() != (void*)core::rt(eng::kRibbonZoneCall) || !playsets::currentZone10()) return r;
+    core::logf("ribbon: vehicle control in a 1.0 zone -> Allow_UIRibbon (Tab opens SelectMenu)");
+    return 1;
 }
 
 // FUN_0156dde0, thiscall, main thread, per event screen request: 1.0's ProgressLog event is 3.0's MissionLog.
@@ -224,6 +238,8 @@ inline bool install(const Config& c)
          (void**)&s.g_screenReq},
         {"screen AddScreen by name (1.0 scripts)", 0x0156A360, "558BEC83E4F86AFF68????????64A100000000",
          (void*)&detail::hkLuaAddScreen, (void**)&s.g_luaAddScreen},
+        {"zone Toy Box query (vehicle ribbon)", 0x0139E6E0, "8B4424045332DB568BF185C0", (void*)&detail::hkZoneToy,
+         (void**)&s.g_zoneToy},
     });
     if (!c.pause10) return menu;
     if (!menu) core::logf("feature pause10 off: it needs selectmenu10's hooks");
