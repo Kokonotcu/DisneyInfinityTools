@@ -211,6 +211,29 @@ inline std::string version3Links(uint32_t n, const std::string& rows)
     return hdr + rows;
 }
 
+// Links in the index form: u32 count, u8 0, the u16 codes, then u16 from / to pairs (FORMATS.md 5.3).
+struct LinkRows {
+    std::vector<uint16_t> code, from, to;
+};
+
+// Record r's Data as the index form: count and rows, the count width by the byte size.
+inline void writeLinks(oct::Rec& r, const LinkRows& rows)
+{
+    const uint32_t count = (uint32_t)rows.code.size();
+    std::string o((const char*)&count, 4);
+    o.push_back('\0');
+    for (uint16_t v : rows.code) o.append((const char*)&v, 2);
+    for (size_t k = 0; k < count; ++k) {
+        o.append((const char*)&rows.from[k], 2);
+        o.append((const char*)&rows.to[k], 2);
+    }
+    r.pay.clear();
+    const int cw = oct::countWidth(o.size());
+    r.type = oct::makeType(oct::SCALAR, 0, oct::BYTE, cw);
+    oct::File::put(r.pay, (uint32_t)o.size(), cw);
+    r.pay += o;
+}
+
 // ---- parameters ----
 
 // A node's parameter block (val) and Mer_ParameterDescription entries (desc), in parameter order
