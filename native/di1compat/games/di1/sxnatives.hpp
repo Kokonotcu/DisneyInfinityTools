@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <mutex>
+#include <unordered_map>
 #include "../../core/hooks.hpp"
 #include "../../engine/slangvm.hpp"
 #include "config.hpp"
@@ -56,6 +58,8 @@ constexpr uint32_t kBehaviorName = 0x01523C30;      // FUN_01523c30, cdecl (type
 constexpr uint32_t kRegisterAction = 0x00AA1B30;    // ActionHandler_RegisterAction: actor, id, name, float
 constexpr uint32_t kRegisterBehavior = 0x00AA1BF0;  // actor, id, name, event, name2, float, float
 constexpr uint32_t kRegisterProperty = 0x00AA1D10;  // actor, id, id, name, type, event, float
+constexpr uint32_t kGravityStrength = 0x01861030;   // GravitySetStrength: actor, float, old id -> id (0x7478a0)
+constexpr uint32_t kGravityDirection = 0x01861090;  // GravitySetDirection: actor, vector, old id -> id (0x7426b0)
 }  // namespace eng
 
 constexpr size_t kKeyCap = 128;         // a key name's buffer
@@ -71,8 +75,10 @@ constexpr int kEventTypeSlot = 2;       // TriggerEvent's type, below actor and 
 constexpr int kFirstMovedEvent = 10;    // 1.0 types 10..14 are 3.0's 12..16 (enumdrift.py: 7 of 7 twin pairs)
 constexpr int kLastMovedEvent = 14;
 constexpr int kInsertedEvents = 2;
-constexpr int kPropertyEventSlot = 0;   // RegisterProperty's event, on top in 1.0; 3.0 wants the type below it
 constexpr char kPropertyType[] = "Value";   // 3.0's float property (0xaa1e3d); 1.0 had no type argument
+constexpr int kNoGravityId = -1;        // 3.0's setters remove the old modifier only for an id >= 0
+constexpr int kStrengthActorSlot = 1;   // below the strength
+constexpr int kDirectionActorSlot = 3;  // below the vector
 constexpr size_t kFlipCap = 512;
 constexpr size_t kFlipInput = 256;
 
@@ -208,6 +214,32 @@ inline void __cdecl registerProperty(uint8_t* ctx)
     v.push(event);
     pushFloat(v, 0.0f);
     call(eng::kRegisterProperty, ctx);
+}
+
+// The last gravity modifier id per actor handle and setter. 3.0 ids are unique: a stale one removes nothing.
+struct GravityIds {
+    std::mutex m;
+    std::unordered_map<int, int> last;   // ponytail: one entry per actor ever set; prune on death if it matters
+};
+
+// 1.0 0x1140e80 replaced the gravity; 3.0 stacks modifiers by id. The old id goes back in, so each call replaces.
+template <uint32_t va, int actorSlot>
+void __cdecl gravityPort(uint8_t* ctx)
+{
+    static GravityIds ids;
+    Vm v{ctx};
+    const int actor = v.at(actorSlot).i;
+    int old = kNoGravityId;
+    {
+        std::lock_guard<std::mutex> lock(ids.m);
+        auto it = ids.last.find(actor);
+        if (it != ids.last.end()) old = it->second;
+    }
+    v.pushInt(old);
+    call(va, ctx);
+    const int id = v.pop().i;
+    std::lock_guard<std::mutex> lock(ids.m);
+    ids.last[actor] = id;
 }
 
 // 1.0 0xa1de30 pushes nothing; 3.0 pushes the vehicle (0x731d10).
@@ -518,6 +550,8 @@ inline Native g_ports[] = {
     {"ActionHandler_RegisterAction", 3, 0, &detail::registerAction},
     {"ActionHandler_RegisterBehavior", 4, 0, &detail::registerBehavior},
     {"ActionHandler_RegisterProperty", 5, 0, &detail::registerProperty},
+    {"GravitySetStrength", 2, 0, &detail::gravityPort<detail::eng::kGravityStrength, detail::kStrengthActorSlot>},
+    {"GravitySetDirection", 4, 0, &detail::gravityPort<detail::eng::kGravityDirection, detail::kDirectionActorSlot>},
 };
 
 // Stubs for every listed native, the ports over them with sxPorts10; behavior types with sxBeh10 too.
