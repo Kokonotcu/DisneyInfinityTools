@@ -53,7 +53,8 @@ constexpr MerFlag kMerFlags[] = {{"--noportrefs", &di1::mer::Rules::portRefs},
                                  {"--noevents", &di1::mer::Rules::events10},
                                  {"--nogate", &di1::mer::Rules::gate10},
                                  {"--notoggletype", &di1::mer::Rules::toggleType10},
-                                 {"--nocacheend", &di1::mer::Rules::cacheEnd10}};
+                                 {"--nocacheend", &di1::mer::Rules::cacheEnd10},
+                                 {"--norealmstart", &di1::mer::Rules::realmStart10}};
 
 void applyMerFlag(mer::Table& T, di1::mer::Rules& R, const std::string& flag)
 {
@@ -269,6 +270,8 @@ int convertMer(const Args& a)
            "%d fetches, %d net-sync links, %d toggle types; %zu B\n", st.namespaces, st.nodes, st.params, st.pinsCopied,
            st.stubs, st.links, st.linksDropped, st.events, st.fetches, st.netSync, st.typed, o.size());
     if (st.uncacheAtEnd) printf("cacheend: %d choreographies uncache at their end\n", st.uncacheAtEnd);
+    for (const di1::realmstart::Change& c : st.realmStarts)
+        printf("realmstart: RealmCache %s StartWeight %g -> %g\n", c.realm.c_str(), c.from, c.to);
     return 0;
 }
 

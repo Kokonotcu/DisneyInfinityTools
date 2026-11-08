@@ -405,6 +405,10 @@ inline Verdict merGraph(Request& r)
              st.typed);
     r.note += buf;
     if (st.uncacheAtEnd) r.note += "+cacheend(" + std::to_string(st.uncacheAtEnd) + " choreographies) ";
+    for (const realmstart::Change& c : st.realmStarts) {
+        snprintf(buf, sizeof(buf), "+realmstart(RealmCache %s StartWeight %g -> %g) ", c.realm.c_str(), c.from, c.to);
+        r.note += buf;
+    }
     r.out = isMtc ? ::mer::mtc(f) : f.write();
     if (!isMtc && r.mtc) *r.mtc = ::mer::mtc(f);
     return isMtc ? "mtc" : "mer";
