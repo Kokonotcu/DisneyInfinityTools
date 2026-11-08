@@ -130,6 +130,7 @@ struct Config {
     bool rowboatConnect10 = false;   // plan B: that driver also connected through the VehicleManager (rowboatmount)
     bool shipBody10 = true;          // the player ship's rigid body actor DNA as a 3.0 boat vehicle (rowboat)
     bool shipSpawn10 = false;        // test: a player deck spawns its rigid body and rides it (shipspawn)
+    bool shipRules10 = true;         // Tardis ship rules: the player mounts the hull, which spawns its deck (shipdeck)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
@@ -254,6 +255,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"rowboatconnect10", core::ConfigKind::Flag, offsetof(Config, rowboatConnect10)},
     {"shipbody10", core::ConfigKind::Flag, offsetof(Config, shipBody10)},
     {"shipspawn10", core::ConfigKind::Flag, offsetof(Config, shipSpawn10)},
+    {"shiprules10", core::ConfigKind::Flag, offsetof(Config, shipRules10)},
 };
 
 // The config lines of the log; the other keys are logged by their features or not at all.

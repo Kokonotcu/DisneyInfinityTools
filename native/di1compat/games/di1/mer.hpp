@@ -56,9 +56,9 @@ struct Stats {
 };
 
 // mission.hpp's aliases as registered classes, each with its 3.0 twin's pins and parameter types added
-inline void addAliases(Table& T, bool mana10)
+inline void addAliases(Table& T, const mission::AliasSet& set)
 {
-    for (const mission::Alias* a : mission::aliases(mana10)) {
+    for (const mission::Alias* a : mission::aliases(set)) {
         T.registered.insert(a->name);
         Class &c = T.classes[a->name], &t = T.classes[a->twin];
         c.pins.insert(t.pins.begin(), t.pins.end());
@@ -569,15 +569,22 @@ inline void toggleType(Graph& g, const NodeView& v, NodeParams& p)
     ++g.s.typed;
 }
 
-// A registered alias node's boolOn parameter as true (mission.hpp Alias)
-inline void aliasBool(const NodeView& v, NodeParams& p)
+// A registered alias node's boolOn, boolOn2 parameters as true and strName as strValue (mission.hpp Alias)
+inline void aliasParams(Graph& g, const NodeView& v, NodeParams& p)
 {
     const mission::Alias* a = v.n.stub ? nullptr : mission::aliasOf(v.n.type);
-    if (!a || !a->boolOn || p.done.count(a->boolOn)) return;
+    if (!a) return;
+    for (const char* b : {a->boolOn, a->boolOn2}) {
+        if (!b || p.done.count(b)) continue;
+        const int32_t o = (int32_t)p.block.val.size();
+        const int32_t on = 1;
+        p.block.val.append((const char*)&on, sizeof on);
+        ::mer::describe(p.block, ::mer::T_BOOL, b, o);
+    }
+    if (!a->strName || p.done.count(a->strName)) return;
     const int32_t o = (int32_t)p.block.val.size();
-    const int32_t on = 1;
-    p.block.val.append((const char*)&on, sizeof on);
-    ::mer::describe(p.block, ::mer::T_BOOL, a->boolOn, o);
+    ::mer::appendString(p.block.val, g.strs[v.ns], a->strValue);
+    ::mer::describe(p.block, ::mer::T_STRING, a->strName, o);
 }
 
 // A registered alias node's pinFrom record from 'from' on in out, also as pinTo: the twin binds pins by name
@@ -635,7 +642,7 @@ inline void rebuildNode(Graph& g, size_t k)
         describeField(g, v, fd, p);
     }
     toggleType(g, v, p);
-    aliasBool(v, p);
+    aliasParams(g, v, p);
     if (!v.n.stub) copyPinTable(g, v);
     aliasPin(g, v, outAt);
     if (!g.port[k].empty() && !v.names.count("LeafNameHash"))
