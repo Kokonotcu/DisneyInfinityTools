@@ -23,6 +23,9 @@ constexpr uint32_t kActorGetPosition = 0x0074B790;      // handle -> x, y, z
 constexpr uint32_t kActorGetRotationY = 0x0074C580;     // handle -> float
 constexpr uint32_t kCreateFromInitString = 0x0075A3F0;  // init, x, y, z, rotation, name -> handle (rowboatriding)
 constexpr uint32_t kSlaveActorToActor = 0x006F69C0;     // slave, master, offset, 3 matrix rows, int, bool
+// FUN_006f69c0 -> FUN_018a8d40: the slave component goes on arg 1 (FUN_0069ecb0), so the deck is the slave
+constexpr uint32_t kSlaveSetPlacedPassthrough = 0x006F6D10;   // slave, bool (-> FUN_0186a4a0)
+constexpr uint32_t kSlaveGetMaster = 0x006F6D50;              // slave -> master handle, 0 when none
 constexpr size_t kSelfAt = 0x34;                        // VM ctx +0x34: the script's actor (sxmisc)
 }  // namespace eng
 
@@ -91,6 +94,15 @@ inline void slaveDeck(uint8_t* ctx, int deck, int body)
     v.pushInt(kSlaveMode);
     v.pushInt(kSlaveFlag);
     call(eng::kSlaveActorToActor, ctx);
+    // a placed (teleported) master moves its slave only with passthrough on, as rowboatriding sets it on its rider
+    v.pushInt(deck);
+    v.pushInt(1);
+    call(eng::kSlaveSetPlacedPassthrough, ctx);
+    v.pushInt(deck);
+    call(eng::kSlaveGetMaster, ctx);
+    const int master = v.pop().i;
+    core::logf("shipspawn10: deck %08X slaved (mode %d), its master now %08X%s", deck, kSlaveMode, master,
+               master == body ? "" : " - not the body: the slave call did not take");
 }
 
 // ShipBattle_RegisterShip (1.0 0xa094d0, ship), from ship.btl.sx's Setup: a player deck spawns its body once.
