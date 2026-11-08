@@ -1,6 +1,7 @@
 // rowboat10: 1.0's player rowboat DNA as a 3.0 boat vehicle (3.0 lacks PhysicsShip, ShipController). luachunk.
 // Any thread.
 #pragma once
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
@@ -42,6 +43,7 @@ constexpr char kScript[] = "objects/vehicle.sx";
 constexpr char kNetType[] = "Vehicle";
 constexpr char kResolution[] = "None";
 constexpr char kPerception[] = "VehicleTalkToMissionGiver|PassengerRideCar|Driving|DriveHelicopter";   // tb_boat
+constexpr char kLocomotion[] = "Locomotion";   // 1.0's AI movement gadget, removed
 constexpr double kMaxPassengers = 1;   // tb_boat's ToyBoxVehicleData; TransportVehicle lets a Tardis rule mount it
 
 inline Value str(const std::string& s)
@@ -118,7 +120,7 @@ inline int renameComponents(Value& comps, const Value* base30)
     return n;
 }
 
-// 3.0's vehicle gadgets: transport data, script, AI tree, network type, collision mode, driving perception.
+// 3.0's vehicle gadgets: transport data, script, AI tree, net type, collision mode, driving perception; no Locomotion.
 inline void vehicleGadgets(Value& gadgets)
 {
     Value yes;
@@ -135,6 +137,9 @@ inline void vehicleGadgets(Value& gadgets)
     putIn(gadgets, "Network", "networkType", str(kNetType));
     putIn(gadgets, "Collision", "CollisionResolutionMode", str(kResolution));
     putIn(gadgets, "PerceptionHelper", "PerceptionInclude", str(kPerception));
+    // no 3.0 DNA with ToyBoxVehicleData or BoatController has Locomotion; its AllowVertical false would pin the hull
+    auto& t = *gadgets.tab;
+    t.erase(std::remove_if(t.begin(), t.end(), [](const auto& e) { return e.first.s == kLocomotion; }), t.end());
 }
 
 // base30's BoatController component, or null.
