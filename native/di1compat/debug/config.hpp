@@ -26,6 +26,7 @@ struct Config {
     int fadeProbe10 = 0;           // non-zero: faded objects' fade inputs (trace/fade)
     int renderdoc10 = 0;           // > 0: RenderDoc captures one frame this many seconds after the first mission tick
     bool mountTrace10 = false;     // Tardis transport rules, actions after a Drive, vehicle connects (trace/mounttrace)
+    bool realmTrace10 = false;     // realm requests, zone attaches, weight changes, the per-zone combiner (trace/realm)
 };
 
 inline const core::ConfigKey kConfigKeys[] = {
@@ -44,6 +45,7 @@ inline const core::ConfigKey kConfigKeys[] = {
     {"fadeprobe10", core::ConfigKind::Int, offsetof(Config, fadeProbe10)},
     {"renderdoc10", core::ConfigKind::Int, offsetof(Config, renderdoc10)},
     {"mounttrace10", core::ConfigKind::Flag, offsetof(Config, mountTrace10)},
+    {"realmtrace10", core::ConfigKind::Flag, offsetof(Config, realmTrace10)},
 };
 
 // Reads <dir>\di1debug.cfg into cfg and logs the switches; without the file every trace stays off.
@@ -62,6 +64,7 @@ inline void loadConfig(const std::string& dir, Config& cfg)
                "renderdoc10=%d", cfg.trace, cfg.missionTrace, cfg.teardownTrace, cfg.breakTrace, cfg.lockTrace10,
                cfg.currencyTrace10, cfg.vfxTrace, cfg.spawnTrace10, cfg.uiTrace10, cfg.fpsLog10, cfg.loadProf10,
                cfg.opacityLog10, cfg.fadeProbe10, cfg.renderdoc10);
+    core::logf("config realm: realmtrace10=%d", cfg.realmTrace10);
 }
 
 }  // namespace dbg

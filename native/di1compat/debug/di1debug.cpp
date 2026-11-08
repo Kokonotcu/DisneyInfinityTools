@@ -28,6 +28,7 @@
 #include "trace/opacity.hpp"
 #include "trace/pause.hpp"
 #include "trace/mounttrace.hpp"
+#include "trace/realm.hpp"
 #include "trace/renderdoc.hpp"
 #include "trace/spawn.hpp"
 #include "trace/spawntrace.hpp"
@@ -82,6 +83,7 @@ static void installTraces(const dbg::Config& cfg, const std::string& gameDir)
     trace::spawntrace::install({cfg.spawnTrace10 && !cfg.trace});
     trace::pause::install({cfg.uiTrace10});
     trace::mounttrace::install({cfg.mountTrace10});
+    trace::realm::install({cfg.realmTrace10});
 }
 
 // Pentane's entry, under the loader lock (H10): the log, the order check, the watches, the writer thread.
