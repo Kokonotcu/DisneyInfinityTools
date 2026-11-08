@@ -47,6 +47,8 @@ inline bool catalogTypeStage(openstage::Open& o, int*& out);
 inline bool rootGraphStage(openstage::Open& o, int*& out);
 // rootgraph10: the .mtb and buffers of a model rootGraphStage passed to 1.0 go to 1.0 too. Destroys r.
 inline bool olderCompanionStage(openstage::Open& o, int*& out);
+// statreward10: a 1.0 .lua_rewards 3.0 lacks; Stat rewards get their overrides' Value. Answers text or passes on.
+inline bool statRewardStage(openstage::Open& o, int*& out);
 
 namespace detail {
 
@@ -167,7 +169,6 @@ inline std::string rootGraph(const std::string& t)
         return {};
     }
 }
-
 
 }  // namespace detail
 
@@ -349,6 +350,23 @@ inline bool olderCompanionStage(openstage::Open& o, int*&)
     }
     detail::passTo10(o, " (its model was served from 1.0)");
     return false;
+}
+
+inline bool statRewardStage(openstage::Open& o, int*& out)
+{
+    if (o.r || o.write || !o.cfg->statReward10 || !text::endsWith(o.p, ".lua_rewards")) return false;
+    const std::string np = text::norm(o.p);
+    std::string t, overrides;
+    if (!vfs::read10s(np, t) || t.find("\"Stat\"") == std::string::npos) return false;
+    const std::string stem = np.substr(0, np.size() - strlen("rewards"));
+    vfs::read10s(stem + "overrides", overrides);
+    int added = 0;
+    std::string s = mission::statRewards10(t, overrides, added);
+    if (!added) return false;   // serveStage serves 1.0's file as it is
+    // 3.0 reads a Stat reward's amount from the reward itself; 1.0's sat in the overrides, so 3.0 paid 0
+    core::logf("statreward10: %s: %d Stat reward(s) given their 1.0 overrides' Value", o.p, added);
+    out = core::memFile(s.data(), s.size());
+    return true;
 }
 
 }  // namespace di1::edits30

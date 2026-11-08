@@ -231,6 +231,15 @@ int convertRootGraph(const Args& a)
     return 0;
 }
 
+// mission::statRewards10 (statreward10): a 1.0 .lua_rewards with its .lua_overrides' Stat amounts, printed.
+int convertStatReward(const Args& a)
+{
+    int added = 0;
+    const std::string s = di1::mission::statRewards10(slurp(a.argv[2]), slurp(a.argv[3]), added);
+    printf("%s\n%d Stat reward(s) given a Value\n", s.c_str(), added);
+    return 0;
+}
+
 // One file through the plugin's dispatch (--mission, --missiongraph): its rules' output and note.
 int convertByPlugin(const Args& a)
 {
