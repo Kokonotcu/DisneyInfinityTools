@@ -124,6 +124,7 @@ struct Config {
     bool statReward10 = true;        // missions: a 1.0 Stat reward carries its overrides' amount (edits30)
     bool carBody10 = true;           // Cars townsfolk car bodies: playsets get 1.0's tinted models (carbody)
     bool rowboat10 = true;           // 1.0 player rowboat DNA as a 3.0 boat vehicle a Tardis rule can mount (rowboat)
+    bool oceanBoat10 = true;         // a 3.0 boat floats on a 1.0 zone's OceanSystem sea level (oceanboat)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
@@ -242,6 +243,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"statreward10", core::ConfigKind::Flag, offsetof(Config, statReward10)},
     {"carbody10", core::ConfigKind::Flag, offsetof(Config, carBody10)},
     {"rowboat10", core::ConfigKind::Flag, offsetof(Config, rowboat10)},
+    {"oceanboat10", core::ConfigKind::Flag, offsetof(Config, oceanBoat10)},
 };
 
 // The config lines of the log; the other keys are logged by their features or not at all.
