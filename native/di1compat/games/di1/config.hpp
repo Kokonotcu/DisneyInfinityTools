@@ -126,6 +126,7 @@ struct Config {
     bool rowboat10 = true;           // 1.0 player rowboat DNA as a 3.0 boat vehicle a Tardis rule can mount (rowboat)
     bool oceanBoat10 = true;         // a 3.0 boat floats on a 1.0 zone's OceanSystem sea level (oceanboat)
     bool rowboatDrive10 = true;      // a DriveRowboat avatar action goes out as Drive (rowboatdrive)
+    bool rowboatMount10 = false;     // plan B: a Tardis-mounted rowboat's driver connected directly (rowboatmount)
 };
 
 // Every key as the cfg file spells it. Not derivable from the field names (hide_ps, vfx_universal10, vfx_trace).
@@ -246,6 +247,7 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"rowboat10", core::ConfigKind::Flag, offsetof(Config, rowboat10)},
     {"oceanboat10", core::ConfigKind::Flag, offsetof(Config, oceanBoat10)},
     {"rowboatdrive10", core::ConfigKind::Flag, offsetof(Config, rowboatDrive10)},
+    {"rowboatmount10", core::ConfigKind::Flag, offsetof(Config, rowboatMount10)},
 };
 
 // The config lines of the log; the other keys are logged by their features or not at all.
