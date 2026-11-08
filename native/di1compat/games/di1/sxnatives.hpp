@@ -58,6 +58,7 @@ constexpr uint32_t kRegisterBehavior = 0x00AA1BF0;  // actor, id, name, event, n
 constexpr uint32_t kRegisterProperty = 0x00AA1D10;  // actor, id, id, name, type, event, float
 constexpr uint32_t kGravityStrength = 0x01861030;   // GravitySetStrength: actor, float, old id -> id (0x7478a0)
 constexpr uint32_t kGravityDirection = 0x01861090;  // GravitySetDirection: actor, vector, old id -> id (0x7426b0)
+constexpr uint32_t kChoLayoutLocator = 0x013A0EB0;  // ChoLayoutDriveChoreographyByLocator: cho, layout, actor, bool, at
 }  // namespace eng
 
 constexpr size_t kKeyCap = 128;         // a key name's buffer
@@ -238,6 +239,18 @@ void __cdecl gravityPort(uint8_t* ctx)
     const int id = v.pop().i;
     std::lock_guard<std::mutex> lock(ids.m);
     ids.last[actor] = id;
+}
+
+// 1.0 0xedf080 (cho, actor, locator, layout); 3.0 (cho, layout, actor or id, is-actor, locator), same lookups
+inline void __cdecl choLayoutByLocator(uint8_t* ctx)
+{
+    Vm v{ctx};
+    Cell layout = v.pop(), locator = v.pop(), actor = v.pop();
+    v.push(layout);
+    v.push(actor);
+    v.pushInt(1);   // the third argument is an actor (0x13a0ef2)
+    v.push(locator);
+    call(eng::kChoLayoutLocator, ctx);
 }
 
 // 1.0 0xa1de30 pushes nothing; 3.0 pushes the vehicle (0x731d10).
@@ -550,6 +563,7 @@ inline Native g_ports[] = {
     {"ActionHandler_RegisterProperty", 5, 0, &detail::registerProperty},
     {"GravitySetStrength", 2, 0, &detail::gravityPort<detail::eng::kGravityStrength, detail::kStrengthActorSlot>},
     {"GravitySetDirection", 4, 0, &detail::gravityPort<detail::eng::kGravityDirection, detail::kDirectionActorSlot>},
+    {"ChoLayoutDriveChoreographyByLocator", 4, 0, &detail::choLayoutByLocator},
 };
 
 // Stubs for every listed native, the ports over them with sxPorts10; behavior types with sxBeh10 too.
