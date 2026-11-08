@@ -328,7 +328,8 @@ def to_hlsl(kind, prog, binding=None):
         out.append('struct PSOut { %s };' % outs)
         out.append('PSOut main(PSIn pin) {')
         out.append('    PSOut o = (PSOut)0;')
-        out.append('    float4 vPos = float4(pin.pos.xy - 0.5, 0, 0); float vFace = pin.face ? 1.0 : -1.0;')
+        # D3D9 vFace is positive on clockwise faces; 3.0 rasterizes counter-clockwise as front (sm3.hpp psHead)
+        out.append('    float4 vPos = float4(pin.pos.xy - 0.5, 0, 0); float vFace = pin.face ? -1.0 : 1.0;')
         out += ['    float4 v%d = pin.%s;' % (k, v) for k, v in sorted(inputs.items())]
     if temps:
         out.append(('    precise float4 ' if kind == 'vs' else '    float4 ') + ', '.join('r%d = 0' % t for t in sorted(temps)) + ';')

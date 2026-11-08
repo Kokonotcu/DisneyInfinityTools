@@ -665,7 +665,8 @@ inline bool psHead(const Program& P, const Decls& d, Binding& B, std::vector<std
     out.push_back("struct PSOut { " + outs + " };");
     out.push_back(quiet ? "void main(PSIn pin) {" : "PSOut main(PSIn pin) {");
     out.push_back("    PSOut o = (PSOut)0;");
-    out.push_back("    float4 vPos = float4(pin.pos.xy - 0.5, 0, 0); float vFace = pin.face ? 1.0 : -1.0;");
+    // D3D9 vFace is positive on clockwise faces; 3.0 rasterizes counter-clockwise as front, so front is negative
+    out.push_back("    float4 vPos = float4(pin.pos.xy - 0.5, 0, 0); float vFace = pin.face ? -1.0 : 1.0;");
     for (auto& [k, v] : d.inputs) out.push_back("    float4 v" + std::to_string(k) + " = pin." + v + ";");
     return quiet;
 }
