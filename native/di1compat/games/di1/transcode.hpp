@@ -37,6 +37,7 @@
 #include "groups.hpp"
 #include "btd.hpp"
 #include "octsteps.hpp"
+#include "pranktasks.hpp"
 #include "renderio.hpp"
 
 namespace di1 {
@@ -44,6 +45,7 @@ namespace di1 {
 // The cfg keys the dispatch reads (S4); the keys of TranscodeIO's steps decide whether their function objects are set.
 struct TranscodeOptions {
     bool challenge = false;   // challenge10
+    bool prankTask = false;   // pranktask10
     bool behaviour = false;   // behav10
     bool events = false;      // events10
     bool progress = false;    // progress10
@@ -326,7 +328,7 @@ inline Verdict missionGraph(Request& r)
 
 inline bool missionMatches(const Request& r)
 {
-    const bool edits = r.o.events || r.o.progress || r.o.accept;
+    const bool edits = r.o.events || r.o.progress || r.o.accept || r.o.prankTask;
     const bool wanted = edits || !r.actLua.empty();
     const bool lua = ends(r, ".lua") && luaSource(r);
     const bool mission = r.np.rfind("mission_data/", 0) == 0 && !strstr(r.path, "__");
@@ -346,7 +348,9 @@ inline Verdict missionTable(Request& r)
     if (tl) r.note += "+tasklines(" + std::to_string(tl) + " 1.0 eval lines as ProgressString) ";
     int ap = r.o.accept && m ? mission::anyPlayer30(t) : 0;
     if (ap) r.note += "+tutorial(" + std::to_string(ap) + " elements take any local player's event) ";
-    const bool changed = k + pr + tl + ap > 0;
+    int pk = r.o.prankTask && m ? pranktasks::lua30(t) : 0;
+    if (pk) r.note += "+pranktask(" + std::to_string(pk) + " Eval_Pranked -> Eval_Generic) ";
+    const bool changed = k + pr + tl + ap + pk > 0;
     if (!changed && r.actLua.empty()) return kRaw;
     r.out.swap(t);
     return changed ? "mission" : "activitytasks";
@@ -397,6 +401,7 @@ inline Verdict merGraph(Request& r)
     if (act)
         r.note += "+activity->challenge(" + std::to_string(act) + " nodes, " + std::to_string(actRe) +
                   " participant links, " + std::to_string(actDrop) + " dropped) ";
+    if (int pt = r.o.prankTask ? pranktasks::graph30(f) : 0) r.note += "+pranktask(" + std::to_string(pt) + ") ";
     mer::Stats st;
     if (!mer::transcode(*r.io.mer, r.o.merRules, f, &st, &why)) return raw(r, "mer: " + why + " ");
     // never cut: 136 characters and 11 numbers of at most 11

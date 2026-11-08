@@ -36,6 +36,7 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
 {
     TranscodeOptions o;
     o.challenge = c.challenge10;
+    o.prankTask = c.prankTask10;
     o.behaviour = c.behav10;
     o.events = c.events10;
     o.progress = c.progress10;
@@ -62,6 +63,7 @@ inline TranscodeOptions transcodeOptionsOf(const Config& c)
     o.merRules.toggleType10 = c.toggleType10;
     o.merRules.cacheEnd10 = c.cacheEnd10;
     o.merRules.realmStart10 = c.realmStart10;
+    o.merRules.prankFacing10 = c.prankFacing10;
     return o;
 }
 

@@ -183,36 +183,13 @@ inline bool inLinksBuffer(const ActGraph& g, size_t i)
     return false;
 }
 
-// Links in the index form: u32 count, u8 0, the u16 codes, then u16 from / to pairs (FORMATS.md 5.3).
-struct LinkRows {
-    std::vector<uint16_t> code, from, to;
-};
-
-// Record r's Data as the index form: count and rows, the count width by the byte size.
-inline void writeLinks(oct::Rec& r, const LinkRows& rows)
-{
-    const uint32_t count = (uint32_t)rows.code.size();
-    std::string o((const char*)&count, 4);
-    o.push_back('\0');
-    for (uint16_t v : rows.code) o.append((const char*)&v, 2);
-    for (size_t k = 0; k < count; ++k) {
-        o.append((const char*)&rows.from[k], 2);
-        o.append((const char*)&rows.to[k], 2);
-    }
-    r.pay.clear();
-    const int cw = oct::countWidth(o.size());
-    r.type = oct::makeType(oct::SCALAR, 0, oct::BYTE, cw);
-    oct::File::put(r.pay, (uint32_t)o.size(), cw);
-    r.pay += o;
-}
-
 // A LinksBuffer without the links on pins 3.0 lacks; Participants links leave the new AvatarList's List.
 inline void rewriteLinkBuffer(ActGraph& g, oct::Rec& r)
 {
     const std::optional<::mer::IndexLinks> b = ::mer::indexLinks(r);
     if (!b || b->uu || !::mer::sizeMatches(*b)) return;   // the index form: all 1.0 graphs (linkcodec.py)
     const std::map<std::string, size_t> noUuids;   // the index form names nodes by index
-    LinkRows kept;
+    ::mer::LinkRows kept;
     for (uint32_t k = 0; k < b->n; ++k) {
         const ::mer::Link L = *::mer::linkAt(*b, k, noUuids);
         const uint16_t from = (uint16_t)L.from, to = (uint16_t)L.to;
@@ -236,7 +213,7 @@ inline void rewriteLinkBuffer(ActGraph& g, oct::Rec& r)
     }
     // nRe counts every buffer so far: after the first reroute each later buffer is rewritten (GP-24)
     if (kept.code.size() == b->n && !g.nRe) return;
-    writeLinks(r, kept);
+    ::mer::writeLinks(r, kept);
 }
 
 inline void rewriteLinks(ActGraph& g)

@@ -64,8 +64,15 @@ struct Config {
     bool scourge10 = true;           // spawnfrom10 on: ScourgeWave pods, Died / Empty (scourge.hpp)
     bool delivery10 = true;          // native10 on: DeliveryNode keeps its pins and links (inertnodes.hpp)
     bool decoSockets10 = true;       // native10 on: Spawn/ActivateDecorationSockets keep theirs (inertnodes.hpp)
-    bool prank10 = true;             // native10 on: RegisterPranks, SpawnPrankSocket, RegisterPrankCombo keep theirs
-    bool prankCombo10 = true;        // native10 on: PrankComboEnded keeps its pins and links (inertnodes.hpp)
+    bool prank10 = true;             // native10 on: MU prank sockets, RegisterPranks, PrankTargetQuery (prank.hpp)
+    bool prankMarker10 = true;       // prank10 on: each prank socket gets 1.0's DecorationSocket marker actor
+    bool prankToy10 = true;          // prank10 on: a toy prank item spawns as its Toy Box object (rumpus.hpp)
+    bool prankPlace10 = true;        // prank10 on: PlaceDeco's missing slot natives place on sockets (prankplace.hpp)
+    bool prankFacing10 = true;       // .mer: PrankTargetQuery's Facing linked from its toy's 'facing' locator
+    bool prankCombo10 = true;        // native10 on: RegisterPrankCombo combos end in PrankComboEnded (prankcombo.hpp)
+    bool prankMission10 = true;      // prankcombo10 on: MissionTask_Pranked counts ended combos as pranks
+    bool prankTask10 = true;         // MissionTask_Pranked as MissionTask_Generic + PrankTaskCounter (pranktasks.hpp)
+    bool prankEnder10 = true;        // prankcombo10 on: a prank task's Ender must be the ender actor's ActorType
     bool rcDelivery10 = true;        // a purchased 1.0 catalog lock goes DELIVERED, AVAILABLE at once (deliveries.hpp)
     bool rcBox10 = true;             // rcdelivery10 on: its Delivery expendable spawns at the avatar (deliveries.hpp)
     bool twin10 = true;              // a 1.0 DNA's model 3.0 retired names 3.0's '<model>2' re-export (transcode)
@@ -187,7 +194,14 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"delivery10", core::ConfigKind::Flag, offsetof(Config, delivery10)},
     {"decosockets10", core::ConfigKind::Flag, offsetof(Config, decoSockets10)},
     {"prank10", core::ConfigKind::Flag, offsetof(Config, prank10)},
+    {"prankmarker10", core::ConfigKind::Flag, offsetof(Config, prankMarker10)},
+    {"pranktoy10", core::ConfigKind::Flag, offsetof(Config, prankToy10)},
+    {"prankplace10", core::ConfigKind::Flag, offsetof(Config, prankPlace10)},
+    {"prankfacing10", core::ConfigKind::Flag, offsetof(Config, prankFacing10)},
     {"prankcombo10", core::ConfigKind::Flag, offsetof(Config, prankCombo10)},
+    {"prankmission10", core::ConfigKind::Flag, offsetof(Config, prankMission10)},
+    {"pranktask10", core::ConfigKind::Flag, offsetof(Config, prankTask10)},
+    {"prankender10", core::ConfigKind::Flag, offsetof(Config, prankEnder10)},
     {"rcdelivery10", core::ConfigKind::Flag, offsetof(Config, rcDelivery10)},
     {"rcbox10", core::ConfigKind::Flag, offsetof(Config, rcBox10)},
     {"twin10", core::ConfigKind::Flag, offsetof(Config, twin10)},
