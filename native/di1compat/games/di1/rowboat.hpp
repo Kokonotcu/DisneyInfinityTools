@@ -20,8 +20,13 @@ constexpr char kBoatDna30[] = "characters/TB_Boat.dnax";
 
 // Whether g is 1.0's player rowboat: ShipController typed Rowboat, PhysicsShip, no RowboatAI gadget.
 inline bool isPlayerRowboat(const Globals& g);
-// g's rowboat as 3.0's boat vehicle; base30 is 3.0's TB_Boat DNA (empty: no 3.0 boat defaults). Returns the edits.
-inline int vehicle30(Globals& g, const std::string& base30);
+// What vehicle30 changed: components renamed, TB_Boat vehicle gadgets and components copied in.
+struct Edits {
+    int renamed = 0;
+    int parts = 0;
+};
+// g's rowboat as 3.0's boat vehicle; base30 is 3.0's TB_Boat DNA (empty: no 3.0 boat defaults).
+inline Edits vehicle30(Globals& g, const std::string& base30);
 // dnachos' steps s, then vehicle30, as Lua text; the note gets what changed (after the caller's tag).
 inline std::string finish30(Globals& g, const std::string& chunk, const dnachos::Steps& s, const std::string& base30,
                             std::string& note);
@@ -166,6 +171,31 @@ inline const Value* baseBoat(const Globals& base)
     return boat && boat->t == Value::TAB ? boat : nullptr;
 }
 
+// TB_Boat's vehicle parts no 1.0 boat has (tb_boat.dnax): driver HUD, rigid body params and messages, vehicle feel
+inline constexpr const char* kVehicleGadgets[] = {
+    "AvatarInteractionHud", "OcclusionColoringData", "RigidBodyParamManager", "VehicleCollisionDamper",
+    "VehicleMusic", "VehicleQuickTurn", "VehicleTricksPhysics",
+};
+inline constexpr const char* kVehicleComponents[] = {"CarsReactionMonitor", "RigidBodyMessageHandler"};
+
+// to[key] = from[key] when from has it and to does not; returns whether it copied.
+inline bool copyMissing(Value& to, const Value* from, const char* key)
+{
+    const Value* v = from ? from->get(key) : nullptr;
+    if (!v || to.get(key)) return false;
+    to.tab->push_back({str(key), *v});
+    return true;
+}
+
+// base's vehicle gadgets and components the boat lacks; returns how many it copied.
+inline int vehicleParts(Value& gadgets, Value& comps, const Globals& base)
+{
+    int n = 0;
+    for (const char* k : kVehicleGadgets) n += copyMissing(gadgets, sub(base, "AgentGadgets"), k);
+    for (const char* k : kVehicleComponents) n += copyMissing(comps, sub(base, "Components"), k);
+    return n;
+}
+
 }  // namespace detail
 
 inline bool isPlayerRowboat(const Globals& g)
@@ -178,25 +208,29 @@ inline bool isPlayerRowboat(const Globals& g)
     return rowboat && physics && gadgets && !gadgets->get("RowboatAI");
 }
 
-inline int vehicle30(Globals& g, const std::string& base30)
+inline Edits vehicle30(Globals& g, const std::string& base30)
 {
     luachunk::Value* comps = detail::sub(g, "Components");
     luachunk::Value* gadgets = detail::sub(g, "AgentGadgets");
-    if (!comps || !gadgets) return 0;
+    if (!comps || !gadgets) return {};
     Globals base;
     if (!base30.empty()) base = luachunk::eval(base30);
-    const int n = detail::renameComponents(*comps, detail::baseBoat(base));
+    Edits e;
+    e.renamed = detail::renameComponents(*comps, detail::baseBoat(base));
     detail::vehicleGadgets(*gadgets);
-    return n;
+    e.parts = detail::vehicleParts(*gadgets, *comps, base);
+    return e;
 }
 
 inline std::string finish30(Globals& g, const std::string& chunk, const dnachos::Steps& s, const std::string& base30,
                             std::string& note)
 {
     const dnachos::Changed c = dnachos::edit30(g, chunk, s);
-    const int renamed = vehicle30(g, base30);
-    note += "(" + std::to_string(renamed) + " components as ToyBoxVehicle/BoatController, " +
-            (base30.empty() ? "no 3.0 boat defaults" : "TB_Boat defaults") + ", transport vehicle gadgets) ";
+    const Edits e = vehicle30(g, base30);
+    note += "(" + std::to_string(e.renamed) + " components as ToyBoxVehicle/BoatController, " +
+            (base30.empty() ? "no 3.0 boat defaults" : "TB_Boat defaults") + ", transport vehicle gadgets";
+    if (e.parts) note += ", " + std::to_string(e.parts) + " TB_Boat vehicle parts";
+    note += ") ";
     if (c.nested) note += "+nest(" + std::to_string(c.nested) + " gadget fields) ";
     std::string out;
     for (auto& [name, v] : g) out += name + " = " + luachunk::text(v) + "\n";
