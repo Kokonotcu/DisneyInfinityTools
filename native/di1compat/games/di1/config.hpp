@@ -66,6 +66,8 @@ struct Config {
     bool decoSockets10 = true;       // native10 on: Spawn/ActivateDecorationSockets keep theirs (inertnodes.hpp)
     bool prank10 = true;             // native10 on: MU prank sockets, RegisterPranks, PrankTargetQuery (prank.hpp)
     bool prankMarker10 = true;       // prank10 on: each prank socket gets 1.0's DecorationSocket marker actor
+    bool prankToy10 = true;          // prank10 on: a toy prank item spawns as its Toy Box object (rumpus.hpp)
+    bool prankPlace10 = true;        // prank10 on: PlaceDeco's missing slot natives place on sockets (prankplace.hpp)
     bool prankFacing10 = true;       // .mer: PrankTargetQuery's Facing linked from its toy's 'facing' locator
     bool prankCombo10 = true;        // native10 on: RegisterPrankCombo combos end in PrankComboEnded (prankcombo.hpp)
     bool prankMission10 = true;      // prankcombo10 on: MissionTask_Pranked counts ended combos as pranks
@@ -187,6 +189,8 @@ inline constexpr core::ConfigKey kConfigKeys[] = {
     {"decosockets10", core::ConfigKind::Flag, offsetof(Config, decoSockets10)},
     {"prank10", core::ConfigKind::Flag, offsetof(Config, prank10)},
     {"prankmarker10", core::ConfigKind::Flag, offsetof(Config, prankMarker10)},
+    {"pranktoy10", core::ConfigKind::Flag, offsetof(Config, prankToy10)},
+    {"prankplace10", core::ConfigKind::Flag, offsetof(Config, prankPlace10)},
     {"prankfacing10", core::ConfigKind::Flag, offsetof(Config, prankFacing10)},
     {"prankcombo10", core::ConfigKind::Flag, offsetof(Config, prankCombo10)},
     {"prankmission10", core::ConfigKind::Flag, offsetof(Config, prankMission10)},

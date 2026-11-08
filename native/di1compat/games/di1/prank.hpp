@@ -15,12 +15,17 @@
 #include "../../engine/mernode.hpp"
 #include "../../formats/mer.hpp"
 #include "config.hpp"
+#include "rumpus.hpp"
 #include "spawner.hpp"
 
 namespace di1::prank {
 
 // Adds SpawnPrankSocket, RegisterPranks and PrankTargetQuery when c.prank10 is on (needs native10).
 inline bool install(const Config& c);
+// The socket nearest p within kPlaceRadius: its id, else -1. Any thread.
+inline int socketNear(const std::array<float, 3>& p);
+// Stands RRO object rro (a toy, or a decoration's expendable) on socket id; false when it is gone. Logged.
+inline bool placeOn(int id, const std::string& rro, const char* who);
 
 namespace detail {
 
@@ -35,13 +40,17 @@ using Vec = std::array<float, 3>;
 constexpr int kOrients = 4;              // Orientation_One..Four (1.0 parameters 0xd77b70)
 constexpr float kBindRadius = 1.5f;      // metres; 1.0 FUN_00b791c0 matched a socket at the locator itself
 constexpr float kQueryRadius = 4.0f;     // metres from a toy's 'facing' locator to a socket's prank locator
+constexpr float kPlaceRadius = 6.0f;     // metres from the avatar to a socket's marker for PlaceDeco's natives
 constexpr float kDefaultHeight = 1.0f;   // arc height with no socket: ActionPrank's own default (ArcHeight_value)
 constexpr float kDegToRad = 0.017453292f;
 constexpr float kNear = 1e-3f;
 constexpr int kXformFloats = 16;         // FUN_0160f370's transform: quaternion, position, then 1.0s
 constexpr int kXformPos = 4;
 inline constexpr char kNone[] = "NONE";
-inline constexpr char kDecoPrefix[] = "INV_PRANK_DECO_";   // MU inventory__lua.lua: RRO filenames MU_Decor_<rest>
+inline constexpr char kInvPrefix[] = "INV_";              // MU inventory__lua.lua: rroName = RRO_<rest>
+inline constexpr char kRroPrefix[] = "RRO_";
+inline constexpr char kDecoPrefix[] = "RRO_PRANK_DECO_";   // MU rumpusdata.lua: Filename MU_Decor_<rest>, Expendable
+inline constexpr char kDecoToy[] = "RRO_PRANK_DECO_F";     // ... except DECO_F: Toy/Monsters/Toy_MU_Decor_F, a toy
 inline constexpr char kDecoExpendable[] = "MU_Decor_";     // mu_expendables.lua names
 // 1.0 monstersu_actors.lua: DecorationSocket.dnax, model objects/DecorationMarker (the socket's marker)
 inline constexpr char kMarkerKey[] = "decorationsocket";
@@ -87,6 +96,7 @@ struct State {
     int socketClass = -1, registerClass = -1, queryClass = -1;   // set once in install()
     bool dispense = false;          // FUN_0160f370's prologue matched: set once in install()
     bool marker = false;            // prankmarker10: a socket gets its DecorationSocket actor; set once in install()
+    bool rumpus = false;            // pranktoy10 and rumpus::callsMatch(): toys spawn; set once in install()
     core::LogOnce<std::string> told;   // its own leaf lock
 };
 inline State g_state;
@@ -262,11 +272,30 @@ inline std::vector<Bound> bind(const std::vector<Vec>& at, void* ns, const std::
     return out;
 }
 
-// The expendable a prank decoration item stands as ("" for a toy): INV_PRANK_DECO_<x> -> MU_Decor_<x>.
-inline std::string decoExpendable(const std::string& item)
+// An inventory item's RRO object (MU inventory__lua.lua rroName): INV_PRANK_<x> -> RRO_PRANK_<x>
+inline std::string rroOf(const std::string& item)
+{
+    const size_t n = sizeof(kInvPrefix) - 1;
+    return item.compare(0, n, kInvPrefix) ? item : kRroPrefix + item.substr(n);
+}
+
+// The expendable a decoration RRO stands as, "" for a toy: RRO_PRANK_DECO_<x> -> MU_Decor_<x> (DECO_F is a toy)
+inline std::string decoExpendable(const std::string& rro)
 {
     const size_t n = sizeof(kDecoPrefix) - 1;
-    return item.compare(0, n, kDecoPrefix) ? std::string() : kDecoExpendable + item.substr(n);
+    const bool deco = !rro.compare(0, n, kDecoPrefix);
+    const bool toy = !rro.compare(0, sizeof(kDecoToy) - 1, kDecoToy);
+    return deco && !toy ? kDecoExpendable + rro.substr(n) : std::string();
+}
+
+// A Toy Box object turned degrees about up at p (row-major, translation in m[12..14], as rumpus::spawn takes it)
+inline rumpus::Spawned spawnToy(const std::string& rro, const Vec& p, float degrees)
+{
+    if (!g_state.rumpus) return {0, false, 0};
+    const float c = std::cos(degrees * kDegToRad), s = std::sin(degrees * kDegToRad);
+    alignas(16) const float m[16] = {c,    0.0f, -s,   0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                     s,    0.0f, c,    0.0f, p[0], p[1], p[2], 1.0f};
+    return rumpus::spawn(rro.c_str(), m);
 }
 
 // The expendable at p turned degrees about up, through 3.0's dispense (rcbox10's call); its handle, 0 none.
@@ -287,22 +316,30 @@ inline uint32_t dispense(const std::string& expendable, const Vec& p, float degr
     return ((DispenseFn)core::rt(eng::kDispense))(mgr, nullptr, expendable.c_str(), xform, 1, 1);
 }
 
-// One bound socket's item made visible as 1.0's FUN_00d877e0 did (decorations only), logged
+// RRO object rro stood on a socket's prank spot as 1.0's FUN_00d877e0 / FUN_00d1da30 did; who says why, logged
+inline void standItem(const Bound& b, const std::string& rro, const char* who)
+{
+    const std::string exp = decoExpendable(rro);
+    if (!exp.empty()) {
+        const uint32_t h = dispense(exp, b.at, b.degrees);
+        core::logf("prank10: %s: socket %d holds %s; %s spawned at (%.1f, %.1f, %.1f) -> %u", who, b.id, rro.c_str(),
+                   exp.c_str(), b.at[0], b.at[1], b.at[2], h);
+        return;
+    }
+    const rumpus::Spawned t = spawnToy(rro, b.at, b.degrees);
+    core::logf("prank10: %s: socket %d holds toy %s at (%.1f, %.1f, %.1f), %.0f deg -> handle %08X%s", who, b.id,
+               rro.c_str(), b.at[0], b.at[1], b.at[2], b.degrees, t.handle,
+               t.object ? "" : (g_state.rumpus ? " (no Toy Box object by that name)" : " (rumpus calls off)"));
+}
+
+// One bound socket's item made visible as 1.0's FUN_00d877e0 did, logged
 inline void showItem(const Bound& b, const std::string& item)
 {
     if (item == kNone) {
         core::logf("prank10: RegisterPranks: socket %d cleared", b.id);
         return;
     }
-    const std::string exp = decoExpendable(item);
-    if (exp.empty()) {
-        core::logf("prank10: RegisterPranks: socket %d holds toy %s; 3.0 has no rumpus object spawn, so it is not "
-                   "drawn", b.id, item.c_str());
-        return;
-    }
-    const uint32_t h = dispense(exp, b.at, b.degrees);
-    core::logf("prank10: RegisterPranks: socket %d holds %s; %s spawned at (%.1f, %.1f, %.1f) -> %u", b.id,
-               item.c_str(), exp.c_str(), b.at[0], b.at[1], b.at[2], h);
+    standItem(b, rroOf(item), "RegisterPranks");
 }
 
 // 1.0 0xd87ac0: each socket at a locator (or tagged actor) gets the Prank item (FUN_00d877e0).
@@ -453,9 +490,43 @@ inline bool install(const Config& c)
     s.dispense = core::prologueMatches(detail::eng::kDispense, detail::eng::kDispenseBytes);
     if (!s.dispense) core::logf("prank10: FUN_0160f370 differs from the analysed bytes; decorations are not drawn");
     s.marker = c.prankMarker10;
+    s.rumpus = c.prankToy10 && rumpus::callsMatch();
+    if (c.prankToy10 && !s.rumpus) core::logf("prank10: a RumpusSpawn call differs from the analysed bytes; no toys");
     s.socketClass = detail::add(detail::socketSpec());
     s.registerClass = detail::add(detail::registerSpec());
     s.queryClass = detail::add(detail::querySpec());
+    return true;
+}
+
+inline int socketNear(const std::array<float, 3>& p)
+{
+    detail::State& s = detail::g_state;
+    std::lock_guard<std::mutex> lock(s.mx);
+    int best = -1;
+    float bestD = detail::sq(detail::kPlaceRadius);
+    for (const detail::Socket& k : s.sockets) {
+        const float d = (std::min)(detail::dist2(p, k.socketPos), detail::dist2(p, k.prankPos));
+        if (d > bestD) continue;
+        bestD = d;
+        best = k.id;
+    }
+    return best;
+}
+
+inline bool placeOn(int id, const std::string& rro, const char* who)
+{
+    detail::State& s = detail::g_state;
+    detail::Bound b{-1, {}, 0.0f};
+    {
+        std::lock_guard<std::mutex> lock(s.mx);
+        for (detail::Socket& k : s.sockets) {
+            if (k.id != id) continue;
+            k.item = rro;
+            b = {k.id, k.prankPos, k.angle[0]};
+        }
+    }
+    if (b.id < 0) return false;
+    detail::standItem(b, rro, who);
     return true;
 }
 

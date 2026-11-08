@@ -2,6 +2,7 @@
 // engine/players, playsets. Main thread.
 #pragma once
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,8 @@ namespace di1::deliveries {
 inline bool install(const Config& c);
 // Whether a lock entering state with this catalog Expendable gets a delivery (1.0 FUN_00bac360).
 inline bool needsDelivery(uint8_t state, const char* expendable);
+// Where a player's avatar stands (rcbox10's calls); false when rcbox10 is off or the avatar is not there.
+inline bool avatarPosition(int player, float (&out)[3]);
 
 namespace detail {
 
@@ -203,6 +206,17 @@ inline bool callsMatch(const char* feature, const Called (&calls)[N])
 }
 
 }  // namespace detail
+
+inline bool avatarPosition(int player, float (&out)[3])
+{
+    namespace eng = detail::eng;
+    uint8_t* actor = detail::g_state.box ? detail::avatarActor(player) : nullptr;
+    if (!actor) return false;
+    if (actor[eng::kActorDirty] & 1) ((detail::RefreshFn)core::rt(eng::kRefresh))(actor, nullptr);
+    const float* p = (const float*)(actor + eng::kAvatarXform) + eng::kXformPos;
+    std::copy(p, p + 3, out);
+    return true;
+}
 
 inline bool needsDelivery(uint8_t state, const char* expendable)
 {
