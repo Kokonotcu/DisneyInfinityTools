@@ -9,6 +9,7 @@
 #include "../../core/memcheck.hpp"
 #include "../../engine/players.hpp"
 #include "config.hpp"
+#include "shipdeck.hpp"
 
 namespace di1::rowboatmount {
 
@@ -38,6 +39,7 @@ constexpr uint32_t kHasBit = 0x006F9AB0;      // cdecl (mask, index) -> bool
 constexpr uint32_t kTypeComponent = 0x0228E4A8;   // u16 component type id the rule reads
 constexpr size_t kTypeMask = 0x20;
 constexpr uint32_t kRowboatUid = 2165;        // ActorType PIR_Rowboat (gamedb/pirates bitmasks.lua)
+constexpr uint32_t kHullUid = 2846;           // ActorType PC_Ship_RigidBody, AV_PirateShipRB's (same file)
 // FUN_013807c0: *(0x228db58) ? its vtable +0x14 () : 0, the host player id (no this; reads its own global)
 constexpr uint32_t kHostId = 0x013807C0;
 constexpr uint32_t kSession = 0x0228DB58;
@@ -76,8 +78,10 @@ struct State {
     bool retarget = false;              // rowboatmount10; set once in install()
     bool connect = false;               // rowboatconnect10; set once in install()
     bool checked = false;               // every called prologue matched; set once in install()
+    bool ships = false;                 // shiprules10: a Tardis ship hull is mounted and re-mounted too; set once
     std::atomic<int> logged{0};
-    std::atomic<uint32_t> vehicle{0};   // the last Tardis rowboat (game thread writes, script threads read)
+    std::atomic<uint32_t> vehicle{0};   // the last Tardis rowboat or hull (game thread writes, script threads read)
+    std::atomic<bool> hull{false};      // that vehicle is a ship hull
     std::atomic<uint32_t> mounted{0};   // the avatar its mount went to
     std::atomic<int> tries{0};
     std::atomic<bool> busy{false};      // a re-mount runs: its own TriggerAction must not start another
@@ -104,6 +108,10 @@ inline bool actorTypeIs(uint32_t handle, uint32_t uid)
 }
 
 inline bool isRowboat(uint32_t vehicle) { return actorTypeIs(vehicle, eng::kRowboatUid); }
+inline bool isHull(uint32_t vehicle) { return g_state.ships && actorTypeIs(vehicle, eng::kHullUid); }
+
+// The re-mount's word for the vehicle; "rowboat" keeps its log lines as they were
+inline const char* vehicleWord() { return g_state.hull ? "ship hull" : "rowboat"; }
 
 // The host player's id, as Lua's Players_GetHostPlayerID (FUN_00b3ed40 -> FUN_013807c0): 0 without a session.
 inline int hostPlayer()
@@ -147,7 +155,8 @@ inline void __fastcall hkApply(void* rule, void* edx, uint32_t avatar, const uin
     State& s = g_state;
     const uint32_t vehicle = vehicleOf(info);
     const bool rowboat = vehicle && isRowboat(vehicle);
-    const uint8_t* pm = rowboat ? engine::players::manager() : nullptr;
+    const bool hull = vehicle && !rowboat && isHull(vehicle);
+    const uint8_t* pm = rowboat || hull ? engine::players::manager() : nullptr;
     const uint8_t* table = pm ? engine::players::table(pm) : nullptr;
     if (rowboat) logAvatars(avatar, table);
     const uint32_t host = table && s.retarget ? hostAvatar(table) : 0;
@@ -156,10 +165,13 @@ inline void __fastcall hkApply(void* rule, void* edx, uint32_t avatar, const uin
         avatar = host;
     }
     s.g_apply(rule, edx, avatar, info);
-    if (!rowboat) return;
+    if (!rowboat && !hull) return;
+    s.hull = hull;
     s.vehicle = vehicle;
     s.mounted = avatar;
     s.tries = 0;
+    if (hull) core::logf("shiprules10: Tardis ship hull %08X mounted by %08X", vehicle, avatar);
+    if (hull) shipdeck::spawnFor(vehicle);
     if (s.connect) connectDriver(avatar, vehicle);
 }
 
@@ -182,7 +194,7 @@ inline bool remount(uint32_t avatar, uint32_t vehicle)
     State& s = g_state;
     if (!((AgentFn)core::rt(eng::kAgent))(vehicle)) {
         s.vehicle = 0;
-        core::logf("rowboatmount10: rowboat %08X is gone; no re-mount", vehicle);
+        core::logf("rowboatmount10: %s %08X is gone; no re-mount", vehicleWord(), vehicle);
         return true;
     }
     void* agent = ((AgentFn)core::rt(eng::kAgent))(avatar);
@@ -190,8 +202,8 @@ inline bool remount(uint32_t avatar, uint32_t vehicle)
                          : nullptr;
     void* hash = driver ? forceMountHash(vehicle) : nullptr;
     if (!hash) return false;
-    core::logf("rowboatmount10: host avatar %08X replaced %08X: Drive to rowboat %08X re-sent", avatar,
-               s.mounted.load(), vehicle);
+    core::logf("rowboatmount10: host avatar %08X replaced %08X: Drive to %s %08X re-sent", avatar, s.mounted.load(),
+               vehicleWord(), vehicle);
     ((TriggerActionFn)core::rt(eng::kTriggerAction))(driver, nullptr, eng::kDrive, hash);
     if (s.connect) connectDriver(avatar, vehicle);
     return true;
@@ -240,6 +252,7 @@ inline bool install(const Config& c)
     detail::State& s = detail::g_state;
     s.retarget = c.rowboatMount10;
     s.connect = c.rowboatConnect10;
+    s.ships = c.shipRules10 && c.aliases10 && shipdeck::check();
     for (const detail::Called& f : detail::kCalled) {
         if (core::prologueMatches(f.va, f.prologueHex)) continue;
         core::logf("rowboatmount10 off: %08X prologue differs", f.va);

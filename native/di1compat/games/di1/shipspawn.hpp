@@ -8,6 +8,7 @@
 #include "../../core/log.hpp"
 #include "../../engine/slangvm.hpp"
 #include "rowboatmount.hpp"
+#include "shipdeck.hpp"
 
 namespace di1::shipspawn {
 
@@ -113,7 +114,8 @@ inline void __cdecl registerShip(uint8_t* ctx)
     Vm v{ctx};
     const Cell ship = v.pop();
     const int deck = ship.type == engine::slangvm::kInt ? ship.i : *(int*)(ctx + eng::kSelfAt);
-    if (!rowboatmount::hasActorType((uint32_t)deck, kDeckUid)) return;
+    // a deck the Tardis hull spawned (shipdeck) already has its body
+    if (!rowboatmount::hasActorType((uint32_t)deck, kDeckUid) || shipdeck::isOurs((uint32_t)deck)) return;
     {
         std::lock_guard<std::mutex> lock(g_state.m);
         if (!g_state.decks.insert(deck).second) return;
