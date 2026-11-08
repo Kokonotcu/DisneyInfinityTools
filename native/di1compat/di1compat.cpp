@@ -24,6 +24,7 @@
 #include "games/di1/chostart.hpp"
 #include "games/di1/config.hpp"
 #include "games/di1/currency.hpp"
+#include "games/di1/deliveries.hpp"
 #include "games/di1/econ.hpp"
 #include "games/di1/expendables.hpp"
 #include "games/di1/gamedb.hpp"
@@ -91,6 +92,7 @@ static void installModules(const di1::Config& cfg)
     di1::audio10::install(cfg);
     di1::particles::install(cfg);
     di1::accept::install(cfg);
+    di1::deliveries::install(cfg);
     di1::tools::install(cfg);
     di1::selectmenu::install(cfg);
     di1::movies::install(cfg);

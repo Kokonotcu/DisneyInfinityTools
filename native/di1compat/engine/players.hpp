@@ -13,6 +13,7 @@ constexpr size_t kLocalCount = 0x90;        // local players: FUN_00b68f60 tests
 constexpr size_t kTable = 0x108;            // the player table: an entry per player
 constexpr size_t kEntryBytes = 0x50;
 constexpr size_t kEntryLocal = 0x10;        // 1: a local player (FUN_015bcc10 selects on it)
+constexpr size_t kEntryAvatar = 0x48;       // the avatar's handle (FUN_01614d60, FUN_00ba9bd0)
 constexpr uint32_t kPlayerId = 0x004291B0;  // FUN_004291b0: thiscall (uint32_t* out, player) -> its id
 constexpr int kMaxPlayers = 4;              // FUN_01204cf0
 }  // namespace eng
@@ -28,6 +29,12 @@ inline const uint8_t* table(const uint8_t* pm) { return *(const uint8_t* const*)
 inline bool isLocal(const uint8_t* table, int player)
 {
     return *(const int*)(table + eng::kEntryLocal + player * eng::kEntryBytes) == 1;
+}
+
+// A player's avatar handle; 0 without an avatar.
+inline uint32_t avatarHandle(const uint8_t* table, int player)
+{
+    return *(const uint32_t*)(table + eng::kEntryAvatar + player * eng::kEntryBytes);
 }
 
 inline uint32_t playerId(uint8_t* pm, int player)

@@ -12,6 +12,7 @@
 #include "../formats/gamedblua.hpp"
 #include "../games/di1/activities.hpp"
 #include "../games/di1/curves.hpp"
+#include "../games/di1/deliveries.hpp"
 #include "../games/di1/surfaces.hpp"
 #include "../games/di1/mission.hpp"
 #include "../base/text.hpp"
@@ -307,6 +308,69 @@ int testGpScan(const Args& a)
     bool failed = false;
     for (auto& [k, n] : s.failed) failed |= n > 0;
     return failed ? 1 : 0;
+}
+
+namespace {
+
+// ---- --rcdelivery ----
+
+// The quoted value after a key's '=' (at), or "" without one.
+std::string quotedAt(const std::string& t, size_t at)
+{
+    if (at == gamedblua::npos) return "";
+    size_t q = t.find_first_of("'\"", at);
+    size_t e = q == gamedblua::npos ? q : t.find(t[q], q + 1);
+    return e == gamedblua::npos ? "" : t.substr(q + 1, e - q - 1);
+}
+
+// rc_catalog records: name -> Expendable.
+std::map<std::string, std::string> catalogExpendables(const std::string& t)
+{
+    std::map<std::string, std::string> m;
+    for (size_t i = t.find('{'); i != std::string::npos; i = t.find('{', i + 1)) {
+        size_t e = gamedblua::matchBrace(t, i);
+        size_t exp = gamedblua::findKey(t, "Expendable", i + 1, e);
+        if (e == gamedblua::npos || exp == gamedblua::npos) continue;
+        m[quotedAt(t, gamedblua::findKey(t, "name", i + 1, e))] = quotedAt(t, exp);
+    }
+    return m;
+}
+
+int checkNeedsDelivery()
+{
+    using di1::deliveries::needsDelivery;
+    constexpr uint8_t kPurchased = di1::deliveries::detail::eng::kPurchased;
+    const bool ok = needsDelivery(kPurchased, "INC_Spawn_GlidePack") && !needsDelivery(kPurchased, "none") &&
+                    !needsDelivery(kPurchased, "NONE") && !needsDelivery(kPurchased, "") &&
+                    !needsDelivery(kPurchased, nullptr) && !needsDelivery(kPurchased + 1, "INC_Spawn_GlidePack");
+    printf("needsDelivery cases: %s\n", ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
+}  // namespace
+
+// rcdelivery10: the story's RC locks (in_city_buy_gp / _hoverboard / _bvr_located) get a delivery in both catalogs.
+int testRcDelivery(const Args& a)
+{
+    int bad = checkNeedsDelivery();
+    auto c10 = catalogExpendables(slurp(a.argv[2])), c30 = catalogExpendables(slurp(a.argv[3]));
+    if (c10 != c30) {
+        ++bad;
+        printf("1.0 and 3.0 catalogs differ in Expendable (%zu / %zu records)\n", c10.size(), c30.size());
+    }
+    int delivered = 0;
+    for (auto& [name, exp] : c30) {
+        if (!di1::deliveries::needsDelivery(di1::deliveries::detail::eng::kPurchased, exp.c_str())) continue;
+        ++delivered;
+        printf("delivered: %s -> %s\n", name.c_str(), exp.c_str());
+    }
+    for (const char* lock : {"RC_TOY_GLIDER_PACK", "RC_TOY_HOVER_BOARD", "RC_TOY_SUPER_HERO_HELICOPTER"}) {
+        if (di1::deliveries::needsDelivery(di1::deliveries::detail::eng::kPurchased, c30[lock].c_str())) continue;
+        ++bad;
+        printf("story lock %s has no Expendable: FUN_00b50ed0 never sets it PURCHASED\n", lock);
+    }
+    printf("%zu records, %d with a delivery, %d failures\n", c30.size(), delivered, bad);
+    return bad ? 1 : 0;
 }
 
 }  // namespace octtest

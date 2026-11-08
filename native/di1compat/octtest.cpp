@@ -31,6 +31,7 @@ constexpr ModeRow kModes[] = {
     {"--dct", 3, octtest::testDct, Job::Test, "<1.0 table> <its stringids> <key>: round trip, reseed, probe"},
     {"--mischain", 1, octtest::testMissionChain, Job::Test, "<1.0 mission .lua>...: chain order does not matter"},
     {"--gpscan", 2, octtest::testGpScan, Job::Test, "<3.0 surfacetypes.lua> <1.0 install assets>: no parse throws"},
+    {"--rcdelivery", 2, octtest::testRcDelivery, Job::Test, "<1.0 rc_catalog.lua> <3.0 rc_catalog.lua>: deliveries"},
     {"--cho-layout", 2, octtest::testChoLayout, Job::Test, "<1.0 assets> <3.0 assets>: layout30 on the twins"},
     {"--cho-time", 2, octtest::testChoTime, Job::Test, "<assets> <subdir>...: time30 regenerates 3.0's ranges"},
     {"--cho-time10", 2, octtest::testChoTime10, Job::Test, "<1.0 assets> <3.0 assets>: time30 on the twins"},

@@ -17,6 +17,7 @@ int testChd(const Args& a);
 int testDct(const Args& a);
 int testMissionChain(const Args& a);
 int testGpScan(const Args& a);
+int testRcDelivery(const Args& a);
 
 // test_cho.cpp
 int testChoLayout(const Args& a);
